@@ -415,8 +415,42 @@ pub struct Plugins {
 pub struct Indexing {
     /// When the background index is built and maintained.
     pub mode: IndexingMode,
+    /// Where the whole-computer name search gets its file names.
+    pub source: IndexSource,
     /// Paths and globs excluded from indexing.
     pub exclude: IndexingExclude,
+}
+
+/// Where the whole-computer name search gets its file names.
+///
+/// The whole-computer search (`Ctrl+E`) needs every name on the drives from
+/// somewhere. This app can keep that list itself, or borrow the one an
+/// installed Everything (voidtools) already keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum IndexSource {
+    /// Everything's own index while it is open, this app's own otherwise,
+    /// decided on the first whole-computer search (the default).
+    #[default]
+    Auto,
+    /// The index this app builds: it walks the drives, or reads the NTFS
+    /// master file table through its Windows service when that is installed.
+    PrimeFiles,
+    /// The index of an installed Everything, read through its SDK or its own
+    /// IPC window, so nothing is indexed here.
+    Everything,
+}
+
+impl IndexSource {
+    /// Parse the `config.toml` spelling (`auto`/`prime-files`/`everything`).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "prime-files" => Some(Self::PrimeFiles),
+            "everything" => Some(Self::Everything),
+            _ => None,
+        }
+    }
 }
 
 /// When the filesystem index is built and kept up to date.
@@ -898,17 +932,24 @@ impl Config {
              [updates]\n\
              automatic = true       # look for, download and install new versions (installed copies only)\n\
              \n\
-             # The sections below are parsed and validated, but not yet applied at\n\
-             # runtime — they take effect when their subsystem is wired in a later\n\
-             # phase (docs/config.md §5). They are here so files and editor\n\
-             # completion can adopt the shape early.\n\
+             # The whole-computer search (Ctrl+E) gets its names from:\n\
+             #   \"auto\"        Everything's index when Everything is open, this\n\
+             #                 app's own otherwise, decided on the first search\n\
+             #   \"prime-files\" this app's own index (walked, or read from the\n\
+             #                 NTFS MFT by the indexing service)\n\
+             #   \"everything\"  an installed Everything's index, through its SDK or IPC\n\
              [indexing]\n\
-             mode = \"auto\"   # \"auto\" | \"always-on\" | \"manual\"\n\
+             source = \"auto\"   # \"auto\" | \"prime-files\" | \"everything\"\n\
+             mode = \"auto\"     # reserved: \"auto\" | \"always-on\" | \"manual\"\n\
              \n\
              [indexing.exclude]\n\
-             paths = []\n\
-             globs = []\n\
+             paths = []   # reserved\n\
+             globs = []   # reserved\n\
              \n\
+             # Parsed and validated, but not yet applied at runtime — it takes\n\
+             # effect when its subsystem is wired in a later phase\n\
+             # (docs/config.md §5). It is here so files and editor completion can\n\
+             # adopt the shape early.\n\
              [search]\n\
              backend = \"auto\"   # \"tantivy\" | \"ripgrep\" | \"auto\"\n\
              \n\
@@ -1321,6 +1362,15 @@ fn read_indexing(table: &toml::Table, indexing: &mut Indexing, diagnostics: &mut
             ))),
         }
     }
+    if let Some(value) = table.get("source") {
+        match value.as_str().and_then(IndexSource::parse) {
+            Some(source) => indexing.source = source,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid indexing.source {value}; using {:?}",
+                indexing.source
+            ))),
+        }
+    }
     if let Some(value) = table.get("exclude") {
         match value.as_table() {
             Some(exclude) => read_indexing_exclude(exclude, &mut indexing.exclude, diagnostics),
@@ -1329,7 +1379,7 @@ fn read_indexing(table: &toml::Table, indexing: &mut Indexing, diagnostics: &mut
             )),
         }
     }
-    warn_unknown_keys(table, &["mode", "exclude"], "indexing.", diagnostics);
+    warn_unknown_keys(table, &["mode", "source", "exclude"], "indexing.", diagnostics);
 }
 
 fn read_indexing_exclude(
@@ -1611,6 +1661,7 @@ mod tests {
         assert_eq!(config.ui.default_sort, SortOrder::Name);
         assert!(!config.ui.show_hidden);
         assert_eq!(config.ui.icon_pack, "default");
+        assert_eq!(config.indexing.source, IndexSource::Auto);
     }
 
     #[test]
@@ -1656,6 +1707,7 @@ mod tests {
         let toml = r#"
             [indexing]
             mode = "always-on"
+            source = "everything"
             [indexing.exclude]
             paths = ["/tmp", "node_modules"]
             globs = ["**/target/**"]
@@ -1674,6 +1726,7 @@ mod tests {
         let (config, diagnostics) = Config::from_toml_str(toml);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(config.indexing.mode, IndexingMode::AlwaysOn);
+        assert_eq!(config.indexing.source, IndexSource::Everything);
         assert_eq!(config.indexing.exclude.paths, ["/tmp", "node_modules"]);
         assert_eq!(config.indexing.exclude.globs, ["**/target/**"]);
         assert_eq!(config.search.backend, SearchBackend::Tantivy);
@@ -1700,6 +1753,7 @@ mod tests {
         let toml = r#"
             [indexing]
             mode = "turbo"
+            source = "cloud"
             [indexing.exclude]
             paths = "not-an-array"
             globs = [1, "ok"]
@@ -1717,6 +1771,7 @@ mod tests {
         // No fatal errors: bad fields fall back to defaults.
         assert!(errors(&diagnostics).is_empty());
         assert_eq!(config.indexing.mode, IndexingMode::Auto);
+        assert_eq!(config.indexing.source, IndexSource::Auto);
         assert!(config.indexing.exclude.paths.is_empty());
         // The non-string array entry is skipped; the valid one is kept.
         assert_eq!(config.indexing.exclude.globs, ["ok"]);
@@ -1725,9 +1780,9 @@ mod tests {
         assert!(config.launcher.position_remember);
         assert!(config.plugins.core.is_empty());
         assert!(config.keybindings.bindings.is_empty());
-        // mode, paths(not array), globs(one bad entry), backend, hotkey,
-        // position_remember, plugins.core(not array), keybindings.quit.
-        assert_eq!(diagnostics.len(), 8);
+        // mode, source, paths(not array), globs(one bad entry), backend,
+        // hotkey, position_remember, plugins.core(not array), keybindings.quit.
+        assert_eq!(diagnostics.len(), 9);
     }
 
     #[test]

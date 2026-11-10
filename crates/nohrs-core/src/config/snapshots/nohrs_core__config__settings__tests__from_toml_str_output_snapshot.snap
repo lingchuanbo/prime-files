@@ -66,6 +66,7 @@ expression: parsed
         },
         indexing: Indexing {
             mode: Auto,
+            source: Auto,
             exclude: IndexingExclude {
                 paths: [],
                 globs: [],

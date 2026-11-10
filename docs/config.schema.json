@@ -159,6 +159,26 @@
       },
       "type": "object"
     },
+    "IndexSource": {
+      "description": "Where the whole-computer name search gets its file names.\n\nThe whole-computer search (`Ctrl+E`) needs every name on the drives from\nsomewhere. This app can keep that list itself, or borrow the one an\ninstalled Everything (voidtools) already keeps.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Everything's own index while it is open, this app's own otherwise,\ndecided on the first whole-computer search (the default).",
+          "type": "string"
+        },
+        {
+          "const": "prime-files",
+          "description": "The index this app builds: it walks the drives, or reads the NTFS\nmaster file table through its Windows service when that is installed.",
+          "type": "string"
+        },
+        {
+          "const": "everything",
+          "description": "The index of an installed Everything, read through its SDK or its own\nIPC window, so nothing is indexed here.",
+          "type": "string"
+        }
+      ]
+    },
     "Indexing": {
       "description": "Filesystem indexing settings.",
       "properties": {
@@ -174,6 +194,11 @@
           "$ref": "#/$defs/IndexingMode",
           "default": "auto",
           "description": "When the background index is built and maintained."
+        },
+        "source": {
+          "$ref": "#/$defs/IndexSource",
+          "default": "auto",
+          "description": "Where the whole-computer name search gets its file names."
         }
       },
       "type": "object"
@@ -553,7 +578,8 @@
           "globs": [],
           "paths": []
         },
-        "mode": "auto"
+        "mode": "auto",
+        "source": "auto"
       },
       "description": "Filesystem indexing strategy and exclusions."
     },

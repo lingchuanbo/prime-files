@@ -62,6 +62,18 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem O SDK do Everything (as dlls que o usuario coloca em target\release\dll)
+rem vai junto no perfil dist: o instalador embala a pasta dll ao lado do
+rem programa, e o Prime Files le o indice do Everything de la.
+if /i "%PROFILE%"=="dist" (
+  if exist "target\release\dll" (
+    if not exist "%OUT%\dll" mkdir "%OUT%\dll"
+    xcopy /e /i /y "target\release\dll" "%OUT%\dll" >nul
+  ) else (
+    echo AVISO: target\release\dll nao encontrado; o programa nao podera usar o indice do Everything.
+  )
+)
+
 echo.
 echo Programas em %OUT%:
 for %%F in ("%OUT%\nohrs.exe" "%OUT%\prime-files-indexer.exe") do (

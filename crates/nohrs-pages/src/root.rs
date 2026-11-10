@@ -238,6 +238,9 @@ impl RootView {
         });
 
         crate::reveal::set_enabled(config.explorer.reveal_from_other_apps);
+        // Where the whole-computer search gets its names may have changed;
+        // the explorer's index state follows the file like any other setting.
+        crate::explorer::everything::set_engine(config.indexing.source, cx);
         let ui = config.ui.clone();
         let explorer_cfg = config.explorer.clone();
         let compact = config.compact.clone();

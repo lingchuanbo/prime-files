@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
-use nohrs_core::config::{self, Config, DockSide, SortOrder, SplitDirection, ThemeMode};
+use nohrs_core::config::{self, Config, DockSide, IndexSource, SortOrder, SplitDirection, ThemeMode};
 use nohrs_core::i18n::{self, Lang, tr};
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::shortcuts::{self, Action, Chord};
@@ -29,6 +29,7 @@ use nohrs_core::{k, t, tf};
 use nohrs_ui::theme::theme;
 
 use crate::color_wheel::{self, Hsv};
+use crate::explorer::everything::{self, Source};
 
 /// The sections of the settings page, in the order the side list shows them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -511,6 +512,14 @@ impl SettingsPage {
     pub fn show_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         self.section = section;
         self.confirm_reset = false;
+        // The search page says what Everything answers, and `auto` must hear
+        // from it before it can show which index is in use.
+        if section == SettingsSection::Search {
+            let status = everything::status(cx);
+            if status.external.is_none() && status.source != Source::Own {
+                everything::probe(cx);
+            }
+        }
         cx.notify();
     }
 
@@ -1393,8 +1402,13 @@ impl SettingsPage {
     }
 
     fn search_section(&self, cx: &mut Context<Self>) -> Vec<Group> {
-        let status = crate::explorer::everything::status(cx);
-        let state = if status.service {
+        let status = everything::status(cx);
+        let source = status.source;
+        // The own index's count while it is walked or read; with Everything
+        // answering, what its index holds instead.
+        let state = if source == Source::Everything {
+            everything::external_text(status.external.as_ref())
+        } else if status.service {
             // The names live in the service: this process holds none, and the
             // count is the service's to keep to itself.
             t!("O serviço de indexação guarda os nomes e responde às buscas.").to_string()
@@ -1409,68 +1423,102 @@ impl SettingsPage {
             }
         };
         let building = status.building.is_some();
-        use crate::explorer::everything::mft;
-        let mft_state = mft::state();
-        let (mft_busy, mft_error) = cx
-            .try_global::<crate::explorer::everything::Everything>()
-            .map_or((false, None), |state| (state.mft_busy, state.mft_error.clone()));
-        let mft_text = match (mft_busy, mft_error, mft_state) {
-            (true, _, _) => t!("Aguardando a permissão do Windows…").to_string(),
-            (false, Some(error), _) => tf!("Não deu certo: {error}", error = error),
-            (false, None, mft::State::On) => t!("Ligada").to_string(),
-            (false, None, mft::State::Stopped) => t!("O serviço está instalado mas parado.").to_string(),
-            (false, None, mft::State::Off) => t!("Desligada").to_string(),
-        };
-        let mft_on = mft_state == mft::State::On;
-        vec![
-            Group::new(vec![
-                Row::hint(
-                    t!("Buscar em todo o computador"),
-                    t!("Clique na lupa da barra de baixo ou aperte Ctrl+E e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho."),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .gap_2()
-                        .child(div().text_xs().text_color(rgb(theme::fg_secondary())).child(state))
-                        .when(!building, |this| {
-                            this.child(button("everything-rebuild", t!("Reindexar agora"), false).on_click(cx.listener(
-                                |_page, _event, _window, cx| crate::explorer::everything::rebuild(cx),
-                            )))
-                        }),
-                ),
-                Row::hint(
-                    t!("Indexação instantânea"),
-                    t!("Lê a tabela dos discos NTFS como o Everything: o índice do computador fica pronto em segundos, também depois de reiniciar. Instala um serviço do Windows, com permissão de administrador uma vez."),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .gap_2()
-                        // A failure's text can be a whole path: it wraps in a
-                        // narrow column instead of pushing the description
-                        // into one word a line.
-                        .child(
+        let own_index = source != Source::Everything;
+        let picked = self.config.indexing.source;
+        let mut rows = vec![
+            Row::hint(
+                t!("Buscar em todo o computador"),
+                t!("Clique na lupa da barra de baixo ou aperte Ctrl+E e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho."),
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_2()
+                    .child(div().text_xs().text_color(rgb(theme::fg_secondary())).child(state))
+                    .when(own_index && !building, |this| {
+                        this.child(button("everything-rebuild", t!("Reindexar agora"), false).on_click(cx.listener(
+                            |_page, _event, _window, cx| crate::explorer::everything::rebuild(cx),
+                        )))
+                    }),
+            ),
+            Row::hint(
+                t!("Índice do computador"),
+                t!("De onde vêm os nomes da busca em todo o computador. Com o Everything aberto, o índice dele serve e nada é criado aqui; o automático decide isso na primeira busca."),
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_2()
+                    .child(self.config_choice(
+                        "index-source",
+                        &[
+                            (t!("Automático"), picked == IndexSource::Auto, "\"auto\""),
+                            (t!("Neste programa"), picked == IndexSource::PrimeFiles, "\"prime-files\""),
+                            ("Everything", picked == IndexSource::Everything, "\"everything\""),
+                        ],
+                        ("indexing", "source"),
+                        cx,
+                    ))
+                    .when(picked == IndexSource::Auto && source == Source::Own, |this| {
+                        this.child(
                             div()
                                 .max_w(px(280.0))
                                 .text_xs()
                                 .text_right()
                                 .text_color(rgb(theme::fg_secondary()))
-                                .child(mft_text),
+                                .child(everything::auto_note(status.external.as_ref())),
                         )
-                        .when(!mft_busy, |this| {
-                            this.child(
-                                button("everything-mft", if mft_on { t!("Desativar") } else { t!("Ativar") }, false)
-                                    .on_click(cx.listener(move |_page, _event, _window, cx| mft::set(!mft_on, cx))),
-                            )
-                        }),
-                ),
-                Row::hint(
-                    t!("Como o índice é feito"),
-                    t!("Os nomes de todas as unidades fixas ficam guardados neste computador. Com o programa aberto, o que é criado ou renomeado entra na hora; com o serviço, ele guarda os nomes e os relê a cada 30 minutos, e sem o serviço o índice deste processo é refeito quando passa de 6 horas. Nada sai do computador."),
-                    div(),
-                ),
-            ]),
+                    }),
+            ),
+        ];
+        if own_index {
+            use crate::explorer::everything::mft;
+            let mft_state = mft::state();
+            let (mft_busy, mft_error) = cx
+                .try_global::<crate::explorer::everything::Everything>()
+                .map_or((false, None), |state| (state.mft_busy, state.mft_error.clone()));
+            let mft_text = match (mft_busy, mft_error, mft_state) {
+                (true, _, _) => t!("Aguardando a permissão do Windows…").to_string(),
+                (false, Some(error), _) => tf!("Não deu certo: {error}", error = error),
+                (false, None, mft::State::On) => t!("Ligada").to_string(),
+                (false, None, mft::State::Stopped) => t!("O serviço está instalado mas parado.").to_string(),
+                (false, None, mft::State::Off) => t!("Desligada").to_string(),
+            };
+            let mft_on = mft_state == mft::State::On;
+            rows.push(Row::hint(
+                t!("Indexação instantânea"),
+                t!("Lê a tabela dos discos NTFS como o Everything: o índice do computador fica pronto em segundos, também depois de reiniciar. Instala um serviço do Windows, com permissão de administrador uma vez."),
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_2()
+                    // A failure's text can be a whole path: it wraps in a
+                    // narrow column instead of pushing the description into
+                    // one word a line.
+                    .child(
+                        div()
+                            .max_w(px(280.0))
+                            .text_xs()
+                            .text_right()
+                            .text_color(rgb(theme::fg_secondary()))
+                            .child(mft_text),
+                    )
+                    .when(!mft_busy, |this| {
+                        this.child(
+                            button("everything-mft", if mft_on { t!("Desativar") } else { t!("Ativar") }, false)
+                                .on_click(cx.listener(move |_page, _event, _window, cx| mft::set(!mft_on, cx))),
+                        )
+                    }),
+            ));
+            rows.push(Row::hint(
+                t!("Como o índice é feito"),
+                t!("Os nomes de todas as unidades fixas ficam guardados neste computador. Com o programa aberto, o que é criado ou renomeado entra na hora; com o serviço, ele guarda os nomes e os relê a cada 30 minutos, e sem o serviço o índice deste processo é refeito quando passa de 6 horas. Nada sai do computador."),
+                div(),
+            ));
+        }
+        vec![
+            Group::new(rows),
             Group::titled(
                 t!("Outras buscas"),
                 vec![

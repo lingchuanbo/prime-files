@@ -25,6 +25,12 @@
 #ifndef IndexerSource
   #define IndexerSource "..\target\dist\prime-files-indexer.exe"
 #endif
+; Everything's SDK DLLs (Everything32/64/ARM/ARM64.dll). The program loads the
+; one for its architecture from {app}\dll when the person chooses to reuse the
+; index of an installed Everything; without them that choice says so instead.
+#ifndef DllSource
+  #define DllSource "..\target\dist\dll"
+#endif
 
 #define AppName "Prime Files"
 #define AppExe "PrimeFiles.exe"
@@ -92,6 +98,9 @@ Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreve
 ; Instant indexing's service. Shipped here, installed only when the person
 ; turns it on in Settings (it copies itself to Program Files then).
 Source: "{#IndexerSource}"; DestDir: "{app}"; Flags: ignoreversion
+; Everything's SDK, read only when the person picks Everything's index in
+; Settings › Search. A build without the DLLs installs without them.
+Source: "{#DllSource}\*.dll"; DestDir: "{app}\dll"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"

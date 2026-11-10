@@ -21,7 +21,7 @@ use nohrs_core::telemetry::LogErr;
 use nohrs_core::{t, tf};
 use nohrs_ui::theme::theme;
 
-use crate::explorer::everything::{Everything, mft};
+use crate::explorer::everything::{self, Everything, Source, mft};
 
 const STEPS: usize = 5;
 
@@ -337,6 +337,9 @@ impl WelcomePage {
         let (mft_busy, mft_error) =
             cx.try_global::<Everything>().map_or((false, None), |state| (state.mft_busy, state.mft_error.clone()));
         let listary = self.listary;
+        // With Everything answering, its index is the computer's and the
+        // service this step offers would never be read.
+        let own_index = everything::source(cx) != Source::Everything;
         let listary_card: AnyElement = match listary {
             Some(crate::listary::State::NotInstalled) => info_card(
                 "icons/search.svg",
@@ -387,16 +390,18 @@ impl WelcomePage {
                 }),
             ))
             .child(listary_card)
-            .child(option_card(
-                "welcome-mft",
-                "icons/database.svg",
-                t!("Indexação instantânea"),
-                t!("Lê a tabela dos discos NTFS como o Everything: o índice do computador fica pronto em segundos, também depois de reiniciar. Instala um serviço do Windows, com permissão de administrador uma vez."),
-                Some(mft_on),
-                mft_busy,
-                cx.listener(move |_page, _, _, cx| mft::set(!mft_on, cx)),
-            ))
-            .when_some(mft_error, |this, error| this.child(note_text(tf!("Não deu certo: {error}", error = error))))
+            .when(own_index, |this| {
+                this.child(option_card(
+                    "welcome-mft",
+                    "icons/database.svg",
+                    t!("Indexação instantânea"),
+                    t!("Lê a tabela dos discos NTFS como o Everything: o índice do computador fica pronto em segundos, também depois de reiniciar. Instala um serviço do Windows, com permissão de administrador uma vez."),
+                    Some(mft_on),
+                    mft_busy,
+                    cx.listener(move |_page, _, _, cx| mft::set(!mft_on, cx)),
+                ))
+                .when_some(mft_error, |this, error| this.child(note_text(tf!("Não deu certo: {error}", error = error))))
+            })
             .when(reveal && self.starts_with_windows == Some(false), |this| {
                 this.child(note(t!("Isso vale enquanto o Prime Files está aberto. Para valer sempre, ligue \"Iniciar com o Windows\" no passo anterior.")))
             })

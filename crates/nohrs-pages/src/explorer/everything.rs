@@ -36,7 +36,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{App, AppContext as _, BorrowAppContext as _, Context, Global, Subscription, Task, WeakEntity};
+use nohrs_core::config::IndexSource;
 use nohrs_core::telemetry::LogErr;
+use nohrs_core::{t, tf};
 use nohrs_services::fs::listing::FileEntryDto;
 
 use super::ExplorerPane;
@@ -1388,6 +1390,1121 @@ pub(crate) mod mft {
     }
 }
 
+/// The index of an installed Everything (voidtools), asked instead of walked.
+///
+/// Everything already keeps every name of the drives — its own index, built
+/// from the NTFS journal — so for the people who run it there is nothing to
+/// walk or keep here: a query costs one message to that program and comes back
+/// with the hits. Two ways to reach it, tried in this order:
+///
+/// * The official SDK (`Everything64.dll` for this architecture, shipped in
+///   the program's `dll` folder). Its calls are only made when the setting
+///   asks for them.
+/// * Everything's own IPC window (`WM_COPYDATA`), the protocol under that SDK.
+///   The SDK looks for the default instance's window class only, and a named
+///   instance (`Everything.exe -instance 1.5a`) registers a suffixed class, so
+///   the names are asked for directly there.
+///
+/// Either way the work runs on background threads: a query waits on that
+/// program's window, and the UI thread never does.
+pub(crate) mod remote {
+    use std::sync::atomic::AtomicBool;
+
+    /// One name Everything knows.
+    pub(crate) struct Hit {
+        pub path: String,
+        pub dir: bool,
+        /// Bytes; 0 for a folder or when Everything did not say.
+        pub size: u64,
+        /// Last write, whole seconds since 1970; 0 when unknown.
+        pub modified: u32,
+    }
+
+    /// What the settings page says about Everything's index.
+    #[derive(Clone)]
+    pub(crate) struct Info {
+        pub entries: u64,
+        pub version: String,
+    }
+
+    /// Why Everything's index could not answer.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum Error {
+        /// No SDK DLL next to the program.
+        Missing,
+        /// Everything is not running, or runs elevated where this process's
+        /// messages cannot reach it.
+        NotRunning,
+        /// Running, but its index is still being read.
+        NotReady,
+        /// One query is holding it, and did not answer in time: the program
+        /// itself may be stuck.
+        Busy,
+        /// Everything runs under a named instance, which the SDK does not
+        /// find: it looks for the default one only.
+        NamedInstance(String),
+        /// Anything else, as the SDK's own error number.
+        Code(u32),
+    }
+
+    /// Everything's own index, as its SDK or its window answers.
+    #[cfg(windows)]
+    pub(crate) fn probe() -> Result<Info, Error> {
+        match dll::probe() {
+            Ok(info) => Ok(info),
+            Err(dll_error) => match ipc::probe() {
+                Ok(info) => Ok(info),
+                // A window was there but did not answer: its reason is the one
+                // to show. No window at all leaves the SDK's reason.
+                Err(ipc::Failure::Failed(error)) => Err(error),
+                Err(ipc::Failure::Unavailable) => Err(dll_error),
+            },
+        }
+    }
+
+    /// The names holding every one of `terms`, up to `limit` of them.
+    #[cfg(windows)]
+    pub(crate) fn search(terms: &[String], limit: u32, cancel: &AtomicBool) -> Result<Vec<Hit>, Error> {
+        match dll::search(terms, limit, cancel) {
+            Ok(hits) => Ok(hits),
+            Err(dll_error) => match ipc::search(terms, limit, cancel) {
+                Ok(hits) => Ok(hits),
+                Err(ipc::Failure::Failed(error)) => Err(error),
+                Err(ipc::Failure::Unavailable) => Err(dll_error),
+            },
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn probe() -> Result<Info, Error> {
+        Err(Error::Missing)
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn search(_terms: &[String], _limit: u32, _cancel: &AtomicBool) -> Result<Vec<Hit>, Error> {
+        Err(Error::Missing)
+    }
+
+    /// The search Everything is asked for plain name terms: each in quotes,
+    /// which keeps its own operators (a `|`, a `!`, a `:` and its wildcards)
+    /// out of the way, joined by spaces so a hit must hold all of them — what
+    /// the local scan does. A `"` cannot appear in a Windows name, and the
+    /// tokenizer already drops the ones typed. Terminated for the wide APIs.
+    #[cfg(windows)]
+    pub(super) fn search_text(terms: &[String]) -> Vec<u16> {
+        let mut text = String::new();
+        for term in terms {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push('"');
+            text.extend(term.chars().filter(|character| *character != '"'));
+            text.push('"');
+        }
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// FILETIME (100 ns from 1601) to whole seconds since 1970.
+    #[cfg(windows)]
+    pub(super) fn filetime_seconds(ticks: u64) -> u32 {
+        // From 1601 to 1970, in the same ticks.
+        const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+        if ticks == 0 {
+            return 0;
+        }
+        let seconds = ticks.saturating_sub(EPOCH_TICKS) / 10_000_000;
+        super::clamp_seconds(i64::try_from(seconds).unwrap_or(i64::from(u32::MAX)))
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    mod discover {
+        use windows::core::{BOOL, PCWSTR};
+        use windows::Win32::Foundation::{HWND, LPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, FindWindowW, GetClassNameW};
+
+        /// Everything's IPC window class, unsuffixed for the default instance.
+        const CLASS: &str = "EVERYTHING_TASKBAR_NOTIFICATION";
+
+        fn wide(text: &str) -> Vec<u16> {
+            text.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        /// Everything's IPC window: the default instance's, else any named
+        /// one's (`EVERYTHING_TASKBAR_NOTIFICATION_(name)`).
+        pub(super) fn window() -> Option<HWND> {
+            let class = wide(CLASS);
+            // SAFETY: the class name is a terminated wide string that lives
+            // for the call; no window title is asked for.
+            if let Ok(window) = unsafe { FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) } {
+                return Some(window);
+            }
+            let mut found: Option<HWND> = None;
+            let param = LPARAM(std::ptr::from_mut(&mut found).cast::<core::ffi::c_void>() as isize);
+            // SAFETY: the callback only writes through that pointer, and the
+            // enumeration finishes before `found` goes away.
+            let _ = unsafe { EnumWindows(Some(visit), param) };
+            found
+        }
+
+        /// The name of a running Everything instance the SDK cannot reach: a
+        /// named one registers `EVERYTHING_TASKBAR_NOTIFICATION_(name)`, while
+        /// the SDK looks for the unsuffixed default class only.
+        pub(super) fn named_instance() -> Option<String> {
+            let mut found: Option<String> = None;
+            let param = LPARAM(std::ptr::from_mut(&mut found).cast::<core::ffi::c_void>() as isize);
+            // SAFETY: as in `window`.
+            let _ = unsafe { EnumWindows(Some(visit_named), param) };
+            found
+        }
+
+        unsafe extern "system" fn visit(window: HWND, param: LPARAM) -> BOOL {
+            // SAFETY: `param` is the `Option<HWND>` the caller keeps on its
+            // stack for the whole (synchronous) enumeration.
+            let found = unsafe { &mut *(param.0 as *mut Option<HWND>) };
+            if class_of(window).starts_with(CLASS) {
+                *found = Some(window);
+                return BOOL::from(false);
+            }
+            BOOL::from(true)
+        }
+
+        unsafe extern "system" fn visit_named(window: HWND, param: LPARAM) -> BOOL {
+            // SAFETY: as in `visit`, for an `Option<String>`.
+            let found = unsafe { &mut *(param.0 as *mut Option<String>) };
+            if let Some(name) = class_of(window)
+                .strip_prefix("EVERYTHING_TASKBAR_NOTIFICATION_(")
+                .and_then(|rest| rest.strip_suffix(')'))
+            {
+                *found = Some(name.to_string());
+                return BOOL::from(false);
+            }
+            BOOL::from(true)
+        }
+
+        fn class_of(window: HWND) -> String {
+            let mut class = [0u16; 256];
+            // SAFETY: `class` is the buffer the call fills, and its length is
+            // what is handed over.
+            let length = unsafe { GetClassNameW(window, &mut class) };
+            let Ok(length) = usize::try_from(length) else {
+                return String::new();
+            };
+            String::from_utf16_lossy(&class[..length.min(class.len())])
+        }
+    }
+
+    /// Everything's own IPC: the message protocol the SDK is built on. The SDK
+    /// only finds the default instance, so a named one is asked directly:
+    /// `WM_COPYDATA` with a QUERY2W to its notification window, and the reply
+    /// (a LIST2 buffer) arriving at a window of our own.
+    ///
+    /// The reply comes asynchronously, so one thread owns that window and
+    /// pumps its messages; the searching threads hand it a query and wait for
+    /// the answer.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    mod ipc {
+        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+        use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+        use std::sync::{Mutex, OnceLock, PoisonError};
+        use std::time::{Duration, Instant};
+
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::DataExchange::COPYDATASTRUCT;
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, MSG, MSGFLT_ALLOW,
+            PM_REMOVE, PeekMessageW, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW,
+            TranslateMessage, WM_COPYDATA, WNDCLASSW, WINDOW_EX_STYLE, WINDOW_STYLE,
+        };
+
+        use nohrs_core::telemetry::LogErr as _;
+
+        use super::{Error, Hit, Info, discover, filetime_seconds, search_text};
+
+        /// Everything's `WM_COPYDATA` ids: the query, and the flags the reply
+        /// is parsed by.
+        const QUERY2W: usize = 18;
+        const SORT_NAME_ASCENDING: u32 = 1;
+        /// Full path, size and last write: the same data the SDK is asked for.
+        const REQUEST: u32 = 0x4 | 0x10 | 0x40;
+        // Request flag bits, in the order the reply lays their data out.
+        const REQUEST_NAME: u32 = 0x1;
+        const REQUEST_PATH: u32 = 0x2;
+        const REQUEST_FULL_PATH: u32 = 0x4;
+        const REQUEST_EXTENSION: u32 = 0x8;
+        const REQUEST_SIZE: u32 = 0x10;
+        const REQUEST_DATE_CREATED: u32 = 0x20;
+        const REQUEST_DATE_MODIFIED: u32 = 0x40;
+        const REQUEST_DATE_ACCESSED: u32 = 0x80;
+        const REQUEST_ATTRIBUTES: u32 = 0x100;
+        /// The class of our own hidden window that receives the replies.
+        const REPLY_CLASS: &str = "PrimeFilesEverythingReply";
+        /// The most a query waits for its answer: measured at tens of
+        /// milliseconds, and past this the program is stuck.
+        const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
+        /// How long Everything may take to accept the query itself.
+        const SEND_TIMEOUT_MS: u32 = 1_000;
+
+        /// Why the IPC route could not answer.
+        pub(super) enum Failure {
+            /// No Everything window at all.
+            Unavailable,
+            /// One was there, but the answer failed.
+            Failed(Error),
+        }
+
+        struct Job {
+            search: Vec<u16>,
+            max: u32,
+            /// Where this query sits in the order they were asked: a newer
+            /// keystroke makes the ones still queued pointless.
+            order: u64,
+            reply: Sender<Answer>,
+        }
+
+        enum Answer {
+            /// Everything's reply buffer, empty when it did not answer.
+            Done(Vec<u8>),
+            /// A newer query was asked before this one went out.
+            Cancelled,
+        }
+
+        /// The reply the window proc took: only valid inside the message, so
+        /// it is copied, and matched to the query by its cookie.
+        static REPLY: Mutex<Option<(u32, Vec<u8>)>> = Mutex::new(None);
+        /// The cookie of the query in flight.
+        static COOKIE: AtomicU32 = AtomicU32::new(0);
+        static NEXT_COOKIE: AtomicU32 = AtomicU32::new(0x5046_0001);
+        /// The order of the newest query asked for.
+        static NEXT_ORDER: AtomicU64 = AtomicU64::new(1);
+        static LATEST_ORDER: AtomicU64 = AtomicU64::new(0);
+        static CLIENT: OnceLock<Option<Sender<Job>>> = OnceLock::new();
+
+        fn client() -> Option<&'static Sender<Job>> {
+            CLIENT.get_or_init(start).as_ref()
+        }
+
+        /// The reply window and its message pump, on a thread of their own.
+        fn start() -> Option<Sender<Job>> {
+            let (sender, jobs) = mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("nohrs-everything-ipc".into())
+                .spawn(move || pump(jobs));
+            match spawned {
+                Ok(_) => Some(sender),
+                Err(error) => {
+                    tracing::warn!("could not start the Everything IPC thread: {error}");
+                    None
+                }
+            }
+        }
+
+        fn pump(jobs: Receiver<Job>) {
+            let Some(window) = reply_window() else {
+                return;
+            };
+            // Everything runs in another process and may sit at another
+            // integrity level; its reply is a WM_COPYDATA to this window.
+            // SAFETY: our own window, and the call only widens its filter.
+            unsafe { ChangeWindowMessageFilterEx(window, WM_COPYDATA, MSGFLT_ALLOW, None).log_err() };
+            while let Ok(job) = jobs.recv() {
+                // A newer keystroke arrived while this one waited its turn.
+                if job.order < LATEST_ORDER.load(Ordering::Relaxed) {
+                    job.reply.send(Answer::Cancelled).log_err();
+                    continue;
+                }
+                let reply = exchange(window, &job);
+                job.reply.send(Answer::Done(reply)).log_err();
+            }
+        }
+
+        /// Sends one query to Everything and pumps our queue until its reply
+        /// is copied here, or the deadline passes.
+        fn exchange(window: HWND, job: &Job) -> Vec<u8> {
+            let Some(target) = discover::window() else {
+                return Vec::new();
+            };
+            let cookie = NEXT_COOKIE.fetch_add(1, Ordering::Relaxed);
+            COOKIE.store(cookie, Ordering::Relaxed);
+            *REPLY.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            let query = query_bytes(window, cookie, job);
+            let data = COPYDATASTRUCT {
+                dwData: QUERY2W,
+                cbData: query.len() as u32,
+                lpData: query.as_ptr().cast_mut().cast(),
+            };
+            // SAFETY: the structure and the search string it points at outlive
+            // this synchronous send, whose target is Everything's own window.
+            let accepted = unsafe {
+                SendMessageTimeoutW(
+                    target,
+                    WM_COPYDATA,
+                    WPARAM(window.0 as usize),
+                    LPARAM((&raw const data) as isize),
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                    SEND_TIMEOUT_MS,
+                    None,
+                )
+            };
+            if accepted.0 == 0 {
+                return Vec::new();
+            }
+            // The answer comes separately, to the window above: pump for it.
+            let deadline = Instant::now() + REPLY_TIMEOUT;
+            loop {
+                if let Some((reply_cookie, bytes)) =
+                    REPLY.lock().unwrap_or_else(PoisonError::into_inner).take()
+                    && reply_cookie == cookie
+                {
+                    return bytes;
+                }
+                if Instant::now() >= deadline {
+                    return Vec::new();
+                }
+                pump_messages();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn pump_messages() {
+            let mut message = MSG::default();
+            // SAFETY: the message is a plain buffer the call fills, and each
+            // message goes to the window proc that asked for it.
+            while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+                // SAFETY: pumping the message just retrieved.
+                unsafe {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+        }
+
+        /// Everything's query buffer (its SDK's QUERY2W): seven 32-bit fields
+        /// and the NUL-terminated search, with no padding at all.
+        fn query_bytes(window: HWND, cookie: u32, job: &Job) -> Vec<u8> {
+            let header = [
+                // Everything's header documents that only 32 bits of the
+                // window handle are used.
+                window.0 as usize as u32,
+                cookie,
+                0, // search flags: case-insensitive, file names only, no regex
+                0, // offset
+                job.max,
+                REQUEST,
+                SORT_NAME_ASCENDING,
+            ];
+            let mut query = Vec::with_capacity(28 + job.search.len() * 2);
+            for value in header {
+                query.extend_from_slice(&value.to_le_bytes());
+            }
+            for unit in &job.search {
+                query.extend_from_slice(&unit.to_le_bytes());
+            }
+            query
+        }
+
+        /// The hidden window that takes the replies.
+        fn reply_window() -> Option<HWND> {
+            let instance = match unsafe { GetModuleHandleW(None) } {
+                Ok(module) => HINSTANCE(module.0),
+                Err(error) => {
+                    tracing::warn!("could not find this program's module: {error}");
+                    return None;
+                }
+            };
+            let class = wide(REPLY_CLASS);
+            let window_class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: instance,
+                lpszClassName: PCWSTR(class.as_ptr()),
+                ..Default::default()
+            };
+            // SAFETY: the class names a proc that lives as long as the binary,
+            // and the strings it refers to outlive the call.
+            if unsafe { RegisterClassW(&window_class) } == 0 {
+                let error = std::io::Error::last_os_error();
+                tracing::warn!("could not register the Everything IPC window: {error}");
+                return None;
+            }
+            let title = wide("Prime Files");
+            // SAFETY: the class is registered above, the instance is this
+            // process's, and the window is never shown.
+            match unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    PCWSTR(class.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    WINDOW_STYLE::default(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    Some(instance),
+                    None,
+                )
+            } {
+                Ok(window) => Some(window),
+                Err(error) => {
+                    tracing::warn!("could not create the Everything IPC window: {error}");
+                    None
+                }
+            }
+        }
+
+        unsafe extern "system" fn window_proc(
+            window: HWND,
+            message: u32,
+            _wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if message == WM_COPYDATA {
+                // SAFETY: WM_COPYDATA always carries a COPYDATASTRUCT in
+                // `lparam`, valid until this proc returns.
+                let data = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
+                let cookie = data.dwData as u32;
+                if cookie == COOKIE.load(Ordering::Relaxed) {
+                    let length = data.cbData as usize;
+                    let bytes = if data.lpData.is_null() || length == 0 {
+                        Vec::new()
+                    } else {
+                        // SAFETY: the sender promises `cbData` bytes there, and
+                        // the copy is made before the message goes away.
+                        unsafe { std::slice::from_raw_parts(data.lpData.cast::<u8>(), length) }.to_vec()
+                    };
+                    *REPLY.lock().unwrap_or_else(PoisonError::into_inner) = Some((cookie, bytes));
+                }
+                return LRESULT(1);
+            }
+            // SAFETY: default handling for every other message.
+            unsafe { DefWindowProcW(window, message, _wparam, lparam) }
+        }
+
+        fn wide(text: &str) -> Vec<u16> {
+            text.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        pub(super) fn probe() -> Result<Info, Failure> {
+            if discover::window().is_none() {
+                return Err(Failure::Unavailable);
+            }
+            // An empty search matches every name, one of which comes back; the
+            // count of all of them is what the page shows.
+            let reply = ask(search_text(&[]), 1)?;
+            let list = list(&reply).ok_or(Failure::Failed(Error::Busy))?;
+            if list.totitems == 0 {
+                return Err(Failure::Failed(Error::NotReady));
+            }
+            let version = match discover::named_instance() {
+                Some(name) => format!("ipc {name}"),
+                None => "ipc".to_string(),
+            };
+            Ok(Info { entries: u64::from(list.totitems), version })
+        }
+
+        pub(super) fn search(terms: &[String], limit: u32, cancel: &AtomicBool) -> Result<Vec<Hit>, Failure> {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(Vec::new());
+            }
+            if discover::window().is_none() {
+                return Err(Failure::Unavailable);
+            }
+            let reply = ask(search_text(terms), limit)?;
+            let list = list(&reply).ok_or(Failure::Failed(Error::Busy))?;
+            let count = list.items.len() / 8;
+            let mut hits = Vec::with_capacity(count.min(1024));
+            for index in 0..count {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok(index) = u32::try_from(index)
+                    && let Some(hit) = list.hit(index)
+                {
+                    hits.push(hit);
+                }
+            }
+            Ok(hits)
+        }
+
+        fn ask(search: Vec<u16>, max: u32) -> Result<Vec<u8>, Failure> {
+            let sender = client().ok_or(Failure::Unavailable)?;
+            let order = NEXT_ORDER.fetch_add(1, Ordering::Relaxed);
+            LATEST_ORDER.store(order, Ordering::Relaxed);
+            let (reply, answer) = mpsc::channel();
+            sender.send(Job { search, max, order, reply }).map_err(|_| Failure::Unavailable)?;
+            // The pump thread has its own deadline; this one also covers a
+            // thread that is stuck before it can answer.
+            match answer.recv_timeout(REPLY_TIMEOUT + Duration::from_secs(2)) {
+                Ok(Answer::Done(bytes)) if !bytes.is_empty() => Ok(bytes),
+                // A newer query was asked for: no hits, and no error to show.
+                Ok(Answer::Cancelled) => Ok(Vec::new()),
+                Ok(Answer::Done(_)) | Err(RecvTimeoutError::Timeout) => Err(Failure::Failed(Error::Busy)),
+                Err(RecvTimeoutError::Disconnected) => Err(Failure::Unavailable),
+            }
+        }
+
+        /// Everything's LIST2 reply: a 20-byte header and 8-byte item entries
+        /// whose `data_offset` points into this same buffer.
+        struct List<'a> {
+            totitems: u32,
+            request_flags: u32,
+            items: &'a [u8],
+            buffer: &'a [u8],
+        }
+
+        fn list(reply: &[u8]) -> Option<List<'_>> {
+            let totitems = word(reply, 0)?;
+            let numitems = word(reply, 4)?;
+            // The reply's own flags decide how its data is laid out.
+            let request_flags = word(reply, 12)?;
+            let end = 20usize.checked_add(usize::try_from(numitems).ok()?.checked_mul(8)?)?;
+            Some(List { totitems, request_flags, items: reply.get(20..end)?, buffer: reply })
+        }
+
+        impl List<'_> {
+            fn hit(&self, index: u32) -> Option<Hit> {
+                let at = usize::try_from(index).ok()?.checked_mul(8)?;
+                let flags = word(self.items, at)?;
+                let mut cursor = usize::try_from(word(self.items, at + 4)?).ok()?;
+                let mut name = String::new();
+                if self.request_flags & REQUEST_NAME != 0 {
+                    name = text(self.buffer, &mut cursor)?;
+                }
+                let mut path = String::new();
+                if self.request_flags & REQUEST_PATH != 0 {
+                    path = text(self.buffer, &mut cursor)?;
+                }
+                let mut full = String::new();
+                if self.request_flags & REQUEST_FULL_PATH != 0 {
+                    full = text(self.buffer, &mut cursor)?;
+                }
+                if self.request_flags & REQUEST_EXTENSION != 0 {
+                    take(self.buffer, &mut cursor)?;
+                }
+                let mut size = 0u64;
+                if self.request_flags & REQUEST_SIZE != 0 {
+                    size = number(self.buffer, &mut cursor)?;
+                }
+                if self.request_flags & REQUEST_DATE_CREATED != 0 {
+                    take(self.buffer, &mut cursor)?;
+                }
+                let mut modified = 0u32;
+                if self.request_flags & REQUEST_DATE_MODIFIED != 0 {
+                    modified = filetime_seconds(number(self.buffer, &mut cursor)?);
+                }
+                if self.request_flags & REQUEST_DATE_ACCESSED != 0 {
+                    take(self.buffer, &mut cursor)?;
+                }
+                if self.request_flags & REQUEST_ATTRIBUTES != 0 {
+                    // Attributes come last among the fields a search asks for,
+                    // so there is nothing after them to stay aligned for.
+                    let _ = word(self.buffer, cursor);
+                }
+                // 0x1 a folder, 0x2 a drive: neither has a size to show.
+                let dir = flags & 0b11 != 0;
+                if dir {
+                    size = 0;
+                }
+                let path = if !full.is_empty() {
+                    full
+                } else if !path.is_empty() && !name.is_empty() {
+                    format!("{path}\\{name}")
+                } else {
+                    name
+                };
+                (!path.is_empty()).then_some(Hit { path, dir, size, modified })
+            }
+        }
+
+        fn word(buffer: &[u8], at: usize) -> Option<u32> {
+            Some(u32::from_le_bytes(buffer.get(at..at.checked_add(4)?)?.try_into().ok()?))
+        }
+
+        /// Skips 8 bytes of a field this search does not use.
+        fn take(buffer: &[u8], cursor: &mut usize) -> Option<()> {
+            number(buffer, cursor).map(|_| ())
+        }
+
+        fn number(buffer: &[u8], cursor: &mut usize) -> Option<u64> {
+            let at = *cursor;
+            let value = u64::from_le_bytes(buffer.get(at..at.checked_add(8)?)?.try_into().ok()?);
+            *cursor = at + 8;
+            Some(value)
+        }
+
+        /// A string field: a 32-bit count of UTF-16 units without the
+        /// terminator, then that many units and the terminator, with no
+        /// padding before the next field.
+        fn text(buffer: &[u8], cursor: &mut usize) -> Option<String> {
+            let count = usize::try_from(word(buffer, *cursor)?).ok()?;
+            let start = cursor.checked_add(4)?;
+            let end = start.checked_add(count.checked_add(1)?.checked_mul(2)?)?;
+            let data = buffer.get(start..end)?;
+            let units: Vec<u16> =
+                data.chunks_exact(2).take(count).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+            *cursor = end;
+            Some(String::from_utf16_lossy(&units))
+        }
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    mod dll {
+        use std::ffi::{CStr, OsString};
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
+        use std::time::{Duration, Instant};
+
+        use windows::core::{BOOL, PCSTR, PCWSTR};
+        use windows::Win32::Foundation::{FILETIME, HMODULE};
+        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+        use super::{Error, Hit, Info, discover, filetime_seconds, search_text};
+
+        /// Everything's SDK has a single search in the DLL — the string, the
+        /// request flags and the results — so no two calls may overlap. A
+        /// query waits on Everything's own window with no timeout, so the wait
+        /// for the turn gives up instead of piling a thread per keystroke on a
+        /// stuck program.
+        static SDK: Gate = Gate::new();
+        /// The most a call waits for the one in front; queries measured in the
+        /// tens of milliseconds, so this is only reached by a stuck program.
+        const GATE_TIMEOUT: Duration = Duration::from_secs(2);
+        /// After a wait gave up, the SDK is left alone this long: every
+        /// keystroke would wait again, and the stuck call may still hold it.
+        const STALLED_FOR: Duration = Duration::from_secs(30);
+
+        struct Gate {
+            busy: Mutex<bool>,
+            free: Condvar,
+            /// When the last wait gave up on the call in front.
+            stalled: Mutex<Option<Instant>>,
+        }
+
+        impl Gate {
+            const fn new() -> Self {
+                Self { busy: Mutex::new(false), free: Condvar::new(), stalled: Mutex::new(None) }
+            }
+
+            fn enter(&self) -> Option<Session<'_>> {
+                let mut stalled = self.stalled.lock().unwrap_or_else(PoisonError::into_inner);
+                if stalled.is_some_and(|when| when.elapsed() < STALLED_FOR) {
+                    return None;
+                }
+                let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+                let deadline = Instant::now() + GATE_TIMEOUT;
+                while *busy {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        *stalled = Some(Instant::now());
+                        return None;
+                    }
+                    let (awaited, _) = self.free.wait_timeout(busy, left).unwrap_or_else(PoisonError::into_inner);
+                    busy = awaited;
+                }
+                *stalled = None;
+                drop(stalled);
+                *busy = true;
+                Some(Session { gate: self })
+            }
+        }
+
+        struct Session<'a> {
+            gate: &'a Gate,
+        }
+
+        impl Drop for Session<'_> {
+            fn drop(&mut self) {
+                *self.gate.busy.lock().unwrap_or_else(PoisonError::into_inner) = false;
+                self.gate.free.notify_one();
+            }
+        }
+
+        /// The first path read; a path that fills it is asked for again with
+        /// room for the longest one Windows allows.
+        const PATH_UNITS: usize = 1024;
+        const LONG_PATH_UNITS: usize = 32_768;
+        // EVERYTHING_REQUEST_*, from Everything.h.
+        const REQUEST_FILE_NAME: u32 = 0x0000_0001;
+        const REQUEST_PATH: u32 = 0x0000_0002;
+        const REQUEST_FULL_PATH: u32 = 0x0000_0004;
+        const REQUEST_SIZE: u32 = 0x0000_0010;
+        const REQUEST_DATE_MODIFIED: u32 = 0x0000_0040;
+        // EVERYTHING_ERROR_IPC: no Everything client to talk to.
+        const ERROR_IPC: u32 = 2;
+
+        type SetSearchW = unsafe extern "system" fn(PCWSTR);
+        type QueryW = unsafe extern "system" fn(BOOL) -> BOOL;
+        type NumResults = unsafe extern "system" fn() -> u32;
+        type TotResults = unsafe extern "system" fn() -> u32;
+        type IsFolder = unsafe extern "system" fn(u32) -> BOOL;
+        type FullPath = unsafe extern "system" fn(u32, *mut u16, u32) -> u32;
+        type GetSize = unsafe extern "system" fn(u32, *mut i64) -> BOOL;
+        type GetDate = unsafe extern "system" fn(u32, *mut FILETIME) -> BOOL;
+        type GetLastError = unsafe extern "system" fn() -> u32;
+        type SetNumber = unsafe extern "system" fn(u32);
+        type SetFlag = unsafe extern "system" fn(BOOL);
+        type Reset = unsafe extern "system" fn();
+        type IsDbLoaded = unsafe extern "system" fn() -> BOOL;
+        type Version = unsafe extern "system" fn() -> u32;
+
+        /// The calls this DLL exports. The core ones are required — every SDK
+        /// since 1.3 has them — and the rest are used only when present, so a
+        /// different SDK build still works for what it can answer.
+        struct Api {
+            set_search: SetSearchW,
+            query: QueryW,
+            num_results: NumResults,
+            tot_results: Option<TotResults>,
+            is_folder: IsFolder,
+            full_path: FullPath,
+            size: Option<GetSize>,
+            date_modified: Option<GetDate>,
+            last_error: GetLastError,
+            set_max: SetNumber,
+            set_offset: Option<SetNumber>,
+            request_flags: Option<SetNumber>,
+            set_match_case: Option<SetFlag>,
+            set_match_whole_word: Option<SetFlag>,
+            set_match_path: Option<SetFlag>,
+            set_regex: Option<SetFlag>,
+            reset: Option<Reset>,
+            is_db_loaded: Option<IsDbLoaded>,
+            versions: [Option<Version>; 4],
+        }
+
+        fn api() -> Option<&'static Api> {
+            static API: OnceLock<Option<Api>> = OnceLock::new();
+            API.get_or_init(load).as_ref()
+        }
+
+        fn load() -> Option<Api> {
+            let module = module()?;
+            // SAFETY: every name below is looked up in the SDK's own DLL and
+            // cast to the type Everything.h declares for it; the lock makes
+            // the calls that follow single at a time.
+            let api = unsafe {
+                Api {
+                    set_search: symbol(module, c"Everything_SetSearchW")?,
+                    query: symbol(module, c"Everything_QueryW")?,
+                    num_results: symbol(module, c"Everything_GetNumResults")?,
+                    tot_results: symbol(module, c"Everything_GetTotResults"),
+                    is_folder: symbol(module, c"Everything_IsFolderResult")?,
+                    full_path: symbol(module, c"Everything_GetResultFullPathNameW")?,
+                    size: symbol(module, c"Everything_GetResultSize"),
+                    date_modified: symbol(module, c"Everything_GetResultDateModified"),
+                    last_error: symbol(module, c"Everything_GetLastError")?,
+                    set_max: symbol(module, c"Everything_SetMax")?,
+                    set_offset: symbol(module, c"Everything_SetOffset"),
+                    request_flags: symbol(module, c"Everything_SetRequestFlags"),
+                    set_match_case: symbol(module, c"Everything_SetMatchCase"),
+                    set_match_whole_word: symbol(module, c"Everything_SetMatchWholeWord"),
+                    set_match_path: symbol(module, c"Everything_SetMatchPath"),
+                    set_regex: symbol(module, c"Everything_SetRegex"),
+                    reset: symbol(module, c"Everything_Reset"),
+                    is_db_loaded: symbol(module, c"Everything_IsDBLoaded"),
+                    versions: [
+                        symbol(module, c"Everything_GetMajorVersion"),
+                        symbol(module, c"Everything_GetMinorVersion"),
+                        symbol(module, c"Everything_GetRevision"),
+                        symbol(module, c"Everything_GetBuildNumber"),
+                    ],
+                }
+            };
+            tracing::debug!(version = %version(&api), "the Everything SDK answered");
+            Some(api)
+        }
+
+        /// Loads the SDK DLL for this architecture, from the `dll` folder the
+        /// installer fills, the program's own folder, or Windows' search.
+        fn module() -> Option<HMODULE> {
+            let name = match std::env::consts::ARCH {
+                "x86_64" => "Everything64.dll",
+                "x86" => "Everything32.dll",
+                "aarch64" => "EverythingARM64.dll",
+                "arm" => "EverythingARM.dll",
+                _ => return None,
+            };
+            let mut candidates: Vec<OsString> = Vec::new();
+            if let Ok(executable) = std::env::current_exe()
+                && let Some(folder) = executable.parent()
+            {
+                candidates.push(folder.join("dll").join(name).into_os_string());
+                candidates.push(folder.join(name).into_os_string());
+                // A test binary runs from `target/<profile>/deps`, one level
+                // below the folder the app itself runs from.
+                #[cfg(test)]
+                {
+                    if let Some(above) = folder.parent() {
+                        candidates.push(above.join("dll").join(name).into_os_string());
+                    }
+                }
+            }
+            // The bare name keeps Windows' own search rules (the program's
+            // folder, the system's, PATH), for an SDK installed elsewhere.
+            candidates.push(name.into());
+            for candidate in candidates {
+                let wide: Vec<u16> = candidate.encode_wide().chain(std::iter::once(0)).collect();
+                // SAFETY: `wide` is a terminated wide string that outlives the
+                // call, and the handle is never freed so the DLL stays loaded.
+                if let Ok(module) = unsafe { LoadLibraryW(PCWSTR(wide.as_ptr())) } {
+                    return Some(module);
+                }
+            }
+            tracing::debug!("the Everything SDK DLL was not found next to the program");
+            None
+        }
+
+        unsafe fn symbol<T>(module: HMODULE, name: &CStr) -> Option<T> {
+            let found = unsafe { GetProcAddress(module, PCSTR(name.as_ptr().cast())) }?;
+            // SAFETY: a Win32 entry point and the SDK's declared function
+            // pointer are both one pointer wide; the name above chooses which
+            // declaration applies.
+            debug_assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<windows::Win32::Foundation::FARPROC>());
+            Some(unsafe { std::mem::transmute_copy(&found) })
+        }
+
+        /// Every name Everything has, as the settings page counts them, and
+        /// whether it answers at all.
+        pub(super) fn probe() -> Result<Info, Error> {
+            let api = api().ok_or(Error::Missing)?;
+            let _session = SDK.enter().ok_or(Error::Busy)?;
+            let empty = [0u16];
+            // SAFETY: the search string outlives the call and the pointers are
+            // the SDK's own exports; the gate keeps them one at a time.
+            unsafe {
+                // `Reset` puts back the SDK's default request flags (path and
+                // file name), the pair that keeps this probe on the smaller
+                // query the SDK sends for it.
+                reset(api);
+                (api.set_search)(PCWSTR(empty.as_ptr()));
+                (api.set_max)(1);
+                if let Some(set_offset) = api.set_offset {
+                    set_offset(0);
+                }
+                if let Some(flags) = api.request_flags {
+                    flags(REQUEST_FILE_NAME | REQUEST_PATH);
+                }
+                if !(api.query)(BOOL::from(true)).as_bool() {
+                    let error = error(api);
+                    reset(api);
+                    return Err(error);
+                }
+                // A client that answered may still be reading its index; the
+                // count is then the part it has so far.
+                let loaded = api.is_db_loaded.is_none_or(|is_loaded| is_loaded().as_bool());
+                let entries = api.tot_results.map_or_else(|| u64::from((api.num_results)()), |tot| u64::from(tot()));
+                reset(api);
+                if !loaded {
+                    return Err(Error::NotReady);
+                }
+                Ok(Info { entries, version: version(api) })
+            }
+        }
+
+        /// The names holding every one of `terms`, up to `limit` of them.
+        /// `cancel` is read between hits: a newer keystroke stops this one.
+        pub(super) fn search(terms: &[String], limit: u32, cancel: &AtomicBool) -> Result<Vec<Hit>, Error> {
+            let api = api().ok_or(Error::Missing)?;
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(Vec::new());
+            }
+            let _session = SDK.enter().ok_or(Error::Busy)?;
+            let search = search_text(terms);
+            // SAFETY: as in `probe`; the search string outlives the call.
+            unsafe {
+                reset(api);
+                (api.set_search)(PCWSTR(search.as_ptr()));
+                (api.set_max)(limit);
+                if let Some(set_offset) = api.set_offset {
+                    set_offset(0);
+                }
+                if let Some(flags) = api.request_flags {
+                    flags(REQUEST_FULL_PATH | REQUEST_SIZE | REQUEST_DATE_MODIFIED);
+                }
+                // The local scan is a case-insensitive substring match over
+                // the name; these are the SDK's defaults, set anyway so a
+                // previous query cannot leave them the other way.
+                if let Some(command) = api.set_match_case {
+                    command(BOOL::from(false));
+                }
+                if let Some(command) = api.set_match_whole_word {
+                    command(BOOL::from(false));
+                }
+                if let Some(command) = api.set_match_path {
+                    command(BOOL::from(false));
+                }
+                if let Some(command) = api.set_regex {
+                    command(BOOL::from(false));
+                }
+                if !(api.query)(BOOL::from(true)).as_bool() {
+                    let error = error(api);
+                    reset(api);
+                    return Err(error);
+                }
+                if !api.is_db_loaded.is_none_or(|is_loaded| is_loaded().as_bool()) {
+                    reset(api);
+                    return Err(Error::NotReady);
+                }
+                let count = (api.num_results)();
+                let mut hits = Vec::with_capacity((count as usize).min(1024));
+                for index in 0..count {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some(path) = full_path(api, index) else {
+                        continue;
+                    };
+                    let dir = (api.is_folder)(index).as_bool();
+                    let size = if dir { 0 } else { result_size(api, index) };
+                    hits.push(Hit { path, dir, size, modified: result_modified(api, index) });
+                }
+                reset(api);
+                if hits.is_empty() && cancel.load(Ordering::Relaxed) {
+                    return Ok(Vec::new());
+                }
+                Ok(hits)
+            }
+        }
+
+        fn reset(api: &Api) {
+            if let Some(reset) = api.reset {
+                // SAFETY: the SDK's own reset, called under the lock.
+                unsafe { reset() };
+            }
+        }
+
+        fn error(api: &Api) -> Error {
+            // SAFETY: the SDK's own error number for the query that failed.
+            let code = unsafe { (api.last_error)() };
+            if code == ERROR_IPC {
+                // The IPC error means "no client answers", and the client the
+                // SDK finds is the default instance only: a named one (the
+                // alpha builds share the machine under `-instance`) is
+                // running but out of reach, which is worth saying.
+                match discover::named_instance() {
+                    Some(name) => Error::NamedInstance(name),
+                    None => Error::NotRunning,
+                }
+            } else {
+                Error::Code(code)
+            }
+        }
+
+        fn version(api: &Api) -> String {
+            let mut numbers = [0u32; 4];
+            for (at, found) in api.versions.iter().enumerate() {
+                if let Some(number) = found {
+                    // SAFETY: an exported version getter, called under the lock.
+                    numbers[at] = unsafe { number() };
+                }
+            }
+            format!("{}.{}.{}.{}", numbers[0], numbers[1], numbers[2], numbers[3])
+        }
+
+        unsafe fn full_path(api: &Api, index: u32) -> Option<String> {
+            let mut buffer = vec![0u16; PATH_UNITS];
+            loop {
+                let units = u32::try_from(buffer.len()).ok()?;
+                // SAFETY: the buffer and its length match, and the call writes
+                // at most that many UTF-16 units, returning how many it copied
+                // without the terminator.
+                let copied = unsafe { (api.full_path)(index, buffer.as_mut_ptr(), units) };
+                let copied = usize::try_from(copied).ok()?;
+                if copied == 0 {
+                    return None;
+                }
+                // Filled to the last unit: the path may be cut, so ask again
+                // with room for the longest path Windows allows.
+                if copied + 1 >= buffer.len() {
+                    if buffer.len() >= LONG_PATH_UNITS {
+                        return None;
+                    }
+                    buffer = vec![0u16; LONG_PATH_UNITS];
+                    continue;
+                }
+                let length = buffer.iter().position(|&unit| unit == 0).unwrap_or(copied).min(copied);
+                return Some(String::from_utf16_lossy(&buffer[..length]));
+            }
+        }
+
+        unsafe fn result_size(api: &Api, index: u32) -> u64 {
+            let Some(get_size) = api.size else { return 0 };
+            let mut size = 0i64;
+            // SAFETY: `size` is a LARGE_INTEGER the call may fill.
+            if unsafe { get_size(index, &mut size) }.as_bool() { u64::try_from(size).unwrap_or(0) } else { 0 }
+        }
+
+        unsafe fn result_modified(api: &Api, index: u32) -> u32 {
+            let Some(get_date) = api.date_modified else { return 0 };
+            // SAFETY: `date` is a FILETIME the call may fill.
+            let mut date = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            if unsafe { get_date(index, &mut date) }.as_bool() {
+                filetime_seconds((u64::from(date.dwHighDateTime) << 32) | u64::from(date.dwLowDateTime))
+            } else {
+                0
+            }
+        }
+    }
+
+    #[cfg(all(test, windows))]
+    mod tests {
+        use super::*;
+
+        fn text(terms: &[&str]) -> String {
+            let terms: Vec<String> = terms.iter().map(|term| (*term).to_string()).collect();
+            let units = search_text(&terms);
+            String::from_utf16_lossy(&units[..units.len() - 1])
+        }
+
+        #[test]
+        fn the_terms_are_quoted_and_joined_so_all_must_match() {
+            assert_eq!(text(&["bonk", "wav"]), "\"bonk\" \"wav\"");
+            assert_eq!(text(&["c++", "a|b"]), "\"c++\" \"a|b\"");
+            assert_eq!(text(&["quo\"te"]), "\"quote\"");
+        }
+
+        #[test]
+        fn a_file_time_becomes_seconds_since_1970() {
+            // 1601 to 1970, in 100 ns ticks, then 2026-11-05 12:00:00 UTC.
+            const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+            assert_eq!(filetime_seconds(0), 0);
+            assert_eq!(filetime_seconds(EPOCH_TICKS + 1_793_880_000 * 10_000_000), 1_793_880_000);
+            // Before 1970 clamps to zero rather than wrapping.
+            assert_eq!(filetime_seconds(EPOCH_TICKS / 2), 0);
+        }
+
+        /// The real thing: needs Everything installed and running, so it only
+        /// runs on request:
+        /// `cargo test --release -p nohrs-pages everything_answers -- --ignored`
+        #[test]
+        #[ignore = "needs Everything installed and running"]
+        fn everything_answers_and_searches() {
+            let info = match probe() {
+                Ok(info) => info,
+                Err(Error::Missing) => {
+                    panic!("put Everything64.dll in target/release/dll first, or open Everything")
+                }
+                Err(error) => panic!("Everything did not answer: {error:?}"),
+            };
+            assert!(info.entries > 0, "Everything indexed no names");
+            let hits = search(&["notepad".to_string()], 100, &AtomicBool::new(false)).expect("a search");
+            assert!(!hits.is_empty(), "no hits for notepad");
+            for hit in &hits {
+                let name = hit.path.rsplit('\\').next().unwrap_or_default().to_lowercase();
+                assert!(name.contains("notepad"), "{name} does not hold the term");
+                assert!(!hit.path.is_empty());
+            }
+            assert!(hits.iter().any(|hit| !hit.dir && hit.size > 0), "a file with no size");
+        }
+    }
+}
+
 /// Folders read at once. The walk waits on the disk, not the processor —
 /// a cold walk of this machine's C: used a third of one core — so more
 /// readers than cores keep more requests in the drive's queue.
@@ -1739,6 +2856,15 @@ pub(crate) struct Everything {
     pub mft_busy: bool,
     /// Why the last install or removal failed.
     pub mft_error: Option<String>,
+    /// Where `[indexing] source` sends the whole-computer names.
+    engine: IndexSource,
+    /// Everything's answer to the last probe; `None` until it is asked.
+    external: Option<Result<remote::Info, remote::Error>>,
+    /// A probe is on its way to Everything.
+    probing: bool,
+    /// Bumped when `engine` changes: a walk that started under the old choice
+    /// does not install its table under the new one.
+    engine_epoch: u64,
     _watcher: Option<notify::RecommendedWatcher>,
     _task: Option<Task<()>>,
     /// Panes searching the whole computer right now: the table is kept while
@@ -1749,6 +2875,34 @@ pub(crate) struct Everything {
 }
 
 impl Global for Everything {}
+
+/// Where the names of the whole-computer search come from, as resolved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// Everything's own index, through its SDK or its IPC window.
+    Everything,
+    /// This process's table, or the indexer service's.
+    Own,
+    /// `auto`, and Everything has not answered yet.
+    Pending,
+}
+
+fn source_of(state: &Everything) -> Source {
+    match state.engine {
+        IndexSource::PrimeFiles => Source::Own,
+        IndexSource::Everything => Source::Everything,
+        IndexSource::Auto => match state.external {
+            Some(Ok(_)) => Source::Everything,
+            Some(Err(_)) => Source::Own,
+            None => Source::Pending,
+        },
+    }
+}
+
+/// The source in effect for a whole-computer search.
+pub(crate) fn source(cx: &App) -> Source {
+    cx.try_global::<Everything>().map_or(Source::Own, source_of)
+}
 
 /// Entries created or renamed since the walk of their drive, as the
 /// watcher reported them, and when each was seen.
@@ -1894,6 +3048,106 @@ fn release(cx: &mut Context<ExplorerPane>) {
     cx.update_global(|state: &mut Everything, _| state.idle = Some(task));
 }
 
+/// Takes the `[indexing] source` the config now asks for. A change throws away
+/// the table this process was keeping — a query is now answered from the other
+/// side — and asks Everything again for `auto` (and for the page's status).
+pub(crate) fn set_engine(engine: IndexSource, cx: &mut App) {
+    let state = cx.default_global::<Everything>();
+    if state.engine == engine {
+        return;
+    }
+    state.engine = engine;
+    state.external = None;
+    state.probing = false;
+    state.index = None;
+    state.walking = None;
+    state.building = None;
+    state.generation += 1;
+    state.engine_epoch += 1;
+    tracing::info!(?engine, "the whole-computer index source changed");
+    // `auto` has to hear from Everything before it can choose, and the other
+    // choices want the page's status line to say what Everything answers.
+    if engine != IndexSource::PrimeFiles {
+        probe(cx);
+    }
+    cx.refresh_windows();
+}
+
+/// Asks Everything whether it answers — its SDK first, then its IPC window —
+/// off the UI thread, and keeps the answer for the bar and the settings page.
+/// On `auto` it decides the source, so the panes' next search reads it.
+pub(crate) fn probe(cx: &mut App) {
+    if cx.default_global::<Everything>().probing {
+        return;
+    }
+    cx.default_global::<Everything>().probing = true;
+    let probe = cx.background_spawn(async { remote::probe() });
+    cx.spawn(async move |cx| {
+        let answer = probe.await;
+        let own = cx
+            .update(|cx| {
+                let state = cx.default_global::<Everything>();
+                state.probing = false;
+                match &answer {
+                    Ok(info) => tracing::info!(
+                        entries = info.entries,
+                        version = %info.version,
+                        "Everything's index answered"
+                    ),
+                    Err(error) => tracing::debug!("Everything's index did not answer: {error:?}"),
+                }
+                state.external = Some(answer);
+                state.generation += 1;
+                source_of(state) == Source::Own
+            })
+            .log_err();
+        // `auto` chose this program's own table: read it now, since the walk
+        // that `ensure` would have started was put off while Everything was
+        // being asked.
+        if own == Some(true) {
+            cx.update(ensure).log_err();
+        }
+        cx.update(|cx| cx.refresh_windows()).log_err();
+    })
+    .detach();
+}
+
+/// What a pane's bar says about Everything's index, when it is the source or
+/// when `auto` is still waiting for it.
+pub(crate) fn external_text(external: Option<&Result<remote::Info, remote::Error>>) -> String {
+    match external {
+        None => t!("Verificando o Everything…").to_string(),
+        Some(Ok(info)) => tf!("O índice do Everything: {n} itens.", n = info.entries),
+        Some(Err(error)) => error_text(error),
+    }
+}
+
+/// Why Everything's index did not answer, as the page says it.
+pub(crate) fn error_text(error: &remote::Error) -> String {
+    match error {
+        remote::Error::Missing => t!("O Everything não foi encontrado. Instale-o ou escolha outro índice.").to_string(),
+        remote::Error::NotRunning => t!("O Everything não está aberto. Abra-o para usar o índice dele.").to_string(),
+        remote::Error::NotReady => t!("O Everything está aberto; o índice dele ainda não foi lido.").to_string(),
+        remote::Error::Busy => t!("O Everything não está respondendo.").to_string(),
+        remote::Error::NamedInstance(instance) => tf!(
+            "O Everything está aberto como a instância {instance}. Esta busca só alcança a instância padrão do Everything.",
+            instance = instance
+        ),
+        remote::Error::Code(code) => tf!("O Everything não respondeu: {error}", error = code),
+    }
+}
+
+/// The line under the index choice when `auto` fell back to this program.
+pub(crate) fn auto_note(external: Option<&Result<remote::Info, remote::Error>>) -> String {
+    match external {
+        Some(Err(remote::Error::NamedInstance(instance))) => tf!(
+            "O Everything está aberto como a instância {instance}; usando o índice deste programa.",
+            instance = instance
+        ),
+        _ => t!("O Everything não está aberto; usando o índice deste programa.").to_string(),
+    }
+}
+
 /// The service's hits for `query`, filtered and ordered the way the local
 /// scan orders its own: the service matched the name terms, and the rest of
 /// the query (extensions, sizes, dates, paths, wildcards) is applied here,
@@ -1910,17 +3164,53 @@ fn service_targets(query: &Query, cancel: &AtomicBool) -> Vec<(String, String, b
             return Vec::new();
         }
     };
+    targets_from_hits(query, cancel, hits.into_iter().map(|hit| (hit.path, hit.dir, hit.size, hit.modified)))
+}
+
+/// Everything's hits for `query`, filtered and ordered as the service's are.
+/// A failure is left in `error` for the pane's bar to say why the list is
+/// empty — Everything may have been closed since the mode opened.
+fn external_targets(
+    query: &Query,
+    cancel: &AtomicBool,
+    error: &Mutex<Option<remote::Error>>,
+) -> Vec<(String, String, bool, u64)> {
+    let terms = query.name_terms();
+    if terms.is_empty() || cancel.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+    match remote::search(&terms, SERVICE_HITS, cancel) {
+        Ok(hits) => targets_from_hits(
+            query,
+            cancel,
+            hits.into_iter().map(|hit| (hit.path, hit.dir, hit.size, hit.modified)),
+        ),
+        Err(why) => {
+            tracing::debug!("the Everything SDK could not search: {why:?}");
+            *lock(error) = Some(why);
+            Vec::new()
+        }
+    }
+}
+
+/// The hits a search answered by another program (the indexer service, or
+/// Everything) to the targets a pane lists. As `gather` sorts: the match
+/// class and recency first, then the shorter name — a hit whose name is the
+/// query itself outranks one with it buried.
+fn targets_from_hits(
+    query: &Query,
+    cancel: &AtomicBool,
+    hits: impl IntoIterator<Item = (String, bool, u64, u32)>,
+) -> Vec<(String, String, bool, u64)> {
     let mut scored: Vec<(u32, usize, String, String, bool, u64)> = hits
         .into_iter()
         .filter(|_| !cancel.load(Ordering::Relaxed))
-        .filter_map(|hit| {
-            let name = hit.path.rsplit('\\').next().unwrap_or(hit.path.as_str()).to_string();
-            let score = query.score(&name, &hit.path, hit.dir, hit.size, hit.modified)?;
-            Some((score, name.chars().count(), name, hit.path, hit.dir, hit.size))
+        .filter_map(|(path, dir, size, modified)| {
+            let name = path.rsplit('\\').next().unwrap_or(path.as_str()).to_string();
+            let score = query.score(&name, &path, dir, size, modified)?;
+            Some((score, name.chars().count(), name, path, dir, size))
         })
         .collect();
-    // As `gather` sorts: the match class and recency first, then the shorter
-    // name — a hit whose name is the query itself outranks one with it buried.
     scored.sort_by(|left, right| (left.0, left.1, &left.3).cmp(&(right.0, right.1, &right.3)));
     scored.into_iter().map(|(_, _, name, path, dir, size)| (name, path, dir, size)).collect()
 }
@@ -1933,11 +3223,16 @@ pub(crate) struct Status {
     /// The indexer service keeps and searches the names itself: this process
     /// holds none of them.
     pub service: bool,
+    /// Where the names come from right now.
+    pub source: Source,
+    /// Everything's index, as the last probe found it.
+    pub external: Option<Result<remote::Info, remote::Error>>,
 }
 
 /// The index's state, for display.
 pub(crate) fn status(cx: &App) -> Status {
     let everything = cx.try_global::<Everything>();
+    let source = everything.map_or(Source::Own, source_of);
     Status {
         entries: everything.and_then(|state| state.index.as_ref()).map(|index| index.len()),
         built: everything.and_then(|state| state.index.as_ref()).map(|index| index.built),
@@ -1945,12 +3240,23 @@ pub(crate) fn status(cx: &App) -> Status {
             .and_then(|state| state.building.as_ref())
             .map(|progress| progress.load(Ordering::Relaxed)),
         service: mft::searchable(),
+        source,
+        external: everything.and_then(|state| state.external.clone()),
     }
 }
 
 /// Reads the saved index on first use and walks the drives again when it is
-/// missing or old.
+/// missing or old. With Everything answering, nothing of that table belongs in
+/// this process, and `auto` has to hear from Everything before it can choose.
 pub(crate) fn ensure(cx: &mut App) {
+    match source(cx) {
+        Source::Everything => return,
+        Source::Pending => {
+            probe(cx);
+            return;
+        }
+        Source::Own => {}
+    }
     let state = cx.default_global::<Everything>();
     if state._watcher.is_none() {
         state._watcher = watch_drives(state.fresh.clone());
@@ -2004,6 +3310,15 @@ enum Walked {
 /// With the service searching, the names are the service's to read again, and
 /// this process asks it to.
 pub(crate) fn rebuild(cx: &mut App) {
+    match source(cx) {
+        // Everything keeps its own index: there is nothing here to walk or
+        // ask again, only the page's status line to refresh.
+        Source::Everything | Source::Pending => {
+            probe(cx);
+            return;
+        }
+        Source::Own => {}
+    }
     if mft::searchable() {
         let task = cx.background_spawn(async {
             match mft::refresh() {
@@ -2018,6 +3333,7 @@ pub(crate) fn rebuild(cx: &mut App) {
     if state.building.is_some() {
         return;
     }
+    let epoch = state.engine_epoch;
     let progress = Arc::new(AtomicUsize::new(0));
     state.building = Some(progress.clone());
     let previous = state.index.clone();
@@ -2056,6 +3372,14 @@ pub(crate) fn rebuild(cx: &mut App) {
         loop {
             cx.background_executor().timer(Duration::from_millis(400)).await;
             ticks += 1;
+            // The choice changed while the walk ran: its table is not this
+            // process's to keep any more.
+            if !matches!(
+                cx.update(|cx| cx.default_global::<Everything>().engine_epoch == epoch),
+                Ok(true)
+            ) {
+                return;
+            }
             match receiver.try_recv() {
                 Ok(Walked::Walking(table)) => {
                     if cx.update(|cx| cx.global_mut::<Everything>().walking = Some(table)).is_err() {
@@ -2186,6 +3510,7 @@ impl ExplorerPane {
         };
         let state = cx.try_global::<Everything>();
         let generation = state.map_or(0, |state| state.generation);
+        let source = state.map_or(Source::Own, source_of);
         let index = state.and_then(|state| state.index.clone());
         let walking = state.filter(|state| state.walking_is_new()).and_then(|state| state.walking.clone());
         let fresh = state.map(|state| state.fresh.clone());
@@ -2201,11 +3526,16 @@ impl ExplorerPane {
             self.end_subfolder_search();
             return;
         }
+        // `auto` has not heard from Everything yet; its probe reruns this.
+        if source == Source::Pending {
+            return;
+        }
         // The service holds the names itself: asking it costs a pipe message
         // and leaves this process holding nothing of the table. The index
         // here is only for a machine without the service.
-        let by_service = mft::searchable();
-        if index.is_none() && walking.is_none() && !by_service {
+        let by_service = source == Source::Own && mft::searchable();
+        let by_everything = source == Source::Everything;
+        if !by_everything && index.is_none() && walking.is_none() && !by_service {
             // Nothing to search yet; the walk reruns this.
             return;
         }
@@ -2224,11 +3554,16 @@ impl ExplorerPane {
         let walking_for_thread = walking.clone();
         let fresh_for_thread = fresh.clone();
         let parsed_for_thread = parsed.clone();
+        // Why Everything's list came back empty, for the bar to say.
+        let external_error = Arc::new(Mutex::new(None));
+        let external_error_for_thread = external_error.clone();
         let spawned = std::thread::Builder::new().name("nohrs-everything-search".into()).spawn({
             let took = took.clone();
             move || {
             let started = Instant::now();
-            let targets = if by_service {
+            let targets = if by_everything {
+                external_targets(&parsed_for_thread, &cancel, &external_error_for_thread)
+            } else if by_service {
                 service_targets(&parsed_for_thread, &cancel)
             } else {
                 // The names here know no folder sizes: a folder shows none.
@@ -2301,6 +3636,9 @@ impl ExplorerPane {
                 }
             }
             let took = took.load(Ordering::Relaxed);
+            // Why Everything's list is empty, when it was Everything that
+            // could not answer.
+            let why = lock(&external_error).take();
             this.update(cx, |pane, cx| {
                 if first && took > 0 {
                     pane.begin_search_hits();
@@ -2314,6 +3652,9 @@ impl ExplorerPane {
                     }
                     if took > 0 {
                         detail.push(format!("{took} ms"));
+                    }
+                    if let Some(why) = &why {
+                        detail.push(error_text(why));
                     }
                     let building = cx
                         .try_global::<Everything>()
@@ -2339,17 +3680,26 @@ impl ExplorerPane {
         cx.notify();
     }
 
-    /// The bar's status while the index is being read or walked.
+    /// The bar's status while the index is being read or walked, and why the
+    /// list is empty when Everything could not answer.
     pub(crate) fn everything_status(&self, cx: &App) -> Option<String> {
         self.everything.as_ref()?;
         let state = cx.try_global::<Everything>()?;
-        match (&state.index, &state.building) {
-            (None, Some(progress)) => Some(nohrs_core::tf!(
-                "Indexando o computador… {n} itens",
-                n = progress.load(Ordering::Relaxed)
-            )),
-            (None, None) => Some(nohrs_core::t!("Lendo o índice…").to_string()),
-            _ => None,
+        match source_of(state) {
+            Source::Everything => match &state.external {
+                Some(Ok(_)) => None,
+                Some(Err(error)) => Some(error_text(error)),
+                None => Some(nohrs_core::t!("Verificando o Everything…").to_string()),
+            },
+            Source::Pending => Some(nohrs_core::t!("Verificando o Everything…").to_string()),
+            Source::Own => match (&state.index, &state.building) {
+                (None, Some(progress)) => Some(nohrs_core::tf!(
+                    "Indexando o computador… {n} itens",
+                    n = progress.load(Ordering::Relaxed)
+                )),
+                (None, None) => Some(nohrs_core::t!("Lendo o índice…").to_string()),
+                _ => None,
+            },
         }
     }
 }
@@ -2549,6 +3899,21 @@ mod platform {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_waits_for_everything_then_falls_back_to_the_own_table() {
+        let mut state = Everything::default();
+        assert!(matches!(source_of(&state), Source::Pending));
+        state.external = Some(Err(remote::Error::NotRunning));
+        assert!(matches!(source_of(&state), Source::Own));
+        state.external = Some(Ok(remote::Info { entries: 10, version: String::new() }));
+        assert!(matches!(source_of(&state), Source::Everything));
+        // An explicit choice does not depend on the probe.
+        state.engine = IndexSource::PrimeFiles;
+        assert!(matches!(source_of(&state), Source::Own));
+        state.engine = IndexSource::Everything;
+        assert!(matches!(source_of(&state), Source::Everything));
+    }
 
     fn sample() -> Index {
         let mut other = Segment::empty();

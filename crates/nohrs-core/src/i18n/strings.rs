@@ -197,6 +197,11 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Corto suena mientras recorres la lista; largo solo suena el archivo en el que te detuviste.",
     ),
     ("Data de modificação", "Date modified", "Fecha de modificación"),
+    (
+        "De onde vêm os nomes da busca em todo o computador. Com o Everything aberto, o índice dele serve e nada é criado aqui; o automático decide isso na primeira busca.",
+        "Where the names for the whole-computer search come from. With Everything open its index is used and nothing is built here; Automatic decides that on the first search.",
+        "De dónde vienen los nombres de la búsqueda en todo el equipo. Con Everything abierto se usa su índice y aquí no se crea nada; Automático lo decide en la primera búsqueda.",
+    ),
     ("Decrescente", "Descending", "Descendente"),
     (
         "Deixe o mouse parado sobre um arquivo de som na lista para ouvi-lo; tirar o mouse para. Um som por vez, no volume do visualizador.",
@@ -372,6 +377,7 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "No setting matches \"{query}\".",
         "Ningún ajuste coincide con \"{query}\".",
     ),
+    ("Neste programa", "In this program", "En este programa"),
     (
         "No modo Ícones, arquivos de som mostram a forma de onda no lugar do ícone.",
         "In Icons view, sound files show their waveform instead of their icon.",
@@ -444,6 +450,38 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("Não instalado", "Not installed", "No instalado"),
     (
+        "O Everything está aberto como a instância {instance}. Esta busca só alcança a instância padrão do Everything.",
+        "Everything is open as the instance {instance}. This search only reaches the default Everything instance.",
+        "Everything está abierto como la instancia {instance}. Esta búsqueda solo alcanza la instancia predeterminada de Everything.",
+    ),
+    (
+        "O Everything está aberto como a instância {instance}; usando o índice deste programa.",
+        "Everything is open as the instance {instance}; using this program's index.",
+        "Everything está abierto como la instancia {instance}; usando el índice de este programa.",
+    ),
+    (
+        "O Everything está aberto; o índice dele ainda não foi lido.",
+        "Everything is open; its index has not been read yet.",
+        "Everything está abierto; su índice aún no se ha leído.",
+    ),
+    (
+        "O Everything não está aberto. Abra-o para usar o índice dele.",
+        "Everything is not open. Open it to use its index.",
+        "Everything no está abierto. Ábrelo para usar su índice.",
+    ),
+    (
+        "O Everything não está aberto; usando o índice deste programa.",
+        "Everything is not open; using this program's index.",
+        "Everything no está abierto; usando el índice de este programa.",
+    ),
+    ("O Everything não está respondendo.", "Everything is not responding.", "Everything no responde."),
+    (
+        "O Everything não foi encontrado. Instale-o ou escolha outro índice.",
+        "Everything was not found. Install it or choose another index.",
+        "No se encontró Everything. Instálalo o elige otro índice.",
+    ),
+    ("O Everything não respondeu: {error}", "Everything did not respond: {error}", "Everything no respondió: {error}"),
+    (
         "O Listary agora abre pastas no Prime Files.",
         "Listary now opens folders in Prime Files.",
         "Listary ahora abre las carpetas en Prime Files.",
@@ -476,6 +514,11 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("O que esconder", "What to hide", "Qué ocultar"),
     ("O seu explorador padrão", "Your default file manager", "Tu explorador predeterminado"),
+    (
+        "O índice do Everything: {n} itens.",
+        "Everything's index: {n} items.",
+        "El índice de Everything: {n} elementos.",
+    ),
     (
         "O índice é criado na primeira busca.",
         "The index is created on the first search.",
@@ -874,6 +917,7 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Search index unavailable; filtering the current folder by name only",
         "Índice de búsqueda no disponible; filtrando solo por nombre en la carpeta actual",
     ),
+    ("Índice do computador", "Computer index", "Índice del equipo"),
     ("“{name}” já existe em “{folder}”", "“{name}” already exists in “{folder}”", "“{name}” ya existe en “{folder}”"),
     ("*(O resto do documento não cabe na visualização.)*", "*(The rest of the document does not fit in the preview.)*", "*(El resto del documento no cabe en la vista previa.)*"),
     ("Abas verticais", "Vertical tabs", "Pestañas verticales"),
@@ -910,6 +954,7 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ("Trabalho", "Work", "Trabajo"),
     ("Turquesa", "Teal", "Turquesa"),
     ("Ver formatado", "Show formatted", "Ver con formato"),
+    ("Verificando o Everything…", "Checking Everything…", "Comprobando Everything…"),
     ("Versão do arquivo {version}", "File version {version}", "Versión del archivo {version}"),
     ("\\\\servidor\\pasta ou smb://servidor/pasta", "\\\\server\\folder or smb://server/folder", "\\\\servidor\\carpeta o smb://servidor/carpeta"),
     ("{n} arquivos não encontrados no disco", "{n} files not found on disk", "{n} archivos no encontrados en el disco"),
