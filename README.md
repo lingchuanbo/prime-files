@@ -46,7 +46,9 @@ Precisa do [Rust](https://rustup.rs) (stable) e do Windows.
 cargo build --release -p nohrs
 ```
 
-O programa fica em `target/release/nohrs.exe` (o código usa internamente o nome `nohrs`: crates `nohrs-*` e a pasta de configuração). O instalador sai de `installer/prime-files.iss` com o [Inno Setup 6](https://jrsoftware.org/isinfo.php); o workflow `.github/workflows/release.yml` faz os dois e publica a release a cada tag `v*`. O ícone é gerado por `assets/icon/make_icon.py`.
+O programa fica em `target/release/nohrs.exe` (o código usa internamente o nome `nohrs`: crates `nohrs-*` e a pasta de configuração). Para compilar também o serviço de indexação, `cargo build --release -p nohrs -p nohrs-indexer`.
+
+No Windows, `compilar.bat` faz os dois de uma vez: `compilar.bat` para o uso do dia a dia (perfil `release`, recompila rápido), `compilar.bat dist` para o que o instalador empacota (`target/dist`). O instalador sai de `installer/prime-files.iss` com o [Inno Setup 6](https://jrsoftware.org/isinfo.php); o workflow `.github/workflows/release.yml` faz os dois e publica a release a cada tag `v*`. O ícone é gerado por `assets/icon/make_icon.py`.
 
 Inclui uma cópia do [gpui](https://github.com/zed-industries/zed) 0.2.2 com correções para o Windows, descritas em [`third_party/gpui/NOHRS.md`](third_party/gpui/NOHRS.md).
 

@@ -77,6 +77,11 @@ expect_used = "warn"
 # and more codegen units split the optimizer's work across the cores. The cost
 # is a slightly slower binary, not visible in use. Dependencies keep the
 # default and are built once.
+#
+# Size was measured and left for later: `opt-level = "s"` takes the binary from
+# 39 MB to 29.6 MB, and the `dist` profile below from 39 MB to 23.5 MB with a
+# full LTO. Both are written down in docs/size.md for when the binary's size is
+# worth the slower runtime and build.
 [profile.release]
 incremental = true
 codegen-units = 256
