@@ -83,6 +83,9 @@ const UNKNOWN_SIZE: u64 = u64::MAX;
 const SERVICE_HITS: u32 = 20_000;
 /// Hits below this from the matching pass call in the near-miss pass.
 const FUZZY_BELOW: usize = 20;
+/// Hits below this from Everything let the pinyin pass run: a name typed as
+/// initials ("wjj" for 文件夹) answers with few literal hits, if any.
+const PINYIN_BELOW: usize = 20;
 /// Near misses shown at most: past the first few, they are noise.
 const FUZZY_MOST: usize = 50;
 /// Entries the watcher keeps between walks; past it the oldest half goes.
@@ -790,8 +793,15 @@ impl Query {
                 return None;
             }
         }
+        // A name written in Han characters is also matched by its pinyin
+        // initials, as the local table matches them: Everything answers a
+        // search for "wjj" with 文件夹, and that is the query this keeps.
+        let initials = (self.pinyin && !name.is_ascii()).then(|| pinyin_initials(&name)).flatten();
         let names_match = self.terms.iter().all(|term| match term {
-            Term::Name(part) => name.contains(part.as_str()),
+            Term::Name(part) => {
+                name.contains(part.as_str())
+                    || initials.as_deref().is_some_and(|initials| initials.contains(part.as_str()))
+            }
             Term::Pattern(pattern) => wildcard(pattern, &name),
             Term::Path(_) => true,
         });
@@ -1408,7 +1418,8 @@ pub(crate) mod mft {
 /// Either way the work runs on background threads: a query waits on that
 /// program's window, and the UI thread never does.
 pub(crate) mod remote {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// One name Everything knows.
     pub(crate) struct Hit {
@@ -1425,6 +1436,9 @@ pub(crate) mod remote {
     pub(crate) struct Info {
         pub entries: u64,
         pub version: String,
+        /// The modifier that makes a query match pinyin initials, when this
+        /// Everything has one (1.5, build 1320 and later); `None` otherwise.
+        pub pinyin: Option<&'static str>,
     }
 
     /// Why Everything's index could not answer.
@@ -1463,11 +1477,44 @@ pub(crate) mod remote {
     }
 
     /// The names holding every one of `terms`, up to `limit` of them.
+    ///
+    /// A name written in Han characters is also matched by its pinyin initials
+    /// ("wjj" for 文件夹), and Everything only does that when it is told to —
+    /// or not at all, depending on its version. So when a search finds almost
+    /// nothing, it is asked again with the pinyin modifier this Everything
+    /// understands; the hits of both are merged.
     #[cfg(windows)]
-    pub(crate) fn search(terms: &[String], limit: u32, cancel: &AtomicBool) -> Result<Vec<Hit>, Error> {
-        match dll::search(terms, limit, cancel) {
+    pub(crate) fn search(
+        terms: &[String],
+        limit: u32,
+        cancel: &Arc<AtomicBool>,
+        pinyin: Option<&'static str>,
+    ) -> Result<Vec<Hit>, Error> {
+        let mut hits = search_via(terms, limit, cancel, None)?;
+        if let Some(modifier) = pinyin
+            && hits.len() < super::PINYIN_BELOW
+            && !cancel.load(Ordering::Relaxed)
+        {
+            match search_via(terms, limit, cancel, Some(modifier)) {
+                Ok(more) => hits.extend(more),
+                // The literal answer already stands; a pinyin pass that fails
+                // is only worth a log line.
+                Err(error) => tracing::debug!("Everything could not search by pinyin: {error:?}"),
+            }
+        }
+        Ok(hits)
+    }
+
+    #[cfg(windows)]
+    fn search_via(
+        terms: &[String],
+        limit: u32,
+        cancel: &Arc<AtomicBool>,
+        modifier: Option<&str>,
+    ) -> Result<Vec<Hit>, Error> {
+        match dll::search(terms, limit, cancel.as_ref(), modifier) {
             Ok(hits) => Ok(hits),
-            Err(dll_error) => match ipc::search(terms, limit, cancel) {
+            Err(dll_error) => match ipc::search(terms, limit, cancel, modifier) {
                 Ok(hits) => Ok(hits),
                 Err(ipc::Failure::Failed(error)) => Err(error),
                 Err(ipc::Failure::Unavailable) => Err(dll_error),
@@ -1481,21 +1528,50 @@ pub(crate) mod remote {
     }
 
     #[cfg(not(windows))]
-    pub(crate) fn search(_terms: &[String], _limit: u32, _cancel: &AtomicBool) -> Result<Vec<Hit>, Error> {
+    pub(crate) fn search(
+        _terms: &[String],
+        _limit: u32,
+        _cancel: &Arc<AtomicBool>,
+        _pinyin: Option<&'static str>,
+    ) -> Result<Vec<Hit>, Error> {
         Err(Error::Missing)
+    }
+
+    /// The search modifier that makes a term match pinyin initials, when this
+    /// Everything understands one: `pinyin:` up to 1.5 build 1386 (single
+    /// character initials were the only method then), `pinyin-jian:` from
+    /// build 1387 (where plain `pinyin:` became QuanPin). Everything 1.4 has
+    /// no pinyin matching, and builds 1384–1386 default to QuanPin, so they
+    /// are left to whatever the person configured there.
+    #[cfg(windows)]
+    pub(super) fn pinyin_modifier() -> Option<&'static str> {
+        let (major, minor, _, build) = ipc::version()?;
+        if major != 1 || minor < 5 {
+            return None;
+        }
+        match build {
+            1387.. => Some("pinyin-jian:"),
+            1320..=1383 => Some("pinyin:"),
+            _ => None,
+        }
     }
 
     /// The search Everything is asked for plain name terms: each in quotes,
     /// which keeps its own operators (a `|`, a `!`, a `:` and its wildcards)
     /// out of the way, joined by spaces so a hit must hold all of them — what
-    /// the local scan does. A `"` cannot appear in a Windows name, and the
-    /// tokenizer already drops the ones typed. Terminated for the wide APIs.
+    /// the local scan does. `modifier`, when given, is put in front of each
+    /// term so it matches pinyin initials too. A `"` cannot appear in a
+    /// Windows name, and the tokenizer already drops the ones typed.
+    /// Terminated for the wide APIs.
     #[cfg(windows)]
-    pub(super) fn search_text(terms: &[String]) -> Vec<u16> {
+    pub(super) fn search_text(terms: &[String], modifier: Option<&str>) -> Vec<u16> {
         let mut text = String::new();
         for term in terms {
             if !text.is_empty() {
                 text.push(' ');
+            }
+            if let Some(modifier) = modifier {
+                text.push_str(modifier);
             }
             text.push('"');
             text.extend(term.chars().filter(|character| *character != '"'));
@@ -1605,9 +1681,9 @@ pub(crate) mod remote {
     #[cfg(windows)]
     #[allow(unsafe_code)]
     mod ipc {
-        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
         use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-        use std::sync::{Mutex, OnceLock, PoisonError};
+        use std::sync::{Arc, Mutex, OnceLock, PoisonError};
         use std::time::{Duration, Instant};
 
         use windows::core::PCWSTR;
@@ -1659,16 +1735,16 @@ pub(crate) mod remote {
         struct Job {
             search: Vec<u16>,
             max: u32,
-            /// Where this query sits in the order they were asked: a newer
-            /// keystroke makes the ones still queued pointless.
-            order: u64,
+            /// The caller's cancel flag: a newer keystroke makes this query
+            /// pointless while it waits its turn.
+            cancel: Option<Arc<AtomicBool>>,
             reply: Sender<Answer>,
         }
 
         enum Answer {
             /// Everything's reply buffer, empty when it did not answer.
             Done(Vec<u8>),
-            /// A newer query was asked before this one went out.
+            /// The caller gave up on the query before it went out.
             Cancelled,
         }
 
@@ -1678,9 +1754,6 @@ pub(crate) mod remote {
         /// The cookie of the query in flight.
         static COOKIE: AtomicU32 = AtomicU32::new(0);
         static NEXT_COOKIE: AtomicU32 = AtomicU32::new(0x5046_0001);
-        /// The order of the newest query asked for.
-        static NEXT_ORDER: AtomicU64 = AtomicU64::new(1);
-        static LATEST_ORDER: AtomicU64 = AtomicU64::new(0);
         static CLIENT: OnceLock<Option<Sender<Job>>> = OnceLock::new();
 
         fn client() -> Option<&'static Sender<Job>> {
@@ -1711,8 +1784,9 @@ pub(crate) mod remote {
             // SAFETY: our own window, and the call only widens its filter.
             unsafe { ChangeWindowMessageFilterEx(window, WM_COPYDATA, MSGFLT_ALLOW, None).log_err() };
             while let Ok(job) = jobs.recv() {
-                // A newer keystroke arrived while this one waited its turn.
-                if job.order < LATEST_ORDER.load(Ordering::Relaxed) {
+                // The caller typed on: this query would only keep the queue
+                // busy, and its answer is already unwanted.
+                if job.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
                     job.reply.send(Answer::Cancelled).log_err();
                     continue;
                 }
@@ -1888,13 +1962,30 @@ pub(crate) mod remote {
             text.encode_utf16().chain(std::iter::once(0)).collect()
         }
 
+        /// Everything's version, asked over its window: major, minor, revision
+        /// and build. `None` when the window does not answer.
+        pub(super) fn version() -> Option<(u32, u32, u32, u32)> {
+            use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_USER};
+
+            let target = discover::window()?;
+            let mut numbers = [0u32; 4];
+            for (at, code) in [0usize, 1, 2, 3].into_iter().enumerate() {
+                // SAFETY: the read-only version messages Everything's window
+                // answers, with no data exchanged either way.
+                let value =
+                    unsafe { SendMessageW(target, WM_USER, Some(WPARAM(code)), Some(LPARAM(0))) };
+                numbers[at] = u32::try_from(value.0).ok()?;
+            }
+            Some((numbers[0], numbers[1], numbers[2], numbers[3]))
+        }
+
         pub(super) fn probe() -> Result<Info, Failure> {
             if discover::window().is_none() {
                 return Err(Failure::Unavailable);
             }
             // An empty search matches every name, one of which comes back; the
             // count of all of them is what the page shows.
-            let reply = ask(search_text(&[]), 1)?;
+            let reply = ask(search_text(&[], None), 1, None)?;
             let list = list(&reply).ok_or(Failure::Failed(Error::Busy))?;
             if list.totitems == 0 {
                 return Err(Failure::Failed(Error::NotReady));
@@ -1903,17 +1994,22 @@ pub(crate) mod remote {
                 Some(name) => format!("ipc {name}"),
                 None => "ipc".to_string(),
             };
-            Ok(Info { entries: u64::from(list.totitems), version })
+            Ok(Info { entries: u64::from(list.totitems), version, pinyin: super::pinyin_modifier() })
         }
 
-        pub(super) fn search(terms: &[String], limit: u32, cancel: &AtomicBool) -> Result<Vec<Hit>, Failure> {
+        pub(super) fn search(
+            terms: &[String],
+            limit: u32,
+            cancel: &Arc<AtomicBool>,
+            modifier: Option<&str>,
+        ) -> Result<Vec<Hit>, Failure> {
             if cancel.load(Ordering::Relaxed) {
                 return Ok(Vec::new());
             }
             if discover::window().is_none() {
                 return Err(Failure::Unavailable);
             }
-            let reply = ask(search_text(terms), limit)?;
+            let reply = ask(search_text(terms, modifier), limit, Some(cancel.clone()))?;
             let list = list(&reply).ok_or(Failure::Failed(Error::Busy))?;
             let count = list.items.len() / 8;
             let mut hits = Vec::with_capacity(count.min(1024));
@@ -1930,17 +2026,15 @@ pub(crate) mod remote {
             Ok(hits)
         }
 
-        fn ask(search: Vec<u16>, max: u32) -> Result<Vec<u8>, Failure> {
+        fn ask(search: Vec<u16>, max: u32, cancel: Option<Arc<AtomicBool>>) -> Result<Vec<u8>, Failure> {
             let sender = client().ok_or(Failure::Unavailable)?;
-            let order = NEXT_ORDER.fetch_add(1, Ordering::Relaxed);
-            LATEST_ORDER.store(order, Ordering::Relaxed);
             let (reply, answer) = mpsc::channel();
-            sender.send(Job { search, max, order, reply }).map_err(|_| Failure::Unavailable)?;
+            sender.send(Job { search, max, cancel, reply }).map_err(|_| Failure::Unavailable)?;
             // The pump thread has its own deadline; this one also covers a
             // thread that is stuck before it can answer.
             match answer.recv_timeout(REPLY_TIMEOUT + Duration::from_secs(2)) {
                 Ok(Answer::Done(bytes)) if !bytes.is_empty() => Ok(bytes),
-                // A newer query was asked for: no hits, and no error to show.
+                // The caller moved on: no hits, and no error to show.
                 Ok(Answer::Cancelled) => Ok(Vec::new()),
                 Ok(Answer::Done(_)) | Err(RecvTimeoutError::Timeout) => Err(Failure::Failed(Error::Busy)),
                 Err(RecvTimeoutError::Disconnected) => Err(Failure::Unavailable),
@@ -2303,19 +2397,24 @@ pub(crate) mod remote {
                 if !loaded {
                     return Err(Error::NotReady);
                 }
-                Ok(Info { entries, version: version(api) })
+                Ok(Info { entries, version: version(api), pinyin: super::pinyin_modifier() })
             }
         }
 
         /// The names holding every one of `terms`, up to `limit` of them.
         /// `cancel` is read between hits: a newer keystroke stops this one.
-        pub(super) fn search(terms: &[String], limit: u32, cancel: &AtomicBool) -> Result<Vec<Hit>, Error> {
+        pub(super) fn search(
+            terms: &[String],
+            limit: u32,
+            cancel: &AtomicBool,
+            modifier: Option<&str>,
+        ) -> Result<Vec<Hit>, Error> {
             let api = api().ok_or(Error::Missing)?;
             if cancel.load(Ordering::Relaxed) {
                 return Ok(Vec::new());
             }
             let _session = SDK.enter().ok_or(Error::Busy)?;
-            let search = search_text(terms);
+            let search = search_text(terms, modifier);
             // SAFETY: as in `probe`; the search string outlives the call.
             unsafe {
                 reset(api);
@@ -2456,17 +2555,25 @@ pub(crate) mod remote {
     mod tests {
         use super::*;
 
-        fn text(terms: &[&str]) -> String {
+        fn text(terms: &[&str], modifier: Option<&str>) -> String {
             let terms: Vec<String> = terms.iter().map(|term| (*term).to_string()).collect();
-            let units = search_text(&terms);
+            let units = search_text(&terms, modifier);
             String::from_utf16_lossy(&units[..units.len() - 1])
         }
 
         #[test]
         fn the_terms_are_quoted_and_joined_so_all_must_match() {
-            assert_eq!(text(&["bonk", "wav"]), "\"bonk\" \"wav\"");
-            assert_eq!(text(&["c++", "a|b"]), "\"c++\" \"a|b\"");
-            assert_eq!(text(&["quo\"te"]), "\"quote\"");
+            assert_eq!(text(&["bonk", "wav"], None), "\"bonk\" \"wav\"");
+            assert_eq!(text(&["c++", "a|b"], None), "\"c++\" \"a|b\"");
+            assert_eq!(text(&["quo\"te"], None), "\"quote\"");
+        }
+
+        #[test]
+        fn a_pinyin_modifier_goes_before_each_quoted_term() {
+            assert_eq!(
+                text(&["wjj", "bg"], Some("pinyin-jian:")),
+                "pinyin-jian:\"wjj\" pinyin-jian:\"bg\""
+            );
         }
 
         #[test]
@@ -2493,7 +2600,8 @@ pub(crate) mod remote {
                 Err(error) => panic!("Everything did not answer: {error:?}"),
             };
             assert!(info.entries > 0, "Everything indexed no names");
-            let hits = search(&["notepad".to_string()], 100, &AtomicBool::new(false)).expect("a search");
+            let cancel = Arc::new(AtomicBool::new(false));
+            let hits = search(&["notepad".to_string()], 100, &cancel, None).expect("a search");
             assert!(!hits.is_empty(), "no hits for notepad");
             for hit in &hits {
                 let name = hit.path.rsplit('\\').next().unwrap_or_default().to_lowercase();
@@ -2501,6 +2609,39 @@ pub(crate) mod remote {
                 assert!(!hit.path.is_empty());
             }
             assert!(hits.iter().any(|hit| !hit.dir && hit.size > 0), "a file with no size");
+        }
+
+        /// A name written in Han characters, found by its pinyin initials: the
+        /// whole point of the modifier. Needs a Han-named file Everything knows.
+        #[test]
+        #[ignore = "needs Everything installed and running"]
+        fn everything_answers_a_name_by_its_pinyin_initials() {
+            let Some(modifier) = pinyin_modifier() else {
+                eprintln!("this Everything has no pinyin search; nothing to check");
+                return;
+            };
+            let han = search(&["文件".to_string()], 200, &Arc::new(AtomicBool::new(false)), None)
+                .unwrap_or_default();
+            let Some(hit) = han.into_iter().find(|hit| hit.path.chars().any(|ch| !ch.is_ascii())) else {
+                eprintln!("no Han-named name in this index; nothing to check");
+                return;
+            };
+            let name = hit.path.rsplit('\\').next().unwrap_or_default().to_lowercase();
+            let Some(initials) = crate::explorer::pinyin::initials(&name) else {
+                return;
+            };
+            let by_initials = search(
+                &[initials.clone()],
+                200,
+                &Arc::new(AtomicBool::new(false)),
+                Some(modifier),
+            )
+            .expect("a pinyin search");
+            assert!(
+                by_initials.iter().any(|other| other.path == hit.path),
+                "{initials} (\u{7b80}\u{6291}) did not find {}",
+                hit.path
+            );
         }
     }
 }
@@ -3168,25 +3309,28 @@ fn service_targets(query: &Query, cancel: &AtomicBool) -> Vec<(String, String, b
 }
 
 /// Everything's hits for `query`, filtered and ordered as the service's are.
-/// A failure is left in `error` for the pane's bar to say why the list is
-/// empty — Everything may have been closed since the mode opened.
+/// `pinyin` is the modifier that makes its words match pinyin initials, when
+/// this Everything has one. A failure is left in `error` for the pane's bar to
+/// say why the list is empty — Everything may have been closed since the mode
+/// opened.
 fn external_targets(
     query: &Query,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
     error: &Mutex<Option<remote::Error>>,
+    pinyin: Option<&'static str>,
 ) -> Vec<(String, String, bool, u64)> {
     let terms = query.name_terms();
     if terms.is_empty() || cancel.load(Ordering::Relaxed) {
         return Vec::new();
     }
-    match remote::search(&terms, SERVICE_HITS, cancel) {
+    match remote::search(&terms, SERVICE_HITS, cancel, pinyin) {
         Ok(hits) => targets_from_hits(
             query,
             cancel,
             hits.into_iter().map(|hit| (hit.path, hit.dir, hit.size, hit.modified)),
         ),
         Err(why) => {
-            tracing::debug!("the Everything SDK could not search: {why:?}");
+            tracing::debug!("Everything could not search: {why:?}");
             *lock(error) = Some(why);
             Vec::new()
         }
@@ -3212,7 +3356,14 @@ fn targets_from_hits(
         })
         .collect();
     scored.sort_by(|left, right| (left.0, left.1, &left.3).cmp(&(right.0, right.1, &right.3)));
-    scored.into_iter().map(|(_, _, name, path, dir, size)| (name, path, dir, size)).collect()
+    // A literal pass and a pinyin pass can answer with the same name.
+    let mut shown = std::collections::HashSet::new();
+    scored
+        .into_iter()
+        .filter_map(|(_, _, name, path, dir, size)| {
+            shown.insert(path.to_lowercase()).then_some((name, path, dir, size))
+        })
+        .collect()
 }
 
 /// What the settings page shows about the index.
@@ -3542,6 +3693,17 @@ impl ExplorerPane {
         let Some(parsed) = Query::parse(&query, &self.cwd) else {
             return;
         };
+        // A name typed as pinyin initials is a Han name Everything only finds
+        // when told to; the modifier it understands was worked out at the
+        // probe. Only an all-Latin query is worth that pass.
+        let pinyin = if parsed.pinyin {
+            state
+                .and_then(|state| state.external.as_ref())
+                .and_then(|answer| answer.as_ref().ok())
+                .and_then(|info| info.pinyin)
+        } else {
+            None
+        };
         let filters = parsed.filters.join(" ");
         mode.last = Some(key);
         mode.cancel.store(true, Ordering::Relaxed);
@@ -3562,7 +3724,7 @@ impl ExplorerPane {
             move || {
             let started = Instant::now();
             let targets = if by_everything {
-                external_targets(&parsed_for_thread, &cancel, &external_error_for_thread)
+                external_targets(&parsed_for_thread, &cancel, &external_error_for_thread, pinyin)
             } else if by_service {
                 service_targets(&parsed_for_thread, &cancel)
             } else {
@@ -3906,7 +4068,7 @@ mod tests {
         assert!(matches!(source_of(&state), Source::Pending));
         state.external = Some(Err(remote::Error::NotRunning));
         assert!(matches!(source_of(&state), Source::Own));
-        state.external = Some(Ok(remote::Info { entries: 10, version: String::new() }));
+        state.external = Some(Ok(remote::Info { entries: 10, version: String::new(), pinyin: None }));
         assert!(matches!(source_of(&state), Source::Everything));
         // An explicit choice does not depend on the probe.
         state.engine = IndexSource::PrimeFiles;
@@ -4078,6 +4240,19 @@ mod tests {
         assert!(search(&index, "qqq").is_empty());
         // A wildcard covers the name itself, never its initials.
         assert!(search(&index, "*.png").len() == 1);
+    }
+
+    // Everything answers "wjj" with 文件夹; the filter that keeps what another
+    // program found must accept those, not only a name holding the letters.
+    #[cfg(windows)]
+    #[test]
+    fn a_hit_from_another_program_is_kept_by_its_pinyin_initials() {
+        let query = Query::parse_at("wjj", "", now()).unwrap();
+        assert!(query.score("文件夹", "C:\\文件夹", true, 0, clamp_seconds(NOW)).is_some());
+        // A Latin name still has to hold the letters itself.
+        assert!(query.score("notes.txt", "C:\\notes.txt", false, 1, clamp_seconds(NOW)).is_none());
+        // A Han name whose initials are something else is not kept.
+        assert!(query.score("工作报告.docx", "C:\\工作报告.docx", false, 1, clamp_seconds(NOW)).is_none());
     }
 
     #[test]
