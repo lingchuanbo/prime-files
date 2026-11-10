@@ -64,6 +64,9 @@ impl NohrsApp {
         Application::new().with_assets(Assets).run(move |app: &mut App| {
             gpui_component::init(app);
             apply_theme_mode(config.theme.mode, app);
+            // The launcher window draws with the same tokens as the explorer.
+            nohrs_ui::theme::theme::set_accent(nohrs_ui::theme::theme::parse_accent(&config.theme.accent));
+            nohrs_ui::theme::theme::set_background(nohrs_ui::theme::theme::parse_color(&config.theme.background));
 
             // The name index is built once for the whole run and shared by every
             // launcher window, so summoning the launcher never waits on a scan.

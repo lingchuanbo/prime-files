@@ -34,6 +34,8 @@ enum PreviewOutcome {
     /// A creative app's file (`creative.rs`).
     Creative(super::creative::Creative),
     Unsupported,
+    /// Nothing could be read — an archive entry that would not unpack, say.
+    Failed(String),
 }
 
 fn detect_language(path: &str) -> String {
@@ -436,9 +438,27 @@ impl ExplorerPane {
             f32::from(window.viewport_size().height),
             window.scale_factor(),
         );
+        // An entry inside an archive is unpacked first, into the temporary
+        // folder, and the preview reads that: no reader here can open a path
+        // inside an archive. The outcome carries the file that was read, so
+        // the PDF, media and model readers get the unpacked one too.
+        let from_archive = super::archive::split(&path).is_some();
         let read_task = cx.background_spawn({
             let path = path.clone();
-            async move { read_preview(&path, show_hidden, edge) }
+            async move {
+                let source = if from_archive {
+                    match super::archive::extract(&path) {
+                        Ok(unpacked) => unpacked.to_string_lossy().into_owned(),
+                        Err(error) => {
+                            return (path.clone(), PreviewOutcome::Failed(error));
+                        }
+                    }
+                } else {
+                    path.clone()
+                };
+                let outcome = read_preview(&source, show_hidden, edge);
+                (source, outcome)
+            }
         });
 
         // Held, not detached: the next preview replaces it, which drops the
@@ -449,13 +469,13 @@ impl ExplorerPane {
             move |this: gpui::WeakEntity<ExplorerPane>, cx: &mut AsyncWindowContext| {
                 let mut cx = cx.clone();
                 async move {
-                    let outcome = read_task.await;
+                    let (source, outcome) = read_task.await;
                     if let Err(error) = this.update_in(&mut cx, |this, window, cx| {
                         // Skip if a newer preview was requested while we were reading.
                         if this.preview_path.as_deref() != Some(path.as_str()) {
                             return;
                         }
-                        this.apply_preview_outcome(path, outcome, window, cx);
+                        this.apply_preview_outcome(path, source, outcome, window, cx);
                     }) {
                         tracing::debug!("Preview update skipped: {error}");
                     }
@@ -467,30 +487,40 @@ impl ExplorerPane {
     fn apply_preview_outcome(
         &mut self,
         path: String,
+        source: String,
         outcome: PreviewOutcome,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // An entry inside an archive is read from the unpacked copy: its own
+        // path names nothing on disk, so nothing may be saved back over it.
+        if super::archive::split(&path).is_some() {
+            self.preview_saveable = false;
+        }
         match outcome {
+            PreviewOutcome::Failed(error) => {
+                self.preview_path = Some(path);
+                self.preview_message = Some(error);
+            }
             PreviewOutcome::TooLarge => {
                 self.preview_path = Some(path);
                 self.preview_message = Some(t!("(Arquivo grande demais para visualizar)").to_string());
             }
             PreviewOutcome::Image => {
                 self.preview_path = Some(path.clone());
-                self.preview_image_path = Some(path);
+                self.preview_image_path = Some(source.clone());
             }
             PreviewOutcome::Pdf => {
                 self.preview_path = Some(path.clone());
-                self.open_pdf_preview(path, cx);
+                self.open_pdf_preview(source, cx);
             }
             PreviewOutcome::Media => {
                 self.preview_path = Some(path.clone());
-                self.open_media_preview(path, cx);
+                self.open_media_preview(source, cx);
             }
             PreviewOutcome::Model => {
                 self.preview_path = Some(path.clone());
-                self.open_model_preview(path, cx);
+                self.open_model_preview(source, cx);
             }
             PreviewOutcome::Listing(listing) => {
                 self.preview_path = Some(path);

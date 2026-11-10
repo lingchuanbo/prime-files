@@ -21,7 +21,7 @@ use std::time::Instant;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{Icon, IconName};
-use nohrs_core::config::{Compact, SplitDirection};
+use nohrs_core::config::{Compact, DockSide, SplitDirection};
 use nohrs_ui::theme::theme;
 
 use crate::compact::{self, Edge, Reveal};
@@ -85,6 +85,9 @@ pub enum GroupDrag {
         start_x: f32,
         /// The column's width then.
         start_width: f32,
+        /// Whether the column hangs on the right, where dragging left widens
+        /// it rather than narrowing it.
+        from_right: bool,
     },
 }
 
@@ -225,8 +228,10 @@ pub struct PaneGroup<T: PaneItem> {
     build_pane: BuildPane<T>,
     /// Compact mode: tab rows hidden until the pointer reaches them.
     compact: Compact,
-    /// Tabs in a column down each pane's left side, as in Zen.
+    /// Tabs in a column down each pane's side, as in Zen.
     vertical_tabs: bool,
+    /// The side that column runs down: `Left` (the default) or `Right`.
+    vertical_tabs_side: DockSide,
     /// Whether the tab row may be the window's title bar. Not while a panel
     /// beside the panes (the terminal on a side) reaches the window's top:
     /// the window's buttons would sit in the middle of the window.
@@ -249,6 +254,7 @@ impl<T: PaneItem> PaneGroup<T> {
             build_pane,
             compact: Compact::default(),
             vertical_tabs: false,
+            vertical_tabs_side: DockSide::Left,
             title_bar_allowed: true,
         };
         (group, first)
@@ -296,10 +302,15 @@ impl<T: PaneItem> PaneGroup<T> {
         self.ratio = ratio.clamp(0.1, 0.9);
     }
 
-    /// Lays the tabs out in a column on each pane's left (`true`) or in a
+    /// Lays the tabs out in a column on each pane's side (`true`) or in a
     /// row along its top.
     pub fn set_vertical_tabs(&mut self, vertical: bool) {
         self.vertical_tabs = vertical;
+    }
+
+    /// The side the tab column runs down. Anything but `Right` is the left.
+    pub fn set_vertical_tabs_side(&mut self, side: DockSide) {
+        self.vertical_tabs_side = if side == DockSide::Right { DockSide::Right } else { DockSide::Left };
     }
 
     /// Whether the tabs are laid out in a column.
@@ -353,8 +364,10 @@ impl<T: PaneItem> PaneGroup<T> {
                 self.drag = Some(GroupDrag::Divider { collapsing });
                 true
             }
-            Some(GroupDrag::TabColumn { start_x, start_width }) => {
-                let width = start_width + f32::from(pointer.x) - start_x;
+            Some(GroupDrag::TabColumn { start_x, start_width, from_right }) => {
+                // A column on the right grows as the pointer moves left.
+                let travelled = f32::from(pointer.x) - start_x;
+                let width = start_width + if from_right { -travelled } else { travelled };
                 // Under the labels' minimum the column snaps to its icons.
                 let width = if width < TAB_COLUMN_LABELS_MIN { TAB_COLUMN_ICONS } else { width.min(TAB_COLUMN_MAX) };
                 TAB_COLUMN_WIDTH.set(width);
@@ -746,27 +759,29 @@ impl<T: PaneItem> PaneGroup<T> {
         let split_available = self.panes.len() < MAX_PANES;
         content.update(cx, |item, _| item.set_split_available(split_available));
         if self.vertical_tabs {
-            // The column stays out in compact mode: its left edge is the
+            // The column stays out in compact mode: its edge is the
             // sidebar's to slide from.
             let reveal = self.panes[pane_index].reveal.clone();
             reveal.set_inset(0.0);
             let compact = Compact { hide_tabs: false, ..self.compact.clone() };
             content.update(cx, |item, _| item.attach_compact(&compact, &reveal));
             let column = self.render_tab_column(pane_index, split, cx, callbacks);
-            return div()
-                .flex()
-                .flex_row()
-                .size_full()
-                .min_w(px(0.0))
-                .min_h(px(0.0))
+            let body = div().flex_1().min_w(px(0.0)).h_full().overflow_hidden().child(content);
+            // The column docks to the side the user chose; the listing takes
+            // the rest either way.
+            let row = div().flex().flex_row().size_full().min_w(px(0.0)).min_h(px(0.0));
+            let row = if self.vertical_tabs_side == DockSide::Right {
+                row.child(body).child(column)
+            } else {
+                row.child(column).child(body)
+            };
+            return row
                 .when(is_active, |this| this.border_t_2().border_color(rgb(theme::accent())))
                 .when(split && !is_active, |this| this.border_t_2().border_color(rgb(theme::bg())))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _event, window, cx| on_activate_pane(this, pane_index, window, cx)),
                 )
-                .child(column)
-                .child(div().flex_1().min_w(px(0.0)).h_full().overflow_hidden().child(content))
                 .into_any_element();
         }
         let tab_bar = self
@@ -1038,6 +1053,8 @@ impl<T: PaneItem> PaneGroup<T> {
     {
         let width = TAB_COLUMN_WIDTH.get();
         let labels = width >= TAB_COLUMN_LABELS_MIN;
+        // Copied out for the listeners below, which outlive this borrow.
+        let side = self.vertical_tabs_side;
         let pane = &self.panes[pane_index];
         let tab_count = pane.tabs.len();
         let active_tab = pane.active_tab;
@@ -1185,8 +1202,14 @@ impl<T: PaneItem> PaneGroup<T> {
             .gap(px(2.0))
             .p(px(6.0))
             .bg(rgb(theme::toolbar_bg()))
-            .border_r_1()
-            .border_color(rgb(theme::border()))
+            // The seam between the column and the listing, on the column's
+            // own inner edge.
+            .when(side == DockSide::Right, |this| {
+                this.border_l_1().border_color(rgb(theme::border()))
+            })
+            .when(side != DockSide::Right, |this| {
+                this.border_r_1().border_color(rgb(theme::border()))
+            })
             .when(split, |this| {
                 this.child(
                     div()
@@ -1220,9 +1243,11 @@ impl<T: PaneItem> PaneGroup<T> {
                     .child(new_tab),
             )
             .child(
+                // The resize strip sits on the column's inner edge: the right
+                // one of a left-hand column, the left one of a right-hand one.
                 crate::dock::place_on_inner_edge(
-                    crate::dock::strip(("vtab-edge", pane_index), nohrs_core::config::DockSide::Left, false),
-                    nohrs_core::config::DockSide::Left,
+                    crate::dock::strip(("vtab-edge", pane_index), side, false),
+                    self.vertical_tabs_side,
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1233,6 +1258,7 @@ impl<T: PaneItem> PaneGroup<T> {
                             GroupDrag::TabColumn {
                                 start_x: f32::from(event.position.x),
                                 start_width: TAB_COLUMN_WIDTH.get(),
+                                from_right: side == DockSide::Right,
                             },
                             window,
                             cx,

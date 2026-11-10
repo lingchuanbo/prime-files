@@ -14,10 +14,12 @@
 //! in one place that follows the window's width.
 
 use gpui::{
-    AnyElement, Context, Div, ElementId, Entity, FocusHandle, KeyDownEvent, Render, SharedString, Stateful, Window,
-    div, prelude::*, px, rgb,
+    AnyElement, Bounds, Context, DispatchPhase, Div, ElementId, Entity, FocusHandle, ImageSource, KeyDownEvent,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, Window, canvas, div,
+    img, linear_color_stop, linear_gradient, prelude::*, px, rgb, MouseButton,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
 use nohrs_core::config::{self, Config, DockSide, SortOrder, SplitDirection, ThemeMode};
 use nohrs_core::i18n::{self, Lang, tr};
@@ -25,6 +27,8 @@ use nohrs_core::telemetry::LogErr;
 use nohrs_core::shortcuts::{self, Action, Chord};
 use nohrs_core::{k, t, tf};
 use nohrs_ui::theme::theme;
+
+use crate::color_wheel::{self, Hsv};
 
 /// The sections of the settings page, in the order the side list shows them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -214,10 +218,31 @@ pub struct SettingsPage {
     updater: Entity<crate::updater::Updater>,
     // The search field, made on the first render (it needs a `Window`).
     search: Option<Entity<InputState>>,
+    // The colour wheel, while it is open under the background presets.
+    wheel: Option<Wheel>,
+    // The font list, made on the first render (it needs a `Window`).
+    font_select: Option<Entity<SelectState<SearchableVec<SharedString>>>>,
     // Takes the key presses that record a shortcut.
     focus_handle: FocusHandle,
     // The command whose new keys are being waited for.
     recording: Option<Action>,
+}
+
+/// The colour wheel while it is open: the colour the handles point at, and
+/// the boxes the ring and the brightness bar were drawn in, so a pointer
+/// position can be turned into a hue, a saturation and a brightness.
+struct Wheel {
+    hsv: Hsv,
+    dragging: Option<WheelPart>,
+}
+
+/// Which of the wheel's two controls the pointer is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WheelPart {
+    /// The ring: hue by angle, saturation by distance from the centre.
+    Ring,
+    /// The bar under it: brightness, full at its left end.
+    Brightness,
 }
 
 impl SettingsPage {
@@ -237,6 +262,8 @@ impl SettingsPage {
             listary: None,
             updater,
             search: None,
+            wheel: None,
+            font_select: None,
             focus_handle: cx.focus_handle(),
             recording: None,
         };
@@ -587,6 +614,7 @@ impl SettingsPage {
     fn general(&self, cx: &mut Context<Self>) -> Vec<Group> {
         let explorer = &self.config.explorer;
         let layout = &self.config.layout;
+        let ui = &self.config.ui;
         vec![
             Group::new(vec![self.language_row(cx)]),
             Group::titled(
@@ -624,14 +652,38 @@ impl SettingsPage {
                 t!("Layout"),
                 vec![
                     self.dock_row("sidebar", "dock-sidebar", t!("Barra lateral"), layout.sidebar, DockSide::Left, cx),
+                    Row::hint(
+                        t!("Acesso rápido"),
+                        t!("Mostra as pastas fixadas e frequentes do Windows no começo da barra lateral."),
+                        self.switch("quick-access", ui.show_quick_access, ("ui", "show_quick_access"), cx),
+                    )
+                    .reset(("ui", "show_quick_access"), ui.show_quick_access, "true"),
                     self.dock_row("preview", "dock-preview", t!("Visualizador"), layout.preview, DockSide::Right, cx),
                     self.dock_row("terminal", "dock-terminal", t!("Terminal"), layout.terminal, DockSide::Bottom, cx),
                     Row::hint(
                         t!("Abas verticais"),
-                        t!("As abas numa coluna à esquerda, como no Zen. Estreita, mostra só os ícones."),
+                        t!("As abas numa coluna ao lado da lista, como no Zen. Estreita, mostra só os ícones."),
                         self.switch("vertical-tabs", layout.vertical_tabs, ("layout", "vertical_tabs"), cx),
                     )
                     .reset(("layout", "vertical_tabs"), !layout.vertical_tabs, "false"),
+                    Row::hint(
+                        t!("Lado das abas verticais"),
+                        t!("De que lado da janela fica a coluna das abas."),
+                        self.config_choice(
+                            "vertical-tabs-side",
+                            &[
+                                (t!("Esquerda"), layout.vertical_tabs_side == DockSide::Left, "\"left\""),
+                                (t!("Direita"), layout.vertical_tabs_side == DockSide::Right, "\"right\""),
+                            ],
+                            ("layout", "vertical_tabs_side"),
+                            cx,
+                        ),
+                    )
+                    .reset(
+                        ("layout", "vertical_tabs_side"),
+                        layout.vertical_tabs_side == DockSide::Left,
+                        "\"left\"",
+                    ),
                     Row::hint(
                         t!("Alça para mover painéis"),
                         t!("Uma alça no meio da borda de cada painel, para arrastá-lo até outro lado."),
@@ -643,6 +695,258 @@ impl SettingsPage {
         ]
     }
 
+    // The background colours offered as dots; the first is the palette's own.
+    // Any other colour goes in `[theme] background` in config.toml, where the
+    // `#rrggbb` form is read as it is.
+    fn background_swatches(
+        &self,
+        cx: &mut Context<Self>,
+        chosen: &str,
+        own: bool,
+    ) -> Div {
+        let palette = if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF };
+        let presets: [(&str, u32); 6] = [
+            ("", palette),
+            ("#1E1F22", 0x1E1F22),
+            ("#000000", 0x000000),
+            ("#22272E", 0x22272E),
+            ("#101828", 0x101828),
+            ("#F5F1E8", 0xF5F1E8),
+        ];
+        div().flex().flex_row().flex_wrap().gap_1().children(presets.into_iter().map(|(value, colour)| {
+            let selected = if value.is_empty() { !own } else { chosen.eq_ignore_ascii_case(value) };
+            div()
+                .id(ElementId::Name(SharedString::from(format!("background-{value}"))))
+                .w(px(36.0))
+                .h(px(28.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::bg_hover())))
+                .on_click(cx.listener(move |page, _event, _window, cx| {
+                    page.write("theme", "background", format!("\"{value}\""), cx);
+                }))
+                .child(
+                    div()
+                        .size(px(20.0))
+                        .rounded_full()
+                        .bg(rgb(colour))
+                        .border_1()
+                        .border_color(rgb(if selected { theme::fg() } else { theme::border() })),
+                )
+        }))
+    }
+
+    // The font list: every family the system knows, by the name it is
+    // installed under, searchable. Made on the first render (it needs a
+    // `Window`); choosing one writes `ui.font_family`, and the root applies it.
+    fn ensure_font_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.font_select.is_some() {
+            return;
+        }
+        let mut fonts: Vec<SharedString> =
+            cx.text_system().all_font_names().into_iter().map(SharedString::from).collect();
+        fonts.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
+        fonts.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        let state = cx.new(|cx| SelectState::new(SearchableVec::new(fonts), None, window, cx));
+        cx.subscribe_in(
+            &state,
+            window,
+            |page, _state, event: &SelectEvent<SearchableVec<SharedString>>, _window, cx| {
+                let SelectEvent::Confirm(value) = event;
+                let family = value.clone().unwrap_or_default();
+                page.write("ui", "font_family", format!("\"{family}\""), cx);
+            },
+        )
+        .detach();
+        self.font_select = Some(state);
+    }
+
+    // The row's control: the searchable list of installed families.
+    fn font_select(&self) -> Div {
+        let current = self.config.ui.font_family.trim().to_string();
+        let shown = if current.is_empty() { t!("Padrão").to_string() } else { current };
+        div().flex().items_center().gap_2().children(
+            self.font_select
+                .clone()
+                .map(|state| Select::new(&state).w(px(240.0)).placeholder(shown)),
+        )
+    }
+
+    // The wheel's button, beside the presets: it opens the ring under them and
+    // shows the colour in use.
+    fn wheel_button(&self, background: String, cx: &mut Context<Self>) -> Stateful<Div> {
+        let open = self.wheel.is_some();
+        let color = theme::parse_color(&background)
+            .unwrap_or(if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF });
+        div()
+            .id("background-wheel-open")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .border_1()
+            .border_color(rgb(if open { theme::accent() } else { theme::border() }))
+            .hover(|style| style.bg(rgb(theme::bg_hover())))
+            .on_click(cx.listener(|page, _event, _window, cx| {
+                page.toggle_wheel(cx);
+            }))
+            .child(div().size(px(16.0)).rounded_full().bg(rgb(color)).border_1().border_color(rgb(theme::border())))
+            .child(div().text_sm().text_color(rgb(theme::fg())).child(t!("Personalizada")))
+    }
+
+    // Opens or closes the wheel, starting it on the colour in use.
+    fn toggle_wheel(&mut self, cx: &mut Context<Self>) {
+        if self.wheel.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let color = theme::parse_color(&self.config.theme.background)
+            .unwrap_or(if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF });
+        self.wheel = Some(Wheel {
+            hsv: Hsv::from_rgb(color),
+            dragging: None,
+        });
+        cx.notify();
+    }
+
+    // The wheel itself, as a row of its own under the presets.
+    //
+    // The ring and the bar take their pointer events the way every drag in
+    // this program does: a `canvas` hands out the element's own bounds and
+    // listens on the window, because a listener hung on the element inside a
+    // scrolling page never sees the press.
+    fn wheel_row(&self, cx: &mut Context<Self>) -> Option<Row> {
+        let wheel = self.wheel.as_ref()?;
+        let color = wheel.hsv.to_rgb();
+        let hue = wheel.hsv.to_hsla();
+        let handle_angle = wheel.hsv.h.to_radians();
+        let handle_distance = wheel.hsv.s;
+        let entity = cx.entity();
+
+        let radius = color_wheel::SIZE / 2.0 - 2.0;
+        let handle_x = color_wheel::SIZE / 2.0 + handle_angle.cos() * handle_distance * radius;
+        let handle_y = color_wheel::SIZE / 2.0 + handle_angle.sin() * handle_distance * radius;
+
+        let ring = div()
+            .id("background-wheel-ring")
+            .relative()
+            .size(px(color_wheel::SIZE))
+            .flex_shrink_0()
+            .cursor_pointer()
+            .child(img(ImageSource::Render(color_wheel::image())).size(px(color_wheel::SIZE)))
+            // Where the chosen hue and saturation sit on the ring.
+            .child(
+                div()
+                    .absolute()
+                    .left(px(handle_x - 6.0))
+                    .top(px(handle_y - 6.0))
+                    .size(px(12.0))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(0xFFFFFF))
+                    .bg(rgb(color))
+                    .shadow_sm(),
+            )
+            .child(pointer_events(entity.clone(), WheelPart::Ring));
+
+        let brightness = div()
+            .id("background-wheel-brightness")
+            .relative()
+            .w(px(220.0))
+            .h(px(16.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .cursor_pointer()
+            .bg(linear_gradient(90.0, linear_color_stop(hue, 0.0), linear_color_stop(gpui::black(), 1.0)))
+            .child(pointer_events(entity, WheelPart::Brightness));
+
+        let panel = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(ring)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().text_sm().text_color(rgb(theme::muted())).child(t!("Brilho")))
+                    .child(brightness)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .size(px(28.0))
+                                    .rounded(px(6.0))
+                                    .bg(rgb(color))
+                                    .border_1()
+                                    .border_color(rgb(theme::border())),
+                            )
+                            .child(div().text_sm().text_color(rgb(theme::fg_secondary())).child(wheel.hsv.hex())),
+                    ),
+            );
+
+        Some(Row::hint(t!("Escolher a cor"), t!("Arraste no anel e na barra."), panel).wide())
+    }
+
+    // A press on the ring or the brightness bar: the colour follows the
+    // pointer from here on, and the window previews it at once.
+    fn wheel_press(&mut self, part: WheelPart, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(wheel) = self.wheel.as_mut() else {
+            return;
+        };
+        wheel.dragging = Some(part);
+        self.wheel_apply(part, bounds, position, cx);
+    }
+
+    // The pointer let go: what the wheel shows is written to the config, the
+    // one path every other setting takes.
+    fn wheel_release(&mut self, cx: &mut Context<Self>) {
+        let Some(wheel) = self.wheel.as_mut() else {
+            return;
+        };
+        if wheel.dragging.take().is_none() {
+            return;
+        }
+        let hex = wheel.hsv.hex();
+        self.write("theme", "background", format!("\"{hex}\""), cx);
+        cx.notify();
+    }
+
+    fn wheel_apply(&mut self, part: WheelPart, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(wheel) = self.wheel.as_mut() else {
+            return;
+        };
+        match part {
+            WheelPart::Ring => {
+                let Some((hue, saturation)) = color_wheel::ring_hue_saturation(bounds, position) else {
+                    return;
+                };
+                wheel.hsv.h = hue;
+                wheel.hsv.s = saturation;
+            }
+            WheelPart::Brightness => {
+                let Some(value) = color_wheel::bar_brightness(bounds, position) else {
+                    return;
+                };
+                wheel.hsv.v = value;
+            }
+        }
+        // Shown in the whole window while the pointer moves; written on
+        // release, so dragging a colour never touches the config file.
+        theme::set_background(Some(wheel.hsv.to_rgb()));
+        cx.refresh_windows();
+    }
     // Which side of the window a panel docks to. The same choice a bubble of
     // the listing's edges makes, and the grip when it is shown.
     fn dock_row(
@@ -708,13 +1012,15 @@ impl SettingsPage {
             self.chips("language", &options, false, cx),
         )
         .wide()
-        .reset(("ui", "language"), chosen.is_none(), "\"auto\"")
+        .reset(("ui", "language"), chosen == Some(Lang::Zh), "\"zh-CN\"")
     }
 
     fn appearance(&self, cx: &mut Context<Self>) -> Vec<Group> {
         let mode = self.config.theme.mode;
         let accent = self.config.theme.accent.trim().to_string();
         let custom = accent.starts_with('#') && theme::parse_accent(&accent).is_some();
+        let background = self.config.theme.background.trim().to_lowercase();
+        let own_background = !background.is_empty() && theme::parse_color(&background).is_some();
         let ui = &self.config.ui;
 
         let swatches = div().flex().flex_row().flex_wrap().gap_1().children(
@@ -753,79 +1059,103 @@ impl SettingsPage {
             }),
         );
 
-        vec![
-            Group::titled(
-                t!("Cores"),
-                vec![
-                    Row::new(
-                        t!("Tema"),
-                        None,
-                        self.config_choice(
-                            "theme-mode",
-                            &[
-                                (t!("Escuro"), mode == ThemeMode::Dark, "\"dark\""),
-                                (t!("Claro"), mode == ThemeMode::Light, "\"light\""),
-                                (t!("Igual ao Windows"), mode == ThemeMode::System, "\"system\""),
-                            ],
-                            ("theme", "mode"),
-                            cx,
-                        ),
-                    )
-                    .reset(("theme", "mode"), mode == ThemeMode::Dark, "\"dark\""),
-                    Row::hint(
-                        t!("Cor de destaque"),
-                        if custom {
-                            t!("O config.toml tem uma cor própria; escolher uma aqui a substitui.")
-                        } else {
-                            t!("Seleção, abas ativas e botões.")
-                        },
-                        swatches,
-                    )
-                    .wide()
-                    .reset(("theme", "accent"), accent.eq_ignore_ascii_case("orange"), "\"orange\""),
-                ],
-            ),
-            Group::titled(
-                t!("Lista"),
-                vec![
-                    Row::hint(
-                        t!("Rolagem suave"),
-                        t!("Quanto a roda do mouse desliza a lista em vez de pular. Desligada rola em degraus."),
-                        self.config_choice(
-                            "scroll-smoothness",
-                            &[
-                                (t!("Desligada"), ui.scroll_smoothness == 0, "0"),
-                                (t!("Dura"), ui.scroll_smoothness == 25, "25"),
-                                (t!("Média"), ui.scroll_smoothness == 50, "50"),
-                                (t!("Suave"), ui.scroll_smoothness == 75, "75"),
-                                (t!("Muito suave"), ui.scroll_smoothness == 100, "100"),
-                            ],
-                            ("ui", "scroll_smoothness"),
-                            cx,
-                        ),
-                    )
-                    .wide()
-                    .reset(("ui", "scroll_smoothness"), ui.scroll_smoothness == 50, "50"),
-                    Row::hint(
-                        t!("Linhas do nome nos ícones"),
-                        t!("Quantas linhas um nome ocupa no modo Ícones, em qualquer zoom; o resto vira \"…\"."),
-                        self.config_choice(
-                            "name-lines",
-                            &[
-                                (t!("Sem limite"), ui.name_lines == 0, "0"),
-                                ("1", ui.name_lines == 1, "1"),
-                                ("2", ui.name_lines == 2, "2"),
-                                ("3", ui.name_lines == 3, "3"),
-                                ("4", ui.name_lines == 4, "4"),
-                            ],
-                            ("ui", "name_lines"),
-                            cx,
-                        ),
-                    )
-                    .reset(("ui", "name_lines"), ui.name_lines == 0, "0"),
-                ],
-            ),
-        ]
+        let mut groups = vec![Group::titled(
+            t!("Cores"),
+            vec![
+                Row::new(
+                    t!("Tema"),
+                    None,
+                    self.config_choice(
+                        "theme-mode",
+                        &[
+                            (t!("Escuro"), mode == ThemeMode::Dark, "\"dark\""),
+                            (t!("Claro"), mode == ThemeMode::Light, "\"light\""),
+                            (t!("Igual ao Windows"), mode == ThemeMode::System, "\"system\""),
+                        ],
+                        ("theme", "mode"),
+                        cx,
+                    ),
+                )
+                .reset(("theme", "mode"), mode == ThemeMode::Dark, "\"dark\""),
+                Row::hint(
+                    t!("Cor de destaque"),
+                    if custom {
+                        t!("O config.toml tem uma cor própria; escolher uma aqui a substitui.")
+                    } else {
+                        t!("Seleção, abas ativas e botões.")
+                    },
+                    swatches,
+                )
+                .wide()
+                .reset(("theme", "accent"), accent.eq_ignore_ascii_case("orange"), "\"orange\""),
+                Row::hint(
+                    t!("Cor de fundo"),
+                    t!("As áreas de conteúdo. Qualquer cor em #rrggbb no config.toml vale; o texto se ajusta ao fundo."),
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(self.background_swatches(cx, &background, own_background))
+                        // The wheel, for any colour the presets do not hold.
+                        .child(self.wheel_button(background.clone(), cx)),
+                )
+                .wide()
+                .reset(("theme", "background"), !own_background, "\"\""),
+                Row::hint(
+                    t!("Fonte da interface"),
+                    t!("A fonte de todo o programa. O padrão é a do sistema."),
+                    self.font_select(),
+                )
+                .wide()
+                .reset(("ui", "font_family"), ui.font_family.trim().is_empty(), "\"\""),
+            ],
+        )];
+        // The ring itself, under the presets, while it is open.
+        if let Some(row) = self.wheel_row(cx) {
+            groups[0].rows.push(row);
+        }
+        groups.push(Group::titled(
+            t!("Lista"),
+            vec![
+                Row::hint(
+                    t!("Rolagem suave"),
+                    t!("Quanto a roda do mouse desliza a lista em vez de pular. Desligada rola em degraus."),
+                    self.config_choice(
+                        "scroll-smoothness",
+                        &[
+                            (t!("Desligada"), ui.scroll_smoothness == 0, "0"),
+                            (t!("Dura"), ui.scroll_smoothness == 25, "25"),
+                            (t!("Média"), ui.scroll_smoothness == 50, "50"),
+                            (t!("Suave"), ui.scroll_smoothness == 75, "75"),
+                            (t!("Muito suave"), ui.scroll_smoothness == 100, "100"),
+                        ],
+                        ("ui", "scroll_smoothness"),
+                        cx,
+                    ),
+                )
+                .wide()
+                .reset(("ui", "scroll_smoothness"), ui.scroll_smoothness == 50, "50"),
+                Row::hint(
+                    t!("Linhas do nome nos ícones"),
+                    t!("Quantas linhas um nome ocupa no modo Ícones, em qualquer zoom; o resto vira \"…\"."),
+                    self.config_choice(
+                        "name-lines",
+                        &[
+                            (t!("Sem limite"), ui.name_lines == 0, "0"),
+                            ("1", ui.name_lines == 1, "1"),
+                            ("2", ui.name_lines == 2, "2"),
+                            ("3", ui.name_lines == 3, "3"),
+                            ("4", ui.name_lines == 4, "4"),
+                        ],
+                        ("ui", "name_lines"),
+                        cx,
+                    ),
+                )
+                .reset(("ui", "name_lines"), ui.name_lines == 0, "0"),
+            ],
+        ));
+        groups
     }
 
     // Each choice offers the default among its options, so a fresh config
@@ -1064,13 +1394,19 @@ impl SettingsPage {
 
     fn search_section(&self, cx: &mut Context<Self>) -> Vec<Group> {
         let status = crate::explorer::everything::status(cx);
-        let state = match (status.building, status.entries) {
-            (Some(found), _) => tf!("Indexando… {n} itens até agora", n = found),
-            (None, Some(entries)) => match status.built.and_then(|built| built.elapsed().ok()) {
-                Some(age) => tf!("{n} itens, atualizado {ago}", n = entries, ago = ago(age)),
-                None => tf!("{n} itens", n = entries),
-            },
-            (None, None) => t!("O índice é criado na primeira busca.").to_string(),
+        let state = if status.service {
+            // The names live in the service: this process holds none, and the
+            // count is the service's to keep to itself.
+            t!("O serviço de indexação guarda os nomes e responde às buscas.").to_string()
+        } else {
+            match (status.building, status.entries) {
+                (Some(found), _) => tf!("Indexando… {n} itens até agora", n = found),
+                (None, Some(entries)) => match status.built.and_then(|built| built.elapsed().ok()) {
+                    Some(age) => tf!("{n} itens, atualizado {ago}", n = entries, ago = ago(age)),
+                    None => tf!("{n} itens", n = entries),
+                },
+                (None, None) => t!("O índice é criado na primeira busca.").to_string(),
+            }
         };
         let building = status.building.is_some();
         use crate::explorer::everything::mft;
@@ -1131,7 +1467,7 @@ impl SettingsPage {
                 ),
                 Row::hint(
                     t!("Como o índice é feito"),
-                    t!("Os nomes de todas as unidades fixas ficam guardados neste computador. Com o programa aberto, o que é criado ou renomeado entra na hora; o índice é relido em segundo plano quando passa de 6 horas (30 minutos com a indexação instantânea). Nada sai do computador."),
+                    t!("Os nomes de todas as unidades fixas ficam guardados neste computador. Com o programa aberto, o que é criado ou renomeado entra na hora; com o serviço, ele guarda os nomes e os relê a cada 30 minutos, e sem o serviço o índice deste processo é refeito quando passa de 6 horas. Nada sai do computador."),
                     div(),
                 ),
             ]),
@@ -1977,6 +2313,8 @@ const NAV_WIDTH: f32 = 232.0;
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let input = self.search_input(window, cx);
+        // The font list needs the window's text system, so it is made here.
+        self.ensure_font_select(window, cx);
         let query = input.read(cx).value().to_string();
         let searching = !query.trim().is_empty();
         let width = f32::from(window.viewport_size().width);
@@ -2066,6 +2404,46 @@ impl crate::Page for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         <Self as Render>::render(self, window, cx).into_any_element()
     }
+}
+
+// The pointer half of a wheel control: a `canvas` that knows the element's
+// own bounds and listens on the window, the way every drag in this program
+// does (the zoom slider, the panel grips). A listener hung on the element
+// itself is not seen here: the settings page draws its rows inside a
+// scrolling body, which parts the hit-testing from the widget.
+fn pointer_events(page: Entity<SettingsPage>, part: WheelPart) -> AnyElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let press = page.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.button == MouseButton::Left
+                    && bounds.contains(&event.position)
+                {
+                    press.update(cx, |page, cx| page.wheel_press(part, bounds, event.position, cx));
+                }
+            });
+            let drag = page.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.pressed_button == Some(MouseButton::Left)
+                    && drag.read(cx).wheel.as_ref().is_some_and(|wheel| wheel.dragging == Some(part))
+                {
+                    drag.update(cx, |page, cx| page.wheel_apply(part, bounds, event.position, cx));
+                }
+            });
+            let release = page;
+            window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
+                if release.read(cx).wheel.as_ref().is_some_and(|wheel| wheel.dragging == Some(part)) {
+                    release.update(cx, |page, cx| page.wheel_release(cx));
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 #[cfg(test)]

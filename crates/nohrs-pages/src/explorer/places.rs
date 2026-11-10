@@ -141,6 +141,8 @@ pub enum SidebarInputPurpose {
     NetworkPlace,
     /// A new name for tag `id`.
     RenameTag(u32),
+    /// A new name for favorite entry `id` — a shortcut or a submenu.
+    RenameFavorite(u32),
 }
 
 /// A field open in the sidebar.
@@ -258,7 +260,7 @@ impl ExplorerPane {
             let state = InputState::new(window, cx);
             match purpose {
                 SidebarInputPurpose::NetworkPlace => state.placeholder(nohrs_core::t!("\\\\servidor\\pasta ou smb://servidor/pasta")),
-                SidebarInputPurpose::RenameTag(_) => state,
+                SidebarInputPurpose::RenameTag(_) | SidebarInputPurpose::RenameFavorite(_) => state,
             }
         });
         input.update(cx, |state, cx| {
@@ -308,6 +310,7 @@ impl ExplorerPane {
                 }
             }
             SidebarInputPurpose::RenameTag(id) => super::tags::Tags::rename(id, text, cx),
+            SidebarInputPurpose::RenameFavorite(id) => super::favorites::Favorites::rename(id, text, cx),
         }
         cx.notify();
     }
@@ -315,6 +318,10 @@ impl ExplorerPane {
     /// The name of where the pane is, when the address is not a folder's
     /// path: This PC's localized name, Network's, a server's or a tag's.
     pub(crate) fn location_name(&self, cx: &gpui::App) -> Option<String> {
+        // An archive says its own name, and where inside it the pane is.
+        if let Some(name) = super::archive::display_name(&self.cwd) {
+            return Some(name);
+        }
         if self.cwd.eq_ignore_ascii_case(super::network::NETWORK) {
             let shell_name = self
                 .sidebar

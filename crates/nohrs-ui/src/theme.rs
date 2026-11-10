@@ -64,6 +64,81 @@ pub mod theme {
         (value & ACCENT_SET != 0).then_some(value & 0xFF_FFFF)
     }
 
+    // The background the user picked, `0x01rrggbb`; zero means the palette's.
+    static BACKGROUND: AtomicU32 = AtomicU32::new(0);
+
+    /// Replaces the palettes' content background with `color` (`0xrrggbb`), or
+    /// restores it with `None`. The surfaces around it — hover, borders, the
+    /// chrome — and the text are shaded from it by [`custom`], so any colour
+    /// stays usable rather than leaving white text on a white window.
+    pub fn set_background(color: Option<u32>) {
+        BACKGROUND.store(color.map_or(0, |color| ACCENT_SET | (color & 0xFF_FFFF)), Ordering::Relaxed);
+    }
+
+    /// The colour a `theme.background` value names: `#rrggbb` only. `None` for
+    /// an empty or unrecognized value, so a typo leaves the palette alone.
+    pub fn parse_color(value: &str) -> Option<u32> {
+        let hex = value.trim().strip_prefix('#')?;
+        if hex.len() != 6 || !hex.chars().all(|digit| digit.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok()
+    }
+
+    // A picked background and everything shaded from it: the surfaces around
+    // it step toward the text colour in small amounts, and the chrome steps
+    // away from the background so the frame still reads as a frame.
+    struct Custom {
+        bg: u32,
+        fg: u32,
+        bg_secondary: u32,
+        bg_hover: u32,
+        fg_secondary: u32,
+        muted: u32,
+        border: u32,
+        border_hover: u32,
+        toolbar_bg: u32,
+        toolbar_hover: u32,
+        toolbar_text: u32,
+        toolbar_active_bg: u32,
+        toolbar_border: u32,
+    }
+
+    impl Custom {
+        fn new(bg: u32) -> Self {
+            // Which side of the background reads: the same 0.4 the accent uses
+            // to decide its own text colour.
+            let dark = luminance(bg) < 0.4;
+            let fg = if dark { 0xDCDDE0 } else { 0x111827 };
+            // Further from the background than nothing, but not as far as the
+            // text: what a hover fill, a border and the chrome are.
+            let away = |amount: f32| mix(bg, fg, amount);
+            // The chrome goes the other way: darker under a dark background,
+            // lighter under a light one, as the palettes do.
+            let chrome = |amount: f32| mix(bg, if dark { 0x000000 } else { 0xFFFFFF }, amount);
+            Self {
+                bg,
+                fg,
+                bg_secondary: away(0.04),
+                bg_hover: away(0.08),
+                fg_secondary: away(0.45),
+                muted: away(0.62),
+                border: away(0.14),
+                border_hover: away(0.26),
+                toolbar_bg: chrome(0.05),
+                toolbar_hover: away(0.08),
+                toolbar_text: away(0.42),
+                toolbar_active_bg: away(0.06),
+                toolbar_border: away(0.14),
+            }
+        }
+    }
+
+    fn custom() -> Option<Custom> {
+        let value = BACKGROUND.load(Ordering::Relaxed);
+        (value & ACCENT_SET != 0).then(|| Custom::new(value & 0xFF_FFFF))
+    }
+
     // Linear blend of two `0xrrggbb` colours, `amount` of the way to `to`.
     fn mix(from: u32, to: u32, amount: f32) -> u32 {
         let channel = |shift: u32| {
@@ -241,8 +316,8 @@ pub mod theme {
     /// Faint accent tint, for selected rows and active chip backgrounds.
     pub fn accent_subtle() -> u32 {
         match picked_accent() {
-            Some(base) if is_dark() => mix(palette().bg, base, 0.2),
-            Some(base) => mix(palette().bg, base, 0.1),
+            Some(base) if is_dark() => mix(bg(), base, 0.2),
+            Some(base) => mix(bg(), base, 0.1),
             None => palette().accent_subtle,
         }
     }
@@ -277,32 +352,6 @@ pub mod theme {
         gray_800;
         /// Strongest step of the gray ramp.
         gray_900;
-        /// Primary surface background color.
-        bg;
-        /// Secondary surface background color.
-        bg_secondary;
-        /// Background color for hovered surfaces.
-        bg_hover;
-        /// Primary foreground (text) color.
-        fg;
-        /// Secondary foreground (text) color for less prominent content.
-        fg_secondary;
-        /// Muted foreground color for de-emphasized content.
-        muted;
-        /// Default border color.
-        border;
-        /// Border color on hover.
-        border_hover;
-        /// Toolbar background color.
-        toolbar_bg;
-        /// Toolbar item background color on hover.
-        toolbar_hover;
-        /// Toolbar text color.
-        toolbar_text;
-        /// Background color of the active toolbar item.
-        toolbar_active_bg;
-        /// Toolbar border color.
-        toolbar_border;
         /// Danger color, used for error messages and destructive actions.
         danger;
         /// Warning color, for an operation that did what was asked and left
@@ -313,6 +362,49 @@ pub mod theme {
         /// Backdrop behind an image preview; deliberately dark so transparent
         /// and light-colored images stay legible.
         preview_backdrop;
+    }
+
+    // The surface tokens read a picked background first: everything drawn on
+    // it (text, hover fills, borders, the chrome around it) is shaded from it,
+    // and the palettes answer when no background was picked.
+    macro_rules! surface {
+        ($($(#[$doc:meta])* $name:ident => $palette:ident;)*) => {
+            $(
+                $(#[$doc])*
+                pub fn $name() -> u32 {
+                    custom().map_or_else(|| palette().$palette, |custom| custom.$name)
+                }
+            )*
+        };
+    }
+
+    surface! {
+        /// Primary surface background color.
+        bg => bg;
+        /// Secondary surface background color.
+        bg_secondary => bg_secondary;
+        /// Background color for hovered surfaces.
+        bg_hover => bg_hover;
+        /// Primary foreground (text) color.
+        fg => fg;
+        /// Secondary foreground (text) color for less prominent content.
+        fg_secondary => fg_secondary;
+        /// Muted foreground color for de-emphasized content.
+        muted => muted;
+        /// Default border color.
+        border => border;
+        /// Border color on hover.
+        border_hover => border_hover;
+        /// Toolbar background color.
+        toolbar_bg => toolbar_bg;
+        /// Toolbar item background color on hover.
+        toolbar_hover => toolbar_hover;
+        /// Toolbar text color.
+        toolbar_text => toolbar_text;
+        /// Background color of the active toolbar item.
+        toolbar_active_bg => toolbar_active_bg;
+        /// Toolbar border color.
+        toolbar_border => toolbar_border;
     }
 
     /// Text color of the active toolbar item.
@@ -329,4 +421,38 @@ pub mod theme {
     /// ships 5%, which is invisible against this theme's white surfaces and
     /// leaves confirmations looking like floating panels rather than modals.
     pub const MODAL_SCRIM_ALPHA: f32 = 0.40;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_rrggbb_names_a_background_colour() {
+            assert_eq!(parse_color("#1e1f22"), Some(0x1E1F22));
+            assert_eq!(parse_color(" #101828 "), Some(0x101828));
+            assert_eq!(parse_color("#FFFFFF"), Some(0xFFFFFF));
+            // Anything else leaves the palette alone rather than turning the
+            // window an unexpected colour.
+            assert_eq!(parse_color(""), None);
+            assert_eq!(parse_color("black"), None);
+            assert_eq!(parse_color("#12345"), None);
+            assert_eq!(parse_color("#1234567"), None);
+            assert_eq!(parse_color("#gggggg"), None);
+            assert_eq!(parse_color("1e1f22"), None);
+        }
+
+        #[test]
+        fn a_custom_background_puts_the_text_on_the_side_that_reads() {
+            // Dark backgrounds carry light text, light ones dark text.
+            let dark = Custom::new(0x101820);
+            assert!(luminance(dark.fg) > luminance(dark.bg));
+            let light = Custom::new(0xF5F1E8);
+            assert!(luminance(light.fg) < luminance(light.bg));
+            // The surfaces step away from the background, and the chrome
+            // further still, so the frame reads as a frame.
+            assert_ne!(light.bg_hover, light.bg);
+            assert_ne!(light.border, light.bg);
+            assert_ne!(light.toolbar_bg, light.bg);
+        }
+    }
 }

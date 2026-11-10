@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use gpui::{App, AppContext as _, Context, Global, Subscription, Task, WeakEntity};
+use gpui::{App, AppContext as _, BorrowAppContext as _, Context, Global, Subscription, Task, WeakEntity};
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::fs::listing::FileEntryDto;
 
@@ -50,9 +50,19 @@ use super::quick_search::DeepSearch;
 /// With the watcher keeping a running app's table current, a walk is the
 /// repair for what changed while it was closed.
 const STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
-/// The same with the indexer service, whose read takes seconds and catches
-/// what changed while the app was closed.
-const STALE_WITH_MFT: Duration = Duration::from_secs(30 * 60);
+/// The same with the indexer service, whose read is a minute for a machine's
+/// whole file table. It was half an hour, on the idea that a cheap repair can
+/// run often; measured, "cheap" meant a minute of reading and a 1 GB file
+/// written again every half hour, for a table the watcher keeps current
+/// anyway. Half a day is what a table only needs to be repaired for: what
+/// changed while the app was closed.
+const STALE_WITH_MFT: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// How long the index stays in memory after the last pane stops searching the
+/// whole computer: a table of fourteen million names is about a gigabyte and
+/// a half, worth giving back on a machine that is short of memory, and worth
+/// reading back from the cache (seconds) the next time the bar asks for it.
+const KEEP_FOR: Duration = Duration::from_secs(10 * 60);
 /// Hits handed to the listing. Past this a search is too broad to read
 /// through anyway, and each hit costs a metadata read.
 const MAX_RESULTS: usize = 5_000;
@@ -66,6 +76,9 @@ const FILE_MAGIC: &[u8; 8] = b"PFEVRY03";
 const FILE_MAGIC_V2: &[u8; 8] = b"PFEVRY02";
 /// The size of an entry from a table saved without sizes.
 const UNKNOWN_SIZE: u64 = u64::MAX;
+/// The most hits one search asks the service for: enough to order and
+/// scroll, and a query that finds more is asking for a folder, not a file.
+const SERVICE_HITS: u32 = 20_000;
 /// Hits below this from the matching pass call in the near-miss pass.
 const FUZZY_BELOW: usize = 20;
 /// Near misses shown at most: past the first few, they are noise.
@@ -214,6 +227,7 @@ impl Segment {
 /// Kensaku's (MIT, github.com/yjid/kensaku): plain typing always works, a
 /// key it does not know is searched as text, and a key still being typed
 /// (`tamanho:`) is left out instead of finding nothing.
+#[derive(Clone)]
 struct Query {
     terms: Vec<Term>,
     excluded: Vec<Term>,
@@ -233,6 +247,9 @@ struct Query {
     first: Option<String>,
     // The letters every name term needs (`letter_mask`).
     mask: u64,
+    /// Whether the name terms are Latin letters, so a name written in Han
+    /// characters is also worth reading as its pinyin initials.
+    pinyin: bool,
     needs_path: bool,
     now: u32,
     // The one plain name term a search with too few hits tries again with,
@@ -242,7 +259,7 @@ struct Query {
     filters: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Term {
     /// Part of the name.
     Name(String),
@@ -556,15 +573,33 @@ fn scope(value: &str, cwd: &str) -> Option<Filter> {
 /// share the high bits). A name lacking a letter of the query cannot match,
 /// and one AND says so before the name's text is read: Kensaku's
 /// "char bloom", which turns most of a scan into reading 8 bytes an entry.
+///
+/// A Han character contributes the initial of its pinyin (`文件夹` -> `w`,
+/// `j`, `j`), since that is how a name written in Chinese is typed. The mask
+/// only lets through what *could* match; the sequence itself is checked
+/// later, in `Query::rank`.
 fn letter_mask(lower: &str) -> u64 {
     lower.chars().fold(0u64, |mask, character| {
         let bit = match character {
             'a'..='z' => character as u32 - 'a' as u32,
             '0'..='9' => 26 + (character as u32 - '0' as u32),
-            other => 36 + other as u32 % 28,
+            other => match super::pinyin::initial(other) {
+                Some(initial) => initial as u32 - 'a' as u32,
+                None => 36 + other as u32 % 28,
+            },
         };
         mask | 1 << bit
     })
+}
+
+// The pinyin initials of a name written with Han characters, or `None` when
+// it has none: the second way such a name is typed (`wjj` for 文件夹). Cheap
+// to skip for the Latin names that are most of a table.
+fn pinyin_initials(lower: &str) -> Option<String> {
+    if lower.is_ascii() {
+        return None;
+    }
+    super::pinyin::initials(lower)
 }
 
 // `term`'s letters appear in `name` in order, within twice its length:
@@ -637,6 +672,7 @@ impl Query {
             whole: String::new(),
             first: None,
             mask: 0,
+            pinyin: false,
             needs_path: false,
             now: clamp_seconds(now.unix_timestamp()),
             fuzzy: None,
@@ -698,6 +734,10 @@ impl Query {
         query.whole = names.join(" ");
         query.first = names.first().map(|first| (*first).to_string());
         query.mask = names.iter().fold(0, |mask, name| mask | letter_mask(name));
+        // Typed in Latin letters, a name written in Han characters may be
+        // meant by its pinyin initials; typed in Han characters, its own text
+        // already covers it and the extra pass would be wasted.
+        query.pinyin = !names.is_empty() && names.iter().all(|name| name.is_ascii());
         query.fuzzy = match query.terms.as_slice() {
             [Term::Name(only)] if only.chars().count() >= 3 && !only.contains(' ') => Some(only.clone()),
             _ => None,
@@ -705,6 +745,93 @@ impl Query {
         query.needs_path = !query.scopes.is_empty()
             || query.terms.iter().chain(&query.excluded).any(|term| matches!(term, Term::Path(_)));
         Some(query)
+    }
+
+    /// The plain name terms, which is what the service's own scan can match:
+    /// the rest of the query — extensions, sizes, dates, paths, wildcards —
+    /// needs the whole path and metadata, and is applied here to its hits.
+    fn name_terms(&self) -> Vec<String> {
+        self.terms
+            .iter()
+            .filter_map(|term| match term {
+                Term::Name(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where a hit of the service's scan stands: `None` when one of the
+    /// filters refuses it, else the same key `rank` gives its entries
+    /// (match class, then system folders after the person's own, then
+    /// recency), so the two ways of searching order their hits alike.
+    fn score(&self, name: &str, path: &str, dir: bool, size: u64, modified: u32) -> Option<u32> {
+        let name = name.to_lowercase();
+        if self.kind.is_some_and(|want| want != dir) {
+            return None;
+        }
+        if let Some((low, high)) = self.size
+            && (dir || size < low || size > high)
+        {
+            return None;
+        }
+        if let Some((from, to)) = self.modified
+            && (modified == 0 || modified < from || modified > to)
+        {
+            return None;
+        }
+        if !self.exts.is_empty() || !self.excluded_exts.is_empty() {
+            let ext = if dir { None } else { name.rsplit_once('.').map(|(_, ext)| ext) };
+            if !self.exts.is_empty() && !ext.is_some_and(|ext| self.exts.iter().any(|want| want == ext)) {
+                return None;
+            }
+            if ext.is_some_and(|ext| self.excluded_exts.iter().any(|unwanted| unwanted == ext)) {
+                return None;
+            }
+        }
+        let names_match = self.terms.iter().all(|term| match term {
+            Term::Name(part) => name.contains(part.as_str()),
+            Term::Pattern(pattern) => wildcard(pattern, &name),
+            Term::Path(_) => true,
+        });
+        if !names_match {
+            return None;
+        }
+        if self.excluded.iter().any(|term| match term {
+            Term::Name(part) => name.contains(part.as_str()),
+            Term::Pattern(pattern) => wildcard(pattern, &name),
+            Term::Path(_) => false,
+        }) {
+            return None;
+        }
+        if self.needs_path {
+            let lowered = path.to_lowercase();
+            if !self.scopes.is_empty() && !self.scopes.iter().any(|scope| lowered.starts_with(scope.as_str())) {
+                return None;
+            }
+            if !self.terms.iter().all(|term| match term {
+                Term::Path(part) => lowered.contains(part.as_str()),
+                _ => true,
+            }) {
+                return None;
+            }
+            if self.excluded.iter().any(|term| match term {
+                Term::Path(part) => lowered.contains(part.as_str()),
+                _ => false,
+            }) {
+                return None;
+            }
+        }
+        let class = if self.whole.is_empty() || name == self.whole {
+            0
+        } else if name.starts_with(&self.whole) {
+            1
+        } else if self.first.as_deref().is_some_and(|first| starts_a_word(&name, first)) {
+            2
+        } else {
+            3
+        };
+        let noise = u32::from(path_is_noise(&path.to_lowercase()));
+        Some(class << 8 | noise << 4 | recency(modified, self.now))
     }
 
     /// The sort key of `entry` if it matches: match class, then system
@@ -739,10 +866,18 @@ impl Query {
             }
         }
         // Name terms first: building a path walks the parents, so it is done
-        // only for entries every name term already let through.
+        // only for entries every name term already let through. A name
+        // written in Han characters also matches by its pinyin initials,
+        // which is how it is typed on a keyboard without an IME.
+        let initials = (self.pinyin && !name.is_ascii()).then(|| pinyin_initials(name)).flatten();
         let names_match = self.terms.iter().all(|term| match term {
-            Term::Name(part) if fuzzy => !name.contains(part.as_str()) && subsequence(part, name),
-            Term::Name(part) => name.contains(part.as_str()),
+            Term::Name(part) if fuzzy => {
+                !name.contains(part.as_str())
+                    && (subsequence(part, name) || initials.as_deref().is_some_and(|initials| subsequence(part, initials)))
+            }
+            Term::Name(part) => {
+                name.contains(part.as_str()) || initials.as_deref().is_some_and(|initials| initials.contains(part.as_str()))
+            }
             Term::Pattern(pattern) => wildcard(pattern, name),
             Term::Path(_) => true,
         });
@@ -1109,6 +1244,58 @@ pub(crate) mod mft {
 
     /// Every NTFS drive's table from the service, or none when it is not
     /// installed or cannot answer (the drives are walked then).
+    /// Whether the running service can search its own copy of the names
+    /// (protocol 2 and later). Asked once: the answer only changes when the
+    /// service is reinstalled, and the app is restarted then any way.
+    pub(super) fn searchable() -> bool {
+        #[cfg(windows)]
+        {
+            static SEARCHABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *SEARCHABLE.get_or_init(|| match nohrs_indexer::client::hello() {
+                Ok(version) => version >= nohrs_indexer::protocol::VERSION,
+                Err(_) => false,
+            })
+        }
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// Asks the service for the paths holding every one of `terms`. The
+    /// service scans the names it keeps, so nothing of the table is loaded
+    /// here: what comes back is the few thousand paths that matched.
+    pub(super) fn search(terms: &[String], limit: u32) -> Result<Vec<nohrs_indexer::protocol::Hit>, String> {
+        #[cfg(windows)]
+        {
+            let started = Instant::now();
+            let hits = nohrs_indexer::client::search(terms, limit).map_err(|error| error.to_string())?;
+            tracing::debug!(
+                terms = terms.len(),
+                hits = hits.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "everything service search"
+            );
+            Ok(hits)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (terms, limit);
+            Err("the service runs on Windows only".to_string())
+        }
+    }
+
+    /// Throws the service's kept names away, so its next search reads the
+    /// volumes again. Nothing to do without the service.
+    pub(super) fn refresh() -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            nohrs_indexer::client::refresh().map_err(|error| error.to_string())
+        }
+        #[cfg(not(windows))]
+        {
+            Err("the service runs on Windows only".to_string())
+        }
+    }
+
     pub(super) fn snapshot(progress: &AtomicUsize) -> Vec<Arc<Segment>> {
         #[cfg(windows)]
         {
@@ -1554,6 +1741,11 @@ pub(crate) struct Everything {
     pub mft_error: Option<String>,
     _watcher: Option<notify::RecommendedWatcher>,
     _task: Option<Task<()>>,
+    /// Panes searching the whole computer right now: the table is kept while
+    /// there is at least one, and handed back a while after the last leaves.
+    users: usize,
+    // The wait that hands the table back, cancelled by a pane coming back.
+    idle: Option<Task<()>>,
 }
 
 impl Global for Everything {}
@@ -1661,11 +1853,86 @@ impl Everything {
     }
 }
 
+/// A pane started searching the whole computer: the table is kept, and a wait
+/// that was about to hand it back is called off.
+fn hold(cx: &mut Context<ExplorerPane>) {
+    cx.update_global(|state: &mut Everything, _| {
+        state.users += 1;
+        state.idle = None;
+    });
+}
+
+/// A pane stopped: with none left, the table goes back to its file after
+/// [`KEEP_FOR`], unless another pane starts searching before then.
+fn release(cx: &mut Context<ExplorerPane>) {
+    let users = cx.update_global(|state: &mut Everything, _| {
+        state.users = state.users.saturating_sub(1);
+        state.users
+    });
+    if users > 0 {
+        return;
+    }
+    let task = cx.spawn(async move |_pane: WeakEntity<ExplorerPane>, cx| {
+        cx.background_executor().timer(KEEP_FOR).await;
+        cx.update(|cx| {
+            let state = cx.default_global::<Everything>();
+            if state.users > 0 {
+                return;
+            }
+            // Freed here rather than kept for a search that may never come:
+            // the file on disk is what the next one reads.
+            let entries = state.index.as_ref().map_or(0, |index| index.len());
+            state.index = None;
+            state.walking = None;
+            state.building = None;
+            state.idle = None;
+            state.generation += 1;
+            tracing::info!(entries, "the everything index was handed back to its file");
+        })
+        .log_err();
+    });
+    cx.update_global(|state: &mut Everything, _| state.idle = Some(task));
+}
+
+/// The service's hits for `query`, filtered and ordered the way the local
+/// scan orders its own: the service matched the name terms, and the rest of
+/// the query (extensions, sizes, dates, paths, wildcards) is applied here,
+/// to a few thousand rows rather than to fourteen million.
+fn service_targets(query: &Query, cancel: &AtomicBool) -> Vec<(String, String, bool, u64)> {
+    let terms = query.name_terms();
+    if terms.is_empty() || cancel.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+    let hits = match mft::search(&terms, SERVICE_HITS) {
+        Ok(hits) => hits,
+        Err(error) => {
+            tracing::debug!("the service could not search: {error}");
+            return Vec::new();
+        }
+    };
+    let mut scored: Vec<(u32, usize, String, String, bool, u64)> = hits
+        .into_iter()
+        .filter(|_| !cancel.load(Ordering::Relaxed))
+        .filter_map(|hit| {
+            let name = hit.path.rsplit('\\').next().unwrap_or(hit.path.as_str()).to_string();
+            let score = query.score(&name, &hit.path, hit.dir, hit.size, hit.modified)?;
+            Some((score, name.chars().count(), name, hit.path, hit.dir, hit.size))
+        })
+        .collect();
+    // As `gather` sorts: the match class and recency first, then the shorter
+    // name — a hit whose name is the query itself outranks one with it buried.
+    scored.sort_by(|left, right| (left.0, left.1, &left.3).cmp(&(right.0, right.1, &right.3)));
+    scored.into_iter().map(|(_, _, name, path, dir, size)| (name, path, dir, size)).collect()
+}
+
 /// What the settings page shows about the index.
 pub(crate) struct Status {
     pub entries: Option<usize>,
     pub built: Option<SystemTime>,
     pub building: Option<usize>,
+    /// The indexer service keeps and searches the names itself: this process
+    /// holds none of them.
+    pub service: bool,
 }
 
 /// The index's state, for display.
@@ -1677,6 +1944,7 @@ pub(crate) fn status(cx: &App) -> Status {
         building: everything
             .and_then(|state| state.building.as_ref())
             .map(|progress| progress.load(Ordering::Relaxed)),
+        service: mft::searchable(),
     }
 }
 
@@ -1686,6 +1954,11 @@ pub(crate) fn ensure(cx: &mut App) {
     let state = cx.default_global::<Everything>();
     if state._watcher.is_none() {
         state._watcher = watch_drives(state.fresh.clone());
+    }
+    // The service keeps the names and searches them itself: nothing of the
+    // table belongs in this process, which would be a gigabyte of it.
+    if mft::searchable() {
+        return;
     }
     if state.index.is_some() {
         let stale = state.index.as_ref().is_some_and(|index| index.stale());
@@ -1728,7 +2001,19 @@ enum Walked {
 }
 
 /// Walks the drives again now, keeping the current index until it is done.
+/// With the service searching, the names are the service's to read again, and
+/// this process asks it to.
 pub(crate) fn rebuild(cx: &mut App) {
+    if mft::searchable() {
+        let task = cx.background_spawn(async {
+            match mft::refresh() {
+                Ok(()) => tracing::info!("the indexer service will re-read the volumes"),
+                Err(error) => tracing::warn!("the indexer service could not be asked to reindex: {error}"),
+            }
+        });
+        cx.global_mut::<Everything>()._task = Some(task);
+        return;
+    }
     let state = cx.default_global::<Everything>();
     if state.building.is_some() {
         return;
@@ -1873,6 +2158,7 @@ impl ExplorerPane {
             self.quick_recursive = false;
             self.name_filter.clear();
             self.end_subfolder_search();
+            hold(cx);
             ensure(cx);
             // The global changes when the index arrives or the walk counts
             // more names: rerun or repaint.
@@ -1887,6 +2173,7 @@ impl ExplorerPane {
                 mode.cancel.store(true, Ordering::Relaxed);
             }
             self.end_subfolder_search();
+            release(cx);
         }
         cx.notify();
     }
@@ -1914,7 +2201,11 @@ impl ExplorerPane {
             self.end_subfolder_search();
             return;
         }
-        if index.is_none() && walking.is_none() {
+        // The service holds the names itself: asking it costs a pipe message
+        // and leaves this process holding nothing of the table. The index
+        // here is only for a machine without the service.
+        let by_service = mft::searchable();
+        if index.is_none() && walking.is_none() && !by_service {
             // Nothing to search yet; the walk reruns this.
             return;
         }
@@ -1929,17 +2220,35 @@ impl ExplorerPane {
 
         let (sender, receiver) = async_channel::unbounded::<Vec<FileEntryDto>>();
         let took = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let index_for_thread = index.clone();
+        let walking_for_thread = walking.clone();
+        let fresh_for_thread = fresh.clone();
+        let parsed_for_thread = parsed.clone();
         let spawned = std::thread::Builder::new().name("nohrs-everything-search".into()).spawn({
             let took = took.clone();
             move || {
             let started = Instant::now();
-            let targets = gather(index.as_deref(), walking.as_deref(), fresh.as_deref(), &parsed, &cancel);
+            let targets = if by_service {
+                service_targets(&parsed_for_thread, &cancel)
+            } else {
+                // The names here know no folder sizes: a folder shows none.
+                gather(
+                    index_for_thread.as_deref(),
+                    walking_for_thread.as_deref(),
+                    fresh_for_thread.as_deref(),
+                    &parsed_for_thread,
+                    &cancel,
+                )
+                .into_iter()
+                .map(|(name, path, dir)| (name, path, dir, 0))
+                .collect()
+            };
             let elapsed = started.elapsed().as_millis() as u64;
             took.store(elapsed.max(1), Ordering::Relaxed);
             tracing::debug!(hits = targets.len(), elapsed_ms = elapsed, "everything search");
             let mut batch = Vec::new();
             let mut limit = FIRST_BATCH;
-            for (name, path, dir) in targets {
+            for (name, path, dir, folder_size) in targets {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -1951,7 +2260,8 @@ impl ExplorerPane {
                     name,
                     path,
                     kind: if dir { "dir" } else { "file" }.to_string(),
-                    size: if dir { 0 } else { metadata.len() },
+                    // A folder found by the service knows what it holds.
+                    size: if dir { folder_size } else { metadata.len() },
                     modified: metadata
                         .modified()
                         .ok()
@@ -2375,6 +2685,34 @@ mod tests {
                 "C:\\Users\\SFX\\Big Bonk.wav",
             ]
         );
+    }
+
+    // Windows' zh-CN collation supplies the initials; elsewhere the names are
+    // matched by their own text alone.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_written_in_han_characters_is_found_by_its_pinyin_initials() {
+        let mut table = Segment::empty();
+        let drive = table.add(NO_PARENT, "C:", found(true, 0, 400));
+        table.add(drive, "文件夹", found(true, 0, 400));
+        table.add(drive, "工作报告.docx", found(false, 2 * KB, 9));
+        table.add(drive, "notes.txt", found(false, 1 * KB, 9));
+        let folder = table.add(drive, "项目A", found(true, 0, 400));
+        table.add(folder, "照片.png", found(false, 4 * KB, 9));
+        table.complete = true;
+        let index = Index { segments: vec![Arc::new(table)], built: SystemTime::now() };
+
+        // Initials, whole and partial, as typed on an English keyboard.
+        assert_eq!(search(&index, "wjj"), ["C:\\文件夹"]);
+        assert_eq!(search(&index, "gzbg"), ["C:\\工作报告.docx"]);
+        assert_eq!(search(&index, "zp"), ["C:\\项目A\\照片.png"]);
+        // The name itself still matches, and Latin names are unaffected.
+        assert_eq!(search(&index, "报告"), ["C:\\工作报告.docx"]);
+        assert_eq!(search(&index, "notes"), ["C:\\notes.txt"]);
+        // Letters the initials do not spell find nothing.
+        assert!(search(&index, "qqq").is_empty());
+        // A wildcard covers the name itself, never its initials.
+        assert!(search(&index, "*.png").len() == 1);
     }
 
     #[test]

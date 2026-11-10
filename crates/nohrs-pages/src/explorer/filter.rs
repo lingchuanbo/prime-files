@@ -117,26 +117,35 @@ fn name_matches(pattern: &str, name: &str) -> bool {
 ///
 /// A pattern with `*` or `?` is a wildcard pattern against the whole name
 /// (`*.png`, `IMG_????.jpg`); anything else matches as a substring, which is
-/// what someone typing part of a name expects. The pattern is prepared once
-/// per filtering, not once per name: lowercasing and splitting it again for
-/// each of a folder's names was most of what a key cost.
+/// what someone typing part of a name expects. A pattern of letters and
+/// digits also matches the name's pinyin initials, so `wjj` finds 文件夹: see
+/// [`super::pinyin`]. The pattern is prepared once per filtering, not once per
+/// name: lowercasing and splitting it again for each of a folder's names was
+/// most of what a key cost.
 pub struct NameMatcher {
     /// The lowercase pattern, and its characters when it has wildcards;
     /// `None` when it is empty and everything matches.
     pattern: Option<(String, Option<Vec<char>>)>,
+    /// Whether the pattern is letters and digits only, so a name made of Han
+    /// characters can be found by typing its initials instead.
+    pinyin: bool,
 }
 
 impl NameMatcher {
     pub fn new(pattern: &str) -> Self {
         let pattern = pattern.trim().to_lowercase();
         if pattern.is_empty() {
-            return Self { pattern: None };
+            return Self { pattern: None, pinyin: false };
         }
         let wildcards = pattern
             .contains(['*', '?'])
             .then(|| pattern.chars().collect());
+        // Initials have no wildcards to match against; a pattern that spells
+        // them out is the only one worth a second look.
+        let pinyin = wildcards.is_none() && pattern.chars().all(|ch| ch.is_ascii_alphanumeric());
         Self {
             pattern: Some((pattern, wildcards)),
+            pinyin,
         }
     }
 
@@ -146,7 +155,11 @@ impl NameMatcher {
         };
         let name = name.to_lowercase();
         match wildcards {
-            None => name.contains(pattern.as_str()),
+            None => {
+                name.contains(pattern.as_str())
+                    || (self.pinyin
+                        && super::pinyin::initials(&name).is_some_and(|initials| initials.contains(pattern.as_str())))
+            }
             Some(pattern) => wildcard(pattern, &name.chars().collect::<Vec<_>>()),
         }
     }
@@ -215,5 +228,25 @@ mod tests {
         assert!(!name_matches("img_????.jpg", "IMG_42.jpg"));
         assert!(name_matches("*a*b*", "xxaYYbzz"));
         assert!(!name_matches("*a*b", "xxaYYbzz"));
+    }
+
+    // Windows' zh-CN collation is what supplies the initials; elsewhere the
+    // pattern is matched against the name alone.
+    #[cfg(windows)]
+    #[test]
+    fn han_names_are_found_by_their_pinyin_initials() {
+        assert!(name_matches("wjj", "文件夹"));
+        assert!(name_matches("WJJ", "文件夹"));
+        // Part of the initials, as typing narrows down.
+        assert!(name_matches("wj", "文件夹"));
+        assert!(name_matches("bg", "工作报告.docx"));
+        // Letters around the Han characters still have to line up.
+        assert!(name_matches("xmabg", "项目A报告"));
+        assert!(!name_matches("wjz", "文件.txt"), "only what the name is typed as counts");
+        assert!(!name_matches("zzz", "文件夹"));
+        // A name with no Han characters is matched as it always was.
+        assert!(name_matches("report", "q3-report.pdf"));
+        // Wildcards match the name itself, never initials.
+        assert!(!name_matches("w*j*", "文件夹"));
     }
 }

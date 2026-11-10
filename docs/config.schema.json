@@ -268,8 +268,13 @@
         },
         "vertical_tabs": {
           "default": false,
-          "description": "Tabs in a column down the left of the window, as in Zen Browser,\ninstead of a row along the top.",
+          "description": "Tabs in a column down the side of the window, as in Zen Browser,\ninstead of a row along the top.",
           "type": "boolean"
+        },
+        "vertical_tabs_side": {
+          "$ref": "#/$defs/DockSide",
+          "default": "left",
+          "description": "The side the vertical tabs run down: `left` or `right`."
         }
       },
       "type": "object"
@@ -375,6 +380,11 @@
           "description": "Accent colour: one of the named colours the settings page offers\n(`orange`, `blue`, `teal`, `green`, `purple`, `pink`, `red`) or a\n`#rrggbb` hex string. Anything else falls back to orange.",
           "type": "string"
         },
+        "background": {
+          "default": "",
+          "description": "Background of the content areas as a `#rrggbb` hex string; empty keeps\nthe palette's own. The text and the surfaces around it (hover, borders,\nchrome) are shaded from it, on whichever side of it reads.",
+          "type": "string"
+        },
         "mode": {
           "$ref": "#/$defs/ThemeMode",
           "default": "dark",
@@ -421,6 +431,11 @@
           "description": "Whether that default runs from Z to A, largest or newest first.",
           "type": "boolean"
         },
+        "font_family": {
+          "default": "",
+          "description": "Font family of the whole interface, by its installed name\n(`Microsoft YaHei UI`); empty keeps the system's own.",
+          "type": "string"
+        },
         "hover_audio": {
           "default": true,
           "description": "Whether resting the mouse on a sound file in the listing plays it.",
@@ -438,7 +453,7 @@
           "type": "string"
         },
         "language": {
-          "default": "auto",
+          "default": "zh-CN",
           "description": "Interface language: `\"auto\"` follows the Windows regional format\n(then the country), or one of `\"pt-BR\"`, `\"en\"`, `\"es\"`, `\"fr\"`, `\"de\"`,\n`\"it\"`, `\"ru\"`, `\"ja\"`, `\"zh-CN\"`.",
           "type": "string"
         },
@@ -462,6 +477,11 @@
         "show_hidden": {
           "default": false,
           "description": "Whether dotfiles are shown in listings.",
+          "type": "boolean"
+        },
+        "show_quick_access": {
+          "default": true,
+          "description": "Whether the sidebar starts with the Windows Quick access section (the\nfolders pinned and found frequent in Explorer).",
           "type": "boolean"
         },
         "welcome_done": {
@@ -557,7 +577,8 @@
         "preview": "right",
         "sidebar": "left",
         "terminal": "bottom",
-        "vertical_tabs": false
+        "vertical_tabs": false,
+        "vertical_tabs_side": "left"
       },
       "description": "Where the sidebar, preview and terminal dock, and the tabs' layout."
     },
@@ -586,6 +607,7 @@
       "$ref": "#/$defs/Theme",
       "default": {
         "accent": "orange",
+        "background": "",
         "mode": "dark"
       },
       "description": "Appearance settings."
@@ -596,14 +618,16 @@
         "audio_waveforms": false,
         "default_sort": "name",
         "default_sort_descending": false,
+        "font_family": "",
         "hover_audio": true,
         "hover_audio_delay_ms": 400,
         "icon_pack": "default",
-        "language": "auto",
+        "language": "zh-CN",
         "name_lines": 0,
         "preview_autoplay": false,
         "scroll_smoothness": 50,
         "show_hidden": false,
+        "show_quick_access": true,
         "welcome_done": false
       },
       "description": "Explorer / view settings."

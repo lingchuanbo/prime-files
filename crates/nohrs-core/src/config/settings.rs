@@ -104,6 +104,10 @@ pub struct Theme {
     /// (`orange`, `blue`, `teal`, `green`, `purple`, `pink`, `red`) or a
     /// `#rrggbb` hex string. Anything else falls back to orange.
     pub accent: String,
+    /// Background of the content areas as a `#rrggbb` hex string; empty keeps
+    /// the palette's own. The text and the surfaces around it (hover, borders,
+    /// chrome) are shaded from it, on whichever side of it reads.
+    pub background: String,
 }
 
 impl Default for Theme {
@@ -111,6 +115,7 @@ impl Default for Theme {
         Self {
             mode: ThemeMode::Dark,
             accent: "orange".to_string(),
+            background: String::new(),
         }
     }
 }
@@ -129,8 +134,14 @@ pub struct Ui {
     pub default_sort_descending: bool,
     /// Whether dotfiles are shown in listings.
     pub show_hidden: bool,
+    /// Whether the sidebar starts with the Windows Quick access section (the
+    /// folders pinned and found frequent in Explorer).
+    pub show_quick_access: bool,
     /// Identifier of the icon pack used to render entries.
     pub icon_pack: String,
+    /// Font family of the whole interface, by its installed name
+    /// (`Microsoft YaHei UI`); empty keeps the system's own.
+    pub font_family: String,
     /// Most lines a name takes under an icon in the icons view, the last
     /// one ending in "…" when the name needs more; 0 = no limit.
     pub name_lines: u32,
@@ -153,11 +164,13 @@ pub struct Ui {
 impl Default for Ui {
     fn default() -> Self {
         Self {
-            language: "auto".to_string(),
+            language: "zh-CN".to_string(),
             default_sort: SortOrder::Name,
             default_sort_descending: false,
             show_hidden: false,
+            show_quick_access: true,
             icon_pack: "default".to_string(),
+            font_family: String::new(),
             name_lines: 0,
             scroll_smoothness: 50,
             audio_waveforms: false,
@@ -262,9 +275,11 @@ pub struct Layout {
     pub preview: DockSide,
     /// The side the terminal docks to.
     pub terminal: DockSide,
-    /// Tabs in a column down the left of the window, as in Zen Browser,
+    /// Tabs in a column down the side of the window, as in Zen Browser,
     /// instead of a row along the top.
     pub vertical_tabs: bool,
+    /// The side the vertical tabs run down: `left` or `right`.
+    pub vertical_tabs_side: DockSide,
     /// A grip in the middle of each panel's edge that carries the panel to
     /// another side. Off by default: dragging it was not obvious, and the
     /// sides are also chosen here and from the bubbles of the listing's edges.
@@ -278,6 +293,7 @@ impl Default for Layout {
             preview: DockSide::Right,
             terminal: DockSide::Bottom,
             vertical_tabs: false,
+            vertical_tabs_side: DockSide::Left,
             move_grips: false,
         }
     }
@@ -841,13 +857,24 @@ impl Config {
              [theme]\n\
              mode = \"dark\"   # \"system\" | \"light\" | \"dark\"\n\
              accent = \"orange\"   # \"orange\" | \"blue\" | \"teal\" | \"green\" | \"purple\" | \"pink\" | \"red\" | hex\n\
+             background = \"\"     # \"#rrggbb\" for the content areas; empty = the palette's own\n\
+             \n\
+             [layout]\n\
+             sidebar = \"left\"            # \"left\" | \"right\" | \"top\" | \"bottom\"\n\
+             preview = \"right\"           # \"left\" | \"right\" | \"top\" | \"bottom\"\n\
+             terminal = \"bottom\"         # \"left\" | \"right\" | \"top\" | \"bottom\"\n\
+             vertical_tabs = false        # tabs in a column, as in Zen Browser\n\
+             vertical_tabs_side = \"left\"  # the column's side: \"left\" | \"right\"\n\
+             move_grips = false           # a grip on each panel's edge to drag it elsewhere\n\
              \n\
              [ui]\n\
-             language = \"auto\"   # \"auto\" (Windows region) | \"pt-BR\" | \"en\" | \"es\" | \"fr\" | \"de\" | \"it\" | \"ru\" | \"ja\" | \"zh-CN\"\n\
+             language = \"zh-CN\"   # \"zh-CN\" (default) | \"auto\" (Windows region) | \"pt-BR\" | \"en\" | \"es\" | \"fr\" | \"de\" | \"it\" | \"ru\" | \"ja\"\n\
              default_sort =\"name\"   # \"name\" | \"modified\" | \"size\" | \"kind\"\n\
              default_sort_descending = false  # true = Z to A, largest or newest first\n\
              show_hidden = false\n\
+             show_quick_access = true   # Windows Quick access (pinned and frequent folders) in the sidebar\n\
              icon_pack = \"default\"\n\
+             font_family = \"\"   # any installed font, by name (e.g. \"Microsoft YaHei UI\"); empty = the system's\n\
              \n\
              [explorer]\n\
              split_direction = \"vertical\"   # \"vertical\" (left/right) | \"horizontal\" (top/bottom)\n\
@@ -927,7 +954,26 @@ fn read_theme(table: &toml::Table, theme: &mut Theme, diagnostics: &mut Vec<Diag
             ))),
         }
     }
-    warn_unknown_keys(table, &["mode", "accent"], "theme.", diagnostics);
+    if let Some(value) = table.get("background") {
+        match value.as_str().map(str::trim) {
+            // Empty is "no colour of my own": the palette's background.
+            Some(background) if background.is_empty() => theme.background.clear(),
+            Some(background) if is_hex_colour(background) => theme.background = background.to_string(),
+            _ => diagnostics.push(Diagnostic::warn(format!(
+                "invalid theme.background {value}; expected \"#rrggbb\", using {:?}",
+                theme.background
+            ))),
+        }
+    }
+    warn_unknown_keys(table, &["mode", "accent", "background"], "theme.", diagnostics);
+}
+
+/// Whether `value` is a `#rrggbb` colour, the only form `theme.background`
+/// takes.
+fn is_hex_colour(value: &str) -> bool {
+    value
+        .strip_prefix('#')
+        .is_some_and(|hex| hex.len() == 6 && hex.chars().all(|digit| digit.is_ascii_hexdigit()))
 }
 
 fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) {
@@ -968,12 +1014,30 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             ))),
         }
     }
+    if let Some(value) = table.get("show_quick_access") {
+        match value.as_bool() {
+            Some(flag) => ui.show_quick_access = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.show_quick_access {value}; using {}",
+                ui.show_quick_access
+            ))),
+        }
+    }
     if let Some(value) = table.get("icon_pack") {
         match value.as_str() {
             Some(pack) if !pack.trim().is_empty() => ui.icon_pack = pack.to_string(),
             _ => diagnostics.push(Diagnostic::warn(format!(
                 "invalid ui.icon_pack {value}; using {:?}",
                 ui.icon_pack
+            ))),
+        }
+    }
+    if let Some(value) = table.get("font_family") {
+        match value.as_str().map(str::trim) {
+            Some(font) => ui.font_family = font.to_string(),
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.font_family {value}; using {:?}",
+                ui.font_family
             ))),
         }
     }
@@ -1047,7 +1111,9 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             "default_sort",
             "default_sort_descending",
             "show_hidden",
+            "show_quick_access",
             "icon_pack",
+            "font_family",
             "name_lines",
             "scroll_smoothness",
             "audio_waveforms",
@@ -1178,9 +1244,14 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
         ("sidebar", &mut layout.sidebar),
         ("preview", &mut layout.preview),
         ("terminal", &mut layout.terminal),
+        ("vertical_tabs_side", &mut layout.vertical_tabs_side),
     ] {
         if let Some(value) = table.get(key) {
-            match value.as_str().and_then(DockSide::parse) {
+            let parsed = value.as_str().and_then(DockSide::parse).filter(|side| {
+                // The tabs run down a side of the window, never along an edge.
+                key != "vertical_tabs_side" || side.is_column()
+            });
+            match parsed {
                 Some(side) => *slot = side,
                 None => diagnostics.push(Diagnostic::warn(format!(
                     "invalid layout.{key} {value}; using {:?}",
@@ -1199,7 +1270,7 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
     }
     warn_unknown_keys(
         table,
-        &["sidebar", "preview", "terminal", "vertical_tabs", "move_grips"],
+        &["sidebar", "preview", "terminal", "vertical_tabs", "vertical_tabs_side", "move_grips"],
         "layout.",
         diagnostics,
     );
@@ -1888,6 +1959,31 @@ mod tests {
         assert_eq!(SortOrder::parse("kind"), Some(SortOrder::Kind));
         assert_eq!(SortOrder::parse("Size"), None);
         assert_eq!(SortOrder::parse("created"), None);
+    }
+
+    #[test]
+    fn background_colour_and_tab_side_are_read_and_checked() {
+        let (config, diagnostics) = Config::from_toml_str(
+            "[theme]\nbackground = \"#101820\"\n[layout]\nvertical_tabs = true\nvertical_tabs_side = \"right\"\n",
+        );
+        assert_eq!(config.theme.background, "#101820");
+        assert!(config.layout.vertical_tabs);
+        assert_eq!(config.layout.vertical_tabs_side, DockSide::Right);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // A colour that is not `#rrggbb`, and a tab column along an edge
+        // (which cannot happen), are refused and the defaults kept.
+        let (config, diagnostics) = Config::from_toml_str(
+            "[theme]\nbackground = \"black\"\n[layout]\nvertical_tabs_side = \"top\"\n",
+        );
+        assert_eq!(config.theme.background, "");
+        assert_eq!(config.layout.vertical_tabs_side, DockSide::Left);
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+
+        // An empty background is the palette's own, which is not a mistake.
+        let (config, diagnostics) = Config::from_toml_str("[theme]\nbackground = \"\"\n");
+        assert_eq!(config.theme.background, "");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]

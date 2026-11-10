@@ -97,6 +97,25 @@ pub fn snapshot(sink: &mut impl protocol::Sink) -> io::Result<()> {
     protocol::read(&mut BufReader::with_capacity(1 << 20, pipe), sink)
 }
 
+/// Asks the service for the names holding every one of `terms`, ignoring
+/// case: the few thousand paths that matched, rather than the whole table.
+/// The service keeps the names itself, so nothing of it is held here.
+pub fn search(terms: &[String], limit: u32) -> io::Result<Vec<protocol::Hit>> {
+    let mut pipe = connect()?;
+    protocol::write_search_request(&mut pipe, terms, limit)?;
+    protocol::read_hits(&mut BufReader::with_capacity(1 << 20, pipe))
+}
+
+/// Throws the names the service keeps away, so the next search reads the
+/// volumes again.
+pub fn refresh() -> io::Result<()> {
+    let mut pipe = connect()?;
+    pipe.write_all(protocol::REFRESH)?;
+    let mut answer = String::new();
+    pipe.read_to_string(&mut answer)?;
+    answer.trim().strip_prefix("PFIX1 OK ").map(drop).ok_or_else(|| io::Error::other(format!("unexpected answer: {answer:?}")))
+}
+
 /// The string SID of the user running this program.
 pub fn current_user_sid() -> io::Result<String> {
     let mut token = HANDLE::default();

@@ -27,6 +27,8 @@ pub enum Action {
     DeletePermanently,
     NewFolder,
     GoUp,
+    RecentFolders,
+    DirectoryMenu,
     SelectAll,
     SearchSubfolders,
     SearchEverything,
@@ -44,6 +46,7 @@ pub enum Action {
     NextPane,
     PreviousPane,
     ToggleSidebar,
+    TogglePreview,
     ToggleTerminal,
     OpenCommandPrompt,
     OpenPowerShell,
@@ -85,6 +88,11 @@ pub const ACTIONS: &[ActionInfo] = &[
     info(Action::DeletePermanently, "delete_permanently", FILES, crate::k!("Excluir para sempre"), &["shift-delete"]),
     info(Action::NewFolder, "new_folder", FILES, crate::k!("Nova pasta"), &["ctrl-shift-n"]),
     info(Action::GoUp, "go_up", FILES, crate::k!("Subir para a pasta de cima"), &["alt-up"]),
+    // The recent folders, under the header's arrow: the places visited last.
+    info(Action::RecentFolders, "recent_folders", FILES, crate::k!("Pastas recentes"), &["alt-down"]),
+    // The directory menu, as Total Commander's Ctrl+D: the favorite folders
+    // in a popup, with the current folder added from there.
+    info(Action::DirectoryMenu, "directory_menu", FILES, crate::k!("Menu de pastas favoritas"), &["ctrl-d"]),
     info(Action::SelectAll, "select_all", SEARCH, crate::k!("Selecionar tudo"), &["ctrl-a"]),
     info(Action::SearchSubfolders, "search_subfolders", SEARCH, crate::k!("Buscar nas subpastas"), &["ctrl-f"]),
     info(Action::SearchEverything, "search_everything", SEARCH, crate::k!("Buscar em todo o computador"), &["ctrl-e"]),
@@ -92,7 +100,8 @@ pub const ACTIONS: &[ActionInfo] = &[
     info(Action::FilterBar, "filter_bar", SEARCH, crate::k!("Barra de filtros"), &["ctrl-shift-l"]),
     info(Action::NewTab, "new_tab", PANES, crate::k!("Nova aba"), &["ctrl-t"]),
     info(Action::CloseTab, "close_tab", PANES, crate::k!("Fechar aba"), &["ctrl-w"]),
-    info(Action::SplitVertical, "split_vertical", PANES, crate::k!("Dividir lado a lado"), &["ctrl-\\"]),
+    // One key that opens the split and, pressed again, closes it.
+    info(Action::SplitVertical, "split_vertical", PANES, crate::k!("Dividir ou fechar lado a lado"), &["ctrl-\\"]),
     // Shift+\ comes as `|` on some layouts, with or without the shift.
     info(
         Action::SplitHorizontal,
@@ -106,6 +115,7 @@ pub const ACTIONS: &[ActionInfo] = &[
     info(Action::NextPane, "next_pane", PANES, crate::k!("Próximo painel"), &["ctrl-]"]),
     info(Action::PreviousPane, "previous_pane", PANES, crate::k!("Painel anterior"), &["ctrl-["]),
     info(Action::ToggleSidebar, "toggle_sidebar", PANES, crate::k!("Mostrar ou esconder a barra lateral"), &["ctrl-b"]),
+    info(Action::TogglePreview, "toggle_preview", PANES, crate::k!("Mostrar ou esconder o visualizador"), &["alt-q"]),
     // Ctrl+' is VS Code's spelling on ABNT2, where ` is a dead key.
     info(
         Action::ToggleTerminal,

@@ -1,10 +1,12 @@
-//! The service: answers snapshot requests on the pipe, one at a time.
+//! The service: answers snapshot and search requests on the pipe, one at a
+//! time.
 //!
 //! It runs as SYSTEM because opening a volume to read its MFT needs that,
-//! and it is careful accordingly: it reads, never writes, holds nothing
-//! between requests, answers only the user it was installed for (and
-//! administrators), only on this machine, and only the two requests of
-//! [`crate::protocol`].
+//! and it is careful accordingly: it reads, never writes, answers only the
+//! user it was installed for (and administrators), only on this machine, and
+//! only the requests of [`crate::protocol`]. Between requests it keeps the
+//! names it last read, so a search is a scan of memory rather than a minute
+//! of reading the MFT — that is the whole point of the search request.
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
@@ -12,9 +14,9 @@ use std::fs::File;
 use std::io::{self, BufWriter, Read as _, Write as _};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
     ERROR_CALL_NOT_IMPLEMENTED, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree, NO_ERROR,
@@ -185,12 +187,96 @@ fn answer(pipe: &File) -> io::Result<()> {
     } else if request == protocol::SNAPSHOT {
         let volumes = snapshot();
         protocol::write(&mut out, &volumes)?;
+    } else if request == protocol::REFRESH {
+        // The next search reads the volumes again.
+        let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *cache = None;
+        drop(cache);
+        out.write_all(format!("PFIX1 OK {}\n", protocol::VERSION).as_bytes())?;
+        out.flush()?;
+    } else if request == protocol::SEARCH {
+        // The terms and the count were written after the request line.
+        let body = read_request_body(reader)?;
+        let (terms, limit) = protocol::read_search_request(&mut &body[..])?;
+        let hits = search(&terms, limit);
+        protocol::write_hits(&mut out, &hits)?;
     } else {
         protocol::write_error(&mut out, "unknown request")?;
     }
     drop(out);
     // The answer reaches the reader before the pipe is cut.
     unsafe { FlushFileBuffers(HANDLE(pipe.as_raw_handle())) }.map_err(io::Error::from)
+}
+
+// The rest of a request after its line: as long as the client says it is.
+fn read_request_body(mut pipe: &File) -> io::Result<Vec<u8>> {
+    // The body starts with the term count; what follows is sized from it.
+    let mut head = [0u8; 2];
+    pipe.read_exact(&mut head)?;
+    let count = u16::from_le_bytes(head) as usize;
+    let mut body = Vec::with_capacity(2 + count * 32 + 4);
+    body.extend_from_slice(&head);
+    for _ in 0..count {
+        let mut length = [0u8; 2];
+        pipe.read_exact(&mut length)?;
+        let length = u16::from_le_bytes(length) as usize;
+        if length > 1024 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "search term too long"));
+        }
+        body.extend_from_slice(&length.to_le_bytes());
+        let mut term = vec![0u8; length];
+        pipe.read_exact(&mut term)?;
+        body.extend_from_slice(&term);
+    }
+    let mut limit = [0u8; 4];
+    pipe.read_exact(&mut limit)?;
+    body.extend_from_slice(&limit);
+    Ok(body)
+}
+
+/// The names the last search could ask about, kept between requests: what a
+/// search needs is the whole volume, which costs a minute to read from the
+/// MFT, so it is read once and refreshed behind the searches going on.
+static CACHE: Mutex<Option<(Instant, Arc<Vec<protocol::Volume>>)>> = Mutex::new(None);
+/// How old the kept names may be before a search rebuilds them.
+const REFRESH_AFTER: Duration = Duration::from_secs(30 * 60);
+
+fn cached() -> Arc<Vec<protocol::Volume>> {
+    {
+        let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((built, volumes)) = cache.as_ref()
+            && built.elapsed() < REFRESH_AFTER
+        {
+            return volumes.clone();
+        }
+        // Read here, with the lock held: a second search waits a minute for
+        // this one rather than reading the MFT twice at once.
+        let started = Instant::now();
+        let volumes = Arc::new(snapshot());
+        let total: usize = volumes.iter().map(protocol::Volume::len).sum();
+        log(&format!("search index: {total} names in {} ms", started.elapsed().as_millis()));
+        *cache = Some((Instant::now(), volumes.clone()));
+        volumes
+    }
+}
+
+/// The paths holding every one of `terms`, whole, ignoring case, limited to
+/// `limit` hits. The name of every entry is checked before the path is built:
+/// a path is walked up its parents, which the millions of names that do not
+/// match must not pay for.
+fn search(terms: &[String], limit: u32) -> Vec<protocol::Hit> {
+    if terms.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let volumes = cached();
+    let mut hits = Vec::new();
+    for volume in volumes.iter() {
+        volume.search(terms, limit as usize, &mut hits);
+        if hits.len() >= limit as usize {
+            break;
+        }
+    }
+    hits
 }
 
 /// Every fixed NTFS volume's names. A volume that cannot be read is left

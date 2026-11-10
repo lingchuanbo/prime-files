@@ -181,6 +181,17 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
         ],
     ),
     (
+        "Os nomes de todas as unidades fixas ficam guardados neste computador. Com o programa aberto, o que é criado ou renomeado entra na hora; com o serviço, ele guarda os nomes e os relê a cada 30 minutos, e sem o serviço o índice deste processo é refeito quando passa de 6 horas. Nada sai do computador.",
+        [
+            "Les noms de tous les disques fixes sont gardés sur cet ordinateur. Programme ouvert, ce qui est créé ou renommé entre aussitôt ; avec le service, il garde les noms et les relit toutes les 30 minutes, et sans lui l'index de ce processus est refait au-delà de 6 heures. Rien ne quitte l'ordinateur.",
+            "Die Namen aller festen Laufwerke bleiben auf diesem Computer. Solange das Programm offen ist, kommt alles Neue oder Umbenannte sofort hinein; mit dem Dienst hält er die Namen und liest sie alle 30 Minuten neu, ohne ihn wird der Index dieses Prozesses nach 6 Stunden neu gebaut. Nichts verlässt den Computer.",
+            "I nomi di tutte le unità fisse restano su questo computer. A programma aperto, ciò che viene creato o rinominato entra subito; con il servizio, questo conserva i nomi e li rilegge ogni 30 minuti, e senza di esso l'indice di questo processo viene rifatto oltre le 6 ore. Nulla lascia il computer.",
+            "Имена на всех несъёмных дисках хранятся на этом компьютере. Пока программа открыта, всё созданное или переименованное попадает в индекс сразу; со службой она хранит имена и перечитывает их каждые 30 минут, а без неё индекс этого процесса перестраивается раз в 6 часов. Ничего не покидает компьютер.",
+            "すべての固定ドライブの名前はこのコンピューターに保存されます。プログラムを開いている間は、作成や名前変更がすぐ反映されます。サービスがある場合は 30 分ごとに読み直し、ない場合はこのプロセスの索引を 6 時間ごとに作り直します。データが外部に出ることはありません。",
+            "所有固定磁盘上的名称都保存在这台电脑上。程序打开时，新建或重命名的内容会立即加入；有索引服务时由它保存名称并每 30 分钟重读一次，没有服务时本进程的索引每 6 小时重建一次。任何内容都不会离开电脑。",
+        ],
+    ),
+    (
         "índice de {age} atrás",
         [
             "index d'il y a {age}",
@@ -1413,6 +1424,17 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
         ],
     ),
     (
+        "Dividir ou fechar lado a lado",
+        [
+            "Diviser ou fermer côte à côte",
+            "Nebeneinander teilen oder schließen",
+            "Dividi o chiudi affiancati",
+            "Разделить или закрыть рядом",
+            "左右に分割/解除",
+            "左右拆分或关闭",
+        ],
+    ),
+    (
         "Divisão de painéis",
         [
             "Division des volets",
@@ -2268,6 +2290,17 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "Показать или скрыть боковую панель",
             "サイドバーの表示/非表示",
             "显示或隐藏侧边栏",
+        ],
+    ),
+    (
+        "Mostrar ou esconder o visualizador",
+        [
+            "Afficher ou masquer l'aperçu",
+            "Vorschau ein- oder ausblenden",
+            "Mostra o nascondi l'anteprima",
+            "Показать или скрыть панель просмотра",
+            "プレビューの表示/非表示",
+            "显示或隐藏预览窗格",
         ],
     ),
     (
@@ -5238,6 +5271,248 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "Можно также потянуть край списка и отпустить на пузыре панели.",
             "一覧の端を引っ張り、パネルのバブルで離すこともできます。",
             "也可以拉动列表的边缘，在面板的气泡上松开。",
+        ],
+    ),
+    (
+        "Pastas favoritas",
+        [
+            "Dossiers favoris",
+            "Lieblingsordner",
+            "Cartelle preferite",
+            "Избранные папки",
+            "お気に入りフォルダ",
+            "常用目录",
+        ],
+    ),
+    (
+        "Adicionar pasta atual",
+        [
+            "Ajouter le dossier actuel",
+            "Aktuellen Ordner hinzufügen",
+            "Aggiungi cartella attuale",
+            "Добавить текущую папку",
+            "現在のフォルダーを追加",
+            "添加当前文件夹",
+        ],
+    ),
+    (
+        "Remover das pastas favoritas",
+        [
+            "Retirer des dossiers favoris",
+            "Aus Lieblingsordnern entfernen",
+            "Rimuovi dalle cartelle preferite",
+            "Убрать из избранных папок",
+            "お気に入りフォルダから削除",
+            "从常用目录移除",
+        ],
+    ),
+    (
+        "Mostra as pastas fixadas e frequentes do Windows no começo da barra lateral.",
+        [
+            "Affiche les dossiers épinglés et fréquents de Windows au début de la barre latérale.",
+            "Zeigt die von Windows angehefteten und häufig genutzten Ordner am Anfang der Seitenleiste.",
+            "Mostra le cartelle fissate e frequenti di Windows all'inizio della barra laterale.",
+            "Показывает закреплённые и частые папки Windows в начале боковой панели.",
+            "Windows で固定されている、よく使うフォルダーをサイドバーの先頭に表示します。",
+            "在侧边栏开头显示 Windows 固定和常用的文件夹。",
+        ],
+    ),
+    (
+        "Menu de pastas favoritas",
+        [
+            "Menu des dossiers favoris",
+            "Menü der Lieblingsordner",
+            "Menu delle cartelle preferite",
+            "Меню избранных папок",
+            "お気に入りフォルダメニュー",
+            "常用目录菜单",
+        ],
+    ),
+    (
+        "No início da lista",
+        [
+            "Au début de la liste",
+            "Am Anfang der Liste",
+            "All'inizio dell'elenco",
+            "В начало списка",
+            "リストの先頭",
+            "列表顶部",
+        ],
+    ),
+    (
+        "Cor de fundo",
+        [
+            "Couleur de fond",
+            "Hintergrundfarbe",
+            "Colore di sfondo",
+            "Цвет фона",
+            "背景色",
+            "背景颜色",
+        ],
+    ),
+    (
+        "As áreas de conteúdo. Qualquer cor em #rrggbb no config.toml vale; o texto se ajusta ao fundo.",
+        [
+            "Les zones de contenu. Toute couleur #rrggbb dans config.toml convient ; le texte s'adapte au fond.",
+            "Die Inhaltsflächen. Jede #rrggbb-Farbe in der config.toml ist möglich; der Text passt sich dem Hintergrund an.",
+            "Le aree di contenuto. Va bene qualsiasi colore #rrggbb nel config.toml; il testo si adatta allo sfondo.",
+            "Области содержимого. Подходит любой цвет #rrggbb в config.toml; текст подстраивается под фон.",
+            "内容領域の色です。config.toml に #rrggbb で任意の色を指定でき、文字色は背景に合わせて調整されます。",
+            "内容区域的颜色。config.toml 里任意 #rrggbb 都可用；文字颜色会随背景自动调整。",
+        ],
+    ),
+    (
+        "Lado das abas verticais",
+        [
+            "Côté des onglets verticaux",
+            "Seite der vertikalen Tabs",
+            "Lato delle schede verticali",
+            "Сторона вертикальных вкладок",
+            "垂直タブの位置",
+            "垂直标签页位置",
+        ],
+    ),
+    (
+        "De que lado da janela fica a coluna das abas.",
+        [
+            "De quel côté de la fenêtre se trouve la colonne d'onglets.",
+            "Auf welcher Fensterseite die Tab-Spalte liegt.",
+            "Su quale lato della finestra sta la colonna delle schede.",
+            "С какой стороны окна находится колонка вкладок.",
+            "タブの列をウィンドウのどちら側に置くか。",
+            "标签列位于窗口的哪一侧。",
+        ],
+    ),
+    (
+        "As abas numa coluna ao lado da lista, como no Zen. Estreita, mostra só os ícones.",
+        [
+            "Les onglets dans une colonne à côté de la liste, comme dans Zen. Étroite, elle n'affiche que les icônes.",
+            "Tabs in einer Spalte neben der Liste, wie in Zen. Schmal zeigt sie nur die Symbole.",
+            "Le schede in una colonna accanto all'elenco, come in Zen. Stretta, mostra solo le icone.",
+            "Вкладки колонкой рядом со списком, как в Zen. В узком виде — только значки.",
+            "Zen のように一覧の横にタブを縦並べます。幅が狭いとアイコンだけを表示します。",
+            "标签以竖列显示在列表旁，类似 Zen。列窄时只显示图标。",
+        ],
+    ),
+    (
+        "Personalizada",
+        [
+            "Personnalisée",
+            "Eigene",
+            "Personalizzato",
+            "Свой цвет",
+            "カスタム",
+            "自定义",
+        ],
+    ),
+    (
+        "Brilho",
+        [
+            "Luminosité",
+            "Helligkeit",
+            "Luminosità",
+            "Яркость",
+            "明るさ",
+            "亮度",
+        ],
+    ),
+    (
+        "Escolher a cor",
+        [
+            "Choisir la couleur",
+            "Farbe wählen",
+            "Scegli il colore",
+            "Выбор цвета",
+            "色を選ぶ",
+            "选择颜色",
+        ],
+    ),
+    (
+        "Arraste no anel e na barra.",
+        [
+            "Faites glisser sur l'anneau et la barre.",
+            "Ziehen Sie auf dem Ring und dem Balken.",
+            "Trascina sull'anello e sulla barra.",
+            "Перетаскивайте по кольцу и полосе.",
+            "リングとバーをドラッグします。",
+            "在色环和亮度条上拖动。",
+        ],
+    ),
+    (
+        "Fonte da interface",
+        [
+            "Police de l'interface",
+            "Schriftart der Oberfläche",
+            "Carattere dell'interfaccia",
+            "Шрифт интерфейса",
+            "インターフェースのフォント",
+            "界面字体",
+        ],
+    ),
+    (
+        "A fonte de todo o programa. O padrão é a do sistema.",
+        [
+            "La police de tout le programme. Par défaut, celle du système.",
+            "Die Schriftart des gesamten Programms. Standard ist die des Systems.",
+            "Il carattere di tutto il programma. Per impostazione predefinita, quello di sistema.",
+            "Шрифт всей программы. По умолчанию — системный.",
+            "プログラム全体のフォントです。既定はシステムのフォントです。",
+            "整个程序的字体。默认使用系统字体。",
+        ],
+    ),
+    (
+        "Padrão",
+        [
+            "Par défaut",
+            "Standard",
+            "Predefinito",
+            "По умолчанию",
+            "既定",
+            "默认",
+        ],
+    ),
+    (
+        "Pastas recentes",
+        [
+            "Dossiers récents",
+            "Zuletzt verwendete Ordner",
+            "Cartelle recenti",
+            "Недавние папки",
+            "最近使ったフォルダー",
+            "最近访问",
+        ],
+    ),
+    (
+        "Nenhuma pasta visitada ainda",
+        [
+            "Aucun dossier visité pour l'instant",
+            "Noch kein Ordner besucht",
+            "Nessuna cartella visitata finora",
+            "Пока не было посещённых папок",
+            "まだフォルダーを開いていません",
+            "还没有访问过文件夹",
+        ],
+    ),
+    (
+        "O serviço de indexação guarda os nomes e responde às buscas.",
+        [
+            "Le service d'indexation garde les noms et répond aux recherches.",
+            "Der Indizierungsdienst hält die Namen und beantwortet die Suchen.",
+            "Il servizio di indicizzazione conserva i nomi e risponde alle ricerche.",
+            "Служба индексации хранит имена и отвечает на запросы.",
+            "インデックスサービスが名前を保持し、検索に応答します。",
+            "索引服务保存文件名并响应搜索。",
+        ],
+    ),
+    (
+        "Arquivos dentro de um compactado ainda não abrem: descompacte a pasta para abri-los.",
+        [
+            "Les fichiers d'une archive ne s'ouvrent pas encore : décompressez le dossier pour les ouvrir.",
+            "Dateien in einem Archiv öffnen sich noch nicht: Entpacken Sie den Ordner, um sie zu öffnen.",
+            "I file dentro un archivio non si aprono ancora: estrai la cartella per aprirli.",
+            "Файлы внутри архива пока не открываются: распакуйте папку, чтобы их открыть.",
+            "アーカイブ内のファイルはまだ開けません。展開してから開いてください。",
+            "压缩包内的文件暂不能打开：请先解压该文件夹后再打开。",
         ],
     ),
 ];

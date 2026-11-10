@@ -44,6 +44,19 @@ impl ExplorerPane {
             Action::DeletePermanently => self.request_permanent_delete(window, cx),
             Action::NewFolder => self.create_new_folder(window, cx),
             Action::GoUp => self.go_up(window, cx),
+            // The header's recent-folders menu, on the keyboard: the same
+            // list its arrow shows.
+            Action::RecentFolders => {
+                self.recent_menu = !self.recent_menu;
+                cx.notify();
+            }
+            Action::DirectoryMenu => self.open_favorites_menu(window, cx),
+            // The preview pane, on the side of the listing: the same key
+            // shows it and hides it again.
+            Action::TogglePreview => {
+                self.preview_visible = !self.preview_visible;
+                cx.notify();
+            }
             Action::SelectAll => {
                 self.select_all();
                 cx.notify();

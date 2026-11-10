@@ -23,6 +23,7 @@ use nohrs_services::fs::trash::Ledger as TrashLedger;
 use nohrs_store::{KvStore, RedbKvStore, StoreLogConfig};
 
 use nohrs_core::config::SplitDirection;
+use nohrs_core::shortcuts::Action;
 
 use super::types::{SortKey, StatusLevel, ViewMode};
 use super::{ExplorerPage, ExplorerPane};
@@ -138,7 +139,9 @@ async fn apply_config_ui_reflects_ui_section(cx: &mut TestAppContext) {
                 default_sort: config::SortOrder::Size,
                 default_sort_descending: false,
                 show_hidden: true,
+                show_quick_access: true,
                 icon_pack: "default".to_string(),
+                font_family: String::new(),
                 name_lines: 0,
                 scroll_smoothness: 50,
                 audio_waveforms: false,
@@ -187,7 +190,9 @@ async fn config_reload_keeps_a_sort_chosen_in_the_session(cx: &mut TestAppContex
                 default_sort: config::SortOrder::Name,
                 default_sort_descending: false,
                 show_hidden: false,
+                show_quick_access: false,
                 icon_pack: "default".to_string(),
+                font_family: String::new(),
                 name_lines: 0,
                 scroll_smoothness: 50,
                 audio_waveforms: false,
@@ -579,6 +584,68 @@ async fn activate_entry_routes_by_kind(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn activating_an_archive_opens_it_as_a_folder(cx: &mut TestAppContext) {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("pacote.zip");
+    {
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("leiame.txt", options).unwrap();
+        zip.write_all(b"oi").unwrap();
+        zip.add_directory("docs/", options).unwrap();
+        zip.finish().unwrap();
+    }
+    let archive = path.to_string_lossy().to_string();
+    let entry = FileEntryDto {
+        name: "pacote.zip".into(),
+        path: archive.clone(),
+        kind: "file".into(),
+        size: 100,
+        modified: 0,
+    };
+
+    let window = new_explorer(cx);
+    window
+        .update(cx, |page, window, cx| {
+            page.activate_entry(entry.clone(), window, cx);
+            assert_eq!(
+                page.cwd,
+                super::archive::location(&archive, ""),
+                "an archive opens like a folder instead of in another program"
+            );
+            let opened_for_program = super::navigation::OPENED_WITH_DEFAULT_APP.with(|opened| opened.borrow().clone());
+            assert!(opened_for_program.is_empty(), "nothing was handed to another program");
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // The listing then shows what is inside it, folders first.
+    window
+        .read_with(cx, |page, _cx| {
+            let names: Vec<String> = page.filtered_entries.iter().map(|entry| entry.name.clone()).collect();
+            assert_eq!(names, ["docs", "leiame.txt"], "{names:?}");
+        })
+        .unwrap();
+
+    // Up from the archive's root leads to the folder holding it.
+    window
+        .update(cx, |page, window, cx| {
+            page.go_up(window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .read_with(cx, |page, _cx| {
+            assert_eq!(page.cwd, root.to_string_lossy().to_string());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 async fn search_visibility_open_close_toggle(cx: &mut TestAppContext) {
     let window = new_explorer(cx);
     window
@@ -733,8 +800,43 @@ async fn split_opens_second_pane_then_reorients(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn close_pane_keeps_at_least_one(cx: &mut TestAppContext) {
+async fn the_split_key_opens_and_closes_the_second_pane(cx: &mut TestAppContext) {
     let window = new_explorer_page(cx);
+    window
+        .update(cx, |page, window, cx| {
+            page.toggle_split(SplitDirection::Vertical, window, cx);
+            assert_eq!(page.pane_count(), 2, "the key opens the split");
+            assert_eq!(page.active_index(), 1, "the new pane is the one in use");
+
+            // The same key closes the split, keeping the pane being worked in.
+            page.toggle_split(SplitDirection::Vertical, window, cx);
+            assert_eq!(page.pane_count(), 1, "the key closes the split");
+            assert_eq!(page.active_index(), 0, "the pane in use is the one kept");
+
+            // And it opens again, so the key really is a toggle.
+            page.toggle_split(SplitDirection::Vertical, window, cx);
+            assert_eq!(page.pane_count(), 2);
+        })
+        .unwrap();
+}
+
+// Alt+Q: the same key shows and hides the preview beside the listing.
+#[gpui::test]
+async fn the_preview_key_hides_and_shows_the_preview(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window
+        .update(cx, |pane, window, cx| {
+            assert!(pane.preview_visible, "open to begin with");
+            assert!(pane.run_shortcut(Action::TogglePreview, window, cx), "the pane handles the key itself");
+            assert!(!pane.preview_visible, "the key hides the preview");
+            pane.run_shortcut(Action::TogglePreview, window, cx);
+            assert!(pane.preview_visible, "and shows it again");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn close_pane_keeps_at_least_one(cx: &mut TestAppContext) {    let window = new_explorer_page(cx);
     window
         .update(cx, |page, window, cx| {
             page.split(SplitDirection::Vertical, window, cx);
@@ -888,7 +990,9 @@ async fn split_pane_inherits_applied_ui_config(cx: &mut TestAppContext) {
                 default_sort: config::SortOrder::Size,
                 default_sort_descending: false,
                 show_hidden: true,
+                show_quick_access: true,
                 icon_pack: "default".to_string(),
+                font_family: String::new(),
                 name_lines: 0,
                 scroll_smoothness: 50,
                 audio_waveforms: false,
@@ -1316,11 +1420,48 @@ async fn filtering_drops_entries_that_are_no_longer_visible(cx: &mut TestAppCont
         .unwrap();
 }
 
+// The quick search is typed in pinyin initials on Windows, where the system
+// collation knows each character's reading: `wjj` finds 文件夹.
+#[cfg(windows)]
+#[gpui::test]
+async fn quick_search_finds_chinese_names_by_pinyin_initials(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window
+        .update(cx, |page, _window, _cx| {
+            page.entries = vec![
+                file("文件夹", "dir", 1),
+                file("工作报告.docx", "file", 2),
+                file("readme.txt", "file", 3),
+            ];
+            let shown = |page: &ExplorerPane| -> Vec<String> {
+                page.filtered_entries.iter().map(|entry| entry.name.clone()).collect()
+            };
+
+            page.search_query = "wjj".to_string();
+            page.apply_filter();
+            assert_eq!(shown(page), vec!["文件夹"]);
+
+            page.search_query = "bg".to_string();
+            page.apply_filter();
+            assert_eq!(shown(page), vec!["工作报告.docx"]);
+
+            // What the name itself holds is still matched as it was.
+            page.search_query = "read".to_string();
+            page.apply_filter();
+            assert_eq!(shown(page), vec!["readme.txt"]);
+
+            // A pattern none of the initials spell out finds nothing.
+            page.search_query = "zzz".to_string();
+            page.apply_filter();
+            assert!(shown(page).is_empty());
+        })
+        .unwrap();
+}
+
 // Opens a pane rooted at a real directory and loads its listing, so the file
 // operation tests can act on actual files. Mirrors how `reload` is driven
 // elsewhere, but anchored at a temp dir instead of the cwd.
-fn open_pane_at(cx: &mut TestAppContext, root: &std::path::Path) -> WindowHandle<ExplorerPane> {
-    let window = new_explorer(cx);
+fn open_pane_at(cx: &mut TestAppContext, root: &std::path::Path) -> WindowHandle<ExplorerPane> {    let window = new_explorer(cx);
     window
         .update(cx, |pane, _window, cx| {
             pane.cwd = root.to_string_lossy().to_string();
@@ -2730,7 +2871,9 @@ async fn each_folder_opens_with_the_zoom_and_sort_it_was_left_with(cx: &mut Test
                 default_sort: config::SortOrder::Name,
                 default_sort_descending: true,
                 show_hidden: false,
+                show_quick_access: false,
                 icon_pack: "default".to_string(),
+                font_family: String::new(),
                 name_lines: 0,
                 scroll_smoothness: 50,
                 audio_waveforms: false,

@@ -1,10 +1,10 @@
 // Only the real opening reports a failure; tests record the request instead.
-#[cfg(not(test))]
 use nohrs_core::tf;
 use nohrs_core::config;
+use nohrs_core::telemetry::LogErr;
 use nohrs_services::fs::listing::{FileEntryDto, ListParams, list_dir_sync};
 
-use gpui::{Context, Window};
+use gpui::{AppContext as _, Context, WeakEntity, Window};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -55,6 +55,10 @@ struct RefreshExtras {
 /// This PC from a drive's root. `None` at This PC itself and at a root with
 /// nothing above it (a network share).
 pub(crate) fn parent_location(path: &str) -> Option<String> {
+    // Inside an archive: its own folders, then the folder holding the file.
+    if let Some(parent) = super::archive::parent(path) {
+        return Some(parent);
+    }
     if path.eq_ignore_ascii_case(super::places::THIS_PC) || super::tags::tag_of_location(path).is_some() {
         return None;
     }
@@ -72,6 +76,10 @@ pub(crate) fn parent_location(path: &str) -> Option<String> {
 }
 
 fn read_folder(path: &str) -> Listing {
+    // An archive browsed as a folder: its entries, listed the same way.
+    if super::archive::split(path).is_some() {
+        return super::archive::read_folder(path);
+    }
     // Not a folder on disk: the Shell says what it holds.
     if path.eq_ignore_ascii_case(super::places::THIS_PC) {
         return Ok(super::places::this_pc_entries());
@@ -182,6 +190,10 @@ impl ExplorerPane {
     }
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        // Every folder the pane lands in goes into the recent list, restoring
+        // the last session's tabs included; a refresh of the same folder is
+        // not a visit, and the list says so by leaving it where it is.
+        super::recent::RecentFolders::push(&self.cwd, cx);
         self.end_hover_audio();
         // Mark as loaded regardless of outcome so an empty or unreadable
         // directory is not re-read on every subsequent render.
@@ -365,6 +377,8 @@ impl ExplorerPane {
         self.tree.reset();
         self.push_history(path.clone());
         self.cwd = path;
+        // What the header's recent button offers back.
+        super::recent::RecentFolders::push(&self.cwd, cx);
         self.reload(cx);
         cx.emit(PaneEvent::Navigated(self.cwd.clone()));
         cx.notify();
@@ -414,6 +428,7 @@ impl ExplorerPane {
             self.history_index -= 1;
             if let Some(p) = self.history.get(self.history_index).cloned() {
                 self.cwd = p;
+                super::recent::RecentFolders::push(&self.cwd, cx);
                 self.cancel_rename(window, cx);
                 self.close_search(window, cx);
                 self.clear_name_filter();
@@ -438,6 +453,7 @@ impl ExplorerPane {
             self.history_index += 1;
             if let Some(p) = self.history.get(self.history_index).cloned() {
                 self.cwd = p;
+                super::recent::RecentFolders::push(&self.cwd, cx);
                 self.cancel_rename(window, cx);
                 self.close_search(window, cx);
                 self.clear_name_filter();
@@ -456,6 +472,30 @@ impl ExplorerPane {
     ) {
         if item.kind == "dir" {
             self.change_dir(item.path, window, cx);
+        } else if super::archive::is_archive_file(&item.path) {
+            // An archive opens like a folder: its entries are listed here.
+            self.change_dir(super::archive::location(&item.path, ""), window, cx);
+        } else if item.path.starts_with(super::archive::PREFIX) {
+            // A file inside an archive: unpack it to the temporary folder
+            // first, then hand that over — Windows has no path inside an
+            // archive to give a program.
+            let address = item.path.clone();
+            let unpacked = cx.background_spawn(async move { super::archive::extract(&address) });
+            cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                let outcome = unpacked.await;
+                this.update(cx, |pane, cx| match outcome {
+                    Ok(path) => pane.open_with_default_app(&path.to_string_lossy()),
+                    Err(error) => {
+                        pane.set_status(
+                            StatusLevel::Error,
+                            tf!("Não foi possível abrir {path}: {error}", path = item.path, error = error),
+                        );
+                        cx.notify();
+                    }
+                })
+                .log_err();
+            })
+            .detach();
         } else if crate::file_dialog::picking().is_some() {
             // A browser is waiting on its Open dialog: the file goes there. The
             // whole selection goes when the activated file is part of it, so

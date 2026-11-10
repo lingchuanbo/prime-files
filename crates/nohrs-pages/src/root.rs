@@ -16,7 +16,7 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, AsyncWindowContext, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, Render, WeakEntity, Window, div, prelude::*, px, rgb,
+    InteractiveElement, Render, SharedString, WeakEntity, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::resizable::ResizableState;
 use gpui_component::{Icon, IconName, Root, Theme, ThemeMode as GpuiThemeMode, WindowExt as _};
@@ -74,6 +74,9 @@ pub struct RootView {
     config_status: Option<String>,
     // Kept alive for the window's lifetime so the OS watch is not dropped.
     _config_watcher: Option<ConfigWatcher>,
+    // The font family `ui.font_family` names, applied to the whole window;
+    // empty keeps the system's own.
+    font_family: SharedString,
 }
 
 impl RootView {
@@ -129,6 +132,7 @@ impl RootView {
             config_overrides,
             config_status: None,
             _config_watcher: None,
+            font_family: SharedString::default(),
         };
         view.start_progress_loop(window, cx);
         view.apply_config(config, config_error, window, cx);
@@ -210,7 +214,16 @@ impl RootView {
         // Before `restyle_components`, which reads these tokens.
         theme::set_dark(mode.is_dark());
         theme::set_accent(theme::parse_accent(&config.theme.accent));
+        theme::set_background(theme::parse_color(&config.theme.background));
         Theme::change(mode, Some(window), cx);
+        // The widgets gpui_component draws read their family from its theme;
+        // everything else inherits it from the root element in `render`.
+        self.font_family = config.ui.font_family.trim().to_string().into();
+        Theme::global_mut(cx).font_family = if self.font_family.is_empty() {
+            ".SystemUIFont".into()
+        } else {
+            self.font_family.clone()
+        };
 
         // Applied unconditionally: `Theme::change` restores the shipped palette,
         // and on the first call the mode often already matches, so this cannot
@@ -484,6 +497,8 @@ impl Render for RootView {
             .flex_col()
             .bg(rgb(theme::bg()))
             .relative()
+            // Every text in the window inherits the family chosen in Settings.
+            .when(!self.font_family.is_empty(), |this| this.font_family(self.font_family.clone()))
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_account_action))
             .children(toolbar)

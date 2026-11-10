@@ -395,6 +395,11 @@ pub fn render(
                                 .text_color(rgb(theme::fg_secondary()))
                                 .child(match item.kind.as_str() {
                                     "file" => human_bytes(item.size),
+                                    // A folder found by the whole-computer
+                                    // search knows what it holds; one in a
+                                    // folder listing would need a walk of its
+                                    // own, and shows nothing, as Explorer does.
+                                    "dir" if item.size > 0 => human_bytes(item.size),
                                     "dir" => "-".to_string(),
                                     other => other.to_string(),
                                 }),

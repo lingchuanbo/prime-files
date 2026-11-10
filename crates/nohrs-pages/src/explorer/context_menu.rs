@@ -57,10 +57,13 @@ enum Command {
     RenameTag,
     DeleteTag,
     RemoveNetworkPlace,
+    RemoveFavorite,
+    RenameFavorite,
+    AddFavoriteCurrent,
 }
 
 impl Command {
-    const ALL: [Command; 40] = [
+    const ALL: [Command; 43] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
@@ -101,6 +104,9 @@ impl Command {
         Command::RenameTag,
         Command::DeleteTag,
         Command::RemoveNetworkPlace,
+        Command::RemoveFavorite,
+        Command::RenameFavorite,
+        Command::AddFavoriteCurrent,
     ];
 
     fn from_id(id: u32) -> Option<Self> {
@@ -118,6 +124,56 @@ pub(crate) fn note_theme_mode(mode: ThemeMode) {
     if let Ok(mut current) = THEME_MODE.lock() {
         *current = mode;
     }
+}
+
+// The directory menu's entries: a shortcut becomes an entry that opens it;
+// a submenu the user made up becomes a submenu of the menu, holding its
+// own. `counter` numbers the shortcuts in menu order, the same order
+// `nth_favorite_path` reads them back in.
+fn favorite_menu_entries(items: &[super::favorites::FavoriteItem], counter: &mut u32) -> Vec<Entry> {
+    items
+        .iter()
+        .filter_map(|item| {
+            if item.is_submenu() {
+                Some(Entry::submenu(
+                    interned(item.name.clone()),
+                    favorite_menu_entries(&item.children, counter),
+                ))
+            } else if *counter < FAVORITE_IDS {
+                let id = FIRST_FAVORITE + *counter;
+                *counter += 1;
+                Some(Entry::command(id, interned(item.name.clone())).with_icon("icons/folder.svg"))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+// The path of the shortcut `index` places into the menu, counting depth
+// first as `favorite_menu_entries` numbered them.
+fn nth_favorite_path(items: &[super::favorites::FavoriteItem], index: usize) -> Option<String> {
+    let mut rest = index;
+    for item in items {
+        if item.is_submenu() {
+            if let Some(path) = nth_favorite_path(&item.children, rest) {
+                return Some(path);
+            }
+            rest -= favorite_link_count(&item.children);
+        } else if rest == 0 {
+            return Some(item.path.clone());
+        } else {
+            rest -= 1;
+        }
+    }
+    None
+}
+
+fn favorite_link_count(items: &[super::favorites::FavoriteItem]) -> usize {
+    items
+        .iter()
+        .map(|item| if item.is_submenu() { favorite_link_count(&item.children) } else { 1 })
+        .sum()
 }
 
 fn theme_mode() -> ThemeMode {
@@ -162,6 +218,12 @@ pub(crate) enum MenuPurpose {
     Tag(u32),
     /// A network place added by hand.
     NetworkPlace(String),
+    /// A favorite shortcut in the sidebar, by its entry id.
+    FavoriteLink(u32),
+    /// A favorite submenu in the sidebar, by its entry id.
+    FavoriteSubmenu(u32),
+    /// The directory menu (Ctrl+D), listing the favorite folders.
+    FavoritesMenu,
 }
 
 /// A menu on screen: what it shows, where, and what runs its entries.
@@ -183,6 +245,15 @@ const FIRST_TAG: u32 = 0x900;
 const TAG_IDS: u32 = 0x400;
 // A colour in a tag's menu: this plus its place in `tags::COLORS`.
 const FIRST_TAG_COLOR: u32 = 0x8F0;
+// A favorite folder in the directory menu (Ctrl+D): this plus its place
+// among the shortcuts, counted depth first. Past the tags' range, below the
+// Shell's.
+const FIRST_FAVORITE: u32 = 0xD00;
+const FAVORITE_IDS: u32 = 0x100;
+// A submenu the directory menu's "add current folder" can put the folder
+// into: this plus its place among the tree's submenus, counted depth first.
+const FIRST_SUBMENU_TARGET: u32 = 0xE00;
+const SUBMENU_TARGETS: u32 = 0x100;
 
 const SHELL_HIDDEN_FOR_ITEMS: &[&str] = &["paste", "cut", "copy", "rename", "delete"];
 
@@ -293,7 +364,8 @@ impl ExplorerPane {
                         &[][..],
                         false,
                     ),
-                    MenuPurpose::Columns(_) | MenuPurpose::Filter | MenuPurpose::Tag(_) | MenuPurpose::NetworkPlace(_) => {
+                    MenuPurpose::Columns(_) | MenuPurpose::Filter | MenuPurpose::Tag(_) | MenuPurpose::NetworkPlace(_)
+                    | MenuPurpose::FavoriteLink(_) | MenuPurpose::FavoriteSubmenu(_) | MenuPurpose::FavoritesMenu => {
                         (Target::None, true, false, Vec::new(), &[][..], false)
                     }
                 };
@@ -440,6 +512,53 @@ impl ExplorerPane {
                 }
                 cx.notify();
             }
+            // Taking a favorite out only drops the shortcut: the folder
+            // itself is never touched. Renaming opens a field in the
+            // sidebar; a submenu takes the pane's current folder in.
+            MenuPurpose::FavoriteLink(favorite) => {
+                if let Choice::Own(id) = choice {
+                    match Command::from_id(id) {
+                        Some(Command::RenameFavorite) => self.begin_favorite_rename(favorite, window, cx),
+                        Some(Command::RemoveFavorite) => super::favorites::Favorites::remove(favorite, cx),
+                        _ => {}
+                    }
+                }
+                cx.notify();
+            }
+            MenuPurpose::FavoriteSubmenu(favorite) => {
+                if let Choice::Own(id) = choice {
+                    match Command::from_id(id) {
+                        Some(Command::RenameFavorite) => self.begin_favorite_rename(favorite, window, cx),
+                        Some(Command::AddFavoriteCurrent) => {
+                            super::favorites::Favorites::add_link(Some(favorite), &self.cwd, cx);
+                        }
+                        Some(Command::RemoveFavorite) => super::favorites::Favorites::remove(favorite, cx),
+                        _ => {}
+                    }
+                }
+                cx.notify();
+            }
+            // The directory menu (Ctrl+D): an entry goes to its folder;
+            // "add current folder" puts the pane's folder at the top of the
+            // list or into one of the submenus.
+            MenuPurpose::FavoritesMenu => {
+                if let Choice::Own(id) = choice {
+                    if let Some(index) = id.checked_sub(FIRST_FAVORITE).filter(|offset| *offset < FAVORITE_IDS) {
+                        if let Some(path) = nth_favorite_path(&super::favorites::Favorites::all(cx), index as usize) {
+                            self.change_dir(path, window, cx);
+                        }
+                    } else if Command::from_id(id) == Some(Command::AddFavoriteCurrent) {
+                        super::favorites::Favorites::add_link(None, &self.cwd, cx);
+                    } else if let Some(index) = id
+                        .checked_sub(FIRST_SUBMENU_TARGET)
+                        .filter(|offset| *offset < SUBMENU_TARGETS)
+                        && let Some((submenu, _)) = super::favorites::Favorites::submenus(cx).get(index as usize)
+                    {
+                        super::favorites::Favorites::add_link(Some(*submenu), &self.cwd, cx);
+                    }
+                }
+                cx.notify();
+            }
             MenuPurpose::Filter => {
                 use super::filter::KindFilter;
                 if let Choice::Own(id) = choice
@@ -532,6 +651,76 @@ impl ExplorerPane {
             Entry::command(Command::RemoveNetworkPlace as u32, t!("Remover dos locais de rede")).with_icon("icons/trash-2.svg"),
         ];
         self.show_menu(MenuPurpose::NetworkPlace(address), own, hwnd, window, cx);
+    }
+
+    /// A favorite shortcut's menu in the sidebar: rename, or take the
+    /// shortcut out. The folder itself is never touched.
+    pub(crate) fn open_favorite_link_menu(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hwnd) = crate::ipc::window_hwnd(window) else {
+            return;
+        };
+        let own = vec![
+            Entry::command(Command::RenameFavorite as u32, t!("Renomear")).with_icon("icons/pencil.svg"),
+            Entry::Separator,
+            Entry::command(Command::RemoveFavorite as u32, t!("Remover das pastas favoritas"))
+                .with_icon("icons/trash-2.svg"),
+        ];
+        self.show_menu(MenuPurpose::FavoriteLink(id), own, hwnd, window, cx);
+    }
+
+    /// A favorite submenu's menu in the sidebar: rename, take the pane's
+    /// current folder into it, or delete it with everything it holds.
+    pub(crate) fn open_favorite_submenu_menu(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hwnd) = crate::ipc::window_hwnd(window) else {
+            return;
+        };
+        let own = vec![
+            Entry::command(Command::RenameFavorite as u32, t!("Renomear")).with_icon("icons/pencil.svg"),
+            Entry::command(Command::AddFavoriteCurrent as u32, t!("Adicionar pasta atual"))
+                .with_icon("icons/plus.svg"),
+            Entry::Separator,
+            Entry::command(Command::RemoveFavorite as u32, t!("Remover das pastas favoritas"))
+                .with_icon("icons/trash-2.svg"),
+        ];
+        self.show_menu(MenuPurpose::FavoriteSubmenu(id), own, hwnd, window, cx);
+    }
+
+    // Opens a field in the sidebar holding entry `id`'s name, selected.
+    fn begin_favorite_rename(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let name = super::favorites::Favorites::get(id, cx).map(|item| item.name).unwrap_or_default();
+        self.sidebar_visible = true;
+        self.begin_sidebar_input(super::places::SidebarInputPurpose::RenameFavorite(id), name, window, cx);
+    }
+
+    /// The directory menu (Ctrl+D), as Total Commander's: the favorite
+    /// folders in a popup, submenus the user made up as submenus of it, and
+    /// the pane's current folder added to the list from there.
+    pub(crate) fn open_favorites_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hwnd) = crate::ipc::window_hwnd(window) else {
+            return;
+        };
+        let mut own = favorite_menu_entries(&super::favorites::Favorites::all(cx), &mut 0);
+        if !own.is_empty() {
+            own.push(Entry::Separator);
+        }
+        // "Add the current folder": at the top of the list, or into one of
+        // the submenus already made. With no submenu to choose from, the
+        // entry is the one command instead of a submenu of one.
+        let submenus = super::favorites::Favorites::submenus(cx);
+        own.push(if submenus.is_empty() {
+            Entry::command(Command::AddFavoriteCurrent as u32, t!("Adicionar pasta atual"))
+                .with_icon("icons/plus.svg")
+        } else {
+            let mut entries = vec![
+                Entry::command(Command::AddFavoriteCurrent as u32, t!("No início da lista")),
+                Entry::Separator,
+            ];
+            for (index, (_, label)) in submenus.iter().take(SUBMENU_TARGETS as usize).enumerate() {
+                entries.push(Entry::command(FIRST_SUBMENU_TARGET + index as u32, label));
+            }
+            Entry::submenu(t!("Adicionar pasta atual"), entries).with_icon("icons/plus.svg")
+        });
+        self.show_menu(MenuPurpose::FavoritesMenu, own, hwnd, window, cx);
     }
 
     /// The column header's menu, as Explorer's: fit one column or all, and
@@ -809,6 +998,9 @@ impl ExplorerPane {
             | Command::RenameTag
             | Command::DeleteTag
             | Command::RemoveNetworkPlace
+            | Command::RemoveFavorite
+            | Command::RenameFavorite
+            | Command::AddFavoriteCurrent
             | Command::MoreOptions => {}
             Command::OpenCommandPrompt => self.open_in(OpenIn::CommandPrompt, cx),
             Command::OpenPowerShell => self.open_in(OpenIn::PowerShell, cx),

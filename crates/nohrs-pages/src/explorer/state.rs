@@ -74,6 +74,11 @@ pub struct ExplorerPane {
     // Whether dotfiles are listed; driven by `ui.show_hidden` (config.md §5).
     /// Whether dotfiles are listed; driven by `ui.show_hidden`.
     pub show_hidden: bool,
+    // Whether the sidebar starts with the Windows Quick access section;
+    // driven by `ui.show_quick_access`.
+    /// Whether the sidebar starts with the Windows Quick access section;
+    /// driven by `ui.show_quick_access`.
+    pub show_quick_access: bool,
     // Identifier of the active icon pack; driven by `ui.icon_pack`.
     /// Identifier of the active icon pack; driven by `ui.icon_pack`.
     pub icon_pack: String,
@@ -360,6 +365,8 @@ pub struct ExplorerPane {
     pub(crate) zoom_menu_hovered: bool,
     /// The header's "open in another program" menu is open.
     pub(crate) open_in_menu: bool,
+    /// Whether the recent-folders menu under the header's button is open.
+    pub(crate) recent_menu: bool,
     /// The file `reveal` brought forward and when: it glows for a moment so
     /// the eye finds it among its neighbours (`reveal_glow`).
     pub(crate) reveal_highlight: Option<(String, std::time::Instant)>,
@@ -507,6 +514,7 @@ impl ExplorerPane {
             group_by: Default::default(),
             group_runs: Vec::new(),
             show_hidden: false,
+            show_quick_access: true,
             icon_pack: "default".to_string(),
             name_lines: 0,
             scroll_smoothness: nohrs_core::config::Ui::default().scroll_smoothness,
@@ -629,6 +637,7 @@ impl ExplorerPane {
             zoom_menu_flash: None,
             zoom_menu_hovered: false,
             open_in_menu: false,
+            recent_menu: false,
             reveal_highlight: None,
             reveal_scroll: None,
             folder_watch: None,
@@ -1137,11 +1146,11 @@ impl ExplorerPane {
         if self.search_query.is_empty() {
             self.filtered_entries = visible.cloned().collect();
         } else {
-            let query = self.search_query.to_lowercase();
-            self.filtered_entries = visible
-                .filter(|e| e.name.to_lowercase().contains(&query))
-                .cloned()
-                .collect();
+            // The quick search reads names the way the filter bar does, so a
+            // Chinese name can be typed in pinyin initials (`wjj` finds
+            // 文件夹).
+            let query = super::filter::NameMatcher::new(&self.search_query);
+            self.filtered_entries = visible.filter(|entry| query.matches(&entry.name)).cloned().collect();
         }
 
         entries::sort_entries_with(&mut self.filtered_entries, self.sort_key, self.sort_asc, self.folder_order);
@@ -1225,6 +1234,10 @@ impl ExplorerPane {
         }
         if self.show_hidden != ui.show_hidden {
             self.show_hidden = ui.show_hidden;
+            changed = true;
+        }
+        if self.show_quick_access != ui.show_quick_access {
+            self.show_quick_access = ui.show_quick_access;
             changed = true;
         }
         if self.icon_pack != ui.icon_pack {

@@ -8,13 +8,16 @@ expression: parsed
         theme: Theme {
             mode: Dark,
             accent: "teal",
+            background: "",
         },
         ui: Ui {
-            language: "auto",
+            language: "zh-CN",
             default_sort: Name,
             default_sort_descending: false,
             show_hidden: true,
+            show_quick_access: true,
             icon_pack: "default",
+            font_family: "",
             name_lines: 0,
             scroll_smoothness: 50,
             audio_waveforms: false,
@@ -48,6 +51,7 @@ expression: parsed
             preview: Right,
             terminal: Bottom,
             vertical_tabs: false,
+            vertical_tabs_side: Left,
             move_grips: false,
         },
         updates: Updates {

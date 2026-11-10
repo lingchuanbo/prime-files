@@ -83,6 +83,29 @@ pub(crate) fn read_folder(folder: &Path, show_hidden: bool) -> std::io::Result<P
 /// read; nothing is decompressed.
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn read_zip(path: &Path) -> Result<PreviewListing, String> {
+    Ok(archive_tree(zip_entries(path)?))
+}
+
+/// The entries of the archive at `path`, flat — the name inside it, whether
+/// it is a folder, and its uncompressed size — whichever format it is: zip is
+/// read here, the rest by 7-Zip or `tar.exe` (see [`read_archive`]). What
+/// browsing an archive as a folder lists, and what the preview draws as a
+/// tree, both start from this.
+pub(crate) fn archive_entries(path: &Path) -> Result<Vec<(String, bool, u64)>, String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if extension == "zip" {
+        zip_entries(path)
+    } else {
+        other_entries(path)
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn zip_entries(path: &Path) -> Result<Vec<(String, bool, u64)>, String> {
     let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|error| error.to_string())?;
     let mut entries = Vec::with_capacity(archive.len());
@@ -92,7 +115,7 @@ pub(crate) fn read_zip(path: &Path) -> Result<PreviewListing, String> {
         };
         entries.push((entry.name().to_string(), entry.is_dir(), entry.size()));
     }
-    Ok(archive_tree(entries))
+    Ok(entries)
 }
 
 /// Archives the preview lists besides zip: what 7-Zip (or, without it, the
@@ -118,7 +141,13 @@ pub(crate) fn is_other_archive(path: &str) -> bool {
 /// in Windows since 10) reads both too, but writes names in the ANSI code
 /// page, so a name outside it comes out with `?` in it.
 pub(crate) fn read_archive(path: &Path) -> Result<PreviewListing, String> {
-    let entries = match seven_zip() {
+    Ok(archive_tree(other_entries(path)?))
+}
+
+// The entries of a .rar, .7z or other archive [`is_other_archive`] names,
+// read by 7-Zip, or `tar.exe` without it.
+fn other_entries(path: &Path) -> Result<Vec<(String, bool, u64)>, String> {
+    match seven_zip() {
         Some(seven) => {
             // `-p` with no password: an encrypted archive fails at once
             // instead of waiting for a password on a console nobody sees.
@@ -130,7 +159,7 @@ pub(crate) fn read_archive(path: &Path) -> Result<PreviewListing, String> {
             if !output.status.success() {
                 return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
             }
-            parse_seven_zip(&String::from_utf8_lossy(&output.stdout))
+            Ok(parse_seven_zip(&String::from_utf8_lossy(&output.stdout)))
         }
         None => {
             let output = hidden_command(Path::new(r"C:\Windows\System32\tar.exe"))
@@ -141,14 +170,13 @@ pub(crate) fn read_archive(path: &Path) -> Result<PreviewListing, String> {
             if !output.status.success() {
                 return Err(ansi_to_string(&output.stderr).trim().to_string());
             }
-            parse_tar_listing(&ansi_to_string(&output.stdout))
+            Ok(parse_tar_listing(&ansi_to_string(&output.stdout)))
         }
-    };
-    Ok(archive_tree(entries))
+    }
 }
 
 // 7-Zip's console program, where its installer puts it or on the PATH.
-fn seven_zip() -> Option<std::path::PathBuf> {
+pub(crate) fn seven_zip() -> Option<std::path::PathBuf> {
     let installed = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
         .iter()
         .filter_map(std::env::var_os)
@@ -160,7 +188,7 @@ fn seven_zip() -> Option<std::path::PathBuf> {
 }
 
 // A console program run without flashing a console window over the app.
-fn hidden_command(program: &Path) -> std::process::Command {
+pub(crate) fn hidden_command(program: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     #[cfg(windows)]
     {

@@ -231,6 +231,7 @@ pub fn render(
                         .mr(px(4.0))
                         .child(i18n::plural(entry_count, k!("{n} item"), k!("{n} itens"))),
                 )
+                .child(render_recent(page, cx))
                 .child(render_open_in(page, cx))
                 .child(render_view_mode_toggle(page, cx))
                 .child(
@@ -257,6 +258,166 @@ pub fn render(
                         ),
                 ),
         )
+}
+
+// "Recent folders", beside the button that opens the folder elsewhere: the
+// places visited last, shown on hover and listed by a click (or Alt+Down). The
+// arrow says the list is there; the menu says where each one goes.
+fn render_recent(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> impl IntoElement + use<> {
+    use nohrs_core::shortcuts::{Action, display};
+    let recent = super::super::recent::RecentFolders::all(cx);
+    let open = page.recent_menu;
+    // What the tooltip shows: the few newest, which is what one reaches for.
+    let preview: String = recent
+        .iter()
+        .take(6)
+        .map(|folder| folder.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tooltip = if preview.is_empty() {
+        t!("Nenhuma pasta visitada ainda").to_string()
+    } else {
+        format!("{}\n\n{preview}", t!("Pastas recentes"))
+    };
+    let shortcut = display(Action::RecentFolders);
+
+    div()
+        .relative()
+        .flex_shrink_0()
+        .child(
+            div()
+                .id("recent-folders")
+                .px(px(8.0))
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::bg_hover())))
+                .when(open, |style| style.bg(rgb(theme::bg_hover())))
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
+                .on_click(cx.listener(|page, _, _, cx| {
+                    page.recent_menu = !page.recent_menu;
+                    page.open_in_menu = false;
+                    cx.notify();
+                }))
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size_4()
+                        .text_color(rgb(if open { theme::accent() } else { theme::gray_600() })),
+                ),
+        )
+        .when(open, |this| {
+            this.child(deferred(
+                div()
+                    .id("recent-folders-menu")
+                    .absolute()
+                    .top(px(34.0))
+                    .right_0()
+                    .min_w(px(300.0))
+                    .max_w(px(520.0))
+                    .p(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .bg(rgb(theme::bg_secondary()))
+                    .shadow_xl()
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|page, _, _, cx| {
+                        page.recent_menu = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px(px(8.0))
+                            .pt(px(4.0))
+                            .pb(px(2.0))
+                            .when_some(shortcut.clone(), |this, keys| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme::muted()))
+                                        .child(t!("Pastas recentes")),
+                                )
+                                .child(div().text_xs().text_color(rgb(theme::muted())).child(keys))
+                            })
+                            .when(shortcut.is_none(), |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme::muted()))
+                                        .child(t!("Pastas recentes")),
+                                )
+                            }),
+                    )
+                    .when(recent.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .text_sm()
+                                .text_color(rgb(theme::muted()))
+                                .child(t!("Nenhuma pasta visitada ainda")),
+                        )
+                    })
+                    .children(recent.into_iter().enumerate().map(|(index, folder)| {
+                        let name = folder
+                            .trim_end_matches(['\\', '/'])
+                            .rsplit(['\\', '/'])
+                            .next()
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(folder.as_str())
+                            .to_string();
+                        let target = folder.clone();
+                        div()
+                            .id(SharedString::from(format!("recent-{index}")))
+                            .h(px(30.0))
+                            .px(px(8.0))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded(px(5.0))
+                            .cursor_pointer()
+                            .text_sm()
+                            .hover(|style| style.bg(rgb(theme::bg_hover())))
+                            .on_click(cx.listener(move |page, _, window, cx| {
+                                page.recent_menu = false;
+                                page.change_dir(target.clone(), window, cx);
+                            }))
+                            .child(
+                                Icon::new(IconName::Folder)
+                                    .size_4()
+                                    .flex_shrink_0()
+                                    .text_color(rgb(theme::muted())),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .max_w(px(160.0))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_color(rgb(theme::fg()))
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_xs()
+                                    .text_color(rgb(theme::muted()))
+                                    .child(folder),
+                            )
+                    })),
+            ))
+        })
 }
 
 // "Open in": the folder on screen in the Command Prompt, PowerShell,

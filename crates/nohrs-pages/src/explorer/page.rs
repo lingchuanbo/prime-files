@@ -255,6 +255,7 @@ impl ExplorerPage {
         super::waveforms::install_store(store.clone());
         super::tags::Tags::install(store.clone(), cx);
         super::network::NetworkPlaces::install(store.clone(), cx);
+        super::favorites::Favorites::install(store.clone(), cx);
         // The credential window for a share opens over this one. Not in
         // tests: their windows have no platform handle to ask.
         #[cfg(not(test))]
@@ -530,6 +531,21 @@ impl ExplorerPage {
         cx.notify();
     }
 
+    /// The split key, as one key that turns the split on and off: with one
+    /// pane it opens a second rooted at the pane in use; with two it closes
+    /// the one nobody is working in, so focus stays where it was.
+    pub(crate) fn toggle_split(&mut self, direction: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.group.pane_count() >= 2 {
+            let other = if self.group.active() == 0 { 1 } else { 0 };
+            self.close_pane(other, window, cx);
+            self.group.set_direction(direction);
+            self.schedule_save(cx);
+            cx.notify();
+        } else {
+            self.split(direction, window, cx);
+        }
+    }
+
     /// Opens a second pane out of the `side` edge a pane was dragged by,
     /// taking `fraction` of the room on that side; it shows the folder the
     /// active tab shows, as the split shortcuts do.
@@ -681,6 +697,7 @@ impl ExplorerPage {
         super::view::panels::set_sides(layout.sidebar, layout.preview);
         self.terminal_side = layout.terminal;
         self.group.set_vertical_tabs(layout.vertical_tabs);
+        self.group.set_vertical_tabs_side(layout.vertical_tabs_side);
         super::view::panels::set_move_grips(layout.move_grips);
         cx.notify();
     }
@@ -1432,7 +1449,7 @@ impl Render for ExplorerPage {
             .key_context(PANES_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &SplitVertical, window, cx| {
-                this.split(SplitDirection::Vertical, window, cx);
+                this.toggle_split(SplitDirection::Vertical, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitHorizontal, window, cx| {
                 this.split(SplitDirection::Horizontal, window, cx);
