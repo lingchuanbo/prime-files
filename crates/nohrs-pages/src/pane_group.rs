@@ -53,7 +53,7 @@ pub trait PaneItem: Render + Focusable + 'static {
 }
 
 /// Width of the column of vertical tabs as a fresh window opens.
-const TAB_COLUMN_DEFAULT: f32 = 220.0;
+const TAB_COLUMN_DEFAULT: f32 = 184.0;
 /// Under this the column shows only the tabs' icons, at [`TAB_COLUMN_ICONS`].
 const TAB_COLUMN_LABELS_MIN: f32 = 120.0;
 const TAB_COLUMN_ICONS: f32 = 48.0;
@@ -1089,8 +1089,8 @@ impl<T: PaneItem> PaneGroup<T> {
                     .text_sm()
                     .cursor_pointer()
                     .when(is_active, |this| {
-                        this.bg(rgb(theme::bg()))
-                            .text_color(rgb(theme::fg()))
+                        this.bg(rgb(theme::accent_subtle()))
+                            .text_color(rgb(theme::accent()))
                             .border_1()
                             .border_color(rgb(theme::border()))
                     })
@@ -1200,7 +1200,7 @@ impl<T: PaneItem> PaneGroup<T> {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .p(px(6.0))
+            .p(px(8.0))
             .bg(rgb(theme::toolbar_bg()))
             // The seam between the column and the listing, on the column's
             // own inner edge.
@@ -1210,6 +1210,20 @@ impl<T: PaneItem> PaneGroup<T> {
             .when(side != DockSide::Right, |this| {
                 this.border_r_1().border_color(rgb(theme::border()))
             })
+            .child(
+                div().flex().items_center().justify_between().h(px(36.0)).px(px(6.0))
+                    .when(labels, |row| row.child(div().text_xs()
+                        .text_color(rgb(theme::muted())).child(nohrs_core::t!("Abas"))))
+                    .child(div().id(("vtab-collapse", pane_index)).size(px(24.0))
+                        .flex().items_center().justify_center().rounded(px(5.0)).cursor_pointer()
+                        .text_color(rgb(theme::muted()))
+                        .hover(|style| style.bg(rgb(theme::toolbar_hover())))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            TAB_COLUMN_WIDTH.set(if labels { TAB_COLUMN_ICONS } else { TAB_COLUMN_DEFAULT });
+                            cx.notify();
+                        }))
+                        .child(Icon::new(IconName::Menu).size_4())),
+            )
             .when(split, |this| {
                 this.child(
                     div()

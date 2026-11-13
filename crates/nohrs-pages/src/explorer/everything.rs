@@ -44,6 +44,15 @@ use nohrs_services::fs::listing::FileEntryDto;
 use super::ExplorerPane;
 use super::quick_search::DeepSearch;
 
+#[path = "everything/scan.rs"]
+mod scan;
+#[path = "everything/workers.rs"]
+mod workers;
+
+#[cfg(test)]
+#[path = "everything/search_tests.rs"]
+mod search_tests;
+
 /// A saved table older than this is walked again when the mode opens. A
 /// full walk of a busy system drive measured 14 minutes (2.5 million names
 /// on this machine's C:, where every folder opened passes the system's file
@@ -71,6 +80,7 @@ const MAX_RESULTS: usize = 5_000;
 /// The first hits go out in a small batch so the listing fills at once.
 const FIRST_BATCH: usize = 200;
 const BATCH: usize = 1_000;
+const RESULT_SLICE: Duration = Duration::from_millis(40);
 const NO_PARENT: u32 = u32::MAX;
 const FILE_MAGIC: &[u8; 8] = b"PFEVRY03";
 // Before 0.3.2: no size or date. Still read, with both unknown, so an
@@ -140,6 +150,8 @@ struct Segment {
     // and matching against a lowered copy keeps the scan a plain `contains`.
     lower: String,
     entries: Vec<Entry>,
+    // 运行时派生，不改变缓存格式；连续扫描之外只补查这些名字的拼音。
+    non_ascii: Vec<u32>,
     // Whole paths, in a table of loose entries with no parents to walk:
     // `Fresh`'s. Empty in a drive's table.
     paths: Vec<String>,
@@ -187,42 +199,6 @@ impl Segment {
             path.push('\\');
         }
         path
-    }
-
-    /// (rank, name length, position) of every entry matching `query`.
-    fn search(&self, query: &Query, fuzzy: bool, cancel: &AtomicBool) -> Vec<(u32, u16, u32)> {
-        // A drive none of the `em:` folders is on is not scanned at all.
-        if self.paths.is_empty() && !query.scopes.is_empty() {
-            let root = self.root().to_lowercase();
-            if !query.scopes.iter().any(|scope| scope.starts_with(&root)) {
-                return Vec::new();
-            }
-        }
-        let threads = std::thread::available_parallelism().map_or(4, usize::from).clamp(1, 16);
-        let chunk = self.entries.len().div_ceil(threads).max(1);
-        std::thread::scope(|scope| {
-            let workers: Vec<_> = self
-                .entries
-                .chunks(chunk)
-                .enumerate()
-                .map(|(part, entries)| {
-                    scope.spawn(move || {
-                        let mut found = Vec::new();
-                        for (offset, entry) in entries.iter().enumerate() {
-                            if offset % 65_536 == 0 && cancel.load(Ordering::Relaxed) {
-                                return found;
-                            }
-                            let index = (part * chunk + offset) as u32;
-                            if let Some(rank) = query.rank(self, index, entry, fuzzy) {
-                                found.push((rank, entry.name_len, index));
-                            }
-                        }
-                        found
-                    })
-                })
-                .collect();
-            workers.into_iter().flat_map(|worker| worker.join().unwrap_or_default()).collect()
-        })
     }
 }
 
@@ -981,7 +957,14 @@ fn wildcard(pattern: &[char], name: &str) -> bool {
 
 impl Segment {
     fn empty() -> Self {
-        Self { names: String::new(), lower: String::new(), entries: Vec::new(), paths: Vec::new(), complete: false }
+        Self {
+            names: String::new(),
+            lower: String::new(),
+            entries: Vec::new(),
+            non_ascii: Vec::new(),
+            paths: Vec::new(),
+            complete: false,
+        }
     }
 
     #[cfg(test)]
@@ -1018,6 +1001,9 @@ impl Segment {
         };
         self.names.push_str(name);
         self.lower.push_str(lowered);
+        if !lowered.is_ascii() {
+            self.non_ascii.push(self.entries.len() as u32);
+        }
         self.entries.push(entry);
         (self.entries.len() - 1) as u32
     }
@@ -1595,9 +1581,9 @@ pub(crate) mod remote {
     #[cfg(windows)]
     #[allow(unsafe_code)]
     mod discover {
-        use windows::core::{BOOL, PCWSTR};
         use windows::Win32::Foundation::{HWND, LPARAM};
         use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, FindWindowW, GetClassNameW};
+        use windows::core::{BOOL, PCWSTR};
 
         /// Everything's IPC window class, unsuffixed for the default instance.
         const CLASS: &str = "EVERYTHING_TASKBAR_NOTIFICATION";
@@ -1686,15 +1672,16 @@ pub(crate) mod remote {
         use std::sync::{Arc, Mutex, OnceLock, PoisonError};
         use std::time::{Duration, Instant};
 
-        use windows::core::PCWSTR;
         use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
         use windows::Win32::System::DataExchange::COPYDATASTRUCT;
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::WindowsAndMessaging::{
-            ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, MSG, MSGFLT_ALLOW,
-            PM_REMOVE, PeekMessageW, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW,
-            TranslateMessage, WM_COPYDATA, WNDCLASSW, WINDOW_EX_STYLE, WINDOW_STYLE,
+            ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, MSG,
+            MSGFLT_ALLOW, PM_REMOVE, PeekMessageW, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+            SendMessageTimeoutW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPYDATA,
+            WNDCLASSW,
         };
+        use windows::core::PCWSTR;
 
         use nohrs_core::telemetry::LogErr as _;
 
@@ -2154,9 +2141,9 @@ pub(crate) mod remote {
         use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
         use std::time::{Duration, Instant};
 
-        use windows::core::{BOOL, PCSTR, PCWSTR};
         use windows::Win32::Foundation::{FILETIME, HMODULE};
         use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+        use windows::core::{BOOL, PCSTR, PCWSTR};
 
         use super::{Error, Hit, Info, discover, filetime_seconds, search_text};
 
@@ -2951,13 +2938,22 @@ fn load_segment(bytes: &[u8], at: usize, current: bool) -> Option<(Segment, usiz
     }
     let names = String::from_utf8(bytes.get(entries_end..names_end)?.to_vec()).ok()?;
     let lower = String::from_utf8(bytes.get(names_end..lower_end)?.to_vec()).ok()?;
-    let mut segment = Segment { names, lower, entries, paths: Vec::new(), complete };
+    let mut segment = Segment { names, lower, entries, non_ascii: Vec::new(), paths: Vec::new(), complete };
     // A slice cut inside a character would come back empty; one such entry
     // means the file is not what this version wrote.
+    let mut lower_offset = 0;
     let consistent = segment.entries.iter().all(|entry| {
-        segment.names.is_char_boundary(entry.name as usize) && segment.lower.is_char_boundary(entry.lower as usize)
+        let start = entry.lower as usize;
+        let end = start + entry.lower_len as usize;
+        let contiguous = start == lower_offset;
+        lower_offset = end;
+        contiguous
+            && segment.names.is_char_boundary(entry.name as usize)
+            && segment.names.is_char_boundary(entry.name as usize + entry.name_len as usize)
+            && segment.lower.is_char_boundary(start)
+            && segment.lower.is_char_boundary(end)
     });
-    if !consistent {
+    if !consistent || lower_offset != segment.lower.len() {
         return None;
     }
     for position in 0..segment.entries.len() {
@@ -2965,6 +2961,10 @@ fn load_segment(bytes: &[u8], at: usize, current: bool) -> Option<(Segment, usiz
         let parent = segment.entries.get(entry.parent as usize).copied();
         let lowered = segment.lower(&entry);
         let mask = letter_mask(lowered);
+        if !lowered.is_ascii() {
+            segment.non_ascii.push(position as u32);
+        }
+        let lowered = segment.lower(&entry);
         let at_root = parent.is_some_and(|parent| parent.parent == NO_PARENT);
         let noise = parent.is_some_and(|parent| parent.flags & NOISE != 0) || noisy(lowered, at_root);
         if let Some(entry) = segment.entries.get_mut(position) {
@@ -3745,9 +3745,17 @@ impl ExplorerPane {
             tracing::debug!(hits = targets.len(), elapsed_ms = elapsed, "everything search");
             let mut batch = Vec::new();
             let mut limit = FIRST_BATCH;
+            let mut last_sent = Instant::now();
             for (name, path, dir, folder_size) in targets {
                 if cancel.load(Ordering::Relaxed) {
                     return;
+                }
+                if batch_ready(batch.len(), limit, last_sent.elapsed()) {
+                    if sender.send_blocking(std::mem::take(&mut batch)).is_err() {
+                        return;
+                    }
+                    limit = BATCH;
+                    last_sent = Instant::now();
                 }
                 // Gone since the walk: not shown.
                 let Ok(metadata) = std::fs::symlink_metadata(&path) else {
@@ -3765,11 +3773,12 @@ impl ExplorerPane {
                         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
                         .map_or(0, |since| since.as_secs()),
                 });
-                if batch.len() >= limit {
+                if batch_ready(batch.len(), limit, last_sent.elapsed()) {
                     if sender.send_blocking(std::mem::take(&mut batch)).is_err() {
                         return;
                     }
                     limit = BATCH;
+                    last_sent = Instant::now();
                 }
             }
             if !batch.is_empty() {
@@ -3883,6 +3892,10 @@ fn short_age(age: Duration) -> String {
 const WALKING: usize = usize::MAX;
 const FRESH: usize = usize::MAX - 1;
 
+fn batch_ready(count: usize, limit: usize, elapsed: Duration) -> bool {
+    count > 0 && (count >= limit || elapsed >= RESULT_SLICE)
+}
+
 // The best hits of the index, of the drive being walked and of what the
 // watcher saw since, merged and ranked, as (name, path, is a folder). The
 // two live tables are read under their locks and let go before any disk is
@@ -3893,7 +3906,7 @@ fn gather(
     walking: Option<&Mutex<Segment>>,
     fresh: Option<&Mutex<Fresh>>,
     query: &Query,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
 ) -> Vec<(String, String, bool)> {
     let table = walking.map(lock);
     let fresh = fresh.map(lock);
@@ -3908,8 +3921,8 @@ fn gather(
         sources.push((FRESH, &fresh.table));
     }
     let scan = |fuzzy: bool| {
-        let mut hits: Vec<(u32, u16, usize, u32)> = Vec::new();
-        for (source, segment) in &sources {
+        let mut hits = scan::search_index(index, query, fuzzy, cancel);
+        for (source, segment) in sources.iter().filter(|(source, _)| *source == WALKING || *source == FRESH) {
             hits.extend(
                 segment
                     .search(query, fuzzy, cancel)
@@ -3922,24 +3935,11 @@ fn gather(
     let mut hits = scan(false);
     if hits.len() < FUZZY_BELOW && query.fuzzy.is_some() {
         let mut near = scan(true);
-        near.sort_unstable();
+        scan::best_prefix(&mut near, FUZZY_MOST);
         near.truncate(FUZZY_MOST);
         hits.extend(near);
     }
-    hits.sort_unstable();
-    // A file the watcher saw may also be in a table walked since.
-    let mut shown = std::collections::HashSet::new();
-    hits.into_iter()
-        .filter_map(|(_, _, source, position)| {
-            let segment = sources.iter().find(|(id, _)| *id == source)?.1;
-            let entry = segment.entries.get(position as usize)?;
-            let path = segment.path(position);
-            shown
-                .insert(path.to_lowercase())
-                .then(|| (segment.name(entry).to_string(), path, entry.flags & DIR != 0))
-        })
-        .take(MAX_RESULTS)
-        .collect()
+    scan::unique_targets(hits, &sources, cancel)
 }
 
 #[cfg(target_os = "windows")]
@@ -4095,7 +4095,7 @@ mod tests {
 
     fn names(index: &Index, query: &str) -> Vec<String> {
         let query = Query::parse(query, "C:\\Projetos").unwrap();
-        gather(Some(index), None, None, &query, &AtomicBool::new(false))
+        gather(Some(index), None, None, &query, &Arc::new(AtomicBool::new(false)))
             .into_iter()
             .map(|(_, path, _)| path)
             .collect()
@@ -4142,7 +4142,7 @@ mod tests {
         walking.push(e, "Kick.wav", false);
         let walking = Mutex::new(walking);
         let query = Query::parse("kick", "").unwrap();
-        let found = gather(Some(&index), Some(&walking), None, &query, &AtomicBool::new(false));
+        let found = gather(Some(&index), Some(&walking), None, &query, &Arc::new(AtomicBool::new(false)));
         let paths: Vec<&str> = found.iter().map(|(_, path, _)| path.as_str()).collect();
         assert_eq!(paths.first(), Some(&"C:\\Música\\kick"));
         assert!(paths.contains(&"E:\\Kick.wav"));
@@ -4192,7 +4192,7 @@ mod tests {
 
     fn search(index: &Index, query: &str) -> Vec<String> {
         let query = Query::parse_at(query, "C:\\Users\\SFX", now()).unwrap();
-        gather(Some(index), None, None, &query, &AtomicBool::new(false))
+        gather(Some(index), None, None, &query, &Arc::new(AtomicBool::new(false)))
             .into_iter()
             .map(|(_, path, _)| path)
             .collect()
@@ -4341,11 +4341,11 @@ mod tests {
         lock(&fresh).record("C:\\Users\\SFX\\Bonk Remix.wav".into(), found(false, KB, 0));
         lock(&fresh).record("C:\\Users\\SFX\\Bonk.wav".into(), found(false, KB, 0));
         let query = Query::parse_at("bonk remix", "", now()).unwrap();
-        let hits = gather(Some(&index), None, Some(&fresh), &query, &AtomicBool::new(false));
+        let hits = gather(Some(&index), None, Some(&fresh), &query, &Arc::new(AtomicBool::new(false)));
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1, "C:\\Users\\SFX\\Bonk Remix.wav");
         let query = Query::parse_at("bonk ext:wav", "", now()).unwrap();
-        let hits = gather(Some(&index), None, Some(&fresh), &query, &AtomicBool::new(false));
+        let hits = gather(Some(&index), None, Some(&fresh), &query, &Arc::new(AtomicBool::new(false)));
         assert_eq!(hits.iter().filter(|(_, path, _)| path == "C:\\Users\\SFX\\Bonk.wav").count(), 1);
         lock(&fresh).retain(|path, _| !path.ends_with("Remix.wav"));
         assert_eq!(lock(&fresh).table.paths, ["C:\\Users\\SFX\\Bonk.wav"]);
@@ -4372,11 +4372,11 @@ mod tests {
             let mut query = Query::parse_at(text, "", now()).unwrap();
             query.fuzzy = None;
             let started = Instant::now();
-            let with = gather(Some(&index), None, None, &query, &AtomicBool::new(false)).len();
+            let with = gather(Some(&index), None, None, &query, &Arc::new(AtomicBool::new(false))).len();
             let masked = started.elapsed();
             query.mask = 0;
             let started = Instant::now();
-            let without = gather(Some(&index), None, None, &query, &AtomicBool::new(false)).len();
+            let without = gather(Some(&index), None, None, &query, &Arc::new(AtomicBool::new(false))).len();
             let plain = started.elapsed();
             assert_eq!(with, without);
             println!("{text:>12}: {with} hits, with mask {masked:?}, without {plain:?}");

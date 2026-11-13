@@ -30,6 +30,13 @@
 
 use std::io::{self, Read, Write};
 
+#[path = "protocol/search.rs"]
+mod search;
+
+#[cfg(test)]
+#[path = "protocol/search_tests.rs"]
+mod search_tests;
+
 /// The protocol's version: 2 added the search request.
 pub const VERSION: u32 = 2;
 /// Asks for every volume's names.
@@ -38,8 +45,7 @@ pub const SNAPSHOT: &[u8] = b"PFIX1 SNAPSHOT\n";
 pub const HELLO: &[u8] = b"PFIX1 HELLO\n";
 /// Asks for the names holding the terms; the body follows on the next lines.
 pub const SEARCH: &[u8] = b"PFIX1 SEARCH\n";
-/// Throws the names kept between requests away, so the next search reads
-/// the volumes again: what "reindex now" means to a service.
+/// Schedules a background rebuild, keeping the current search snapshot.
 pub const REFRESH: &[u8] = b"PFIX1 REFRESH\n";
 /// The root's parent.
 pub const NO_PARENT: u32 = u32::MAX;
@@ -141,61 +147,6 @@ impl Volume {
         self.entries.is_empty()
     }
 
-    /// Adds to `out` every entry whose name holds all `terms` (already
-    /// lowercased), as whole paths, until `limit` is reached. The paths are
-    /// built only for what matched.
-    pub fn search(&self, terms: &[String], limit: usize, out: &mut Vec<Hit>) {
-        if terms.is_empty() || out.len() >= limit {
-            return;
-        }
-        let wanted: Vec<&str> = terms.iter().map(String::as_str).collect();
-        // Scanned on every core: fourteen million names on one is a second.
-        let threads = std::thread::available_parallelism().map_or(4, usize::from).clamp(1, 16);
-        let chunk = self.entries.len().div_ceil(threads).max(1);
-        let matched: Vec<u32> = std::thread::scope(|scope| {
-            let workers: Vec<_> = self
-                .entries
-                .chunks(chunk)
-                .enumerate()
-                .map(|(part, entries)| {
-                    let wanted = &wanted;
-                    scope.spawn(move || {
-                        let mut found = Vec::new();
-                        for (offset, entry) in entries.iter().enumerate() {
-                            if entry.parent == NO_PARENT {
-                                continue;
-                            }
-                            let name = self.lower_of(entry);
-                            if wanted.iter().all(|term| name.contains(term)) {
-                                found.push((part * chunk + offset) as u32);
-                            }
-                        }
-                        found
-                    })
-                })
-                .collect();
-            // The order the table has: drives, then folders and files as the
-            // MFT listed them.
-            let mut all: Vec<u32> = workers.into_iter().flat_map(|worker| worker.join().unwrap_or_default()).collect();
-            all.sort_unstable();
-            all
-        });
-        for index in matched {
-            if out.len() >= limit {
-                return;
-            }
-            let Some(entry) = self.entries.get(index as usize) else {
-                continue;
-            };
-            out.push(Hit {
-                path: self.path(index),
-                dir: entry.dir,
-                size: entry.size,
-                modified: entry.modified,
-            });
-        }
-    }
-
     fn name_of(&self, entry: &Entry) -> &str {
         self.names.get(entry.start as usize..entry.start as usize + entry.len as usize).unwrap_or("")
     }
@@ -247,9 +198,18 @@ pub trait Sink {
 
 /// Writes a snapshot of `volumes`.
 pub fn write(out: &mut impl Write, volumes: &[Volume]) -> io::Result<()> {
+    write_volumes(out, volumes.iter(), volumes.len())
+}
+
+#[cfg(windows)]
+pub(crate) fn write_shared(out: &mut impl Write, volumes: &[std::sync::Arc<Volume>]) -> io::Result<()> {
+    write_volumes(out, volumes.iter().map(std::ops::Deref::deref), volumes.len())
+}
+
+fn write_volumes<'a>(out: &mut impl Write, volumes: impl Iterator<Item = &'a Volume>, count: usize) -> io::Result<()> {
     out.write_all(MAGIC)?;
     out.write_all(&VERSION.to_le_bytes())?;
-    out.write_all(&(volumes.len() as u32).to_le_bytes())?;
+    out.write_all(&(count as u32).to_le_bytes())?;
     for volume in volumes {
         out.write_all(&(volume.root.len() as u16).to_le_bytes())?;
         out.write_all(volume.root.as_bytes())?;

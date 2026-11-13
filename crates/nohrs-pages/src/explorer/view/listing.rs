@@ -12,6 +12,8 @@ pub mod list;
 pub mod row;
 /// The full-text search bar shown above the listing.
 pub mod search_bar;
+/// This PC overview and recent folders.
+mod home;
 
 /// Renders the file listing in the active view mode, with the search bar when
 /// search is visible.
@@ -36,24 +38,14 @@ pub fn render(
     };
     let file_list = with_wheel_zoom(page, file_list, listing_scrollbar(page), cx);
 
-    // This PC opens on how full each drive is, as Explorer's does.
-    let drives = page
-        .cwd
-        .eq_ignore_ascii_case(crate::explorer::places::THIS_PC)
-        .then(|| drive_cards(page, cx))
-        .flatten();
-    let file_list = match drives {
-        Some(cards) => div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(cards)
-            // Flex itself: the listing grows with `flex_1`, which in a
-            // plain block came out zero tall.
-            .child(div().flex_1().min_h(px(0.0)).flex().flex_col().child(file_list))
-            .into_any_element(),
-        None => file_list,
-    };
+    // 首页以卡片呈现磁盘；筛选和搜索时仍使用完整列表。
+    let overview = page.cwd.eq_ignore_ascii_case(crate::explorer::places::THIS_PC)
+        && !page.is_filtering() && page.search_results.is_none() && !page.search_visible
+        && !page.entries.is_empty()
+        && page.entries.iter().all(|entry| crate::explorer::drives::drive_root(&entry.path).is_some());
+    let file_list = if overview {
+        home::render(page, cx).unwrap_or(file_list)
+    } else { file_list };
 
     if page.search_visible {
         div()
@@ -66,103 +58,6 @@ pub fn render(
     } else {
         file_list
     }
-}
-
-/// The drives of This PC as cards: icon, name, a bar of the used space and
-/// "free of total". `None` until the listing holds a drive.
-fn drive_cards(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> Option<AnyElement> {
-    use nohrs_ui::theme::theme;
-    let drives: Vec<_> = page
-        .entries
-        .iter()
-        .filter(|entry| crate::explorer::drives::drive_root(&entry.path).is_some())
-        .map(|entry| (entry.name.clone(), entry.path.clone()))
-        .collect();
-    if drives.is_empty() {
-        return None;
-    }
-    let cards = drives.into_iter().enumerate().map(|(ix, (name, path))| {
-        let space = crate::explorer::drives::space(&path, cx);
-        let icon = page.thumbnails.icon(&path, true, 32, cx);
-        let opened = path.clone();
-        let menu_path = path.clone();
-        div()
-            .id(("drive-card", ix))
-            .w(px(250.0))
-            .p(px(10.0))
-            .flex()
-            .gap(px(10.0))
-            .items_center()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .bg(rgb(theme::bg_secondary()))
-            .cursor_pointer()
-            .hover(|this| this.bg(rgb(theme::bg_hover())))
-            .on_click(cx.listener(move |pane, _, window, cx| pane.change_dir(opened.clone(), window, cx)))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |pane, event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    if let Some(ix) = pane.filtered_entries.iter().position(|entry| entry.path == menu_path) {
-                        pane.select_single(ix);
-                        pane.open_context_menu(Some(ix), event.modifiers.shift, window, cx);
-                    }
-                }),
-            )
-            .child(match icon {
-                Some(image) => img(ImageSource::Render(image)).size(px(32.0)).flex_shrink_0().into_any_element(),
-                None => gpui_component::Icon::new(gpui_component::Icon::empty()).path("icons/database.svg")
-                    .size(px(28.0))
-                    .text_color(rgb(theme::gray_500()))
-                    .into_any_element(),
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(theme::fg()))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(name),
-                    )
-                    .child(usage_bar(space, 6.0))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme::fg_secondary()))
-                            .whitespace_nowrap()
-                            .child(space.map(|space| space.describe()).unwrap_or_default()),
-                    ),
-            )
-    });
-    Some(
-        div()
-            .flex_shrink_0()
-            .w_full()
-            .px(px(12.0))
-            .pt(px(10.0))
-            .pb(px(6.0))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::fg_secondary()))
-                    .child(nohrs_core::t!("Unidades e armazenamento")),
-            )
-            .child(div().flex().flex_wrap().gap(px(8.0)).children(cards))
-            .into_any_element(),
-    )
 }
 
 /// A bar of a drive's used space: the accent colour, red when nearly full,

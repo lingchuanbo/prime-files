@@ -7,45 +7,18 @@ use crate::explorer::types::StatusLevel;
 use crate::explorer::{ExplorerPane, zoom};
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::input::{Input, InputState};
-use gpui_component::{Icon, IconName, Sizable as _};
+use gpui_component::input::InputState;
+use gpui_component::{Icon, IconName};
 use nohrs_ui::theme::theme;
 
-/// Renders the explorer's bottom bar, laid out as File Pilot's: the filter
-/// field on the left (with its subfolder-search switch inside it), and on the
-/// right the counts and the view switch with its zoom.
+/// 底栏左侧显示搜索框，右侧显示状态、计数与视图缩放控件。
 pub fn render(
     page: &mut ExplorerPane,
     window: &mut Window,
     cx: &mut Context<ExplorerPane>,
 ) -> impl IntoElement + use<> {
-    let input = page.quick_input(window, cx);
     let files = page.entries.iter().filter(|entry| entry.kind != "dir").count();
-    let everything = page.everything_on();
-    let placeholder = if everything {
-        // While the index is read or walked, the field says so itself: the
-        // status beside it has no room when the window is split.
-        page.everything_status(cx).unwrap_or_else(|| t!("Buscar em todo o computador…").to_string())
-    } else if page.quick_recursive {
-        t!("Buscar nas subpastas…").to_string()
-    } else {
-        tf!("Filtrar {files} arquivos…", files = files)
-    };
-    input.update(cx, |state, cx| state.set_placeholder(placeholder, window, cx));
-
-    // Read during render, as the search bar does, so every keystroke narrows
-    // the listing or restarts the search.
-    let typed = input.read(cx).value().to_string();
-    if everything {
-        page.search_everything(typed, cx);
-    } else if page.quick_recursive {
-        page.search_subfolders(typed, cx);
-    } else if typed != page.name_filter {
-        page.name_filter = typed;
-        page.apply_filter();
-    }
-
-    let recursive = page.quick_recursive;
+    let search = super::quick_search::render(page, window, cx);
     // A file operation's report, a search's progress, or nothing.
     let everything_status = page.everything_status(cx);
     let (status, status_color) = match (page.status_for_footer(), &page.deep_search) {
@@ -109,92 +82,7 @@ pub fn render(
         .gap(px(6.0))
         .when(!framed, |this| this.bg(rgb(theme::footer_bg())).border_t_1())
         .border_color(rgb(theme::border()))
-        .child(
-            // The field: a search glyph, the text, and the switch between
-            // filtering here and searching subfolders, all in one box.
-            div()
-                .w(px(280.0))
-                .h(px(24.0))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap_1()
-                .pl(px(8.0))
-                .pr(px(2.0))
-                .rounded(px(4.0))
-                .bg(rgb(theme::bg()))
-                .border_1()
-                .border_color(rgb(theme::border()))
-                .child(
-                    // The glyph is the switch to "Everything" mode: every
-                    // name on the computer instead of this folder's.
-                    div()
-                        .id("quick-bar-everything")
-                        .size(px(20.0))
-                        .ml(px(-6.0))
-                        .flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.0))
-                        .cursor_pointer()
-                        .when(everything, |button| {
-                            button.bg(rgb(theme::accent())).text_color(rgb(theme::bg()))
-                        })
-                        .when(!everything, |button| {
-                            button
-                                .text_color(rgb(theme::muted()))
-                                .hover(|button| button.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg())))
-                        })
-                        .tooltip(|window, cx| {
-                            Tooltip::new(nohrs_core::shortcuts::with_keys(
-                                t!("Buscar em todo o computador"),
-                                nohrs_core::shortcuts::Action::SearchEverything,
-                            ))
-                            .build(window, cx)
-                        })
-                        .on_click(cx.listener(|page, _, window, cx| {
-                            let on = !page.everything_on();
-                            page.set_everything(on, cx);
-                            page.focus_quick_input(None, window, cx);
-                        }))
-                        .child(Icon::new(IconName::Search).size_3()),
-                )
-                .child(
-                    div().flex_1().min_w(px(0.0)).child(
-                        Input::new(&input)
-                            .xsmall()
-                            .appearance(false)
-                            .cleanable(true)
-                            .text_xs(),
-                    ),
-                )
-                .child(
-                    div()
-                        .id("quick-bar-subfolders")
-                        .size(px(20.0))
-                        .flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.0))
-                        .cursor_pointer()
-                        .when(recursive, |button| {
-                            button
-                                .bg(rgb(theme::accent()))
-                                .text_color(rgb(theme::bg()))
-                        })
-                        .when(!recursive, |button| {
-                            button
-                                .text_color(rgb(theme::muted()))
-                                .hover(|button| button.bg(rgb(theme::bg_hover())))
-                        })
-                        .on_click(cx.listener(|page, _, window, cx| {
-                            page.set_quick_recursive(!page.quick_recursive, window, cx);
-                        }))
-                        .child(Icon::new(IconName::FolderOpen).size_3()),
-                ),
-        )
+        .child(search)
         .child(
             div()
                 .flex_1()

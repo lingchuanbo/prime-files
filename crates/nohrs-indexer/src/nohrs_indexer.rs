@@ -5,8 +5,9 @@
 //! Reading a volume's MFT needs administrator rights, which Prime Files —
 //! installed per user — does not have. So a small Windows service, installed
 //! once with the person's consent (UAC), reads it and hands the names to the
-//! app over a local pipe. It is read-only and keeps nothing: each request
-//! reads the tables again. The pipe answers only the user who installed it
+//! app over a local pipe. It is read-only, keeps an in-memory snapshot and
+//! follows the NTFS change journal in the background. The pipe answers only
+//! the user who installed it
 //! (and administrators), and other users' profile folders are named but
 //! not listed, as the app's own walk can see them.
 //!

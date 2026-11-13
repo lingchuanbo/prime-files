@@ -37,6 +37,7 @@ mod state;
 pub(crate) mod thumbnails;
 pub(crate) mod waveforms;
 pub(crate) mod tags;
+mod workspace_icons;
 mod tree;
 mod types;
 /// Rendering of a single explorer pane: header, sidebar, listing, and preview.

@@ -23,11 +23,14 @@ pub mod listing;
 pub mod preview;
 /// The explorer sidebar with quick-access locations.
 pub mod sidebar;
+mod navigation_icons;
 
 /// The page a workspace (a tag, renamed) opens to: its folders as cards.
 pub mod workspace;
 /// The filter and subfolder-search field under the listing.
 pub mod quick_bar;
+/// Shared search field: in the header, or the compact footer.
+mod quick_search;
 /// The drawn context menus.
 pub mod menu;
 /// Sidebar, listing and preview side by side, with draggable dividers.

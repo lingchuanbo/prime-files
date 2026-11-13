@@ -30,6 +30,8 @@ const DIRECTORY: u16 = 2;
 // The 8.3 alias of a name that has a long one: the same entry again.
 const DOS_NAMESPACE: u8 = 2;
 
+pub(crate) mod updates;
+
 /// What one record says of itself.
 #[derive(Clone, Copy, Default)]
 pub struct Info {
@@ -62,6 +64,7 @@ pub struct Table {
     /// In the order read.
     pub names: Vec<Name>,
     text: String,
+    extended: std::collections::HashSet<u64>,
 }
 
 impl Table {
@@ -155,6 +158,9 @@ pub fn parse_record(table: &mut Table, number: u64, record: &mut [u8]) {
     // An extension record carries attributes of its base record that did
     // not fit there.
     let owner = if base == 0 { number } else { base };
+    if base != 0 {
+        table.extended.insert(owner);
+    }
     if base == 0
         && let Some(info) = table.info(owner)
     {
@@ -175,6 +181,9 @@ pub fn parse_record(table: &mut Table, number: u64, record: &mut [u8]) {
         let resident = attribute[8] == 0;
         let named = attribute[9] != 0;
         match kind {
+            ATTRIBUTE_LIST => {
+                table.extended.insert(owner);
+            }
             STANDARD_INFORMATION if resident => {
                 if let Some(modified) = resident_value(attribute).and_then(|value| u64_at(value, 8))
                     && let Some(info) = table.info(owner)
@@ -309,6 +318,9 @@ fn skipped(lowered: &str) -> bool {
 /// The volume's names as a tree from its root, parents first.
 pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volume {
     let count = table.records.len();
+    if !table.records.get(ROOT as usize).is_some_and(|info| info.in_use && info.dir) {
+        return crate::protocol::Volume::new(root);
+    }
     // Children by folder, without a vector per folder: count, then fill.
     let mut first = vec![0u32; count + 1];
     let live = |name: &Name| {
@@ -372,6 +384,8 @@ pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volu
 
 #[cfg(windows)]
 pub use volume::read_volume;
+#[cfg(windows)]
+pub(crate) use volume::read_volume_interruptible;
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -392,6 +406,10 @@ mod volume {
     /// Reads every record of the NTFS volume `root` ("C:"). Needs
     /// administrator rights: it opens the volume itself.
     pub fn read_volume(root: &str) -> io::Result<Table> {
+        read_volume_interruptible(root, || false)
+    }
+
+    pub(crate) fn read_volume_interruptible(root: &str, cancelled: impl Fn() -> bool) -> io::Result<Table> {
         let volume = std::fs::OpenOptions::new()
             .read(true)
             // Share everything: the volume is in use by everyone else.
@@ -438,6 +456,7 @@ mod volume {
             let mut offset = lcn.map(|lcn| lcn * cluster);
             let mut remaining = clusters * cluster;
             while remaining > 0 {
+                if cancelled() { return Err(io::Error::new(io::ErrorKind::Interrupted, "index rebuild stopped")); }
                 if done >= valid {
                     break 'runs;
                 }

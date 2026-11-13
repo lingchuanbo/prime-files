@@ -4,6 +4,16 @@
 //! has a row here. Sorted by key to keep duplicates easy to spot.
 
 pub(super) static STRINGS: &[(&str, &str, &str)] = &[
+    ("Alterar ícone", "Change icon", "Cambiar icono"),
+    ("Marcador", "Bookmark", "Marcador"),
+    ("Maleta", "Briefcase", "Maletín"),
+    ("Pessoa", "Person", "Persona"),
+    ("Camadas", "Layers", "Capas"),
+    ("Paleta", "Palette", "Paleta"),
+    ("Espadas", "Swords", "Espadas"),
+    ("Código", "Code", "Código"),
+    ("Quadro", "Kanban board", "Tablero"),
+    ("Etiqueta", "Tag", "Etiqueta"),
     ("\"Mostrar na pasta\" abre aqui", "\"Show in folder\" opens here", "\"Mostrar en la carpeta\" se abre aquí"),
     (
         "\"Settings\" do Listary não é um objeto",

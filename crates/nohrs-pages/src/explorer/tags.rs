@@ -18,6 +18,7 @@ use nohrs_core::telemetry::LogErr;
 use nohrs_services::fs::listing::FileEntryDto;
 use nohrs_store::{KvKey, KvStore, kv_key};
 use serde::{Deserialize, Serialize};
+use super::workspace_icons::WorkspaceIcon;
 
 const TAGS_KEY: KvKey = kv_key!("explorer.tags");
 
@@ -46,6 +47,14 @@ pub(crate) struct Tag {
     pub id: u32,
     pub name: String,
     pub color: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<WorkspaceIcon>,
+}
+
+impl Tag {
+    pub(crate) fn icon(&self) -> WorkspaceIcon {
+        self.icon.unwrap_or_else(|| WorkspaceIcon::for_legacy_id(self.id))
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -171,7 +180,7 @@ impl Tags {
     fn push_tag(&mut self, name: String, color: u32) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        self.tags.push(Tag { id, name, color });
+        self.tags.push(Tag { id, name, color, icon: None });
         id
     }
 
@@ -352,6 +361,14 @@ impl Tags {
         });
     }
 
+    pub(crate) fn set_icon(id: u32, icon: WorkspaceIcon, cx: &mut App) {
+        Self::change(cx, |tags| {
+            if let Some(tag) = tags.tags.iter_mut().find(|tag| tag.id == id) {
+                tag.icon = Some(icon);
+            }
+        });
+    }
+
     /// Deletes tag `id` and takes it off every item.
     pub(crate) fn delete(id: u32, cx: &mut App) {
         Self::change(cx, |tags| {
@@ -456,6 +473,56 @@ impl Tags {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_icons_keep_legacy_data_readable() {
+        let bytes = br#"{"tags":[{"id":1,"name":"Work","color":4096477}],"items":[["D:/work",[1]]],"next_id":2}"#;
+        let stored: Stored = serde_json::from_slice(bytes).expect("legacy workspace data");
+        assert_eq!(WorkspaceIcon::Briefcase, stored.tags[0].icon());
+        assert_eq!(None, stored.tags[0].icon);
+        assert_eq!(vec![("D:/work".to_string(), vec![1])], stored.items);
+        assert!(stored.orders.is_empty());
+        let unknown: Tag = serde_json::from_str(
+            r#"{"id":1,"name":"Work","color":4096477,"icon":"future-icon"}"#,
+        ).expect("unknown icon falls back without losing workspace");
+        assert_eq!(WorkspaceIcon::Tag, unknown.icon());
+    }
+
+    #[test]
+    fn every_workspace_icon_round_trips() {
+        for icon in WorkspaceIcon::ALL {
+            let tag = Tag { id: 7, name: "Design".into(), color: 0x14B8A6, icon: Some(icon) };
+            let bytes = serde_json::to_vec(&tag).expect("encode workspace");
+            assert_eq!(tag, serde_json::from_slice::<Tag>(&bytes).expect("decode workspace"));
+            assert!(nohrs_ui::assets::Assets::get(icon.path()).is_some(), "missing {}", icon.path());
+        }
+    }
+
+    #[gpui::test]
+    async fn changing_workspace_icon_survives_reload(cx: &mut gpui::TestAppContext) {
+        let store: Arc<dyn KvStore> = Arc::new(nohrs_store::RedbKvStore::open_in_memory(
+            &nohrs_store::StoreLogConfig::default(),
+        ).expect("in-memory store"));
+        let original = cx.update(|cx| {
+            Tags::install(Some(store.clone()), cx);
+            Tags::toggle(&["D:/work".into()], 1, cx);
+            let original = Tags::get(1, cx).expect("workspace");
+            Tags::set_icon(1, WorkspaceIcon::Swords, cx);
+            original
+        });
+        cx.run_until_parked();
+        cx.background_executor.timer(SAVE_DEBOUNCE).await;
+        cx.run_until_parked();
+        cx.update(|cx| {
+            cx.remove_global::<Tags>();
+            Tags::install(Some(store.clone()), cx);
+            let restored = Tags::get(1, cx).expect("restored workspace");
+            assert_eq!(WorkspaceIcon::Swords, restored.icon());
+            assert_eq!(original.name, restored.name);
+            assert_eq!(original.color, restored.color);
+            assert!(Tags::all_have(&["D:/work".into()], 1, cx));
+        });
+    }
 
     #[gpui::test]
     fn cards_keep_the_order_they_are_dragged_into(cx: &mut gpui::TestAppContext) {

@@ -161,8 +161,10 @@ pub(crate) fn page(
     cx: &mut Context<ExplorerPane>,
 ) -> AnyElement {
     let icon_px = 32;
-    let name = tags::Tags::get(tag, cx).map(|tag| tag.name).unwrap_or_default();
-    let color = tags::Tags::get(tag, cx).map(|tag| tag.color).unwrap_or(theme::accent());
+    let workspace = tags::Tags::get(tag, cx);
+    let name = workspace.as_ref().map(|tag| tag.name.clone()).unwrap_or_default();
+    let color = workspace.as_ref().map(|tag| tag.color).unwrap_or(theme::accent());
+    let icon = workspace.as_ref().map(|tag| tag.icon()).unwrap_or_default();
 
     let header = div()
         .flex()
@@ -177,9 +179,7 @@ pub(crate) fn page(
                 .rounded(px(14.0))
                 .bg(rgb(color))
                 .child(
-                    Icon::new(IconName::Folder)
-                        .size_6()
-                        .text_color(rgb(0xFFFFFF)),
+                    svg().path(icon.path()).size(px(24.0)).text_color(rgb(0xFFFFFF)),
                 ),
         )
         .child(

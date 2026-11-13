@@ -6,8 +6,9 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{Icon, IconName, Sizable as _};
 use nohrs_ui::theme::theme;
+use super::navigation_icons;
 
-const ROW_HEIGHT: f32 = 28.0;
+const ROW_HEIGHT: f32 = 32.0;
 const ICON_SIZE: f32 = 16.0;
 /// Width of the expand chevron's column; each tree level indents by it.
 const CHEVRON_WIDTH: f32 = 16.0;
@@ -37,9 +38,7 @@ impl Render for FavoriteDragPreview {
     }
 }
 
-/// Renders the sidebar the way Explorer's navigation pane is laid out: Quick
-/// access, then This PC as a tree of drives and folders, then Network and
-/// Linux. Names and icons come from the Shell, so they match Explorer's.
+/// 工作空间位于首组，其后为快捷访问、收藏夹、此电脑和网络目录。
 pub fn render(
     page: &mut ExplorerPane,
     window: &mut Window,
@@ -55,8 +54,11 @@ pub fn render(
         return render_band(page, &places, icon_px, cx).into_any_element();
     }
 
-    let mut list = div().flex().flex_col().px(px(6.0)).gap(px(1.0));
+    let mut list = div().flex().flex_col().px(px(10.0)).gap(px(3.0));
+    list = list.child(brand());
+    list = tag_rows(page, list, cx);
     if page.show_quick_access {
+        list = list.child(section_label(t!("Acesso rápido").to_string()));
         for place in &places.quick_access {
             list = list.child(row(page, place, 0, None, icon_px, cx));
         }
@@ -95,16 +97,29 @@ pub fn render(
     if !places.other.iter().any(|place| place.parsing_name.eq_ignore_ascii_case(crate::explorer::network::NETWORK)) {
         list = network_rows(page, list, cx);
     }
-    list = tag_rows(page, list, cx);
 
     div()
         .id("sidebar")
         .size_full()
-        .when(!page.framed.sidebar, |this| this.bg(rgb(theme::bg())))
+        .when(!page.framed.sidebar, |this| this.bg(rgb(theme::toolbar_bg())))
         .py(px(8.0))
         .overflow_y_scroll()
         .child(list)
         .into_any_element()
+}
+
+fn brand() -> impl IntoElement {
+    div().flex().items_center().gap_2().px(px(8.0)).pt(px(6.0)).pb(px(18.0))
+        .child(div().size(px(30.0)).rounded(px(9.0)).flex().items_center().justify_center()
+            .bg(rgb(theme::accent_subtle()))
+            .child(Icon::new(IconName::Folder).size_4().text_color(rgb(theme::accent()))))
+        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(theme::fg())).child("Prime Files"))
+}
+
+fn section_label(label: String) -> impl IntoElement {
+    div().px(px(8.0)).pb(px(6.0)).text_xs().font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(theme::muted())).child(label)
 }
 
 // The sidebar as a band: Quick access, the drives and the other places, each
@@ -127,6 +142,57 @@ fn render_band(
     groups.push((pc_name, places.drives.clone()));
     groups.push((String::new(), places.other.clone()));
     let mut band = div().flex().flex_col().gap(px(6.0)).px(px(10.0));
+    let tags = Tags::all(cx);
+    if !tags.is_empty() {
+        let chips: Vec<AnyElement> = tags
+            .into_iter()
+            .map(|tag| {
+                let location = crate::explorer::tags::location(tag.id);
+                let active = page.cwd == location;
+                let id = tag.id;
+                div()
+                    .id(SharedString::from(format!("tag-chip-{}", tag.id)))
+                    .h(px(ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .cursor_pointer()
+                    .when(active, |this| this.bg(rgb(theme::accent_subtle())))
+                    .when(!active, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
+                    .on_click(cx.listener(move |this, _, window, cx| this.change_dir(location.clone(), window, cx)))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.open_tag_menu(id, window, cx);
+                        }),
+                    )
+                    .child(navigation_icons::workspace(&tag))
+                    .child(div().text_sm().whitespace_nowrap().text_color(rgb(theme::fg())).child(tag.name))
+                    .into_any_element()
+            })
+            .collect();
+        band = band.child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .w(px(110.0))
+                        .flex_shrink_0()
+                        .pt(px(6.0))
+                        .text_xs()
+                        .text_color(rgb(theme::muted()))
+                        .child(t!("Espaços de trabalho")),
+                )
+                .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().gap(px(4.0)).children(chips)),
+        );
+    }
     for (index, (name, members)) in groups.into_iter().enumerate() {
         if members.is_empty() {
             continue;
@@ -194,57 +260,6 @@ fn render_band(
         );
     }
 
-    let tags = Tags::all(cx);
-    if !tags.is_empty() {
-        let chips: Vec<AnyElement> = tags
-            .into_iter()
-            .map(|tag| {
-                let location = crate::explorer::tags::location(tag.id);
-                let active = page.cwd == location;
-                let id = tag.id;
-                div()
-                    .id(SharedString::from(format!("tag-chip-{}", tag.id)))
-                    .h(px(ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .cursor_pointer()
-                    .when(active, |this| this.bg(rgb(theme::accent_subtle())))
-                    .when(!active, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
-                    .on_click(cx.listener(move |this, _, window, cx| this.change_dir(location.clone(), window, cx)))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.open_tag_menu(id, window, cx);
-                        }),
-                    )
-                    .child(div().size(px(10.0)).rounded_full().bg(rgb(tag.color)))
-                    .child(div().text_sm().whitespace_nowrap().text_color(rgb(theme::fg())).child(tag.name))
-                    .into_any_element()
-            })
-            .collect();
-        band = band.child(
-            div()
-                .flex()
-                .items_start()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .w(px(110.0))
-                        .flex_shrink_0()
-                        .pt(px(6.0))
-                        .text_xs()
-                        .text_color(rgb(theme::muted()))
-                        .child(t!("Espaços de trabalho")),
-                )
-                .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().gap(px(4.0)).children(chips)),
-        );
-    }
     div()
         .id("sidebar")
         .size_full()
@@ -259,17 +274,14 @@ fn chip(
     page: &mut ExplorerPane,
     place: &Place,
     group: usize,
-    icon_px: u32,
+    _icon_px: u32,
     cx: &mut Context<ExplorerPane>,
 ) -> impl IntoElement + use<> {
     let active = place
         .path
         .as_deref()
         .is_some_and(|path| crate::explorer::same_path(path, &page.cwd));
-    let icon = match page.sidebar.icons.icon_in(&place.parsing_name, true, icon_px, |pane| &mut pane.sidebar.icons, cx) {
-        Some(image) => img(ImageSource::Render(image)).size(px(ICON_SIZE)).flex_shrink_0().into_any_element(),
-        None => Icon::new(IconName::Folder).size_4().text_color(rgb(theme::gray_500())).into_any_element(),
-    };
+    let icon = navigation_icons::place(place);
     let opened = place.clone();
     let menu = place.clone();
     div()
@@ -316,7 +328,7 @@ fn network_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<Explore
         list = list.child(
             simple_row(
                 SharedString::from(format!("network-place-{address}")),
-                Icon::new(Icon::empty()).path("icons/server.svg").size_4().text_color(rgb(theme::muted())).into_any_element(),
+                navigation_icons::glyph("icons/aura-server.svg", 0x38BDF8),
                 crate::explorer::network::display_name(&address),
                 active,
                 1,
@@ -407,7 +419,7 @@ fn tag_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<ExplorerPan
         list = list.child(
             simple_row(
                 SharedString::from(format!("tag-{}", tag.id)),
-                div().size(px(10.0)).mx(px(3.0)).rounded_full().bg(rgb(tag.color)).into_any_element(),
+                navigation_icons::workspace(&tag).into_any_element(),
                 tag.name.clone(),
                 active,
                 0,
@@ -502,31 +514,14 @@ fn row(
     place: &Place,
     depth: usize,
     expandable: Option<bool>,
-    icon_px: u32,
+    _icon_px: u32,
     cx: &mut Context<ExplorerPane>,
 ) -> impl IntoElement + use<> {
     let active = place
         .path
         .as_deref()
         .is_some_and(|path| crate::explorer::same_path(path, &page.cwd));
-    let icon = page.sidebar.icons.icon_in(
-        &place.parsing_name,
-        // Places are folders, drives and shell locations, each with its own.
-        true,
-        icon_px,
-        |pane| &mut pane.sidebar.icons,
-        cx,
-    );
-    let icon = match icon {
-        Some(image) => img(ImageSource::Render(image))
-            .size(px(ICON_SIZE))
-            .flex_shrink_0()
-            .into_any_element(),
-        None => Icon::new(IconName::Folder)
-            .size_4()
-            .text_color(rgb(theme::gray_500()))
-            .into_any_element(),
-    };
+    let icon = navigation_icons::place(place);
     let chevron = match expandable {
         Some(open) => {
             let toggled = place.clone();
@@ -826,12 +821,7 @@ fn favorite_submenu_row(
             }),
         )
         .child(chevron)
-        .child(
-            Icon::new(Icon::empty())
-                .path("icons/folder.svg")
-                .size_4()
-                .text_color(rgb(theme::gray_500())),
-        )
+        .child(navigation_icons::path(&item.path))
         .child(
             div()
                 .flex_1()
@@ -851,14 +841,11 @@ fn favorite_link_row(
     page: &mut ExplorerPane,
     item: &crate::explorer::favorites::FavoriteItem,
     depth: usize,
-    icon_px: u32,
+    _icon_px: u32,
     cx: &mut Context<ExplorerPane>,
 ) -> Stateful<Div> {
     let active = crate::explorer::same_path(&item.path, &page.cwd);
-    let icon = match page.sidebar.icons.icon_in(&item.path, true, icon_px, |pane| &mut pane.sidebar.icons, cx) {
-        Some(image) => img(ImageSource::Render(image)).size(px(ICON_SIZE)).flex_shrink_0().into_any_element(),
-        None => Icon::new(IconName::Folder).size_4().text_color(rgb(theme::gray_500())).into_any_element(),
-    };
+    let icon = navigation_icons::path(&item.path);
     let path = item.path.clone();
     let id = item.id;
     div()
@@ -912,14 +899,11 @@ fn favorite_link_row(
 fn favorite_chip(
     page: &mut ExplorerPane,
     item: &crate::explorer::favorites::FavoriteItem,
-    icon_px: u32,
+    _icon_px: u32,
     cx: &mut Context<ExplorerPane>,
 ) -> Stateful<Div> {
     let active = crate::explorer::same_path(&item.path, &page.cwd);
-    let icon = match page.sidebar.icons.icon_in(&item.path, true, icon_px, |pane| &mut pane.sidebar.icons, cx) {
-        Some(image) => img(ImageSource::Render(image)).size(px(ICON_SIZE)).flex_shrink_0().into_any_element(),
-        None => Icon::new(IconName::Folder).size_4().text_color(rgb(theme::gray_500())).into_any_element(),
-    };
+    let icon = navigation_icons::path(&item.path);
     let path = item.path.clone();
     let id = item.id;
     div()

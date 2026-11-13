@@ -14,9 +14,8 @@ use std::fs::File;
 use std::io::{self, BufWriter, Read as _, Write as _};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
     ERROR_CALL_NOT_IMPLEMENTED, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree, NO_ERROR,
@@ -42,9 +41,13 @@ use windows::core::{HSTRING, PWSTR};
 
 use crate::{PIPE_NAME, SERVICE_NAME, mft, protocol};
 
+mod journal;
+mod index;
+
 static ALLOWED: OnceLock<String> = OnceLock::new();
 static STATUS: AtomicIsize = AtomicIsize::new(0);
 static STOPPING: AtomicBool = AtomicBool::new(false);
+static INDEX: OnceLock<Arc<index::Index>> = OnceLock::new();
 
 /// Runs as the service the Service Control Manager started, answering the
 /// user `allowed_sid` (validated by the caller).
@@ -90,7 +93,26 @@ unsafe extern "system" fn service_main(_count: u32, _arguments: *mut PWSTR) {
     }
     set_state(SERVICE_RUNNING);
     log("started");
+    let index = INDEX.get_or_init(|| Arc::new(index::Index::default())).clone();
+    let worker = match std::thread::Builder::new().name("prime-index-updates".into()).spawn({
+        let index = index.clone();
+        move || {
+            if std::panic::catch_unwind(|| index::run(&index)).is_err() {
+                log("index worker panicked");
+                index.stop();
+            }
+        }
+    }) {
+        Ok(worker) => worker,
+        Err(error) => {
+            log(&format!("could not start index worker: {error}"));
+            set_state(SERVICE_STOPPED);
+            return;
+        }
+    };
     serve();
+    index.stop();
+    if worker.join().is_err() { log("index worker join failed"); }
     log("stopped");
     set_state(SERVICE_STOPPED);
 }
@@ -99,6 +121,7 @@ unsafe extern "system" fn control(code: u32, _kind: u32, _data: *mut c_void, _co
     match code {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             STOPPING.store(true, Ordering::SeqCst);
+            if let Some(index) = INDEX.get() { index.stop(); }
             set_state(SERVICE_STOP_PENDING);
             // The loop waits in ConnectNamedPipe: a connection wakes it.
             std::thread::spawn(|| {
@@ -185,21 +208,22 @@ fn answer(pipe: &File) -> io::Result<()> {
         out.write_all(format!("PFIX1 OK {}\n", protocol::VERSION).as_bytes())?;
         out.flush()?;
     } else if request == protocol::SNAPSHOT {
-        let volumes = snapshot();
-        protocol::write(&mut out, &volumes)?;
+        match cached() {
+            Ok(volumes) => protocol::write_shared(&mut out, &volumes)?,
+            Err(error) => protocol::write_error(&mut out, &error.to_string())?,
+        }
     } else if request == protocol::REFRESH {
-        // The next search reads the volumes again.
-        let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        *cache = None;
-        drop(cache);
+        if let Some(index) = INDEX.get() { index.refresh(); }
         out.write_all(format!("PFIX1 OK {}\n", protocol::VERSION).as_bytes())?;
         out.flush()?;
     } else if request == protocol::SEARCH {
         // The terms and the count were written after the request line.
         let body = read_request_body(reader)?;
         let (terms, limit) = protocol::read_search_request(&mut &body[..])?;
-        let hits = search(&terms, limit);
-        protocol::write_hits(&mut out, &hits)?;
+        match search(&terms, limit) {
+            Ok(hits) => protocol::write_hits(&mut out, &hits)?,
+            Err(error) => protocol::write_error(&mut out, &error.to_string())?,
+        }
     } else {
         protocol::write_error(&mut out, "unknown request")?;
     }
@@ -234,41 +258,19 @@ fn read_request_body(mut pipe: &File) -> io::Result<Vec<u8>> {
     Ok(body)
 }
 
-/// The names the last search could ask about, kept between requests: what a
-/// search needs is the whole volume, which costs a minute to read from the
-/// MFT, so it is read once and refreshed behind the searches going on.
-static CACHE: Mutex<Option<(Instant, Arc<Vec<protocol::Volume>>)>> = Mutex::new(None);
-/// How old the kept names may be before a search rebuilds them.
-const REFRESH_AFTER: Duration = Duration::from_secs(30 * 60);
-
-fn cached() -> Arc<Vec<protocol::Volume>> {
-    {
-        let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((built, volumes)) = cache.as_ref()
-            && built.elapsed() < REFRESH_AFTER
-        {
-            return volumes.clone();
-        }
-        // Read here, with the lock held: a second search waits a minute for
-        // this one rather than reading the MFT twice at once.
-        let started = Instant::now();
-        let volumes = Arc::new(snapshot());
-        let total: usize = volumes.iter().map(protocol::Volume::len).sum();
-        log(&format!("search index: {total} names in {} ms", started.elapsed().as_millis()));
-        *cache = Some((Instant::now(), volumes.clone()));
-        volumes
-    }
+fn cached() -> io::Result<Arc<Vec<Arc<protocol::Volume>>>> {
+    INDEX.get().ok_or_else(|| io::Error::other("index worker not running"))?.snapshot()
 }
 
 /// The paths holding every one of `terms`, whole, ignoring case, limited to
 /// `limit` hits. The name of every entry is checked before the path is built:
 /// a path is walked up its parents, which the millions of names that do not
 /// match must not pay for.
-fn search(terms: &[String], limit: u32) -> Vec<protocol::Hit> {
+fn search(terms: &[String], limit: u32) -> io::Result<Vec<protocol::Hit>> {
     if terms.is_empty() || limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let volumes = cached();
+    let volumes = cached()?;
     let mut hits = Vec::new();
     for volume in volumes.iter() {
         volume.search(terms, limit as usize, &mut hits);
@@ -276,27 +278,16 @@ fn search(terms: &[String], limit: u32) -> Vec<protocol::Hit> {
             break;
         }
     }
-    hits
+    Ok(hits)
 }
 
-/// Every fixed NTFS volume's names. A volume that cannot be read is left
-/// out, and the app walks it as before.
+/// Reads a standalone snapshot; pipe requests use the background index instead.
 pub fn snapshot() -> Vec<protocol::Volume> {
     let profile = ALLOWED.get().and_then(|sid| profile_path(sid));
-    let mut volumes = Vec::new();
-    for root in ntfs_volumes() {
-        let started = Instant::now();
-        match mft::read_volume(&root) {
-            Ok(table) => {
-                let policy = policy_for(&root, profile.as_deref());
-                let volume = mft::tree(&table, &root, &policy);
-                log(&format!("{root}: {} names in {} ms", volume.len(), started.elapsed().as_millis()));
-                volumes.push(volume);
-            }
-            Err(error) => log(&format!("{root}: {error}")),
-        }
-    }
-    volumes
+    ntfs_volumes().into_iter().filter_map(|root| match mft::read_volume(&root) {
+        Ok(table) => Some(mft::tree(&table, &root, &policy_for(&root, profile.as_deref()))),
+        Err(error) => { log(&format!("{root}: {error}")); None }
+    }).collect()
 }
 
 // Which profile folders of `root` are listed: the user's own and Public.

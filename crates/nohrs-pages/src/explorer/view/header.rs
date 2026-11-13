@@ -106,14 +106,14 @@ pub fn render(
     let entry_count = page.filtered_entries.len();
 
     let framed = page.framed.header;
-    div()
-        .when(!framed, |this| this.bg(rgb(theme::bg())).border_b_1())
+    let navigation = div()
+        .when(!framed, |this| this.bg(rgb(theme::toolbar_bg())))
         .border_color(rgb(theme::border()))
         .flex()
         .items_center()
         .text_color(rgb(theme::fg()))
         .px(px(16.0))
-        .py(px(10.0))
+        .py(px(12.0))
         .gap_2()
         .child(
             div()
@@ -204,7 +204,12 @@ pub fn render(
             None => div()
                 .id("path-bar")
                 .flex_1()
-                .h(px(28.0))
+                .h(px(34.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .bg(rgb(theme::bg_secondary()))
+                .border_1()
+                .border_color(rgb(theme::border()))
                 .flex()
                 .items_center()
                 .overflow_hidden()
@@ -216,7 +221,9 @@ pub fn render(
                 }))
                 .child(bc)
                 .into_any_element(),
-        })
+        });
+    let actions = div()
+        .flex().items_center().flex_shrink_0()
         .child(
             div()
                 .flex()
@@ -233,11 +240,13 @@ pub fn render(
                 )
                 .child(render_recent(page, cx))
                 .child(render_open_in(page, cx))
+                .child(filter_button(page, cx))
+                .child(new_folder_button(cx))
                 .child(render_view_mode_toggle(page, cx))
                 .child(
                     // The preview switch sits up here, beside the view modes,
                     // where it is seen: the preview is one of the explorer's
-                    // most used parts. The filter menu went to the bottom bar.
+                    // most used parts. Filters share the same action row.
                     ListItem::new("preview-toggle")
                         .px(px(8.0))
                         .py(px(6.0))
@@ -259,7 +268,30 @@ pub fn render(
                                 }),
                         ),
                 ),
-        )
+        );
+    navigation.flex_shrink_0()
+        .when(!framed, |style| style.border_b_1())
+        .child(actions)
+}
+
+fn new_folder_button(cx: &mut Context<ExplorerPane>) -> impl IntoElement + use<> {
+    ListItem::new("toolbar-new-folder")
+        .px(px(10.0)).py(px(6.0)).rounded(px(6.0)).flex_shrink_0()
+        .bg(rgb(theme::accent_subtle())).text_color(rgb(theme::accent()))
+        .on_click(cx.listener(|page, _, window, cx| page.create_new_folder(window, cx)))
+        .child(div().flex().items_center().gap_2()
+            .child(Icon::new(IconName::Plus).size_4())
+            .child(div().text_sm().whitespace_nowrap().child(t!("Nova pasta"))))
+}
+
+fn filter_button(page: &ExplorerPane, cx: &mut Context<ExplorerPane>) -> impl IntoElement + use<> {
+    ListItem::new("toolbar-filter")
+        .px(px(8.0)).py(px(6.0)).rounded(px(6.0))
+        .text_color(rgb(if page.is_filtering() || page.filter_bar_visible {
+            theme::accent()
+        } else { theme::fg_secondary() }))
+        .on_click(cx.listener(|page, _, window, cx| page.open_filter_menu(window, cx)))
+        .child(Icon::new(Icon::empty()).path("icons/funnel.svg").size_4())
 }
 
 // "Recent folders", beside the button that opens the folder elsewhere: the

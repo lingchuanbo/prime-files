@@ -252,6 +252,7 @@ const FIRST_TAG: u32 = 0x900;
 const TAG_IDS: u32 = 0x400;
 // A colour in a tag's menu: this plus its place in `tags::COLORS`.
 const FIRST_TAG_COLOR: u32 = 0x8F0;
+const FIRST_TAG_ICON: u32 = 0x8D0;
 // A favorite folder in the directory menu (Ctrl+D): this plus its place
 // among the shortcuts, counted depth first. Past the tags' range, below the
 // Shell's.
@@ -506,6 +507,10 @@ impl ExplorerPane {
                                 .and_then(|index| super::tags::COLORS.get(index as usize))
                             {
                                 super::tags::Tags::recolor(tag, *color, cx);
+                            } else if let Some(icon) = id.checked_sub(FIRST_TAG_ICON)
+                                .and_then(|index| super::workspace_icons::WorkspaceIcon::ALL.get(index as usize))
+                            {
+                                super::tags::Tags::set_icon(tag, *icon, cx);
                             }
                         }
                     }
@@ -649,7 +654,13 @@ impl ExplorerPane {
         let Some(hwnd) = crate::ipc::window_hwnd(window) else {
             return;
         };
-        let current = super::tags::Tags::get(tag, cx).map(|tag| tag.color);
+        let workspace = super::tags::Tags::get(tag, cx);
+        let current = workspace.as_ref().map(|tag| tag.color);
+        let current_icon = workspace.as_ref().map(|tag| tag.icon());
+        let icons = super::workspace_icons::WorkspaceIcon::ALL.iter().enumerate()
+            .map(|(index, icon)| Entry::radio(FIRST_TAG_ICON + index as u32, icon.label(), current_icon == Some(*icon))
+                .with_icon(icon.path()))
+            .collect();
         let colors = super::tags::COLORS
             .iter()
             .enumerate()
@@ -659,6 +670,7 @@ impl ExplorerPane {
             .collect();
         let own = vec![
             Entry::command(Command::RenameTag as u32, t!("Renomear")).with_icon("icons/pencil.svg"),
+            Entry::submenu(t!("Alterar ícone"), icons).with_icon("icons/aura-layers.svg"),
             Entry::submenu(t!("Cor"), colors).with_icon("icons/palette-2.svg"),
             Entry::Separator,
             Entry::command(Command::DeleteTag as u32, t!("Excluir espaço de trabalho")).with_icon("icons/trash-2.svg"),

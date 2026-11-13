@@ -4,6 +4,16 @@
 //! that every key has a row here and that placeholders survive.
 
 pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
+    ("Alterar ícone", ["Changer l’icône", "Symbol ändern", "Cambia icona", "Изменить значок", "アイコンを変更", "更换图标"]),
+    ("Marcador", ["Signet", "Lesezeichen", "Segnalibro", "Закладка", "ブックマーク", "书签"]),
+    ("Maleta", ["Mallette", "Aktentasche", "Valigetta", "Портфель", "ブリーフケース", "公文包"]),
+    ("Pessoa", ["Personne", "Person", "Persona", "Пользователь", "ユーザー", "个人"]),
+    ("Camadas", ["Calques", "Ebenen", "Livelli", "Слои", "レイヤー", "图层"]),
+    ("Paleta", ["Palette", "Palette", "Tavolozza", "Палитра", "パレット", "调色板"]),
+    ("Espadas", ["Épées", "Schwerter", "Spade", "Мечи", "剣", "双剑"]),
+    ("Código", ["Code", "Code", "Codice", "Код", "コード", "代码"]),
+    ("Quadro", ["Tableau", "Kanban-Tafel", "Bacheca", "Доска", "ボード", "看板"]),
+    ("Etiqueta", ["Étiquette", "Tag", "Etichetta", "Метка", "タグ", "标签"]),
     (
         "Como você vê os arquivos",
         [
