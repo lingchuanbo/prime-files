@@ -844,6 +844,7 @@ impl SettingsPage {
 
         let ring = div()
             .id("background-wheel-ring")
+            .debug_selector(|| "background-wheel-ring".into())
             .relative()
             .size(px(color_wheel::SIZE))
             .flex_shrink_0()
@@ -866,6 +867,7 @@ impl SettingsPage {
 
         let brightness = div()
             .id("background-wheel-brightness")
+            .debug_selector(|| "background-wheel-brightness".into())
             .relative()
             .w(px(220.0))
             .h(px(16.0))
@@ -2490,15 +2492,13 @@ fn pointer_events(page: Entity<SettingsPage>, part: WheelPart) -> AnyElement {
         },
     )
     .absolute()
+    // 显式覆盖控件，避免事件层按前面的色轮图片定位到下方。
+    .top(px(0.0))
+    .left(px(0.0))
     .size_full()
     .into_any_element()
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn search_ignores_case_and_accents() {
-        assert_eq!(super::fold("Áudio nos ÍCONES"), "audio nos icones");
-        assert!(super::fold("Configuração").contains(&super::fold("configuracao")));
-    }
-}
+#[path = "settings/tests.rs"]
+mod tests;
