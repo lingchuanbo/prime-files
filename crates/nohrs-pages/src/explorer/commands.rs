@@ -52,9 +52,11 @@ impl ExplorerPane {
             }
             Action::DirectoryMenu => self.open_favorites_menu(window, cx),
             // The preview pane, on the side of the listing: the same key
-            // shows it and hides it again.
+            // shows it and hides it again, and the choice is kept for the
+            // next start (the header's button does the same).
             Action::TogglePreview => {
                 self.preview_visible = !self.preview_visible;
+                super::view::panels::save_layout("preview_visible", self.preview_visible.to_string(), cx);
                 cx.notify();
             }
             Action::SelectAll => {

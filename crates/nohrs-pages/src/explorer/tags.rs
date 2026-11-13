@@ -53,6 +53,10 @@ struct Stored {
     tags: Vec<Tag>,
     /// Each item as last written, with its tags' ids.
     items: Vec<(String, Vec<u32>)>,
+    /// The order each workspace keeps its items in, by [`item_key`]; an item
+    /// missing from its list comes after those that are there.
+    #[serde(default)]
+    orders: HashMap<u32, Vec<String>>,
     next_id: u32,
 }
 
@@ -62,6 +66,9 @@ pub(crate) struct Tags {
     tags: Vec<Tag>,
     /// By [`item_key`]: the path as written and its tags' ids.
     items: HashMap<String, (String, Vec<u32>)>,
+    /// The order each workspace shows its items in: the card order of its
+    /// page, which a drag sets.
+    orders: HashMap<u32, Vec<String>>,
     next_id: u32,
     store: Option<Arc<dyn KvStore>>,
     save: Option<Task<()>>,
@@ -141,6 +148,7 @@ impl Tags {
             Some(stored) => {
                 tags.tags = stored.tags;
                 tags.next_id = stored.next_id;
+                tags.orders = stored.orders;
                 for (path, ids) in stored.items {
                     tags.items.insert(item_key(&path), (path, ids));
                 }
@@ -167,13 +175,41 @@ impl Tags {
         id
     }
 
-    // Hands the listing thread the paths of each tag.
+    // Hands the listing thread the paths of each tag, each in the order its
+    // workspace keeps: the order the page shows now, then the one saved, then
+    // whatever is new — so a drag's order survives the publish after it.
     fn publish(&self) {
-        let mut tagged: HashMap<u32, Vec<String>> = HashMap::new();
+        let mut fresh: HashMap<u32, Vec<String>> = HashMap::new();
         for (path, ids) in self.items.values() {
             for id in ids {
-                tagged.entry(*id).or_default().push(path.clone());
+                fresh.entry(*id).or_default().push(path.clone());
             }
+        }
+        let previous: HashMap<u32, Vec<String>> =
+            TAGGED.lock().ok().and_then(|slot| slot.clone()).unwrap_or_default();
+        let mut tagged: HashMap<u32, Vec<String>> = HashMap::new();
+        for (id, paths) in fresh {
+            let mut arranged: Vec<String> = Vec::with_capacity(paths.len());
+            for source in [previous.get(&id), self.orders.get(&id)].into_iter().flatten() {
+                for key in source {
+                    let key = item_key(key);
+                    if let Some(kept) = paths.iter().find(|path| item_key(path) == key)
+                        && !arranged.iter().any(|arranged| item_key(arranged) == key)
+                    {
+                        arranged.push(kept.clone());
+                    }
+                }
+            }
+            // Whatever neither source names yet, in a stable order: a tag
+            // with no saved order still lists the same way every time.
+            let mut rest: Vec<String> = paths
+                .iter()
+                .filter(|path| !arranged.iter().any(|kept| item_key(kept) == item_key(path)))
+                .cloned()
+                .collect();
+            rest.sort_by_key(|path| item_key(path));
+            arranged.extend(rest);
+            tagged.insert(id, arranged);
         }
         match TAGGED.lock() {
             Ok(mut slot) => *slot = Some(tagged),
@@ -256,6 +292,33 @@ impl Tags {
         });
     }
 
+    /// Puts tag `id` on every one of `paths` that does not carry it yet, and
+    /// leaves those that do: a workspace taking folders in, never out.
+    pub(crate) fn add(paths: &[String], id: u32, cx: &mut App) {
+        Self::change(cx, |tags| {
+            for path in paths {
+                let key = item_key(path);
+                let (_, ids) = tags.items.entry(key).or_insert_with(|| (path.clone(), Vec::new()));
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        });
+    }
+
+    /// Takes tag `id` off `path` alone, the rest of the tag left as it is.
+    pub(crate) fn remove_path(path: &str, id: u32, cx: &mut App) {
+        let key = item_key(path);
+        Self::change(cx, move |tags| {
+            if let Some((_, ids)) = tags.items.get_mut(&key) {
+                ids.retain(|tag| *tag != id);
+                if ids.is_empty() {
+                    tags.items.remove(&key);
+                }
+            }
+        });
+    }
+
     /// Makes a tag with the next colour and puts it on `paths`. Returns its id.
     pub(crate) fn create(name: String, paths: &[String], cx: &mut App) -> u32 {
         let mut created = 0;
@@ -300,6 +363,39 @@ impl Tags {
         });
     }
 
+    /// Moves the item `from` to just after `after` (or to the front with
+    /// `None`) in the order workspace `id` shows them: what dragging a card
+    /// onto another means.
+    pub(crate) fn reorder(id: u32, from: &str, after: Option<&str>, cx: &mut App) {
+        let from_key = item_key(from);
+        let after_key = after.map(item_key);
+        // Moved in the order the listing reads, then remembered for the next
+        // start: the publish the change runs keeps what is there.
+        let mut updated = None;
+        if let Ok(mut slot) = TAGGED.lock()
+            && let Some(tagged) = slot.as_mut()
+            && let Some(paths) = tagged.get_mut(&id)
+            && let Some(at) = paths.iter().position(|path| item_key(path) == from_key)
+        {
+            let moved = paths.remove(at);
+            let insert_at = match &after_key {
+                Some(target) => paths
+                    .iter()
+                    .position(|path| item_key(path) == *target)
+                    .map_or(paths.len(), |at| at + 1),
+                None => 0,
+            };
+            paths.insert(insert_at.min(paths.len()), moved);
+            updated = Some(paths.iter().map(|path| item_key(path)).collect::<Vec<_>>());
+        }
+        let Some(order) = updated else {
+            return;
+        };
+        Self::change(cx, move |tags| {
+            tags.orders.insert(id, order);
+        });
+    }
+
     /// A tagged item was renamed or moved here: its tags follow it.
     pub(crate) fn moved(from: &str, to: &str, cx: &mut App) {
         let Some(tags) = cx.try_global::<Self>() else {
@@ -336,6 +432,7 @@ impl Tags {
                         let stored = Stored {
                             tags: tags.tags.clone(),
                             items: tags.items.values().cloned().collect(),
+                            orders: tags.orders.clone(),
                             next_id: tags.next_id,
                         };
                         let bytes = serde_json::to_vec(&stored).log_err()?;
@@ -359,6 +456,30 @@ impl Tags {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn cards_keep_the_order_they_are_dragged_into(cx: &mut gpui::TestAppContext) {
+        let folder = tempfile::tempdir().expect("temp folder");
+        let paths: Vec<String> = (0..3)
+            .map(|index| {
+                let path = folder.path().join(format!("pasta{index}"));
+                std::fs::create_dir(&path).expect("folder");
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        cx.update(|cx| {
+            Tags::install(None, cx);
+            let id = Tags::create("Trabalho".into(), &paths, cx);
+            let names = || -> Vec<String> { read_items(id).into_iter().map(|entry| entry.name).collect() };
+            assert_eq!(names(), vec!["pasta0", "pasta1", "pasta2"]);
+            // Dragged to the front.
+            Tags::reorder(id, &paths[2], None, cx);
+            assert_eq!(names(), vec!["pasta2", "pasta0", "pasta1"]);
+            // And after another card.
+            Tags::reorder(id, &paths[2], Some(&paths[1]), cx);
+            assert_eq!(names(), vec!["pasta0", "pasta1", "pasta2"]);
+        });
+    }
 
     #[gpui::test]
     fn a_tag_lists_what_carries_it_and_follows_a_rename(cx: &mut gpui::TestAppContext) {

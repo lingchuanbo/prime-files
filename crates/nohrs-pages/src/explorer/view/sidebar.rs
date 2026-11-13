@@ -240,7 +240,7 @@ fn render_band(
                         .pt(px(6.0))
                         .text_xs()
                         .text_color(rgb(theme::muted()))
-                        .child(t!("Tags")),
+                        .child(t!("Espaços de trabalho")),
                 )
                 .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().gap(px(4.0)).children(chips)),
         );
@@ -370,7 +370,7 @@ fn tag_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<ExplorerPan
             .pr(px(4.0))
             .text_xs()
             .text_color(rgb(theme::muted()))
-            .child(t!("Tags"))
+            .child(t!("Espaços de trabalho"))
             .child(
                 div()
                     .id("tag-new")
@@ -382,7 +382,7 @@ fn tag_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<ExplorerPan
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(theme::bg_hover())))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        let name = t!("Nova tag").to_string();
+                        let name = t!("Novo espaço de trabalho").to_string();
                         let id = Tags::create(name.clone(), &[], cx);
                         this.begin_sidebar_input(SidebarInputPurpose::RenameTag(id), name, window, cx);
                     }))

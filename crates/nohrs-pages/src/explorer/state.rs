@@ -361,6 +361,9 @@ pub struct ExplorerPane {
     /// Closes the zoom menu shown by a wheel or key zoom (`flash_zoom_menu`);
     /// `None` while the menu was opened by a click, or is shut.
     pub(crate) zoom_menu_flash: Option<gpui::Task<()>>,
+    /// The workspace page being shown: its tag, the cards read for it, and
+    /// the read still running. Empty until a workspace is opened.
+    pub(crate) workspace: Option<WorkspaceView>,
     /// The mouse is on the zoom menu.
     pub(crate) zoom_menu_hovered: bool,
     /// The header's "open in another program" menu is open.
@@ -635,6 +638,7 @@ impl ExplorerPane {
             quick_look: false,
             zoom_menu_open: false,
             zoom_menu_flash: None,
+            workspace: None,
             zoom_menu_hovered: false,
             open_in_menu: false,
             recent_menu: false,
@@ -1365,4 +1369,11 @@ mod tests {
         assert!(sort_key_from_config(config::SortOrder::Size) == SortKey::Size);
         assert!(sort_key_from_config(config::SortOrder::Kind) == SortKey::Type);
     }
+}
+/// What a workspace page is showing: the tag it is, the cards read for the
+/// folders it holds, and the read still running while they are counted.
+pub(crate) struct WorkspaceView {
+    pub tag: u32,
+    pub cards: Option<std::rc::Rc<Vec<super::view::workspace::Card>>>,
+    pub task: Option<gpui::Task<()>>,
 }

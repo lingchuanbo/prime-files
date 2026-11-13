@@ -198,6 +198,9 @@ pub struct ExplorerPage {
     tab_subscriptions: HashMap<EntityId, Subscription>,
     /// Whether navigation in one pane mirrors into the others (§3.2).
     synced_panes: bool,
+    /// Whether the preview shows in panes made from here on: the `[layout]`
+    /// value, so a window closed with it hidden opens that way.
+    preview_visible: bool,
     // Last-applied `[ui]` settings, replayed onto tabs opened later so they match
     // config rather than reverting to pane defaults.
     ui: Ui,
@@ -276,6 +279,7 @@ impl ExplorerPage {
             group,
             tab_subscriptions: HashMap::new(),
             synced_panes: false,
+            preview_visible: true,
             ui: Ui::default(),
             store,
             save_task: None,
@@ -378,6 +382,7 @@ impl ExplorerPage {
         tab.update(cx, |pane, cx| {
             pane.apply_config_ui(&ui, cx);
             pane.sidebar_visible = sidebar_visible;
+            pane.preview_visible = self.preview_visible;
             if let Some(cwd) = cwd {
                 pane.cwd = cwd;
                 // Force a reload of the new root on the next render.
@@ -695,6 +700,17 @@ impl ExplorerPage {
     /// and the terminal dock, and the tabs' layout.
     pub fn apply_config_layout(&mut self, layout: &Layout, cx: &mut Context<Self>) {
         super::view::panels::set_sides(layout.sidebar, layout.preview);
+        // The preview the window was left with: shown or hidden as it was.
+        // Panes made from here on start that way (`configure_tab`), and the
+        // ones already open take it too — the panes of a restored window are
+        // made before the config is read.
+        if self.preview_visible != layout.preview_visible {
+            self.preview_visible = layout.preview_visible;
+            for tab in self.group.active_tabs() {
+                let visible = layout.preview_visible;
+                tab.update(cx, |pane, _| pane.preview_visible = visible);
+            }
+        }
         self.terminal_side = layout.terminal;
         self.group.set_vertical_tabs(layout.vertical_tabs);
         self.group.set_vertical_tabs_side(layout.vertical_tabs_side);

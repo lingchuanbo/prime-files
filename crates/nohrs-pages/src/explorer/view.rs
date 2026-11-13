@@ -4,6 +4,7 @@ use crate::compact::{self, Edge};
 use crate::explorer::ExplorerPane;
 use crate::explorer::state::FramedBars;
 use gpui::prelude::FluentBuilder;
+use nohrs_core::telemetry::LogErr;
 use gpui::*;
 use nohrs_ui::theme::theme;
 
@@ -22,6 +23,9 @@ pub mod listing;
 pub mod preview;
 /// The explorer sidebar with quick-access locations.
 pub mod sidebar;
+
+/// The page a workspace (a tag, renamed) opens to: its folders as cards.
+pub mod workspace;
 /// The filter and subfolder-search field under the listing.
 pub mod quick_bar;
 /// The drawn context menus.
@@ -459,7 +463,13 @@ fn render_body(
     } else {
         None
     };
-    let listing = listing::render(page, window, cx);
+    // A workspace opens as a page of folder cards, not as a listing of the
+    // same paths: what it holds is the folders, and what a listing would show
+    // is what is inside each of them, row after row.
+    let listing = match super::tags::tag_of_location(&page.cwd) {
+        Some(tag) => page.workspace_page(tag, cx),
+        None => listing::render(page, window, cx),
+    };
     // While Space's quick look shows the preview over everything, the side
     // panel keeps its room, empty, so the listing behind does not reflow
     // twice; in compact mode it stays in its edge.
@@ -901,4 +911,61 @@ pub fn find_query_highlights(
     });
 
     highlights
+}
+
+impl ExplorerPane {
+    /// The page of workspace `tag`: its folders as cards, counted the first
+    /// time it opens (and again after a folder is added or removed).
+    pub(crate) fn workspace_page(&mut self, tag: u32, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_workspace(tag, cx);
+        let cards = self
+            .workspace
+            .as_ref()
+            .and_then(|view| view.cards.clone())
+            .unwrap_or_default();
+        self::workspace::page(self, tag, &cards, cx)
+    }
+
+    fn ensure_workspace(&mut self, tag: u32, cx: &mut Context<Self>) {
+        let ready = self.workspace.as_ref().is_some_and(|view| {
+            view.tag == tag && (view.cards.is_some() || view.task.is_some())
+        });
+        if ready {
+            return;
+        }
+        // The folders the workspace holds are the rows its location listed.
+        let paths: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "dir")
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.workspace = Some(super::state::WorkspaceView {
+            tag,
+            cards: None,
+            task: None,
+        });
+        let read = cx.background_spawn(async move { self::workspace::read_cards(paths) });
+        let task = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+            let cards = read.await;
+            this.update(cx, |pane, cx| {
+                if let Some(view) = pane.workspace.as_mut() {
+                    view.cards = Some(std::rc::Rc::new(cards));
+                    view.task = None;
+                }
+                cx.notify();
+            })
+            .log_err();
+        });
+        if let Some(view) = self.workspace.as_mut() {
+            view.task = Some(task);
+        }
+    }
+
+    /// Throws the cards away so the next render counts the folders again,
+    /// after one was added to the workspace or taken out of it.
+    pub(crate) fn refresh_workspace(&mut self, cx: &mut Context<Self>) {
+        self.workspace = None;
+        cx.notify();
+    }
 }

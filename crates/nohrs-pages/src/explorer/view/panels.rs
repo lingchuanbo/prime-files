@@ -290,7 +290,12 @@ impl ExplorerPane {
         }
     }
 
-    fn set_panel_visible(&mut self, panel: Panel, visible: bool) {
+    fn set_panel_visible(&mut self, panel: Panel, visible: bool, cx: &mut App) {
+        if panel == Panel::Preview && self.preview_visible != visible {
+            // Remembered in the config: a window closed with the preview
+            // hidden opens that way, as the person left it.
+            save_layout("preview_visible", visible.to_string(), cx);
+        }
         match panel {
             Panel::Sidebar => self.sidebar_visible = visible,
             Panel::Preview => self.preview_visible = visible,
@@ -365,7 +370,7 @@ impl ExplorerPane {
             (Gesture::Resize { start_size, .. }, Some(panel)) if drag.collapsing => {
                 // Hidden at the size it had, which it opens at again.
                 set_size(panel, start_size);
-                self.set_panel_visible(panel, false);
+                self.set_panel_visible(panel, false, cx);
             }
             (Gesture::Move, Some(panel)) => {
                 let target = dock::nearest_side(bounds, drag.pointer);
@@ -401,7 +406,7 @@ impl ExplorerPane {
                         }
                         let (min, max) = range(panel);
                         set_size(panel, depth.clamp(min, max));
-                        self.set_panel_visible(panel, true);
+                        self.set_panel_visible(panel, true, cx);
                         cx.refresh_windows();
                     }
                     Opening::Terminal => cx.emit(PaneEvent::TerminalRequested {
@@ -433,6 +438,11 @@ pub(crate) fn dock_panel(panel: Panel, side: DockSide, cx: &mut App) {
 
 /// Writes `layout.<key> = value` to the config file in the background.
 pub(crate) fn save_layout(key: &'static str, value: String, cx: &mut App) {
+    // A test's window is not the person's window: it writes no config.
+    if cfg!(test) {
+        let _ = (key, value, cx);
+        return;
+    }
     cx.background_spawn(async move {
         if let Err(error) =
             nohrs_core::config::set_value(&nohrs_core::config::paths::config_file(), "layout", key, &value)
@@ -568,7 +578,7 @@ pub(crate) fn render(
                 cx.stop_propagation();
                 match claimant {
                     Some(panel) if event.click_count >= 2 => {
-                        this.set_panel_visible(panel, true);
+                        this.set_panel_visible(panel, true, cx);
                         this.dock_drag = None;
                     }
                     _ => this.start_edge_pull(edge, event.position),

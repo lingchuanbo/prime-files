@@ -59,11 +59,13 @@ enum Command {
     RemoveNetworkPlace,
     RemoveFavorite,
     RenameFavorite,
+    OpenWorkspaceCard,
+    RemoveWorkspaceCard,
     AddFavoriteCurrent,
 }
 
 impl Command {
-    const ALL: [Command; 43] = [
+    const ALL: [Command; 45] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
@@ -106,6 +108,8 @@ impl Command {
         Command::RemoveNetworkPlace,
         Command::RemoveFavorite,
         Command::RenameFavorite,
+        Command::OpenWorkspaceCard,
+        Command::RemoveWorkspaceCard,
         Command::AddFavoriteCurrent,
     ];
 
@@ -224,6 +228,9 @@ pub(crate) enum MenuPurpose {
     FavoriteSubmenu(u32),
     /// The directory menu (Ctrl+D), listing the favorite folders.
     FavoritesMenu,
+    /// A folder card of a workspace page: the workspace it is in, and the
+    /// folder it points at.
+    WorkspaceCard { tag: u32, path: String },
 }
 
 /// A menu on screen: what it shows, where, and what runs its entries.
@@ -321,8 +328,8 @@ impl ExplorerPane {
                     })
                     .collect();
                 tags.push(Entry::Separator);
-                tags.push(Entry::command(Command::NewTag as u32, t!("Nova tag…")).with_icon("icons/plus.svg"));
-                vec![Entry::submenu(t!("Tags"), tags).with_icon("icons/tag.svg"), Entry::Separator, more]
+                tags.push(Entry::command(Command::NewTag as u32, t!("Novo espaço de trabalho…")).with_icon("icons/plus.svg"));
+                vec![Entry::submenu(t!("Espaços de trabalho"), tags).with_icon("icons/tag.svg"), Entry::Separator, more]
             }
             _ => vec![more],
         }
@@ -365,7 +372,8 @@ impl ExplorerPane {
                         false,
                     ),
                     MenuPurpose::Columns(_) | MenuPurpose::Filter | MenuPurpose::Tag(_) | MenuPurpose::NetworkPlace(_)
-                    | MenuPurpose::FavoriteLink(_) | MenuPurpose::FavoriteSubmenu(_) | MenuPurpose::FavoritesMenu => {
+                    | MenuPurpose::FavoriteLink(_) | MenuPurpose::FavoriteSubmenu(_) | MenuPurpose::FavoritesMenu
+                    | MenuPurpose::WorkspaceCard { .. } => {
                         (Target::None, true, false, Vec::new(), &[][..], false)
                     }
                 };
@@ -559,6 +567,22 @@ impl ExplorerPane {
                 }
                 cx.notify();
             }
+            // A folder card of a workspace: opening it, or taking it out of
+            // the workspace — the folder itself is never touched.
+            MenuPurpose::WorkspaceCard { tag, path } => {
+                if let Choice::Own(id) = choice {
+                    match Command::from_id(id) {
+                        Some(Command::OpenWorkspaceCard) => self.change_dir(path, window, cx),
+                        Some(Command::RemoveWorkspaceCard) => {
+                            super::tags::Tags::remove_path(&path, tag, cx);
+                            self.refresh_workspace(cx);
+                            self.reload(cx);
+                        }
+                        _ => {}
+                    }
+                }
+                cx.notify();
+            }
             MenuPurpose::Filter => {
                 use super::filter::KindFilter;
                 if let Choice::Own(id) = choice
@@ -637,7 +661,7 @@ impl ExplorerPane {
             Entry::command(Command::RenameTag as u32, t!("Renomear")).with_icon("icons/pencil.svg"),
             Entry::submenu(t!("Cor"), colors).with_icon("icons/palette-2.svg"),
             Entry::Separator,
-            Entry::command(Command::DeleteTag as u32, t!("Excluir tag")).with_icon("icons/trash-2.svg"),
+            Entry::command(Command::DeleteTag as u32, t!("Excluir espaço de trabalho")).with_icon("icons/trash-2.svg"),
         ];
         self.show_menu(MenuPurpose::Tag(tag), own, hwnd, window, cx);
     }
@@ -651,6 +675,27 @@ impl ExplorerPane {
             Entry::command(Command::RemoveNetworkPlace as u32, t!("Remover dos locais de rede")).with_icon("icons/trash-2.svg"),
         ];
         self.show_menu(MenuPurpose::NetworkPlace(address), own, hwnd, window, cx);
+    }
+
+    /// A folder card's menu on a workspace page: open it, or take it out of
+    /// the workspace. The folder itself is never touched.
+    pub(crate) fn open_workspace_card_menu(
+        &mut self,
+        tag: u32,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(hwnd) = crate::ipc::window_hwnd(window) else {
+            return;
+        };
+        let own = vec![
+            Entry::command(Command::OpenWorkspaceCard as u32, t!("Abrir")).with_icon("icons/folder-open.svg"),
+            Entry::Separator,
+            Entry::command(Command::RemoveWorkspaceCard as u32, t!("Remover do espaço de trabalho"))
+                .with_icon("icons/trash-2.svg"),
+        ];
+        self.show_menu(MenuPurpose::WorkspaceCard { tag, path }, own, hwnd, window, cx);
     }
 
     /// A favorite shortcut's menu in the sidebar: rename, or take the
@@ -984,7 +1029,7 @@ impl ExplorerPane {
             Command::NewTag => {
                 // Made, put on the selection, and named in the sidebar.
                 let paths = self.selected_paths();
-                let name = t!("Nova tag").to_string();
+                let name = t!("Novo espaço de trabalho").to_string();
                 let id = super::tags::Tags::create(name.clone(), &paths, cx);
                 self.sidebar_visible = true;
                 self.begin_sidebar_input(super::places::SidebarInputPurpose::RenameTag(id), name, window, cx);
@@ -1001,6 +1046,8 @@ impl ExplorerPane {
             | Command::RemoveFavorite
             | Command::RenameFavorite
             | Command::AddFavoriteCurrent
+            | Command::OpenWorkspaceCard
+            | Command::RemoveWorkspaceCard
             | Command::MoreOptions => {}
             Command::OpenCommandPrompt => self.open_in(OpenIn::CommandPrompt, cx),
             Command::OpenPowerShell => self.open_in(OpenIn::PowerShell, cx),

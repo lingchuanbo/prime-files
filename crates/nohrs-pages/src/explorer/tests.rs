@@ -1015,6 +1015,29 @@ async fn split_pane_inherits_applied_ui_config(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn a_window_opens_with_the_preview_it_was_left_with(cx: &mut TestAppContext) {
+    let window = new_explorer_page(cx);
+    window
+        .update(cx, |page, _window, cx| {
+            assert!(page.pane(0).read(cx).preview_visible, "shown until a config says otherwise");
+            // What the last run wrote into `[layout]` when the preview was
+            // closed before the window was.
+            let mut layout = config::Layout::default();
+            layout.preview_visible = false;
+            page.apply_config_layout(&layout, cx);
+            assert!(
+                !page.pane(0).read(cx).preview_visible,
+                "the pane already open follows the saved state"
+            );
+            // And shown again, when that is what was left.
+            let layout = config::Layout::default();
+            page.apply_config_layout(&layout, cx);
+            assert!(page.pane(0).read(cx).preview_visible);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 async fn root_pane_shows_sidebar_but_split_pane_hides_it(cx: &mut TestAppContext) {
     let window = new_explorer_page(cx);
     window

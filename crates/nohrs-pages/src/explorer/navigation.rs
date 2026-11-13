@@ -194,6 +194,11 @@ impl ExplorerPane {
         // the last session's tabs included; a refresh of the same folder is
         // not a visit, and the list says so by leaving it where it is.
         super::recent::RecentFolders::push(&self.cwd, cx);
+        // A workspace lists its folders again after an add or a removal: the
+        // cards are counted again on the next render.
+        if super::tags::tag_of_location(&self.cwd).is_some() {
+            self.workspace = None;
+        }
         self.end_hover_audio();
         // Mark as loaded regardless of outcome so an empty or unreadable
         // directory is not re-read on every subsequent render.

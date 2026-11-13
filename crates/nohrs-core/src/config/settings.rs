@@ -284,6 +284,9 @@ pub struct Layout {
     /// another side. Off by default: dragging it was not obvious, and the
     /// sides are also chosen here and from the bubbles of the listing's edges.
     pub move_grips: bool,
+    /// Whether the preview panel is shown. Written whenever the preview is
+    /// toggled, so a window closed with it hidden opens that way again.
+    pub preview_visible: bool,
 }
 
 impl Default for Layout {
@@ -295,6 +298,7 @@ impl Default for Layout {
             vertical_tabs: false,
             vertical_tabs_side: DockSide::Left,
             move_grips: false,
+            preview_visible: true,
         }
     }
 }
@@ -900,6 +904,7 @@ impl Config {
              vertical_tabs = false        # tabs in a column, as in Zen Browser\n\
              vertical_tabs_side = \"left\"  # the column's side: \"left\" | \"right\"\n\
              move_grips = false           # a grip on each panel's edge to drag it elsewhere\n\
+             preview_visible = true       # whether the preview panel starts shown; written when it is toggled\n\
              \n\
              [ui]\n\
              language = \"zh-CN\"   # \"zh-CN\" (default) | \"auto\" (Windows region) | \"pt-BR\" | \"en\" | \"es\" | \"fr\" | \"de\" | \"it\" | \"ru\" | \"ja\"\n\
@@ -1301,7 +1306,11 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
             }
         }
     }
-    for (key, slot) in [("vertical_tabs", &mut layout.vertical_tabs), ("move_grips", &mut layout.move_grips)] {
+    for (key, slot) in [
+        ("vertical_tabs", &mut layout.vertical_tabs),
+        ("move_grips", &mut layout.move_grips),
+        ("preview_visible", &mut layout.preview_visible),
+    ] {
         if let Some(value) = table.get(key) {
             match value.as_bool() {
                 Some(flag) => *slot = flag,
@@ -1311,7 +1320,7 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
     }
     warn_unknown_keys(
         table,
-        &["sidebar", "preview", "terminal", "vertical_tabs", "vertical_tabs_side", "move_grips"],
+        &["sidebar", "preview", "terminal", "vertical_tabs", "vertical_tabs_side", "move_grips", "preview_visible"],
         "layout.",
         diagnostics,
     );
@@ -2087,6 +2096,17 @@ mod tests {
         assert_eq!(config.ui.default_sort, SortOrder::Size);
         assert!(config.ui.show_hidden);
         assert_eq!(config.ui.icon_pack, "nerd");
+    }
+
+    #[test]
+    fn the_preview_visibility_is_remembered_in_the_layout() {
+        // What the app starts from: shown unless a file says otherwise.
+        assert!(Layout::default().preview_visible);
+        // What the pane writes when the preview is hidden.
+        let config = Config::from_toml_str("[layout]\npreview_visible = false\n").0;
+        assert!(!config.layout.preview_visible);
+        // And the template offers the key, so it is found when looked for.
+        assert!(Config::default_toml_template().contains("preview_visible = true"));
     }
 
     #[test]

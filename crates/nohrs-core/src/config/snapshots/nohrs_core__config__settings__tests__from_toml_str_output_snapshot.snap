@@ -53,6 +53,7 @@ expression: parsed
             vertical_tabs: false,
             vertical_tabs_side: Left,
             move_grips: false,
+            preview_visible: true,
         },
         updates: Updates {
             automatic: true,

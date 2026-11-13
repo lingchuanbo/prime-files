@@ -244,6 +244,8 @@ pub fn render(
                         .rounded(px(6.0))
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.preview_visible = !view.preview_visible;
+                            // Kept for the next start, as the key does.
+                            super::panels::save_layout("preview_visible", view.preview_visible.to_string(), cx);
                             cx.notify();
                         }))
                         .child(

@@ -281,6 +281,11 @@
           "default": "right",
           "description": "The side the preview docks to."
         },
+        "preview_visible": {
+          "default": true,
+          "description": "Whether the preview panel is shown. Written whenever the preview is\ntoggled, so a window closed with it hidden opens that way again.",
+          "type": "boolean"
+        },
         "sidebar": {
           "$ref": "#/$defs/DockSide",
           "default": "left",
@@ -601,6 +606,7 @@
       "default": {
         "move_grips": false,
         "preview": "right",
+        "preview_visible": true,
         "sidebar": "left",
         "terminal": "bottom",
         "vertical_tabs": false,
