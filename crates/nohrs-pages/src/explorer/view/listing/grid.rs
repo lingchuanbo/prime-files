@@ -279,6 +279,11 @@ fn render_grid_item(
     };
 
     let is_dir = item.kind == "dir";
+    let name_color = if selected || item.kind != "file" {
+        theme::fg()
+    } else {
+        page.file_type_color(&item.name).unwrap_or_else(theme::fg)
+    };
     // A sound file with waveforms on asks for its waveform and, until it
     // arrives or if it cannot be had, the type's icon: one image shared by
     // every file of the extension, where the thumbnail would have the Shell
@@ -420,7 +425,7 @@ fn render_grid_item(
                 .items_center()
                 .text_xs()
                 .line_height(px(NAME_LINE_HEIGHT))
-                .text_color(rgb(theme::fg()))
+                .text_color(rgb(name_color))
                 .overflow_hidden()
                 .children(name_lines.into_iter().map(|line| {
                     div()

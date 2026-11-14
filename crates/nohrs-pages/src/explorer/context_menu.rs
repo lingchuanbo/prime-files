@@ -253,6 +253,8 @@ const TAG_IDS: u32 = 0x400;
 // A colour in a tag's menu: this plus its place in `tags::COLORS`.
 const FIRST_TAG_COLOR: u32 = 0x8F0;
 const FIRST_TAG_ICON: u32 = 0x8D0;
+// A workspace card's reset entry and colours in its temporary colour menu.
+const FIRST_CARD_COLOR: u32 = 0xA00;
 // A favorite folder in the directory menu (Ctrl+D): this plus its place
 // among the shortcuts, counted depth first. Past the tags' range, below the
 // Shell's.
@@ -583,7 +585,15 @@ impl ExplorerPane {
                             self.refresh_workspace(cx);
                             self.reload(cx);
                         }
-                        _ => {}
+                        _ if id == FIRST_CARD_COLOR => super::tags::Tags::set_card_color(tag, &path, None, cx),
+                        _ => {
+                            if let Some((color, _)) = id
+                                .checked_sub(FIRST_CARD_COLOR + 1)
+                                .and_then(|index| super::tags::COLORS.get(index as usize))
+                            {
+                                super::tags::Tags::set_card_color(tag, &path, Some(*color), cx);
+                            }
+                        }
                     }
                 }
                 cx.notify();
@@ -689,24 +699,44 @@ impl ExplorerPane {
         self.show_menu(MenuPurpose::NetworkPlace(address), own, hwnd, window, cx);
     }
 
-    /// A folder card's menu on a workspace page: open it, or take it out of
-    /// the workspace. The folder itself is never touched.
+    /// A folder card's menu on a workspace page: open it, colour it for this
+    /// run, or take it out of the workspace. The folder itself is untouched.
     pub(crate) fn open_workspace_card_menu(
         &mut self,
         tag: u32,
         path: String,
+        colorable: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(hwnd) = crate::ipc::window_hwnd(window) else {
             return;
         };
-        let own = vec![
+        let mut own = vec![
             Entry::command(Command::OpenWorkspaceCard as u32, t!("Abrir")).with_icon("icons/folder-open.svg"),
             Entry::Separator,
+        ];
+        if colorable {
+            let current_color = super::tags::Tags::card_color(tag, &path, cx);
+            let mut colors = vec![Entry::radio(
+                FIRST_CARD_COLOR,
+                t!("Seguir a cor do espaço de trabalho"),
+                current_color.is_none(),
+            )];
+            colors.extend(super::tags::COLORS.iter().enumerate().map(|(index, (color, name))| {
+                Entry::radio(
+                    FIRST_CARD_COLOR + 1 + index as u32,
+                    nohrs_core::i18n::tr(name),
+                    current_color == Some(*color),
+                )
+            }));
+            own.push(Entry::submenu(t!("Cor do cartão"), colors).with_icon("icons/palette-2.svg"));
+            own.push(Entry::Separator);
+        }
+        own.push(
             Entry::command(Command::RemoveWorkspaceCard as u32, t!("Remover do espaço de trabalho"))
                 .with_icon("icons/trash-2.svg"),
-        ];
+        );
         self.show_menu(MenuPurpose::WorkspaceCard { tag, path }, own, hwnd, window, cx);
     }
 

@@ -161,6 +161,77 @@ pub struct Ui {
     pub hover_audio: bool,
     /// How long the mouse rests on a sound file before it plays, in ms.
     pub hover_audio_delay_ms: u32,
+    /// Ordered file-name glob rules and their text colours; the first match wins.
+    pub file_type_colors: Vec<FileTypeColorRule>,
+}
+
+/// A filename pattern and its configured display colour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct FileTypeColorRule {
+    /// Case-insensitive filename globs such as `*.rs;*.toml` or `README*`.
+    pub pattern: String,
+    /// Six-digit hexadecimal colour such as `#ff8800`.
+    pub color: String,
+}
+
+impl Default for FileTypeColorRule {
+    fn default() -> Self {
+        Self { pattern: "*.txt".into(), color: "#65a30d".into() }
+    }
+}
+
+impl FileTypeColorRule {
+    /// Whether the pattern and colour can be used by the renderer.
+    pub fn is_valid(&self) -> bool {
+        valid_file_type_pattern(&self.pattern) && is_hex_colour(&self.color)
+    }
+
+    /// Returns the parsed RGB colour if this rule is valid and matches.
+    pub fn color_for(&self, file_name: &str) -> Option<u32> {
+        if !self.is_valid() {
+            return None;
+        }
+        let color = u32::from_str_radix(self.color.trim_start_matches('#'), 16).ok()?;
+        self.pattern
+            .split(';')
+            .map(str::trim)
+            .any(|pattern| wildcard_matches(pattern, file_name))
+            .then_some(color)
+    }
+}
+
+fn valid_file_type_pattern(pattern: &str) -> bool {
+    pattern.split(';').all(|pattern| {
+        let pattern = pattern.trim();
+        !pattern.is_empty() && !pattern.chars().any(|character| matches!(character, '/' | '\\'))
+    })
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let value: Vec<char> = value.to_lowercase().chars().collect();
+    let (mut p, mut v, mut star, mut retry) = (0, 0, None, 0);
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            p += 1;
+            retry = v;
+        } else if let Some(star_index) = star {
+            retry += 1;
+            v = retry;
+            p = star_index + 1;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 impl Default for Ui {
@@ -181,7 +252,15 @@ impl Default for Ui {
             welcome_done: false,
             hover_audio: true,
             hover_audio_delay_ms: 400,
+            file_type_colors: Vec::new(),
         }
+    }
+}
+
+impl Ui {
+    /// Gets the colour for the first matching filename rule.
+    pub fn file_type_color(&self, file_name: &str) -> Option<u32> {
+        self.file_type_colors.iter().find_map(|rule| rule.color_for(file_name))
     }
 }
 
@@ -917,6 +996,7 @@ impl Config {
              show_quick_access = true   # Windows Quick access (pinned and frequent folders) in the sidebar\n\
              icon_pack = \"default\"\n\
              font_family = \"\"   # any installed font, by name (e.g. \"Microsoft YaHei UI\"); empty = the system's\n\
+             file_type_colors = []   # ordered filename glob(s), separated by ;, and hex colour rules\n\
              \n\
              [explorer]\n\
              split_direction = \"vertical\"   # \"vertical\" (left/right) | \"horizontal\" (top/bottom)\n\
@@ -1162,6 +1242,34 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             ))),
         }
     }
+    if let Some(value) = table.get("file_type_colors") {
+        match value.as_array() {
+            Some(rules) => {
+                ui.file_type_colors.clear();
+                for (index, value) in rules.iter().enumerate() {
+                    let Some(rule) = value.as_table() else {
+                        diagnostics.push(Diagnostic::warn(format!(
+                            "invalid ui.file_type_colors[{index}]; expected a table"
+                        )));
+                        continue;
+                    };
+                    let pattern = rule.get("pattern").and_then(toml::Value::as_str).unwrap_or("").trim();
+                    let color = rule.get("color").and_then(toml::Value::as_str).unwrap_or("").trim();
+                    if !valid_file_type_pattern(pattern) || !is_hex_colour(color) {
+                        diagnostics.push(Diagnostic::warn(format!(
+                            "invalid ui.file_type_colors[{index}]; expected a filename glob and #rrggbb colour"
+                        )));
+                        continue;
+                    }
+                    ui.file_type_colors.push(FileTypeColorRule {
+                        pattern: pattern.to_string(),
+                        color: color.to_ascii_lowercase(),
+                    });
+                }
+            }
+            None => diagnostics.push(Diagnostic::warn("invalid ui.file_type_colors; expected an array")),
+        }
+    }
     warn_unknown_keys(
         table,
         &[
@@ -1180,6 +1288,7 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             "hover_audio",
             "hover_audio_delay_ms",
             "welcome_done",
+            "file_type_colors",
         ],
         "ui.",
         diagnostics,
@@ -1835,6 +1944,44 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(config.explorer.split_direction, SplitDirection::Horizontal);
         assert!(config.explorer.synced_panes);
+    }
+
+    #[test]
+    fn file_type_color_rules_parse_and_match_case_insensitive_wildcards() {
+        let (config, diagnostics) = Config::from_toml_str(
+            r##"
+            [ui]
+            file_type_colors = [
+                { pattern = "*.webp;*.svg", color = "#ff8800" },
+                { pattern = "README*", color = "#22aaff" },
+            ]
+            "##,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(config.ui.file_type_colors.len(), 2);
+        assert_eq!(Some(0xff8800), config.ui.file_type_color("photo.WEBP"));
+        assert_eq!(Some(0xff8800), config.ui.file_type_color("icon.svg"));
+        assert_eq!(Some(0x22aaff), config.ui.file_type_color("readme.md"));
+        assert_eq!(None, config.ui.file_type_color("photo.png"));
+    }
+
+    #[test]
+    fn invalid_file_type_color_rules_are_ignored_with_diagnostics() {
+        let (config, diagnostics) = Config::from_toml_str(
+            r##"
+            [ui]
+            file_type_colors = [
+                { pattern = "*.txt", color = "#123456" },
+                { pattern = "", color = "#abcdef" },
+                { pattern = "*.bad", color = "red" },
+            ]
+            "##,
+        );
+
+        assert_eq!(1, config.ui.file_type_colors.len());
+        assert_eq!("*.txt", config.ui.file_type_colors[0].pattern);
+        assert_eq!(2, diagnostics.len());
     }
 
     #[test]

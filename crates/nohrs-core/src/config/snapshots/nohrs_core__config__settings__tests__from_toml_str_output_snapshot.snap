@@ -11,6 +11,7 @@ expression: parsed
             background: "",
         },
         ui: Ui {
+            app_name: "",
             language: "zh-CN",
             default_sort: Name,
             default_sort_descending: false,
@@ -25,6 +26,7 @@ expression: parsed
             welcome_done: false,
             hover_audio: true,
             hover_audio_delay_ms: 400,
+            file_type_colors: [],
         },
         explorer: Explorer {
             split_direction: Vertical,

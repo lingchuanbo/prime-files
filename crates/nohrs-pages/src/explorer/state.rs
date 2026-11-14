@@ -1272,6 +1272,11 @@ impl ExplorerPane {
         }
     }
 
+    /// The configured filename colour, if a rule matches this entry.
+    pub fn file_type_color(&self, file_name: &str) -> Option<u32> {
+        self.applied_ui.as_ref()?.file_type_color(file_name)
+    }
+
     /// Sorts by `key` in the given direction, as the context menu chooses it.
     pub(crate) fn set_sort(&mut self, key: SortKey, ascending: bool, cx: &mut Context<Self>) {
         self.sort_key = key;

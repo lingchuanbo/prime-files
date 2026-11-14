@@ -43,6 +43,11 @@ pub fn render(
     };
 
     let is_selected = page.is_selected(ix);
+    let name_color = if is_selected || item.kind != "file" {
+        theme::fg()
+    } else {
+        page.file_type_color(&item.name).unwrap_or_else(theme::fg)
+    };
     let tree_view = page.view_mode == crate::explorer::types::ViewMode::Tree;
     let depth = if tree_view { page.tree_depth(&item.path) } else { 0 };
     let tree_folder = tree_view && item.kind == "dir";
@@ -345,7 +350,7 @@ pub fn render(
                                                 .min_w(px(0.0))
                                                 .text_sm()
                                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(rgb(theme::fg()))
+                                                .text_color(rgb(name_color))
                                                 .overflow_hidden()
                                                 .text_ellipsis()
                                                 .whitespace_nowrap()

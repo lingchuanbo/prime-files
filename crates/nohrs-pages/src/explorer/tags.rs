@@ -78,12 +78,50 @@ pub(crate) struct Tags {
     /// The order each workspace shows its items in: the card order of its
     /// page, which a drag sets.
     orders: HashMap<u32, Vec<String>>,
+    /// Per-card colours for this run only, keyed by workspace and item path.
+    card_colors: HashMap<(u32, String), u32>,
     next_id: u32,
     store: Option<Arc<dyn KvStore>>,
     save: Option<Task<()>>,
 }
 
 impl Global for Tags {}
+
+impl Tags {
+    fn card_color_for(&self, id: u32, path: &str) -> Option<u32> {
+        self.card_colors.get(&(id, item_key(path))).copied()
+    }
+
+    fn set_card_color_for(&mut self, id: u32, path: &str, color: Option<u32>) {
+        let key = (id, item_key(path));
+        match color {
+            Some(color) => {
+                self.card_colors.insert(key, color);
+            }
+            None => {
+                self.card_colors.remove(&key);
+            }
+        }
+    }
+
+    fn move_card_colors(&mut self, from: &str, to: &str) {
+        let from_key = item_key(from);
+        let to_key = item_key(to);
+        let affected: Vec<(u32, u32)> = self
+            .card_colors
+            .iter()
+            .filter_map(|((workspace, path), color)| (path == &from_key).then_some((*workspace, *color)))
+            .collect();
+        self.card_colors.retain(|(_, path), _| path != &from_key);
+        for (workspace, color) in affected {
+            self.card_colors.insert((workspace, to_key.clone()), color);
+        }
+    }
+
+    fn remove_card_color(&mut self, id: u32, path: &str) {
+        self.card_colors.remove(&(id, item_key(path)));
+    }
+}
 
 // Which paths carry each tag, for the listing thread.
 static TAGGED: Mutex<Option<HashMap<u32, Vec<String>>>> = Mutex::new(None);
@@ -319,6 +357,7 @@ impl Tags {
     pub(crate) fn remove_path(path: &str, id: u32, cx: &mut App) {
         let key = item_key(path);
         Self::change(cx, move |tags| {
+            tags.remove_card_color(id, &key);
             if let Some((_, ids)) = tags.items.get_mut(&key) {
                 ids.retain(|tag| *tag != id);
                 if ids.is_empty() {
@@ -326,6 +365,18 @@ impl Tags {
                 }
             }
         });
+    }
+
+    /// The temporary colour of one card in one workspace.
+    pub(crate) fn card_color(id: u32, path: &str, cx: &App) -> Option<u32> {
+        cx.try_global::<Self>()?.card_color_for(id, path)
+    }
+
+    /// Sets a card colour for this run, or follows the workspace colour when
+    /// `color` is `None`. This deliberately does not write to the store.
+    pub(crate) fn set_card_color(id: u32, path: &str, color: Option<u32>, cx: &mut App) {
+        cx.update_global(|tags: &mut Self, _cx| tags.set_card_color_for(id, path, color));
+        cx.refresh_windows();
     }
 
     /// Makes a tag with the next colour and puts it on `paths`. Returns its id.
@@ -373,6 +424,7 @@ impl Tags {
     pub(crate) fn delete(id: u32, cx: &mut App) {
         Self::change(cx, |tags| {
             tags.tags.retain(|tag| tag.id != id);
+            tags.card_colors.retain(|(workspace, _), _| *workspace != id);
             tags.items.retain(|_, (_, ids)| {
                 ids.retain(|tag| *tag != id);
                 !ids.is_empty()
@@ -426,6 +478,7 @@ impl Tags {
             if let Some((_, ids)) = tags.items.remove(&item_key(&from)) {
                 tags.items.insert(item_key(&to), (to.clone(), ids));
             }
+            tags.move_card_colors(&from, &to);
         });
     }
 
@@ -546,6 +599,24 @@ mod tests {
             Tags::reorder(id, &paths[2], Some(&paths[1]), cx);
             assert_eq!(names(), vec!["pasta0", "pasta1", "pasta2"]);
         });
+    }
+
+    #[test]
+    fn workspace_card_colors_are_scoped_to_workspace_and_follow_renames() {
+        let mut tags = Tags::default();
+        tags.set_card_color_for(1, "D:/shared", Some(COLORS[2].0));
+        tags.set_card_color_for(2, "D:/shared", Some(COLORS[4].0));
+
+        assert_eq!(Some(COLORS[2].0), tags.card_color_for(1, "d:/SHARED/"));
+        assert_eq!(Some(COLORS[4].0), tags.card_color_for(2, "D:/shared"));
+
+        tags.move_card_colors("D:/shared", "D:/renamed");
+        assert_eq!(Some(COLORS[2].0), tags.card_color_for(1, "D:/renamed"));
+        tags.remove_card_color(1, "D:/renamed");
+        assert_eq!(None, tags.card_color_for(1, "D:/renamed"));
+        assert_eq!(Some(COLORS[4].0), tags.card_color_for(2, "D:/renamed"));
+        tags.set_card_color_for(2, "D:/renamed", None);
+        assert_eq!(None, tags.card_color_for(2, "D:/renamed"));
     }
 
     #[gpui::test]

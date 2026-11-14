@@ -39,6 +39,10 @@ default_sort = "name"      # "name" | "modified" | "size" | "kind"
 default_sort_descending = false  # true = Z→A, maior/mais novo primeiro
 show_hidden = false
 icon_pack = "default"
+file_type_colors = [
+  { pattern = "*.webp;*.svg", color = "#ff8800" },
+  { pattern = "README*", color = "#22aaff" },
+]
 
 [keybindings]
 # 草案 (P3 で本格化)。`action = "chord"` の自由マップ。空ならデフォルトは built-in。
@@ -53,7 +57,7 @@ icon_pack = "default"
 
 `[keybindings]` と `[plugins]` は型として定義済みだが、値はまだ挙動に反映されない (hot reload は再起動扱い、§5)。スキーマには予約済みで、P3/P4 で形を拡張しても古いファイルは壊れない。
 
-> **ランタイム反映状況**: 現状でランタイムに反映されるのは `theme` / `ui` / `diagnostics` / `indexing.source` のみ。`indexing.mode` / `indexing.exclude` / `search` / `launcher` / `keybindings` / `plugins` は **parse + validate されるが、まだ挙動には反映されない** (各サブシステムが配線される後続フェーズで有効化)。schema / template に先行して載せているのは、ファイルとエディタ補完が形を先取りできるようにするため。編集しても今は効果がない点に注意。
+> **ランタイム反映状況**: `theme` / `ui` / `diagnostics` / `indexing.source` はランタイムに反映される。`ui.file_type_colors` の `pattern` はセミコロンで区切った複数の、大文字と小文字を区別しないファイル名 glob に対応する (例: `*.webp;*.svg`)。上から最初に一致した色を一覧・グリッド・コンパクト表示のファイル名に適用する。`indexing.mode` / `indexing.exclude` / `search` / `launcher` / `keybindings` / `plugins` は **parse + validate されるが、まだ挙動には反映されない** (各サブシステムが配線される後続フェーズで有効化)。schema / template に先行して載せているのは、ファイルとエディタ補完が形を先取りできるようにするため。編集しても今は効果がない点に注意。
 >
 > **`required` なし**: 全フィールドが `#[serde(default)]`。ローダは `Config::default()` から開始して存在するキーだけ上書きするため、どのセクションを省略しても (空の `config.toml` でも) 受理される。生成スキーマも `required` を持たず、エディタ検証とローダ挙動が一致する。
 

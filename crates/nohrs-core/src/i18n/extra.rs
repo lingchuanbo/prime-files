@@ -5913,4 +5913,61 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "显示在标题栏中。留空使用默认名称；按 Enter 或离开输入框后保存。",
         ],
     ),
+    (
+        "Cor dos nomes por tipo de arquivo",
+        [
+            "Couleur des noms par type de fichier",
+            "Dateinamen nach Dateityp färben",
+            "Colora i nomi per tipo di file",
+            "Цвет имён по типу файла",
+            "ファイルの種類ごとに名前を色分け",
+            "按文件类型着色文件名",
+        ],
+    ),
+    (
+        "Cor do cartão",
+        ["Couleur de la carte", "Kartenfarbe", "Colore della scheda", "Цвет карточки", "カードの色", "卡片颜色"],
+    ),
+    (
+        "Digite padrões de nome separados por ponto e vírgula e uma cor #rrggbb para cada regra.",
+        [
+            "Saisissez des motifs de nom séparés par des points-virgules et une couleur #rrggbb pour chaque règle.",
+            "Geben Sie für jede Regel durch Semikolons getrennte Dateinamensmuster und eine #rrggbb-Farbe ein.",
+            "Inserisci modelli di nome separati da punto e virgola e un colore #rrggbb per ogni regola.",
+            "Введите разделённые точками с запятой шаблоны имён и цвет #rrggbb для каждого правила.",
+            "各ルールにセミコロン区切りのファイル名パターンと #rrggbb 形式の色を入力してください。",
+            "为每条规则输入用分号分隔的文件名模式和 #rrggbb 颜色。",
+        ],
+    ),
+    (
+        "Adicionar regra de cor",
+        ["Ajouter une règle de couleur", "Farberregel hinzufügen", "Aggiungi regola colore", "Добавить цветовое правило", "色ルールを追加", "添加颜色规则"],
+    ),
+    (
+        "Regras de cor por tipo de arquivo",
+        ["Règles de couleur par type de fichier", "Farbregeln nach Dateityp", "Regole colore per tipo di file", "Цветовые правила по типу файла", "ファイルの種類ごとの色ルール", "文件类型颜色规则"],
+    ),
+    (
+        "Salvar regras de cor",
+        ["Enregistrer les règles de couleur", "Farbregeln speichern", "Salva regole colore", "Сохранить цветовые правила", "色ルールを保存", "保存颜色规则"],
+    ),
+    (
+        "Seguir a cor do espaço de trabalho",
+        ["Suivre la couleur de l’espace de travail", "Arbeitsbereichsfarbe verwenden", "Segui il colore dell’area di lavoro", "Использовать цвет рабочего пространства", "ワークスペースの色に合わせる", "跟随工作空间颜色"],
+    ),
+    (
+        "Ainda não há regras de cor.",
+        ["Aucune règle de couleur pour le moment.", "Noch keine Farbregeln.", "Nessuna regola colore.", "Пока нет цветовых правил.", "色ルールはまだありません。", "还没有颜色规则。"],
+    ),
+    (
+        "Use padrões de nome sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*. As regras anteriores têm prioridade.",
+        [
+            "Utilisez des motifs de nom sans distinction majuscules/minuscules, séparés par des points-virgules, comme *.jpg;*.svg ou README*. Les règles précédentes sont prioritaires.",
+            "Verwenden Sie Dateinamensmuster ohne Beachtung der Groß-/Kleinschreibung, getrennt durch Semikolons, etwa *.jpg;*.svg oder README*. Frühere Regeln haben Vorrang.",
+            "Usa modelli di nome senza distinzione tra maiuscole e minuscole, separati da punto e virgola, come *.jpg;*.svg o README*. Le regole precedenti hanno la priorità.",
+            "Используйте шаблоны имён без учёта регистра через точку с запятой, например *.jpg;*.svg или README*. Приоритет имеют правила выше.",
+            "*.jpg;*.svg や README* のような、大文字と小文字を区別しないセミコロン区切りのファイル名パターンを使います。上のルールが優先されます。",
+            "使用不区分大小写的文件名模式，并用分号分隔，例如 *.jpg;*.svg 或 README*。靠前的规则优先。",
+        ],
+    ),
 ];

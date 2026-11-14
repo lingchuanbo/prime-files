@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
-use nohrs_core::config::{self, Config, DockSide, IndexSource, SortOrder, SplitDirection, ThemeMode};
+use nohrs_core::config::{self, Config, DockSide, FileTypeColorRule, IndexSource, SortOrder, SplitDirection, ThemeMode};
 use nohrs_core::i18n::{self, Lang, tr};
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::shortcuts::{self, Action, Chord};
@@ -226,6 +226,9 @@ pub struct SettingsPage {
     wheel: Option<Wheel>,
     // The font list, made on the first render (it needs a `Window`).
     font_select: Option<Entity<SelectState<SearchableVec<SharedString>>>>,
+    /// Editable filename-colour rules and their input controls.
+    file_type_color_draft: Vec<FileTypeColorRule>,
+    file_type_color_inputs: Vec<(Entity<InputState>, Entity<InputState>)>,
     // Takes the key presses that record a shortcut.
     focus_handle: FocusHandle,
     // The command whose new keys are being waited for.
@@ -249,6 +252,14 @@ enum WheelPart {
     Brightness,
 }
 
+#[derive(Clone, Copy)]
+enum FileColorRuleAction {
+    Add,
+    Remove(usize),
+    MoveUp(usize),
+    MoveDown(usize),
+}
+
 impl SettingsPage {
     /// Creates a new settings page on its first section.
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -270,6 +281,8 @@ impl SettingsPage {
             _app_name_subscription: None,
             wheel: None,
             font_select: None,
+            file_type_color_draft: Vec::new(),
+            file_type_color_inputs: Vec::new(),
             focus_handle: cx.focus_handle(),
             recording: None,
         };
@@ -530,7 +543,90 @@ impl SettingsPage {
 
     /// Takes the config the window now runs on, so the controls show it.
     pub fn set_config(&mut self, config: Config, cx: &mut Context<Self>) {
+        if self.config.ui.file_type_colors != config.ui.file_type_colors {
+            self.file_type_color_draft = config.ui.file_type_colors.clone();
+            self.file_type_color_inputs.clear();
+        }
         self.config = config;
+        cx.notify();
+    }
+
+    fn ensure_file_type_color_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_type_color_inputs.len() == self.file_type_color_draft.len() {
+            return;
+        }
+        self.file_type_color_inputs = self
+            .file_type_color_draft
+            .iter()
+            .map(|rule| {
+                let pattern = cx.new(|cx| InputState::new(window, cx));
+                let color = cx.new(|cx| InputState::new(window, cx));
+                pattern.update(cx, |state, cx| {
+                    state.set_placeholder("*.webp;*.svg", window, cx);
+                    state.set_value(rule.pattern.clone(), window, cx);
+                });
+                color.update(cx, |state, cx| {
+                    state.set_placeholder("#rrggbb", window, cx);
+                    state.set_value(rule.color.clone(), window, cx);
+                });
+                (pattern, color)
+            })
+            .collect();
+    }
+
+    fn capture_file_type_color_inputs(&mut self, cx: &Context<Self>) {
+        self.file_type_color_draft = self
+            .file_type_color_inputs
+            .iter()
+            .map(|(pattern, color)| FileTypeColorRule {
+                pattern: pattern.read(cx).value().trim().to_string(),
+                color: color.read(cx).value().trim().to_string(),
+            })
+            .collect();
+    }
+
+    fn save_file_type_colors(&mut self, cx: &mut Context<Self>) {
+        self.capture_file_type_color_inputs(cx);
+        if self.file_type_color_draft.iter().any(|rule| !rule.is_valid()) {
+            self.status = Some((t!("Digite padrões de nome separados por ponto e vírgula e uma cor #rrggbb para cada regra.").to_string(), true));
+            cx.notify();
+            return;
+        }
+        let values = self
+            .file_type_color_draft
+            .iter()
+            .map(|rule| {
+                let pattern = serde_json::to_string(&rule.pattern).unwrap_or_else(|_| "\"\"".into());
+                let color = serde_json::to_string(&rule.color).unwrap_or_else(|_| "\"\"".into());
+                format!("{{ pattern = {pattern}, color = {color} }}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.write("ui", "file_type_colors", format!("[{values}]"), cx);
+    }
+
+    fn edit_file_type_color_rules(&mut self, action: FileColorRuleAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.capture_file_type_color_inputs(cx);
+        match action {
+            FileColorRuleAction::Add => self.file_type_color_draft.push(FileTypeColorRule {
+                pattern: "*.ext".into(),
+                color: "#eab308".into(),
+            }),
+            FileColorRuleAction::Remove(index) => {
+                if index < self.file_type_color_draft.len() {
+                    self.file_type_color_draft.remove(index);
+                }
+            }
+            FileColorRuleAction::MoveUp(index) if index > 0 && index < self.file_type_color_draft.len() => {
+                self.file_type_color_draft.swap(index, index - 1);
+            }
+            FileColorRuleAction::MoveDown(index) if index + 1 < self.file_type_color_draft.len() => {
+                self.file_type_color_draft.swap(index, index + 1);
+            }
+            _ => {}
+        }
+        self.file_type_color_inputs.clear();
+        self.ensure_file_type_color_inputs(window, cx);
         cx.notify();
     }
 
@@ -1388,7 +1484,55 @@ impl SettingsPage {
                 ),
             )
             .reset(("ui", "default_sort_descending"), !ui.default_sort_descending, "false"),
-        ])]
+        ]), Group::titled(t!("Regras de cor por tipo de arquivo"), vec![Row::hint(
+            t!("Cor dos nomes por tipo de arquivo"),
+            t!("Use padrões de nome sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*. As regras anteriores têm prioridade."),
+            self.file_type_color_editor(cx),
+        ).wide()])]
+    }
+
+    fn file_type_color_editor(&self, cx: &mut Context<Self>) -> Div {
+        let rows = self.file_type_color_inputs.iter().enumerate().map(|(index, (pattern, color))| {
+            div()
+                .id(("file-type-color-rule", index))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().min_w(px(110.0)).child(Input::new(pattern).small()))
+                .child(div().w(px(118.0)).flex_shrink_0().child(Input::new(color).small()))
+                .child(
+                    div()
+                        .id(("file-type-color-preview", index))
+                        .size(px(18.0))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .bg(rgb(theme::parse_color(&self.file_type_color_draft[index].color).unwrap_or(theme::accent()))),
+                )
+                .child(file_rule_button("↑", index, FileColorRuleAction::MoveUp(index), cx))
+                .child(file_rule_button("↓", index, FileColorRuleAction::MoveDown(index), cx))
+                .child(file_rule_button("×", index, FileColorRuleAction::Remove(index), cx))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .when(self.file_type_color_inputs.is_empty(), |this| {
+                this.child(div().text_xs().text_color(rgb(theme::muted())).child(t!("Ainda não há regras de cor.")))
+            })
+            .children(rows)
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(button("file-type-color-add", t!("Adicionar regra de cor"), false).on_click(cx.listener(
+                        |page, _, window, cx| page.edit_file_type_color_rules(FileColorRuleAction::Add, window, cx),
+                    )))
+                    .child(button("file-type-color-save", t!("Salvar regras de cor"), false).on_click(cx.listener(
+                        |page, _, _, cx| page.save_file_type_colors(cx),
+                    )))
+            )
     }
 
     fn media(&self, cx: &mut Context<Self>) -> Vec<Group> {
@@ -2398,6 +2542,31 @@ fn button(id: &'static str, label: &'static str, danger: bool) -> Stateful<Div> 
         .child(label)
 }
 
+fn file_rule_button(
+    label: &'static str,
+    index: usize,
+    action: FileColorRuleAction,
+    cx: &mut Context<SettingsPage>,
+) -> Stateful<Div> {
+    let action_id = index * 3 + match label { "↑" => 0, "↓" => 1, _ => 2 };
+    div()
+        .id(("file-type-color-action", action_id))
+        .size(px(28.0))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .border_1()
+        .border_color(rgb(theme::border_hover()))
+        .text_sm()
+        .text_color(rgb(theme::fg()))
+        .hover(|style| style.bg(rgb(theme::bg_hover())))
+        .on_click(cx.listener(move |page, _, window, cx| page.edit_file_type_color_rules(action, window, cx)))
+        .child(label)
+}
+
 /// Window narrower than this puts the sections in a row of tabs on top.
 const NARROW: f32 = 760.0;
 /// Content narrower than this puts each control under its text.
@@ -2408,6 +2577,7 @@ impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let input = self.search_input(window, cx);
         self.app_name_input(window, cx);
+        self.ensure_file_type_color_inputs(window, cx);
         // The font list needs the window's text system, so it is made here.
         self.ensure_font_select(window, cx);
         let query = input.read(cx).value().to_string();

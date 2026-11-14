@@ -159,6 +159,22 @@
       },
       "type": "object"
     },
+    "FileTypeColorRule": {
+      "description": "A filename pattern and its configured display colour.",
+      "properties": {
+        "color": {
+          "default": "#65a30d",
+          "description": "Six-digit hexadecimal colour such as `#ff8800`.",
+          "type": "string"
+        },
+        "pattern": {
+          "default": "*.txt",
+          "description": "Case-insensitive filename globs such as `*.rs;*.toml` or `README*`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "IndexSource": {
       "description": "Where the whole-computer name search gets its file names.\n\nThe whole-computer search (`Ctrl+E`) needs every name on the drives from\nsomewhere. This app can keep that list itself, or borrow the one an\ninstalled Everything (voidtools) already keeps.",
       "oneOf": [
@@ -446,6 +462,11 @@
     "Ui": {
       "description": "Explorer / view settings.",
       "properties": {
+        "app_name": {
+          "default": "",
+          "description": "Custom title shown in the main window title bar; empty uses the product name.",
+          "type": "string"
+        },
         "audio_waveforms": {
           "default": false,
           "description": "Whether sound files show their waveform instead of their icon in the\nicons view.",
@@ -460,6 +481,14 @@
           "default": false,
           "description": "Whether that default runs from Z to A, largest or newest first.",
           "type": "boolean"
+        },
+        "file_type_colors": {
+          "default": [],
+          "description": "Ordered file-name glob rules and their text colours; the first match wins.",
+          "items": {
+            "$ref": "#/$defs/FileTypeColorRule"
+          },
+          "type": "array"
         },
         "font_family": {
           "default": "",
@@ -647,9 +676,11 @@
     "ui": {
       "$ref": "#/$defs/Ui",
       "default": {
+        "app_name": "",
         "audio_waveforms": false,
         "default_sort": "name",
         "default_sort_descending": false,
+        "file_type_colors": [],
         "font_family": "",
         "hover_audio": true,
         "hover_audio_delay_ms": 400,

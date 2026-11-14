@@ -196,7 +196,7 @@ pub(crate) fn page(
                 ),
         );
 
-    fn tile(card: &Card, icon: AnyElement, tag: u32, cx: &mut Context<ExplorerPane>) -> AnyElement {
+    fn tile(card: &Card, icon: AnyElement, tag: u32, color: u32, cx: &mut Context<ExplorerPane>) -> AnyElement {
         let path = card.path.clone();
         let menu = card.path.clone();
         // Dragging the card onto another moves it in the workspace's order;
@@ -219,7 +219,7 @@ pub(crate) fn page(
             .p(px(12.0))
             .rounded(px(12.0))
             .border_1()
-            .border_color(rgb(theme::border()))
+            .border_color(rgb(color))
             .bg(rgb(theme::bg_secondary()))
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme::bg_hover())))
@@ -241,9 +241,10 @@ pub(crate) fn page(
                 MouseButton::Right,
                 cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.open_workspace_card_menu(tag, menu.clone(), window, cx);
+                    this.open_workspace_card_menu(tag, menu.clone(), true, window, cx);
                 }),
             )
+            .child(div().h(px(3.0)).w_full().rounded_full().bg(rgb(color)))
             .child(div().flex().items_center().justify_between().child(icon).child(
                 Icon::new(IconName::Ellipsis)
                     .size_4()
@@ -341,13 +342,15 @@ pub(crate) fn page(
 
     // The icons first: each is one lookup into the sidebar's cache, which
     // borrows the pane between tiles.
-    let icons: Vec<AnyElement> = cards
+    let icons: Vec<(AnyElement, u32)> = cards
         .iter()
         .map(|card| {
-            match page.sidebar.icons.icon_in(&card.path, true, icon_px, |pane| &mut pane.sidebar.icons, cx) {
+            let color = tags::Tags::card_color(tag, &card.path, cx).unwrap_or(color);
+            let icon = match page.sidebar.icons.icon_in(&card.path, true, icon_px, |pane| &mut pane.sidebar.icons, cx) {
                 Some(image) => img(ImageSource::Render(image)).size(px(28.0)).into_any_element(),
-                None => Icon::new(IconName::Folder).size_6().text_color(rgb(theme::accent())).into_any_element(),
-            }
+                None => Icon::new(IconName::Folder).size_6().text_color(rgb(color)).into_any_element(),
+            };
+            (icon, color)
         })
         .collect();
 
@@ -355,7 +358,7 @@ pub(crate) fn page(
         .flex()
         .flex_wrap()
         .gap_4()
-        .children(cards.iter().zip(icons).map(|(card, icon)| tile(card, icon, tag, cx)))
+        .children(cards.iter().zip(icons).map(|(card, (icon, color))| tile(card, icon, tag, color, cx)))
         .child(add);
 
     // The files the workspace holds: a compact row each, the folder cards
@@ -386,7 +389,7 @@ pub(crate) fn page(
                     MouseButton::Right,
                     cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.open_workspace_card_menu(tag, menu.clone(), window, cx);
+                        this.open_workspace_card_menu(tag, menu.clone(), false, window, cx);
                     }),
                 )
                 .child(icon)

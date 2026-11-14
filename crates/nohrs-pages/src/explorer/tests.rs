@@ -150,6 +150,7 @@ async fn apply_config_ui_reflects_ui_section(cx: &mut TestAppContext) {
                 welcome_done: false,
                 hover_audio: false,
                 hover_audio_delay_ms: 400,
+                file_type_colors: Vec::new(),
             };
             page.apply_config_ui(&ui, cx);
             assert!(page.show_hidden);
@@ -202,6 +203,7 @@ async fn config_reload_keeps_a_sort_chosen_in_the_session(cx: &mut TestAppContex
                 welcome_done: false,
                 hover_audio: false,
                 hover_audio_delay_ms: 400,
+                file_type_colors: Vec::new(),
             };
             page.apply_config_ui(&ui, cx);
             page.set_sort(SortKey::Modified, false, cx);
@@ -1003,6 +1005,7 @@ async fn split_pane_inherits_applied_ui_config(cx: &mut TestAppContext) {
                 welcome_done: false,
                 hover_audio: false,
                 hover_audio_delay_ms: 400,
+                file_type_colors: Vec::new(),
             };
             page.apply_config_ui(&ui, cx);
 
@@ -2908,6 +2911,7 @@ async fn each_folder_opens_with_the_zoom_and_sort_it_was_left_with(cx: &mut Test
                 welcome_done: false,
                 hover_audio: false,
                 hover_audio_delay_ms: 400,
+                file_type_colors: Vec::new(),
             };
             page.apply_config_ui(&ui, cx);
 

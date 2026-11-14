@@ -141,6 +141,11 @@ fn render_item(
     let preview_item = item.clone();
     let activation_item = item.clone();
     let is_dir = item.kind == "dir";
+    let name_color = if selected || !matches!(item.kind.as_str(), "file") {
+        theme::fg()
+    } else {
+        page.file_type_color(&item.name).unwrap_or_else(theme::fg)
+    };
     let highlight = page.highlight_query();
 
     div()
@@ -214,7 +219,7 @@ fn render_item(
                         .flex_shrink()
                         .min_w(px(0.0))
                         .text_sm()
-                        .text_color(rgb(theme::fg()))
+                        .text_color(rgb(name_color))
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
