@@ -1245,7 +1245,7 @@ pub(crate) mod mft {
     /// Whether the running service can search its own copy of the names
     /// (protocol 2 and later). Asked once: the answer only changes when the
     /// service is reinstalled, and the app is restarted then any way.
-    pub(super) fn searchable() -> bool {
+    pub(crate) fn searchable() -> bool {
         #[cfg(windows)]
         {
             static SEARCHABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1261,7 +1261,7 @@ pub(crate) mod mft {
     /// Asks the service for the paths holding every one of `terms`. The
     /// service scans the names it keeps, so nothing of the table is loaded
     /// here: what comes back is the few thousand paths that matched.
-    pub(super) fn search(terms: &[String], limit: u32) -> Result<Vec<nohrs_indexer::protocol::Hit>, String> {
+    pub(crate) fn search(terms: &[String], limit: u32) -> Result<Vec<nohrs_indexer::protocol::Hit>, String> {
         #[cfg(windows)]
         {
             let started = Instant::now();

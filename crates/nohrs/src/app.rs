@@ -8,7 +8,7 @@
 //! binary owns the keybinding that summons the launcher from anywhere.
 
 use crate::cli::{Cli, Command};
-use gpui::{App, AppContext, Application, Bounds, KeyBinding, WindowAppearance, px, size};
+use gpui::{App, AppContext, Application, Bounds, KeyBinding, WindowAppearance, actions, px, size};
 use gpui_component::Root;
 use gpui_component::resizable::ResizableState;
 use nohrs_core::config::{self, ConfigOverride, ThemeMode};
@@ -24,6 +24,8 @@ use nohrs_ui::window::{self, traffic_lights::TrafficLightsHook};
 use std::sync::Arc;
 
 pub struct NohrsApp;
+
+actions!(nohrs, [OpenStandaloneSearch]);
 
 impl NohrsApp {
     pub fn run(cli: &Cli) {
@@ -75,6 +77,7 @@ impl NohrsApp {
             // from any application, and one GPUI handles while nohrs is in front.
             launcher.install_global_hotkey(app);
             install_in_app_launcher_key(launcher.clone(), app);
+            install_standalone_search_key(app);
 
             if launcher_only {
                 // Resident mode: nohrs is a background process whose only job is
@@ -195,6 +198,16 @@ fn install_in_app_launcher_key(launcher: LauncherIndex, app: &mut App) {
     app.on_action(move |_: &ToggleLauncher, cx: &mut App| {
         if let Err(error) = launcher.toggle(cx) {
             tracing::error!("failed to toggle launcher window: {error}");
+        }
+    });
+}
+
+fn install_standalone_search_key(app: &mut App) {
+    // The launcher already owns Ctrl+Shift+Space as its OS-level shortcut.
+    app.bind_keys([KeyBinding::new("ctrl-shift-f", OpenStandaloneSearch, None)]);
+    app.on_action(|_: &OpenStandaloneSearch, cx: &mut App| {
+        if let Err(error) = nohrs_pages::search_window::toggle(cx) {
+            tracing::error!("failed to toggle standalone search window: {error}");
         }
     });
 }

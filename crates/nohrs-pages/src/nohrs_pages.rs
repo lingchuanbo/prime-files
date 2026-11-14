@@ -27,6 +27,8 @@ pub mod pane_group;
 pub mod updater;
 /// Other programs' "show in folder", answered by Nohrs.
 pub mod reveal;
+/// The standalone, indexed full-computer search window.
+pub mod search_window;
 /// The application root view that hosts the sidebar and active page.
 pub mod root;
 /// The S3 page.
