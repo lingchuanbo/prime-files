@@ -15,6 +15,7 @@
 //! create/remove through the group's primitives.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -100,6 +101,20 @@ type BuildPane<T> = Box<dyn Fn(&mut Window, &mut App) -> Entity<T>>;
 /// splits are P3+. (Tabs within a pane are unbounded — see [`Pane`].)
 const MAX_PANES: usize = 2;
 
+/// Per-tab appearance and protection, persisted by the embedding page.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TabMetadata {
+    #[serde(default)]
+    /// Prevent ordinary close and show in the pinned section.
+    pub pinned: bool,
+    #[serde(default)]
+    /// Show as a compact persistent tab.
+    pub resident: bool,
+    #[serde(default)]
+    /// Optional RGB icon color.
+    pub color: Option<u32>,
+}
+
 /// One pane: an ordered, non-empty list of tabs with one active.
 struct Pane<T: PaneItem> {
     // Invariant: always non-empty.
@@ -145,6 +160,7 @@ type TabHook<V> = Rc<dyn Fn(&mut V, usize, usize, &mut Window, &mut Context<V>)>
 /// A tab-reorder render hook: `(view, pane, from, to, window, cx)`.
 type ReorderHook<V> = Rc<dyn Fn(&mut V, usize, usize, usize, &mut Window, &mut Context<V>)>;
 /// A press that starts one of the group's drags: `(view, drag, window, cx)`.
+type ContextHook<V> = Rc<dyn Fn(&mut V, usize, usize, Point<Pixels>, &mut Window, &mut Context<V>)>;
 type DragHook<V> = Rc<dyn Fn(&mut V, GroupDrag, &mut Window, &mut Context<V>)>;
 
 /// The view-state hooks a [`PaneGroup`] needs to render its interactive chrome.
@@ -164,6 +180,8 @@ pub struct PaneGroupCallbacks<V: 'static> {
     pub on_close_tab: TabHook<V>,
     /// A tab was dragged onto another within the same pane: `(pane, from, to)`.
     pub on_reorder_tab: ReorderHook<V>,
+    /// A tab was right-clicked at a window position.
+    pub on_tab_context: ContextHook<V>,
     /// The divider or the tab column's edge was pressed: the embedder hands
     /// the drag to [`PaneGroup::begin_drag`] and the mouse after it to
     /// [`PaneGroup::drag_to`] and [`PaneGroup::finish_drag`].
@@ -180,6 +198,7 @@ impl<V: 'static> Clone for PaneGroupCallbacks<V> {
             on_activate_tab: self.on_activate_tab.clone(),
             on_close_tab: self.on_close_tab.clone(),
             on_reorder_tab: self.on_reorder_tab.clone(),
+            on_tab_context: self.on_tab_context.clone(),
             on_group_drag: self.on_group_drag.clone(),
         }
     }
@@ -216,6 +235,7 @@ impl Render for TabDragPreview {
 pub struct PaneGroup<T: PaneItem> {
     // Invariant: always non-empty and at most two entries (2-way cap).
     panes: Vec<Pane<T>>,
+    tab_metadata: HashMap<EntityId, TabMetadata>,
     /// Index of the pane keyboard input and shortcuts act on.
     active: usize,
     /// Orientation a split uses; toggled by the split shortcuts.
@@ -246,6 +266,7 @@ impl<T: PaneItem> PaneGroup<T> {
         let first = build_pane(window, cx);
         let group = Self {
             panes: vec![Pane::with_tab(first.clone())],
+            tab_metadata: HashMap::new(),
             active: 0,
             direction: SplitDirection::default(),
             ratio: 0.5,
@@ -411,7 +432,9 @@ impl<T: PaneItem> PaneGroup<T> {
             self.active = self.panes.len() - 1;
         }
         self.focus_active(window, cx);
-        removed.tabs.iter().map(|tab| tab.entity_id()).collect()
+        let ids: Vec<_> = removed.tabs.iter().map(|tab| tab.entity_id()).collect();
+        for id in &ids { self.tab_metadata.remove(id); }
+        ids
     }
 
     /// Builds a tab, appends it to the pane at `pane_index`, and makes it that
@@ -461,6 +484,7 @@ impl<T: PaneItem> PaneGroup<T> {
                 }
                 removed.entity_id()
             };
+            self.tab_metadata.remove(&removed_id);
             if pane_index == self.active {
                 self.focus_active(window, cx);
             }
@@ -616,6 +640,18 @@ impl<T: PaneItem> PaneGroup<T> {
             }
         }
         None
+    }
+
+    /// Returns the metadata attached to a tab entity.
+    pub fn tab_metadata(&self, id: EntityId) -> TabMetadata {
+        self.tab_metadata.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Updates metadata for an existing tab entity.
+    pub fn set_tab_metadata(&mut self, id: EntityId, metadata: TabMetadata) {
+        if self.locate_tab(id).is_some() {
+            self.tab_metadata.insert(id, metadata);
+        }
     }
 
     /// Number of open panes (1 or 2).
@@ -1058,7 +1094,7 @@ impl<T: PaneItem> PaneGroup<T> {
         let pane = &self.panes[pane_index];
         let tab_count = pane.tabs.len();
         let active_tab = pane.active_tab;
-        let rows: Vec<AnyElement> = pane
+        let rows: Vec<(TabMetadata, AnyElement)> = pane
             .tabs
             .iter()
             .enumerate()
@@ -1067,15 +1103,18 @@ impl<T: PaneItem> PaneGroup<T> {
                     let item = tab.read(cx);
                     (item.tab_title(cx), item.tab_icon(cx))
                 };
+                let metadata = self.tab_metadata(tab.entity_id());
                 let is_active = tab_index == active_tab;
+                let on_context = callbacks.on_tab_context.clone();
                 let on_activate_tab = callbacks.on_activate_tab.clone();
                 let on_close_tab = callbacks.on_close_tab.clone();
                 let on_middle_close = callbacks.on_close_tab.clone();
                 let on_reorder_tab = callbacks.on_reorder_tab.clone();
                 let drag_title = SharedString::from(title.clone());
+                let tooltip_title = title.clone();
                 let group = SharedString::from(format!("vtab-group-{pane_index}-{tab_index}"));
-                let show_close = tab_count > 1;
-                div()
+                let show_close = tab_count > 1 && !metadata.pinned && !metadata.resident;
+                let row = div()
                     .id(SharedString::from(format!("vtab-{pane_index}-{tab_index}")))
                     .group(group.clone())
                     .flex()
@@ -1084,6 +1123,11 @@ impl<T: PaneItem> PaneGroup<T> {
                     .gap(px(8.0))
                     .h(px(34.0))
                     .px(px(if labels { 10.0 } else { 0.0 }))
+                    .when(metadata.resident, |this| this
+                        .w(px(if labels { ((width - 22.0) / 3.0).max(36.0) } else { 32.0 }))
+                        .h(px(if labels { 44.0 } else { 34.0 })).justify_center()
+                        .bg(rgb(theme::bg_secondary()))
+                        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip_title.clone()).build(window, cx)))
                     .when(!labels, |this| this.justify_center())
                     .rounded(px(8.0))
                     .text_sm()
@@ -1094,10 +1138,15 @@ impl<T: PaneItem> PaneGroup<T> {
                             .border_1()
                             .border_color(rgb(theme::border()))
                     })
+                    .when(metadata.pinned && !is_active, |this| this.bg(rgb(theme::bg_secondary())))
                     .when(!is_active, |this| {
                         this.text_color(rgb(theme::toolbar_text()))
                             .hover(|style| style.bg(rgb(theme::toolbar_hover())))
                     })
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        on_context(this, pane_index, tab_index, event.position, window, cx);
+                    }))
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         on_activate_tab(this, pane_index, tab_index, window, cx)
                     }))
@@ -1130,9 +1179,9 @@ impl<T: PaneItem> PaneGroup<T> {
                         Icon::new(icon.unwrap_or(IconName::Folder))
                             .size_4()
                             .flex_shrink_0()
-                            .text_color(rgb(if is_active { theme::accent() } else { theme::muted() })),
+                            .text_color(rgb(metadata.color.unwrap_or(if is_active { theme::accent() } else { theme::muted() }))),
                     )
-                    .when(labels, |this| {
+                    .when(labels && !metadata.resident, |this| {
                         this.child(
                             div()
                                 .flex_1()
@@ -1168,9 +1217,18 @@ impl<T: PaneItem> PaneGroup<T> {
                                 .child(Icon::new(IconName::Close).size_3()),
                         )
                     })
-                    .into_any_element()
+                    .into_any_element();
+                (metadata, row)
             })
             .collect();
+        let mut resident = Vec::new();
+        let mut pinned = Vec::new();
+        let mut ordinary = Vec::new();
+        for (metadata, row) in rows {
+            if metadata.resident { resident.push(row); }
+            else if metadata.pinned { pinned.push(row); }
+            else { ordinary.push(row); }
+        }
         let on_new_tab = callbacks.on_new_tab.clone();
         let on_close_pane = callbacks.on_close_pane.clone();
         let on_group_drag = callbacks.on_group_drag.clone();
@@ -1253,8 +1311,13 @@ impl<T: PaneItem> PaneGroup<T> {
                     .flex_col()
                     .gap(px(2.0))
                     .overflow_y_scroll()
-                    .children(rows)
-                    .child(new_tab),
+                    .when(!resident.is_empty(), |list| list.child(
+                        div().flex().flex_wrap().gap(px(3.0)).children(resident)))
+                    .when(!pinned.is_empty(), |list| list.child(
+                        div().flex().flex_col().gap(px(2.0)).pb(px(6.0))
+                            .border_b_1().border_color(rgb(theme::border())).children(pinned)))
+                    .child(new_tab)
+                    .children(ordinary),
             )
             .child(
                 // The resize strip sits on the column's inner edge: the right
@@ -1298,6 +1361,9 @@ impl<T: PaneItem> PaneGroup<T> {
     where
         V: 'static,
     {
+        let on_context = callbacks.on_tab_context.clone();
+        let metadata = self.tab(pane_index, tab_index).map(|tab| self.tab_metadata(tab.entity_id())).unwrap_or_default();
+        let show_close = show_close && !metadata.pinned && !metadata.resident;
         let on_activate_tab = callbacks.on_activate_tab.clone();
         let on_close_tab = callbacks.on_close_tab.clone();
         let on_reorder_tab = callbacks.on_reorder_tab.clone();
@@ -1348,6 +1414,10 @@ impl<T: PaneItem> PaneGroup<T> {
                             .bg(rgb(theme::border())),
                     )
             })
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                on_context(this, pane_index, tab_index, event.position, window, cx);
+            }))
             .on_click(cx.listener(move |this, _event, window, cx| {
                 on_activate_tab(this, pane_index, tab_index, window, cx)
             }))
@@ -1379,16 +1449,12 @@ impl<T: PaneItem> PaneGroup<T> {
                     on_reorder_tab(this, pane_index, drag.tab, tab_index, window, cx);
                 }
             }))
-            .when_some(icon, |this, icon| {
+            .when_some(icon.or(metadata.color.map(|_| IconName::Folder)), |this, icon| {
                 this.child(
                     Icon::new(icon)
                         .size_4()
                         .flex_shrink_0()
-                        .text_color(rgb(if is_active {
-                            theme::accent()
-                        } else {
-                            theme::muted()
-                        })),
+                        .text_color(rgb(metadata.color.unwrap_or(if is_active { theme::accent() } else { theme::muted() }))),
                 )
             })
             .child(

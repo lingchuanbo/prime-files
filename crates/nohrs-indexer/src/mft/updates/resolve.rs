@@ -36,7 +36,7 @@ pub(crate) fn refresh(
     table: &mut Table,
     numbers: BTreeSet<u64>,
     read: impl FnMut(u64) -> io::Result<Raw>,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let mut records = Records {
         cache: BTreeMap::new(),
         read,
@@ -63,7 +63,12 @@ pub(crate) fn refresh(
         owners.insert(owner);
     }
     if !complex {
-        return super::apply(table, records.cache);
+        let changes = changed_records(table, records.cache)?;
+        if changes.is_empty() {
+            return Ok(false);
+        }
+        super::apply(table, changes)?;
+        return Ok(true);
     }
     if owners
         .iter()
@@ -77,7 +82,45 @@ pub(crate) fn refresh(
         .map(|&owner| load(owner, &mut records).map_err(|error| super::record_error(owner, error)))
         .collect::<io::Result<Vec<_>>>()?;
     commit(table, groups, &owners);
-    Ok(())
+    Ok(true)
+}
+
+fn changed_records(table: &Table, records: BTreeMap<u64, Raw>) -> io::Result<BTreeMap<u64, Raw>> {
+    let mut old_names: BTreeMap<u64, Vec<(u64, &str)>> = BTreeMap::new();
+    for name in &table.names {
+        if records.contains_key(&name.record) {
+            old_names
+                .entry(name.record)
+                .or_default()
+                .push((name.parent, table.name(name)));
+        }
+    }
+    let mut changed = BTreeMap::new();
+    for (number, raw) in records {
+        let mut parsed = Table::default();
+        if let Some(bytes) = &raw {
+            super::validate(bytes).map_err(|error| super::record_error(number, error))?;
+            mft::parse_record(&mut parsed, 0, &mut bytes.clone());
+        }
+        let previous = table
+            .records
+            .get(number as usize)
+            .copied()
+            .unwrap_or_default();
+        let current = parsed.records.first().copied().unwrap_or_default();
+        let mut old = old_names.remove(&number).unwrap_or_default();
+        let mut new: Vec<_> = parsed
+            .names
+            .iter()
+            .map(|name| (name.parent, parsed.name(name)))
+            .collect();
+        old.sort_unstable();
+        new.sort_unstable();
+        if previous != current || old != new {
+            changed.insert(number, raw);
+        }
+    }
+    Ok(changed)
 }
 
 fn load(

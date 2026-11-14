@@ -213,3 +213,40 @@ fn moving_into_another_profile_hides_descendants() {
     mft::tree(&table, "C:", &policy).search(&["txt".into()], 100, &mut found);
     assert!(found.is_empty());
 }
+
+#[test]
+fn refresh_skips_identical_search_data_but_detects_metadata_and_deletion() {
+    let mut table = fixture();
+    let same = Record::new(1, 0)
+        .name(30, "child.txt", 1)
+        .resident_data(4)
+        .finish();
+    assert!(!refresh(&mut table, [31].into(), |_| Ok(Some(same.clone()))).unwrap());
+    let changed = Record::new(1, 0)
+        .name(30, "child.txt", 1)
+        .resident_data(9)
+        .finish();
+    assert!(refresh(&mut table, [31].into(), |_| Ok(Some(changed.clone()))).unwrap());
+    assert_eq!(9, hits(&table)[0].size);
+    assert!(refresh(&mut table, [31].into(), |_| Ok(None)).unwrap());
+    assert!(hits(&table).is_empty());
+    assert!(!refresh(&mut table, [31].into(), |_| Ok(None)).unwrap());
+}
+
+#[test]
+fn refresh_applies_changed_entries_in_a_mixed_batch() {
+    let mut table = fixture();
+    let same = Record::new(3, 0).name(5, "old", 1).finish();
+    let renamed = Record::new(1, 0)
+        .name(30, "renamed.txt", 1)
+        .resident_data(4)
+        .finish();
+    let records = BTreeMap::from([(30, same), (31, renamed)]);
+    assert!(
+        refresh(&mut table, [30, 31].into(), |number| Ok(records
+            .get(&number)
+            .cloned()))
+        .unwrap()
+    );
+    assert_eq!(r"C:\old\renamed.txt", hits(&table)[0].path);
+}

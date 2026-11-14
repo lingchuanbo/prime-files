@@ -33,7 +33,7 @@ const DOS_NAMESPACE: u8 = 2;
 pub(crate) mod updates;
 
 /// What one record says of itself.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Info {
     /// The record holds a live file or folder.
     pub in_use: bool,

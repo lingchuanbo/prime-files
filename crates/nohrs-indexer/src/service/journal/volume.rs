@@ -71,9 +71,12 @@ impl Journal {
         input[40..42].copy_from_slice(&2u16.to_le_bytes());
         input[42..44].copy_from_slice(&3u16.to_le_bytes());
         // BytesToWaitFor=0：没有变化立即返回，停机不依赖新文件事件。
-        let mut buffer = vec![0; BUFFER_SIZE];
         let mut next = cursor.next;
         let mut changes = BTreeSet::new();
+        if next >= state.next {
+            return Ok((cursor, changes));
+        }
+        let mut buffer = vec![0; BUFFER_SIZE];
         for _ in 0..MAX_BATCHES {
             if next >= state.next {
                 return Ok((Cursor { next, ..cursor }, changes));

@@ -87,10 +87,11 @@ impl Tracked {
 
 fn catch_up(table: &mut mft::Table, journal: &Journal, cursor: &mut Cursor) -> io::Result<bool> {
     let (next, numbers) = journal.changes(*cursor)?;
-    let changed = !numbers.is_empty();
-    if changed {
-        mft::updates::refresh(table, numbers, |number| journal.record(number))?;
-    }
+    let changed = if numbers.is_empty() {
+        false
+    } else {
+        mft::updates::refresh(table, numbers, |number| journal.record(number))?
+    };
     *cursor = next;
     Ok(changed)
 }
