@@ -85,6 +85,117 @@ fn malformed_record_does_not_partially_apply_batch() {
 }
 
 #[test]
+fn unresolved_extension_changes_preserve_old_links() {
+    let mut table = fixture();
+    let mut extension = Record::new(1, 31).name(32, "linked.txt", 1).finish();
+    mft::parse_record(&mut table, 40, &mut extension);
+    for number in [31, 40] {
+        assert!(apply(&mut table, BTreeMap::from([(number, None)])).is_err());
+        assert_eq!(2, hits(&table).len());
+    }
+    let extension = Record::new(1, 31).name(32, "new.txt", 1).finish();
+    assert!(apply(&mut table, BTreeMap::from([(41, Some(extension))])).is_err());
+    assert_eq!(2, hits(&table).len());
+}
+
+#[test]
+fn resolved_extensions_update_sizes_links_and_extension_deletion() {
+    let mut table = fixture();
+    let base = Record::new(1, 0)
+        .name(30, "child.txt", 1)
+        .attribute_list(&[31, 40])
+        .finish();
+    let extension = Record::new(1, 31)
+        .name(32, "linked.txt", 1)
+        .big_data(8192, &[0])
+        .finish();
+    let mut current = BTreeMap::from([(31, Some(base)), (40, Some(extension))]);
+    refresh(&mut table, [31].into(), |number| {
+        Ok(current.get(&number).cloned().flatten())
+    })
+    .unwrap();
+    assert_eq!(2, hits(&table).len());
+    assert!(hits(&table).iter().all(|hit| hit.size == 8192));
+    current.insert(
+        40,
+        Some(
+            Record::new(1, 31)
+                .name(32, "renamed.txt", 1)
+                .big_data(9000, &[0])
+                .finish(),
+        ),
+    );
+    refresh(&mut table, [40].into(), |number| {
+        Ok(current.get(&number).cloned().flatten())
+    })
+    .unwrap();
+    assert_eq!(2, hits(&table).len());
+    assert!(
+        hits(&table)
+            .iter()
+            .any(|hit| hit.path.ends_with("renamed.txt"))
+    );
+    assert!(hits(&table).iter().all(|hit| hit.size == 9000));
+    current.insert(
+        31,
+        Some(
+            Record::new(1, 0)
+                .name(30, "child.txt", 1)
+                .resident_data(7)
+                .finish(),
+        ),
+    );
+    current.insert(40, None);
+    refresh(&mut table, [40].into(), |number| {
+        Ok(current.get(&number).cloned().flatten())
+    })
+    .unwrap();
+    assert_eq!(1, hits(&table).len());
+    assert_eq!(7, hits(&table)[0].size);
+    current.insert(31, None);
+    refresh(&mut table, [31].into(), |number| {
+        Ok(current.get(&number).cloned().flatten())
+    })
+    .unwrap();
+    assert!(hits(&table).is_empty());
+}
+
+#[test]
+fn missing_extension_keeps_entire_previous_batch() {
+    let mut table = fixture();
+    let listed = Record::new(1, 0)
+        .name(30, "changed.txt", 1)
+        .attribute_list(&[31, 40])
+        .finish();
+    let current = BTreeMap::from([(30, None), (31, Some(listed))]);
+    assert!(
+        refresh(&mut table, [30, 31].into(), |number| Ok(current
+            .get(&number)
+            .cloned()
+            .flatten()))
+        .is_err()
+    );
+    assert_eq!(r"C:\old\child.txt", hits(&table)[0].path);
+}
+
+#[test]
+fn reused_owner_sequence_keeps_entire_previous_batch() {
+    let mut table = fixture();
+    let base = Record::new(1, 0).attribute_list(&[31, 40]).finish();
+    let extension = Record::new(1, 31 | (1 << 48))
+        .name(32, "wrong.txt", 1)
+        .finish();
+    let current = BTreeMap::from([(30, None), (31, Some(base)), (40, Some(extension))]);
+    assert!(
+        refresh(&mut table, [30, 40].into(), |number| {
+            Ok(current.get(&number).cloned().flatten())
+        })
+        .is_err()
+    );
+    assert_eq!(r"C:\old\child.txt", hits(&table)[0].path);
+}
+
+#[test]
 fn moving_into_another_profile_hides_descendants() {
     let mut table = fixture();
     let other = Record::new(3, 0).name(32, "other", 1).finish();

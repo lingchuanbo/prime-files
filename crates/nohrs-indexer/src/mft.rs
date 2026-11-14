@@ -65,6 +65,7 @@ pub struct Table {
     pub names: Vec<Name>,
     text: String,
     extended: std::collections::HashSet<u64>,
+    extensions: std::collections::HashMap<u64, u64>,
 }
 
 impl Table {
@@ -160,6 +161,8 @@ pub fn parse_record(table: &mut Table, number: u64, record: &mut [u8]) {
     let owner = if base == 0 { number } else { base };
     if base != 0 {
         table.extended.insert(owner);
+        table.extended.insert(number);
+        table.extensions.insert(number, owner);
     }
     if base == 0
         && let Some(info) = table.info(owner)
@@ -547,6 +550,16 @@ pub(crate) mod tests {
 
         pub(crate) fn resident_data(self, size: usize) -> Self {
             self.attribute(DATA, true, &[], &vec![7u8; size])
+        }
+
+        pub(crate) fn attribute_list(self, records: &[u64]) -> Self {
+            let mut value = vec![0u8; records.len() * 32];
+            for (entry, number) in value.as_chunks_mut::<32>().0.iter_mut().zip(records) {
+                entry[..4].copy_from_slice(&DATA.to_le_bytes());
+                entry[4..6].copy_from_slice(&32u16.to_le_bytes());
+                entry[16..24].copy_from_slice(&number.to_le_bytes());
+            }
+            self.attribute(ATTRIBUTE_LIST, true, &[], &value)
         }
 
         pub(crate) fn big_data(self, size: u64, runs: &[u8]) -> Self {

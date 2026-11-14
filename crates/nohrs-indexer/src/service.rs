@@ -44,6 +44,10 @@ use crate::{PIPE_NAME, SERVICE_NAME, mft, protocol};
 mod journal;
 mod index;
 
+#[cfg(test)]
+#[path = "service/request_tests.rs"]
+mod request_tests;
+
 static ALLOWED: OnceLock<String> = OnceLock::new();
 static STATUS: AtomicIsize = AtomicIsize::new(0);
 static STOPPING: AtomicBool = AtomicBool::new(false);
@@ -243,11 +247,11 @@ fn read_request_body(mut pipe: &File) -> io::Result<Vec<u8>> {
     for _ in 0..count {
         let mut length = [0u8; 2];
         pipe.read_exact(&mut length)?;
+        body.extend_from_slice(&length);
         let length = u16::from_le_bytes(length) as usize;
         if length > 1024 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "search term too long"));
         }
-        body.extend_from_slice(&length.to_le_bytes());
         let mut term = vec![0u8; length];
         pipe.read_exact(&mut term)?;
         body.extend_from_slice(&term);

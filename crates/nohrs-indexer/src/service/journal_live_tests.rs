@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
+use std::io::Write as _;
 use std::{
     fs,
     os::windows::{fs::OpenOptionsExt as _, io::AsRawHandle as _},
@@ -80,33 +81,40 @@ fn real_journal_tracks_create_rename_hard_link_move_and_delete() {
     fs::create_dir(&folder).unwrap();
     let _cleanup = Cleanup(folder.clone());
     let folder_id = number(&folder);
-    let original = folder.join("original.txt");
-    fs::write(&original, b"search update").unwrap();
-    let file_id = number(&original);
-    advance(&journal, &mut cursor, file_id);
-    assert_eq!(vec!["original.txt"], names(&journal, file_id));
-    let renamed = folder.join("renamed.txt");
-    fs::rename(&original, &renamed).unwrap();
-    advance(&journal, &mut cursor, file_id);
-    assert_eq!(vec!["renamed.txt"], names(&journal, file_id));
-    let link = folder.join("linked.txt");
-    fs::hard_link(&renamed, &link).unwrap();
-    advance(&journal, &mut cursor, file_id);
-    let mut found = names(&journal, file_id);
-    found.sort();
-    assert_eq!(vec!["linked.txt", "renamed.txt"], found);
-    let moved = folder.join("destination");
-    fs::create_dir(&moved).unwrap();
-    fs::rename(&renamed, moved.join("renamed.txt")).unwrap();
-    advance(&journal, &mut cursor, file_id);
-    assert_eq!(2, names(&journal, file_id).len());
-    fs::remove_file(&link).unwrap();
-    fs::remove_file(moved.join("renamed.txt")).unwrap();
-    advance(&journal, &mut cursor, file_id);
-    assert!(names(&journal, file_id).is_empty());
+    verify_file_changes(&journal, &mut cursor, &folder);
     assert!(
         names(&journal, folder_id)
             .iter()
             .any(|name| name.starts_with("journal-test-"))
     );
+}
+
+fn verify_file_changes(journal: &Journal, cursor: &mut Cursor, folder: &Path) {
+    let original = folder.join("original.txt");
+    fs::File::create(&original)
+        .unwrap()
+        .write_all(b"search update")
+        .unwrap();
+    let file_id = number(&original);
+    advance(journal, cursor, file_id);
+    assert_eq!(vec!["original.txt"], names(journal, file_id));
+    let renamed = folder.join("renamed.txt");
+    fs::rename(&original, &renamed).unwrap();
+    advance(journal, cursor, file_id);
+    assert_eq!(vec!["renamed.txt"], names(journal, file_id));
+    let link = folder.join("linked.txt");
+    fs::hard_link(&renamed, &link).unwrap();
+    advance(journal, cursor, file_id);
+    let mut found = names(journal, file_id);
+    found.sort();
+    assert_eq!(vec!["linked.txt", "renamed.txt"], found);
+    let moved = folder.join("destination");
+    fs::create_dir(&moved).unwrap();
+    fs::rename(&renamed, moved.join("renamed.txt")).unwrap();
+    advance(journal, cursor, file_id);
+    assert_eq!(2, names(journal, file_id).len());
+    fs::remove_file(&link).unwrap();
+    fs::remove_file(moved.join("renamed.txt")).unwrap();
+    advance(journal, cursor, file_id);
+    assert!(names(journal, file_id).is_empty());
 }

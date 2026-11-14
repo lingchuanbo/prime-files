@@ -106,8 +106,8 @@ pub fn search(terms: &[String], limit: u32) -> io::Result<Vec<protocol::Hit>> {
     protocol::read_hits(&mut BufReader::with_capacity(1 << 20, pipe))
 }
 
-/// Throws the names the service keeps away, so the next search reads the
-/// volumes again.
+/// Schedules a background rebuild, keeping the published search snapshot
+/// available until the replacement is ready.
 pub fn refresh() -> io::Result<()> {
     let mut pipe = connect()?;
     pipe.write_all(protocol::REFRESH)?;

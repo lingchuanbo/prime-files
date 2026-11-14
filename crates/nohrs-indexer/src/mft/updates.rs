@@ -5,13 +5,16 @@ use super::{
 use std::collections::BTreeMap;
 use std::io;
 
+mod resolve;
+pub(crate) use resolve::refresh;
+
 pub(crate) fn apply(table: &mut Table, changes: BTreeMap<u64, Option<Vec<u8>>>) -> io::Result<()> {
     for (&number, record) in &changes {
         if number > table.records.len() as u64 + 1_000_000 || table.extended.contains(&number) {
-            return Err(invalid());
+            return Err(record_error(number, invalid()));
         }
         if let Some(record) = record {
-            validate(record)?;
+            validate(record).map_err(|error| record_error(number, error))?;
         }
     }
     // 先验证整批；扩展属性无法单独更新时，调用方保留旧快照并重建。
@@ -28,6 +31,10 @@ pub(crate) fn apply(table: &mut Table, changes: BTreeMap<u64, Option<Vec<u8>>>) 
         }
     }
     Ok(())
+}
+
+fn record_error(number: u64, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("MFT record {number}: {error}"))
 }
 
 fn invalid() -> io::Error {
