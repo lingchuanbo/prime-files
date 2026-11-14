@@ -67,6 +67,52 @@ fn search_matches_reference_in_table_order_and_respects_existing_output() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn search_finds_han_names_by_pinyin_initials() {
+    let mut volume = Volume::new("C:");
+    volume.push(0, "文件夹", true, 0, 8);
+    volume.push(0, "工作报告.docx", false, 123, 9);
+    volume.push(0, "普通文件.txt", false, 456, 10);
+
+    let mut actual = Vec::new();
+    volume.search(&["wjj".to_string()], 20, &mut actual);
+
+    assert_eq!(
+        actual
+            .iter()
+            .map(|hit| hit.path.as_str())
+            .collect::<Vec<_>>(),
+        ["C:\\文件夹"]
+    );
+}
+
+#[test]
+fn search_finds_han_names_by_full_pinyin() {
+    let mut volume = Volume::new("C:");
+    volume.push(0, "文件夹", true, 0, 8);
+
+    let mut actual = Vec::new();
+    volume.search(&["wenjianjia".to_string()], 20, &mut actual);
+
+    assert_eq!(actual.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>(), ["C:\\文件夹"]);
+}
+
+#[cfg(windows)]
+#[test]
+fn full_pinyin_fallback_runs_even_when_literal_matches_are_common() {
+    let mut volume = Volume::new("C:");
+    for index in 0..20 {
+        volume.push(0, &format!("wenjian-note-{index}.txt"), false, 1, 1);
+    }
+    volume.push(0, "文件夹", true, 0, 8);
+
+    let mut actual = Vec::new();
+    volume.search(&["wenjian".to_string()], 100, &mut actual);
+
+    assert!(actual.iter().any(|hit| hit.path == "C:\\文件夹"));
+}
+
 #[test]
 #[ignore]
 fn service_search_benchmark() {

@@ -5897,4 +5897,20 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "Everything 没有响应。",
         ],
     ),
+    ("Aplicativo", ["Application", "Anwendung", "Applicazione", "Приложение", "アプリ", "应用"]),
+    (
+        "Nome do aplicativo",
+        ["Nom de l’application", "Anwendungsname", "Nome dell’applicazione", "Название приложения", "アプリ名", "软件名称"],
+    ),
+    (
+        "Mostrado na barra de título. Deixe vazio para usar o nome padrão; pressione Enter ou saia do campo para salvar.",
+        [
+            "Affiché dans la barre de titre. Laissez vide pour utiliser le nom par défaut ; appuyez sur Entrée ou quittez le champ pour enregistrer.",
+            "Wird in der Titelleiste angezeigt. Leer lassen, um den Standardnamen zu verwenden; mit Eingabe bestätigen oder das Feld verlassen, um zu speichern.",
+            "Mostrato nella barra del titolo. Lascia vuoto per usare il nome predefinito; premi Invio o esci dal campo per salvare.",
+            "Отображается в заголовке окна. Оставьте поле пустым, чтобы использовать имя по умолчанию; нажмите Enter или выйдите из поля для сохранения.",
+            "タイトルバーに表示されます。既定の名前を使うには空欄にします。Enter キーを押すか、入力欄から移動すると保存されます。",
+            "显示在标题栏中。留空使用默认名称；按 Enter 或离开输入框后保存。",
+        ],
+    ),
 ];

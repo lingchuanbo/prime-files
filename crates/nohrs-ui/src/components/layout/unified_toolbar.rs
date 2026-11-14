@@ -21,13 +21,24 @@ const ACCOUNT_BUTTON_ID: &str = "unified-toolbar-account-button";
 /// settings button with its menu.
 pub fn unified_toolbar<V: Render>(
     window: &Window,
+    app_name: &str,
     _cx: &mut Context<V>,
 ) -> impl IntoElement + use<V> {
     let drag_region = div()
         .id("unified-toolbar-drag-region")
         .flex_1()
         .h_full()
-        .window_control_area(WindowControlArea::Drag);
+        .flex()
+        .items_center()
+        .window_control_area(WindowControlArea::Drag)
+        .child(
+            div()
+                .px(px(8.0))
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(theme::fg()))
+                .child(app_name.to_string()),
+        );
 
     div()
         .id("unified-toolbar")
@@ -279,7 +290,7 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             self.renders += 1;
-            unified_toolbar(window, cx)
+            unified_toolbar(window, "Prime Files", cx)
         }
     }
 

@@ -11,6 +11,7 @@
 //! and each Han character should cost the comparison once.
 
 use std::sync::atomic::{AtomicU8, Ordering};
+use pinyin::ToPinyin;
 
 /// First and last Han character the table covers: the CJK Unified Ideographs
 /// block, which is where a file name's characters come from.
@@ -60,6 +61,23 @@ pub(crate) fn initials(text: &str) -> Option<String> {
             out.push(ch.to_ascii_lowercase());
         } else if let Some(letter) = initial(ch) {
             out.push(letter);
+        }
+    }
+    Some(out)
+}
+
+/// The full, tone-free pinyin of a name that contains Han characters.
+/// Latin text and punctuation stay in place so mixed names can match too.
+pub(crate) fn full(text: &str) -> Option<String> {
+    if !text.chars().any(|ch| ch.to_pinyin().is_some()) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if let Some(pinyin) = ch.to_pinyin() {
+            out.push_str(pinyin.plain());
+        } else {
+            out.extend(ch.to_lowercase());
         }
     }
     Some(out)

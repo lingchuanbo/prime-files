@@ -16,9 +16,9 @@
 use gpui::{
     AnyElement, Bounds, Context, DispatchPhase, Div, ElementId, Entity, FocusHandle, ImageSource, KeyDownEvent,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, Window, canvas, div,
-    img, linear_color_stop, linear_gradient, prelude::*, px, rgb, MouseButton,
+    img, linear_color_stop, linear_gradient, prelude::*, px, rgb, MouseButton, Subscription,
 };
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
 use nohrs_core::config::{self, Config, DockSide, IndexSource, SortOrder, SplitDirection, ThemeMode};
@@ -219,6 +219,9 @@ pub struct SettingsPage {
     updater: Entity<crate::updater::Updater>,
     // The search field, made on the first render (it needs a `Window`).
     search: Option<Entity<InputState>>,
+    // Window title field, committed when the user presses Enter or leaves it.
+    app_name: Option<Entity<InputState>>,
+    _app_name_subscription: Option<Subscription>,
     // The colour wheel, while it is open under the background presets.
     wheel: Option<Wheel>,
     // The font list, made on the first render (it needs a `Window`).
@@ -263,6 +266,8 @@ impl SettingsPage {
             listary: None,
             updater,
             search: None,
+            app_name: None,
+            _app_name_subscription: None,
             wheel: None,
             font_select: None,
             focus_handle: cx.focus_handle(),
@@ -529,6 +534,31 @@ impl SettingsPage {
         cx.notify();
     }
 
+    fn app_name_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        if let Some(input) = &self.app_name {
+            return input.clone();
+        }
+        let input = cx.new(|cx| {
+            let state = InputState::new(window, cx);
+            state
+        });
+        input.update(cx, |state, cx| {
+            state.set_placeholder(t!("Nome do aplicativo"), window, cx);
+            state.set_value(self.config.ui.app_name.clone(), window, cx);
+        });
+        let subscription = cx.subscribe_in(&input, window, |page, input, event: &InputEvent, _window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                let value = input.read(cx).value().trim().to_string();
+                if let Ok(value) = serde_json::to_string(&value) {
+                    page.write("ui", "app_name", value, cx);
+                }
+            }
+        });
+        self.app_name = Some(input.clone());
+        self._app_name_subscription = Some(subscription);
+        input
+    }
+
     // Writes one value; the watcher brings it back through `set_config`.
     fn write(&mut self, section: &'static str, key: &'static str, value: String, cx: &mut Context<Self>) {
         let path = config::paths::config_file();
@@ -626,6 +656,20 @@ impl SettingsPage {
         let ui = &self.config.ui;
         vec![
             Group::new(vec![self.language_row(cx)]),
+            Group::titled(
+                t!("Aplicativo"),
+                vec![
+                    Row::hint(
+                        t!("Nome do aplicativo"),
+                        t!("Mostrado na barra de título. Deixe vazio para usar o nome padrão; pressione Enter ou saia do campo para salvar."),
+                        self.app_name
+                            .as_ref()
+                            .map(|input| Input::new(input).small().w(px(320.0)).cleanable(true).into_any_element())
+                            .unwrap_or_else(|| div().into_any_element()),
+                    )
+                    .wide(),
+                ],
+            ),
             Group::titled(
                 t!("Abas e painéis"),
                 vec![
@@ -2363,6 +2407,7 @@ const NAV_WIDTH: f32 = 232.0;
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let input = self.search_input(window, cx);
+        self.app_name_input(window, cx);
         // The font list needs the window's text system, so it is made here.
         self.ensure_font_select(window, cx);
         let query = input.read(cx).value().to_string();

@@ -702,6 +702,7 @@ impl ExplorerPage {
     /// Applies the `[ui]` config section to every tab (§5 of `config.md`).
     pub fn apply_config_ui(&mut self, ui: &Ui, cx: &mut Context<Self>) {
         self.ui = ui.clone();
+        self.group.set_app_name(&ui.app_name);
         for tab in self.group.all_tabs() {
             tab.update(cx, |pane, cx| pane.apply_config_ui(ui, cx));
         }

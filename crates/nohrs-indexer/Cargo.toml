@@ -22,6 +22,7 @@ name = "prime-files-indexer"
 path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
+pinyin = { version = "0.11", default-features = false, features = ["plain"] }
 windows = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",

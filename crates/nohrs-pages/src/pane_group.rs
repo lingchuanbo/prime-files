@@ -256,6 +256,8 @@ pub struct PaneGroup<T: PaneItem> {
     /// beside the panes (the terminal on a side) reaches the window's top:
     /// the window's buttons would sit in the middle of the window.
     title_bar_allowed: bool,
+    /// Product name shown when the tab row itself is the window title bar.
+    app_name: String,
 }
 
 impl<T: PaneItem> PaneGroup<T> {
@@ -277,6 +279,7 @@ impl<T: PaneItem> PaneGroup<T> {
             vertical_tabs: false,
             vertical_tabs_side: DockSide::Left,
             title_bar_allowed: true,
+            app_name: nohrs_ui::window::APP_NAME.to_string(),
         };
         (group, first)
     }
@@ -343,6 +346,15 @@ impl<T: PaneItem> PaneGroup<T> {
     /// under the window's own title bar.
     pub fn set_title_bar_allowed(&mut self, allowed: bool) {
         self.title_bar_allowed = allowed;
+    }
+
+    /// Sets the product name shown before the tabs when they occupy the title bar.
+    pub fn set_app_name(&mut self, app_name: &str) {
+        self.app_name = if app_name.trim().is_empty() {
+            nohrs_ui::window::APP_NAME.to_string()
+        } else {
+            app_name.trim().to_string()
+        };
     }
 
     /// Starts one of the group's drags.
@@ -994,6 +1006,19 @@ impl<T: PaneItem> PaneGroup<T> {
             // explorer's bars then are: no line under it.
             .when(!self.tabs_in_frame(), |this| this.border_b_1())
             .border_color(rgb(theme::border()))
+            .when(title_bar, |this| {
+                this.child(
+                    div()
+                        .id("pane-title-bar-app-name")
+                        .flex_shrink_0()
+                        .px(px(10.0))
+                        .pb(px(5.0))
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(rgb(theme::toolbar_text()))
+                        .child(self.app_name.clone()),
+                )
+            })
             .children(tabs)
             // New-tab affordance (`Cmd/Ctrl+T`, §4 / §6).
             .child(

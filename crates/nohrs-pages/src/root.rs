@@ -212,6 +212,8 @@ impl RootView {
             cx.refresh_windows();
         }
         // Before `restyle_components`, which reads these tokens.
+        let title = config.ui.app_name.trim();
+        window.set_window_title(if title.is_empty() { nohrs_ui::window::APP_NAME } else { title });
         theme::set_dark(mode.is_dark());
         theme::set_accent(theme::parse_accent(&config.theme.accent));
         theme::set_background(theme::parse_color(&config.theme.background));
@@ -492,7 +494,13 @@ impl Render for RootView {
         let own_title_bar = self.welcome.is_some()
             || self.current_page != PageKind::Explorer
             || !self.explorer.read(cx).tabs_in_title_bar();
-        let toolbar = own_title_bar.then(|| unified_toolbar(window, cx));
+        let app_name = self.config.ui.app_name.trim();
+        let app_name = if app_name.is_empty() {
+            nohrs_ui::window::APP_NAME
+        } else {
+            app_name
+        };
+        let toolbar = own_title_bar.then(|| unified_toolbar(window, app_name, cx));
 
         div()
             .size_full()

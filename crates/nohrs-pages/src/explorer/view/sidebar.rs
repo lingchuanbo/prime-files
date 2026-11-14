@@ -55,7 +55,6 @@ pub fn render(
     }
 
     let mut list = div().flex().flex_col().px(px(10.0)).gap(px(3.0));
-    list = list.child(brand());
     list = tag_rows(page, list, cx);
     if page.show_quick_access {
         list = list.child(section_label(t!("Acesso rápido").to_string()));
@@ -106,15 +105,6 @@ pub fn render(
         .overflow_y_scroll()
         .child(list)
         .into_any_element()
-}
-
-fn brand() -> impl IntoElement {
-    div().flex().items_center().gap_2().px(px(8.0)).pt(px(6.0)).pb(px(18.0))
-        .child(div().size(px(30.0)).rounded(px(9.0)).flex().items_center().justify_center()
-            .bg(rgb(theme::accent_subtle()))
-            .child(Icon::new(IconName::Folder).size_4().text_color(rgb(theme::accent()))))
-        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(theme::fg())).child("Prime Files"))
 }
 
 fn section_label(label: String) -> impl IntoElement {
@@ -372,7 +362,7 @@ fn network_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<Explore
 fn tag_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<ExplorerPane>) -> Div {
     let tags = Tags::all(cx);
     let counts = Tags::counts(cx);
-    list = list.child(div().my(px(8.0)).mx(px(6.0)).h(px(1.0)).bg(rgb(theme::border()))).child(
+    list = list.child(
         div()
             .flex()
             .items_center()
@@ -672,22 +662,6 @@ fn favorite_rows(page: &mut ExplorerPane, list: Div, icon_px: u32, cx: &mut Cont
                             }))
                             .child(Icon::new(Icon::empty()).path("icons/folder-plus.svg").size_3()),
                     )
-                    // The pane's current folder at the top level.
-                    .child(
-                        div()
-                            .id("favorite-add")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(20.0))
-                            .rounded(px(4.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(theme::bg_hover())))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                crate::explorer::favorites::Favorites::add_link(None, &this.cwd, cx);
-                            }))
-                            .child(Icon::new(IconName::Plus).size_3()),
-                    ),
             ),
     );
     for item in &favorites {

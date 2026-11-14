@@ -124,6 +124,8 @@ impl Default for Theme {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Ui {
+    /// Custom title shown in the main window title bar; empty uses the product name.
+    pub app_name: String,
     /// Interface language: `"auto"` follows the Windows regional format
     /// (then the country), or one of `"pt-BR"`, `"en"`, `"es"`, `"fr"`, `"de"`,
     /// `"it"`, `"ru"`, `"ja"`, `"zh-CN"`.
@@ -164,6 +166,7 @@ pub struct Ui {
 impl Default for Ui {
     fn default() -> Self {
         Self {
+            app_name: String::new(),
             language: "zh-CN".to_string(),
             default_sort: SortOrder::Name,
             default_sort_descending: false,
@@ -1023,6 +1026,15 @@ fn is_hex_colour(value: &str) -> bool {
 }
 
 fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) {
+    if let Some(value) = table.get("app_name") {
+        match value.as_str() {
+            Some(name) => ui.app_name = name.trim().to_string(),
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.app_name {value}; using {:?}",
+                ui.app_name
+            ))),
+        }
+    }
     if let Some(value) = table.get("language") {
         match value.as_str().map(str::trim) {
             Some(language) if language.eq_ignore_ascii_case("auto") => ui.language = "auto".to_string(),
@@ -1153,6 +1165,7 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
     warn_unknown_keys(
         table,
         &[
+            "app_name",
             "language",
             "default_sort",
             "default_sort_descending",
@@ -1681,6 +1694,7 @@ mod tests {
             mode = "dark"
             accent = "#ff8800"
             [ui]
+            app_name = "My Files"
             default_sort = "modified"
             default_sort_descending = true
             show_hidden = true
@@ -1691,6 +1705,7 @@ mod tests {
         assert_eq!(config.theme.mode, ThemeMode::Dark);
         assert_eq!(config.theme.accent, "#ff8800");
         assert_eq!(config.ui.default_sort, SortOrder::Modified);
+        assert_eq!(config.ui.app_name, "My Files");
         assert!(config.ui.default_sort_descending);
         assert!(config.ui.show_hidden);
         assert_eq!(config.ui.icon_pack, "nerd");

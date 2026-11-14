@@ -34,6 +34,7 @@ mode = "dark"   # "light" | "dark" | "system"
 accent = "orange"   # "orange" | "blue" | "teal" | "green" | "purple" | "pink" | "red" | hex
 
 [ui]
+app_name = ""                # 窗口标题；留空时显示 Prime Files
 default_sort = "name"      # "name" | "modified" | "size" | "kind"
 default_sort_descending = false  # true = Z→A, maior/mais novo primeiro
 show_hidden = false

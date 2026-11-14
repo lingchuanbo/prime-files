@@ -114,10 +114,12 @@ struct Entry {
     parent: u32,
     name: u32,
     lower: u32,
+    pinyin: u32,
     /// Last write, whole seconds since 1970; 0 when unknown.
     modified: u32,
     name_len: u16,
     lower_len: u16,
+    pinyin_len: u16,
     flags: u8,
 }
 
@@ -149,6 +151,8 @@ struct Segment {
     // The names lowercased, apart: lowercasing can change a name's length,
     // and matching against a lowered copy keeps the scan a plain `contains`.
     lower: String,
+    // Tone-free full pinyin, derived while building/loading the index.
+    pinyin: String,
     entries: Vec<Entry>,
     // 运行时派生，不改变缓存格式；连续扫描之外只补查这些名字的拼音。
     non_ascii: Vec<u32>,
@@ -175,6 +179,11 @@ impl Segment {
     fn lower(&self, entry: &Entry) -> &str {
         let start = entry.lower as usize;
         self.lower.get(start..start + entry.lower_len as usize).unwrap_or("")
+    }
+
+    fn pinyin(&self, entry: &Entry) -> &str {
+        let start = entry.pinyin as usize;
+        self.pinyin.get(start..start + entry.pinyin_len as usize).unwrap_or("")
     }
 
     fn path(&self, index: u32) -> String {
@@ -560,7 +569,7 @@ fn scope(value: &str, cwd: &str) -> Option<Filter> {
 /// only lets through what *could* match; the sequence itself is checked
 /// later, in `Query::rank`.
 fn letter_mask(lower: &str) -> u64 {
-    lower.chars().fold(0u64, |mask, character| {
+    let mask = lower.chars().fold(0u64, |mask, character| {
         let bit = match character {
             'a'..='z' => character as u32 - 'a' as u32,
             '0'..='9' => 26 + (character as u32 - '0' as u32),
@@ -570,6 +579,12 @@ fn letter_mask(lower: &str) -> u64 {
             },
         };
         mask | 1 << bit
+    });
+    super::pinyin::full(lower).map_or(mask, |full| {
+        full.chars().fold(mask, |mask, character| match character {
+            'a'..='z' => mask | 1 << (character as u32 - 'a' as u32),
+            _ => mask,
+        })
     })
 }
 
@@ -858,13 +873,18 @@ impl Query {
         // written in Han characters also matches by its pinyin initials,
         // which is how it is typed on a keyboard without an IME.
         let initials = (self.pinyin && !name.is_ascii()).then(|| pinyin_initials(name)).flatten();
+        let full_pinyin = (self.pinyin && !name.is_ascii()).then(|| segment.pinyin(entry));
         let names_match = self.terms.iter().all(|term| match term {
             Term::Name(part) if fuzzy => {
                 !name.contains(part.as_str())
-                    && (subsequence(part, name) || initials.as_deref().is_some_and(|initials| subsequence(part, initials)))
+                    && (subsequence(part, name)
+                        || initials.as_deref().is_some_and(|initials| subsequence(part, initials))
+                        || full_pinyin.is_some_and(|full| subsequence(part, full)))
             }
             Term::Name(part) => {
-                name.contains(part.as_str()) || initials.as_deref().is_some_and(|initials| initials.contains(part.as_str()))
+                name.contains(part.as_str())
+                    || initials.as_deref().is_some_and(|initials| initials.contains(part.as_str()))
+                    || full_pinyin.as_deref().is_some_and(|full| full.contains(part.as_str()))
             }
             Term::Pattern(pattern) => wildcard(pattern, name),
             Term::Path(_) => true,
@@ -960,6 +980,7 @@ impl Segment {
         Self {
             names: String::new(),
             lower: String::new(),
+            pinyin: String::new(),
             entries: Vec::new(),
             non_ascii: Vec::new(),
             paths: Vec::new(),
@@ -985,6 +1006,7 @@ impl Segment {
         // units at most); clipping keeps the table's lengths in 16 bits.
         let name = clip(name, u16::MAX as usize);
         let lowered = clip(lowered, u16::MAX as usize);
+        let full_pinyin = super::pinyin::full(lowered).unwrap_or_default();
         let parent_entry = self.entries.get(parent as usize).copied();
         let at_root = parent_entry.is_some_and(|entry| entry.parent == NO_PARENT);
         let noise = parent_entry.is_some_and(|entry| entry.flags & NOISE != 0) || noisy(lowered, at_root);
@@ -994,13 +1016,16 @@ impl Segment {
             parent,
             name: self.names.len() as u32,
             lower: self.lower.len() as u32,
+            pinyin: self.pinyin.len() as u32,
             modified: found.modified,
             name_len: name.len() as u16,
             lower_len: lowered.len() as u16,
+            pinyin_len: full_pinyin.len() as u16,
             flags: if found.dir { DIR } else { 0 } | if noise { NOISE } else { 0 },
         };
         self.names.push_str(name);
         self.lower.push_str(lowered);
+        self.pinyin.push_str(&full_pinyin);
         if !lowered.is_ascii() {
             self.non_ascii.push(self.entries.len() as u32);
         }
@@ -1425,6 +1450,8 @@ pub(crate) mod remote {
         /// The modifier that makes a query match pinyin initials, when this
         /// Everything has one (1.5, build 1320 and later); `None` otherwise.
         pub pinyin: Option<&'static str>,
+        /// The modifier that matches full pinyin on Everything 1.5 build 1387+.
+        pub full_pinyin: Option<&'static str>,
     }
 
     /// Why Everything's index could not answer.
@@ -1475,16 +1502,16 @@ pub(crate) mod remote {
         limit: u32,
         cancel: &Arc<AtomicBool>,
         pinyin: Option<&'static str>,
+        full_pinyin: Option<&'static str>,
     ) -> Result<Vec<Hit>, Error> {
         let mut hits = search_via(terms, limit, cancel, None)?;
-        if let Some(modifier) = pinyin
-            && hits.len() < super::PINYIN_BELOW
-            && !cancel.load(Ordering::Relaxed)
-        {
+        let try_pinyin = hits.len() < super::PINYIN_BELOW;
+        for modifier in [pinyin, full_pinyin].into_iter().flatten() {
+            if !try_pinyin || cancel.load(Ordering::Relaxed) {
+                break;
+            }
             match search_via(terms, limit, cancel, Some(modifier)) {
                 Ok(more) => hits.extend(more),
-                // The literal answer already stands; a pinyin pass that fails
-                // is only worth a log line.
                 Err(error) => tracing::debug!("Everything could not search by pinyin: {error:?}"),
             }
         }
@@ -1519,6 +1546,7 @@ pub(crate) mod remote {
         _limit: u32,
         _cancel: &Arc<AtomicBool>,
         _pinyin: Option<&'static str>,
+        _full_pinyin: Option<&'static str>,
     ) -> Result<Vec<Hit>, Error> {
         Err(Error::Missing)
     }
@@ -1540,6 +1568,12 @@ pub(crate) mod remote {
             1320..=1383 => Some("pinyin:"),
             _ => None,
         }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn full_pinyin_modifier() -> Option<&'static str> {
+        let (major, minor, _, build) = ipc::version()?;
+        (major == 1 && minor >= 5 && build >= 1387).then_some("pinyin:")
     }
 
     /// The search Everything is asked for plain name terms: each in quotes,
@@ -1981,7 +2015,12 @@ pub(crate) mod remote {
                 Some(name) => format!("ipc {name}"),
                 None => "ipc".to_string(),
             };
-            Ok(Info { entries: u64::from(list.totitems), version, pinyin: super::pinyin_modifier() })
+            Ok(Info {
+                entries: u64::from(list.totitems),
+                version,
+                pinyin: super::pinyin_modifier(),
+                full_pinyin: super::full_pinyin_modifier(),
+            })
         }
 
         pub(super) fn search(
@@ -2384,7 +2423,12 @@ pub(crate) mod remote {
                 if !loaded {
                     return Err(Error::NotReady);
                 }
-                Ok(Info { entries, version: version(api), pinyin: super::pinyin_modifier() })
+                Ok(Info {
+                    entries,
+                    version: version(api),
+                    pinyin: super::pinyin_modifier(),
+                    full_pinyin: super::full_pinyin_modifier(),
+                })
             }
         }
 
@@ -2588,7 +2632,7 @@ pub(crate) mod remote {
             };
             assert!(info.entries > 0, "Everything indexed no names");
             let cancel = Arc::new(AtomicBool::new(false));
-            let hits = search(&["notepad".to_string()], 100, &cancel, None).expect("a search");
+            let hits = search(&["notepad".to_string()], 100, &cancel, None, None).expect("a search");
             assert!(!hits.is_empty(), "no hits for notepad");
             for hit in &hits {
                 let name = hit.path.rsplit('\\').next().unwrap_or_default().to_lowercase();
@@ -2607,7 +2651,7 @@ pub(crate) mod remote {
                 eprintln!("this Everything has no pinyin search; nothing to check");
                 return;
             };
-            let han = search(&["文件".to_string()], 200, &Arc::new(AtomicBool::new(false)), None)
+            let han = search(&["文件".to_string()], 200, &Arc::new(AtomicBool::new(false)), None, None)
                 .unwrap_or_default();
             let Some(hit) = han.into_iter().find(|hit| hit.path.chars().any(|ch| !ch.is_ascii())) else {
                 eprintln!("no Han-named name in this index; nothing to check");
@@ -2622,6 +2666,7 @@ pub(crate) mod remote {
                 200,
                 &Arc::new(AtomicBool::new(false)),
                 Some(modifier),
+                None,
             )
             .expect("a pinyin search");
             assert!(
@@ -2920,9 +2965,11 @@ fn load_segment(bytes: &[u8], at: usize, current: bool) -> Option<(Segment, usiz
             parent: word(0),
             name: word(4),
             lower: word(8),
+            pinyin: 0,
             modified,
             name_len: half(12),
             lower_len: half(14),
+            pinyin_len: 0,
             flags,
         };
         // Every slice the table hands out must land inside its strings, and
@@ -2938,7 +2985,7 @@ fn load_segment(bytes: &[u8], at: usize, current: bool) -> Option<(Segment, usiz
     }
     let names = String::from_utf8(bytes.get(entries_end..names_end)?.to_vec()).ok()?;
     let lower = String::from_utf8(bytes.get(names_end..lower_end)?.to_vec()).ok()?;
-    let mut segment = Segment { names, lower, entries, non_ascii: Vec::new(), paths: Vec::new(), complete };
+    let mut segment = Segment { names, lower, pinyin: String::new(), entries, non_ascii: Vec::new(), paths: Vec::new(), complete };
     // A slice cut inside a character would come back empty; one such entry
     // means the file is not what this version wrote.
     let mut lower_offset = 0;
@@ -2959,14 +3006,22 @@ fn load_segment(bytes: &[u8], at: usize, current: bool) -> Option<(Segment, usiz
     for position in 0..segment.entries.len() {
         let entry = segment.entries[position];
         let parent = segment.entries.get(entry.parent as usize).copied();
-        let lowered = segment.lower(&entry);
-        let mask = letter_mask(lowered);
-        if !lowered.is_ascii() {
+        let (full_pinyin, mask, noise) = {
+            let lowered = segment.lower(&entry);
+            let full_pinyin = super::pinyin::full(lowered).unwrap_or_default();
+            let mask = letter_mask(lowered);
+            let at_root = parent.is_some_and(|parent| parent.parent == NO_PARENT);
+            let noise = parent.is_some_and(|parent| parent.flags & NOISE != 0) || noisy(lowered, at_root);
+            (full_pinyin, mask, noise)
+        };
+        if let Some(entry) = segment.entries.get_mut(position) {
+            entry.pinyin = segment.pinyin.len() as u32;
+            entry.pinyin_len = full_pinyin.len() as u16;
+        }
+        segment.pinyin.push_str(&full_pinyin);
+        if !segment.lower(&entry).is_ascii() {
             segment.non_ascii.push(position as u32);
         }
-        let lowered = segment.lower(&entry);
-        let at_root = parent.is_some_and(|parent| parent.parent == NO_PARENT);
-        let noise = parent.is_some_and(|parent| parent.flags & NOISE != 0) || noisy(lowered, at_root);
         if let Some(entry) = segment.entries.get_mut(position) {
             entry.mask = mask;
             if noise {
@@ -3318,12 +3373,13 @@ fn external_targets(
     cancel: &Arc<AtomicBool>,
     error: &Mutex<Option<remote::Error>>,
     pinyin: Option<&'static str>,
+    full_pinyin: Option<&'static str>,
 ) -> Vec<(String, String, bool, u64)> {
     let terms = query.name_terms();
     if terms.is_empty() || cancel.load(Ordering::Relaxed) {
         return Vec::new();
     }
-    match remote::search(&terms, SERVICE_HITS, cancel, pinyin) {
+    match remote::search(&terms, SERVICE_HITS, cancel, pinyin, full_pinyin) {
         Ok(hits) => targets_from_hits(
             query,
             cancel,
@@ -3704,6 +3760,14 @@ impl ExplorerPane {
         } else {
             None
         };
+        let full_pinyin = if parsed.pinyin {
+            state
+                .and_then(|state| state.external.as_ref())
+                .and_then(|answer| answer.as_ref().ok())
+                .and_then(|info| info.full_pinyin)
+        } else {
+            None
+        };
         let filters = parsed.filters.join(" ");
         mode.last = Some(key);
         mode.cancel.store(true, Ordering::Relaxed);
@@ -3724,7 +3788,13 @@ impl ExplorerPane {
             move || {
             let started = Instant::now();
             let targets = if by_everything {
-                external_targets(&parsed_for_thread, &cancel, &external_error_for_thread, pinyin)
+                external_targets(
+                    &parsed_for_thread,
+                    &cancel,
+                    &external_error_for_thread,
+                    pinyin,
+                    full_pinyin,
+                )
             } else if by_service {
                 service_targets(&parsed_for_thread, &cancel)
             } else {
@@ -4068,7 +4138,12 @@ mod tests {
         assert!(matches!(source_of(&state), Source::Pending));
         state.external = Some(Err(remote::Error::NotRunning));
         assert!(matches!(source_of(&state), Source::Own));
-        state.external = Some(Ok(remote::Info { entries: 10, version: String::new(), pinyin: None }));
+        state.external = Some(Ok(remote::Info {
+            entries: 10,
+            version: String::new(),
+            pinyin: None,
+            full_pinyin: None,
+        }));
         assert!(matches!(source_of(&state), Source::Everything));
         // An explicit choice does not depend on the probe.
         state.engine = IndexSource::PrimeFiles;

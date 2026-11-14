@@ -11,7 +11,7 @@ use gpui::{App, AppContext, Bounds, Context, Entity, Render, SharedString,
     Subscription, Task, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, div,
     px, rgb, size, uniform_list};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{Icon, IconName};
+use gpui_component::{Icon, IconName, Root};
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use nohrs_ui::theme::theme;
 
@@ -26,7 +26,7 @@ const DEBOUNCE: Duration = Duration::from_millis(70);
 struct SearchResult {
     hit: IndexedSearchHit,
     name: String,
-    kind: String,
+    directory: String,
 }
 
 /// A resizable, standalone window for searching the resident filename index.
@@ -125,12 +125,8 @@ impl From<IndexedSearchHit> for SearchResult {
     fn from(hit: IndexedSearchHit) -> Self {
         let path = std::path::Path::new(&hit.path);
         let name = path.file_name().map_or_else(|| hit.path.clone(), |name| name.to_string_lossy().into_owned());
-        let kind = if hit.is_dir {
-            "文件夹".to_string()
-        } else {
-            path.extension().and_then(|ext| ext.to_str()).map_or_else(|| "文件".to_string(), |ext| format!(".{ext}"))
-        };
-        Self { hit, name, kind }
+        let directory = path.parent().map_or_else(|| hit.path.clone(), |parent| parent.to_string_lossy().into_owned());
+        Self { hit, name, directory }
     }
 }
 
@@ -186,11 +182,11 @@ impl Render for SearchWindow {
             .child(
                 div().h(px(30.0)).px(px(22.0)).flex().items_center().gap(px(10.0))
                     .text_xs().text_color(rgb(theme::muted()))
-                    .child(div().w(px(210.0)).child("名称"))
+                    .child(div().w(px(16.0)))
+                    .child(div().w(px(230.0)).child("名称"))
                     .child(div().flex_1().child("路径"))
-                    .child(div().w(px(70.0)).child("类型"))
-                    .child(div().w(px(70.0)).child("大小"))
-                    .child(div().w(px(145.0)).child("修改时间")),
+                    .child(div().w(px(90.0)).child("大小"))
+                    .child(div().w(px(160.0)).child("修改时间")),
             )
             .child(uniform_list("indexed-search-results", results.len(), move |range: Range<usize>, _window, _cx: &mut App| {
                 range.filter_map(|index| {
@@ -201,9 +197,8 @@ impl Render for SearchWindow {
 }
 
 fn render_row(result: &SearchResult, index: usize, selected: bool, view: &gpui::WeakEntity<SearchWindow>) -> impl IntoElement + use<> {
-    let path = result.hit.path.clone();
+    let path = result.directory.clone();
     let name = result.name.clone();
-    let kind = result.kind.clone();
     let size = if result.hit.is_dir { "—".to_string() } else { format_bytes(result.hit.size) };
     let modified = format_modified(result.hit.modified);
     let open_view = view.clone();
@@ -222,11 +217,10 @@ fn render_row(result: &SearchResult, index: usize, selected: bool, view: &gpui::
         .hover(|style| style.bg(rgb(theme::bg_hover())))
         .on_click({ let view = view.clone(); move |event: &gpui::ClickEvent, _window, cx| { let _ = view.update(cx, |this, cx| { this.selected = Some(index); if event.click_count() >= 2 { this.open_result(index, cx); } cx.notify(); }); } })
         .child(Icon::new(if result.hit.is_dir { IconName::Folder } else { IconName::File }).size_4())
-        .child(div().w(px(210.0)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name))
+        .child(div().w(px(230.0)).min_w(px(0.0)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name))
         .child(div().flex_1().min_w(px(0.0)).overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(rgb(theme::fg_secondary())).child(path))
-        .child(div().w(px(70.0)).text_xs().text_color(rgb(theme::fg_secondary())).child(kind))
-        .child(div().w(px(70.0)).text_xs().text_color(rgb(theme::fg_secondary())).child(size))
-        .child(div().w(px(145.0)).text_xs().text_color(rgb(theme::fg_secondary())).child(modified))
+        .child(div().w(px(90.0)).text_xs().text_color(rgb(theme::fg_secondary())).child(size))
+        .child(div().w(px(160.0)).text_xs().text_color(rgb(theme::fg_secondary())).child(modified))
         .context_menu(move |menu: PopupMenu, _window, _cx| {
             menu.item(PopupMenuItem::new("打开").on_click({ let view = open_view.clone(); move |_, _, cx| { let _ = view.update(cx, |this, cx| this.open_result(index, cx)); } }))
                 .item(PopupMenuItem::new("在资源管理器中显示").on_click({ let view = reveal_view.clone(); move |_, _, cx| { let _ = view.update(cx, |this, cx| this.reveal_result(index, cx)); } }))
@@ -252,7 +246,7 @@ fn format_modified(seconds: u32) -> String {
 }
 
 #[derive(Default)]
-struct OpenSearchWindow(Option<WindowHandle<SearchWindow>>);
+struct OpenSearchWindow(Option<WindowHandle<Root>>);
 impl gpui::Global for OpenSearchWindow {}
 
 /// Opens the search window, or closes it when it is already open.
@@ -280,18 +274,36 @@ pub fn toggle(cx: &mut App) -> anyhow::Result<()> {
         window_decorations: None,
         tabbing_identifier: None,
     };
-    let handle = cx.open_window(options, |window, cx| cx.new(|cx| SearchWindow::new(window, cx)))?;
+    let handle = cx.open_window(options, |window, cx| {
+        let search = cx.new(|cx| SearchWindow::new(window, cx));
+        cx.new(|cx| Root::new(search, window, cx))
+    })?;
     cx.set_global(OpenSearchWindow(Some(handle)));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use super::{SearchResult, format_bytes};
+    use crate::explorer::IndexedSearchHit;
 
     #[test]
     fn formats_sizes_for_result_rows() {
         assert_eq!(format_bytes(12), "12 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn result_rows_separate_the_name_from_its_parent_path() {
+        let path = std::path::Path::new("parent").join("report.txt");
+        let result = SearchResult::from(IndexedSearchHit {
+            path: path.to_string_lossy().into_owned(),
+            is_dir: false,
+            size: 12,
+            modified: 0,
+        });
+
+        assert_eq!(result.name, "report.txt");
+        assert_eq!(result.directory, "parent");
     }
 }

@@ -42,6 +42,7 @@ raw-window-handle = "0.6"
 # installer against SHA256SUMS.txt. Both already in the tree.
 semver = "1"
 sha2 = "0.10"
+pinyin = { version = "0.11", default-features = false, features = ["plain"] }
 
 # Thumbnails come from the Shell's own extractor (`IShellItemImageFactory`), the
 # one Explorer uses: it covers images, video frames, PDFs and program icons in one

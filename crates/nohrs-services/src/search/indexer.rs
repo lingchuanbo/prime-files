@@ -5,6 +5,28 @@ use std::sync::{Arc, Mutex};
 use tantivy::TantivyDocument;
 use tantivy::schema::{FAST, Field, STORED, STRING, Schema, TEXT, Term, Value};
 use tantivy::{Index, IndexWriter}; // Import trait for add_text etc? No, TantivyDocument implements it.
+use pinyin::ToPinyin;
+
+fn pinyin_forms(text: &str) -> Option<(String, String)> {
+    if !text.chars().any(|character| character.to_pinyin().is_some()) {
+        return None;
+    }
+    let mut full = String::with_capacity(text.len());
+    let mut initials = String::with_capacity(text.len());
+    for character in text.chars() {
+        if let Some(syllable) = character.to_pinyin() {
+            let plain = syllable.plain();
+            full.push_str(plain);
+            if let Some(initial) = plain.chars().next() {
+                initials.push(initial);
+            }
+        } else {
+            full.extend(character.to_lowercase());
+            initials.extend(character.to_lowercase());
+        }
+    }
+    Some((full, initials))
+}
 
 /// Owns the tantivy index and its writer, and performs full and incremental indexing.
 pub struct IndexManager {
@@ -42,6 +64,8 @@ impl IndexManager {
 
             // Check if schema has required fields (e.g., filename was added later)
             if existing_schema.get_field("filename").is_err()
+                || existing_schema.get_field("filename_pinyin").is_err()
+                || existing_schema.get_field("filename_initials").is_err()
                 || existing_schema.get_field("is_directory").is_err()
             {
                 tracing::info!(
@@ -80,6 +104,11 @@ impl IndexManager {
         // filename: tokenized for full-text search on file names
         schema_builder.add_text_field("filename", TEXT | STORED);
 
+        // Derived filename-only field: the content field keeps its existing
+        // full-text semantics while Chinese names can be queried by QuanPin.
+        schema_builder.add_text_field("filename_pinyin", TEXT);
+        schema_builder.add_text_field("filename_initials", TEXT);
+
         // content: indexed but not stored (for full text search)
         schema_builder.add_text_field("content", TEXT);
 
@@ -113,6 +142,12 @@ impl IndexManager {
         let filename_field = schema
             .get_field("filename")
             .context("Schema error: filename field missing")?;
+        let filename_pinyin_field = schema
+            .get_field("filename_pinyin")
+            .context("Schema error: filename_pinyin field missing")?;
+        let filename_initials_field = schema
+            .get_field("filename_initials")
+            .context("Schema error: filename_initials field missing")?;
         let content_field = schema
             .get_field("content")
             .context("Schema error: content field missing")?;
@@ -153,6 +188,8 @@ impl IndexManager {
                             &mut writer_guard,
                             path_field,
                             filename_field,
+                            filename_pinyin_field,
+                            filename_initials_field,
                             content_field,
                             is_directory_field,
                         ) {
@@ -164,6 +201,8 @@ impl IndexManager {
                             &mut writer_guard,
                             path_field,
                             filename_field,
+                            filename_pinyin_field,
+                            filename_initials_field,
                             content_field,
                             is_directory_field,
                         )
@@ -198,6 +237,8 @@ impl IndexManager {
         writer: &mut IndexWriter,
         path_field: Field,
         filename_field: Field,
+        filename_pinyin_field: Field,
+        filename_initials_field: Field,
         content_field: Field,
         is_directory_field: Field,
     ) -> Result<()> {
@@ -207,6 +248,10 @@ impl IndexManager {
         let mut doc = TantivyDocument::default();
         doc.add_text(path_field, &path_str);
         doc.add_text(filename_field, &filename);
+        if let Some((full, initials)) = pinyin_forms(&filename) {
+            doc.add_text(filename_pinyin_field, &full);
+            doc.add_text(filename_initials_field, &initials);
+        }
         doc.add_text(content_field, &filename); // Allow searching dir by name content
         doc.add_u64(is_directory_field, 1);
 
@@ -221,6 +266,8 @@ impl IndexManager {
         writer: &mut IndexWriter,
         path_field: Field,
         filename_field: Field,
+        filename_pinyin_field: Field,
+        filename_initials_field: Field,
         content_field: Field,
         is_directory_field: Field,
     ) -> Result<()> {
@@ -252,6 +299,10 @@ impl IndexManager {
                 let mut doc = TantivyDocument::default();
                 doc.add_text(path_field, &path_str);
                 doc.add_text(filename_field, &filename);
+                if let Some((full, initials)) = pinyin_forms(&filename) {
+                    doc.add_text(filename_pinyin_field, &full);
+                    doc.add_text(filename_initials_field, &initials);
+                }
                 doc.add_text(content_field, &searchable_content);
                 doc.add_u64(is_directory_field, 0);
 
@@ -316,6 +367,8 @@ impl IndexManager {
         let schema = self.index.schema();
         let path_field = schema.get_field("path").context("Schema error")?;
         let filename_field = schema.get_field("filename").context("Schema error")?;
+        let filename_pinyin_field = schema.get_field("filename_pinyin").context("Schema error")?;
+        let filename_initials_field = schema.get_field("filename_initials").context("Schema error")?;
         let content_field = schema.get_field("content").context("Schema error")?;
         let is_directory_field = schema.get_field("is_directory").context("Schema error")?;
 
@@ -330,6 +383,8 @@ impl IndexManager {
                     &mut writer_guard,
                     path_field,
                     filename_field,
+                    filename_pinyin_field,
+                    filename_initials_field,
                     content_field,
                     is_directory_field,
                 ) {
@@ -364,6 +419,8 @@ impl super::backend::SearchBackend for IndexManager {
         let schema = self.index.schema();
         let path_field = schema.get_field("path").context("Field not found")?;
         let filename_field = schema.get_field("filename").context("Field not found")?;
+        let filename_pinyin_field = schema.get_field("filename_pinyin").context("Field not found")?;
+        let filename_initials_field = schema.get_field("filename_initials").context("Field not found")?;
         let content_field = schema.get_field("content").context("Field not found")?;
         let is_directory_field = schema
             .get_field("is_directory")
@@ -371,7 +428,7 @@ impl super::backend::SearchBackend for IndexManager {
 
         let query_parser = tantivy::query::QueryParser::for_index(
             &self.index,
-            vec![filename_field, content_field],
+            vec![filename_field, filename_initials_field, filename_pinyin_field, content_field],
         );
         let query = query_parser.parse_query(query_str)?;
 
@@ -494,5 +551,37 @@ mod tests {
         std::fs::write(&note, "hello").unwrap();
         manager.process_changes(&[note]).unwrap();
         assert_eq!(indexed(&manager), 1);
+    }
+
+    #[test]
+    fn indexed_filenames_are_found_by_full_pinyin() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Documents");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("文件夹.txt");
+        std::fs::write(&file, "ordinary body").unwrap();
+        let manager = IndexManager::new_with_path(dir.path().join("index"), root).unwrap();
+        manager.index_home(None).unwrap();
+
+        let results = super::super::backend::SearchBackend::search(&manager, "wenjianjia").unwrap();
+
+        assert!(results.iter().any(|result| result.path == file));
+        let body_results = super::super::backend::SearchBackend::search(&manager, "ordinary").unwrap();
+        assert!(body_results.iter().any(|result| result.path == file));
+    }
+
+    #[test]
+    fn indexed_filenames_are_found_by_pinyin_initials() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Documents");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("文件夹.txt");
+        std::fs::write(&file, "ordinary body").unwrap();
+        let manager = IndexManager::new_with_path(dir.path().join("index"), root).unwrap();
+        manager.index_home(None).unwrap();
+
+        let results = super::super::backend::SearchBackend::search(&manager, "wjj").unwrap();
+
+        assert!(results.iter().any(|result| result.path == file));
     }
 }

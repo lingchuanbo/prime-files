@@ -49,6 +49,7 @@ fn optimized_scan_preserves_matching_and_ranking() {
         "aaa",
         "报告",
         "wjj",
+        "wenjianjia",
         "report -项目",
         "*.txt",
         "ext:docx",
@@ -80,6 +81,7 @@ fn parallel_index_scan_preserves_the_reference_results() {
         "aba",
         "报告",
         "wjj",
+        "wenjianjia",
         "*.txt",
         "report -项目",
         "ext:docx",
@@ -120,6 +122,18 @@ fn cancelled_search_returns_no_results() {
         segment
             .search(&query, false, &AtomicBool::new(true))
             .is_empty()
+    );
+}
+
+#[test]
+fn indexed_names_are_found_by_full_pinyin() {
+    let segment = fixture(0);
+    let query = Query::parse("wenjianjia", "").unwrap();
+    let actual = segment.search(&query, false, &AtomicBool::new(false));
+
+    assert_eq!(
+        actual.into_iter().map(|(_, _, position)| segment.path(position)).collect::<Vec<_>>(),
+        ["C:\\文件夹"]
     );
 }
 

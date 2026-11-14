@@ -5,6 +5,8 @@ use super::*;
 const MIN_PARALLEL_ENTRIES: usize = 32_768;
 const SAMPLE_SIZE: usize = 128;
 const DENSE_DIVISOR: usize = 8;
+const PINYIN_FALLBACK_THRESHOLD: usize = 20;
+const MIN_FULL_PINYIN_QUERY_LEN: usize = 4;
 
 impl Volume {
     /// Adds matching names in table order, stopping at `limit`, including
@@ -22,11 +24,15 @@ impl Volume {
             .len()
             .div_ceil(threads)
             .max(MIN_PARALLEL_ENTRIES);
-        let matched = if self.entries.len() <= chunk {
+        let mut matched = if self.entries.len() <= chunk {
             self.matching(0..self.entries.len(), terms, remaining)
         } else {
             self.parallel_matching(terms, remaining, chunk)
         };
+        if matched.len() < remaining && should_match_pinyin(terms, matched.len()) {
+            self.matching_pinyin(terms, remaining, &mut matched);
+        }
+        matched.sort_unstable();
         for position in matched.into_iter().take(remaining) {
             let entry = &self.entries[position];
             out.push(Hit {
@@ -35,6 +41,44 @@ impl Volume {
                 size: entry.size,
                 modified: entry.modified,
             });
+        }
+    }
+
+    fn matching_pinyin(&self, terms: &[String], limit: usize, matched: &mut Vec<usize>) {
+        let mut seen: std::collections::HashSet<usize> = matched.iter().copied().collect();
+        for &position in &self.non_ascii {
+            if matched.len() >= limit {
+                break;
+            }
+            let position = position as usize;
+            if seen.contains(&position) {
+                continue;
+            }
+            let Some(entry) = self.entries.get(position) else {
+                continue;
+            };
+            let name = self.lower_of(entry);
+            if terms.iter().all(|term| name.contains(term.as_str())) {
+                continue;
+            }
+            let Some(initials) = super::pinyin::initials(name) else {
+                if terms.iter().all(|term| self.pinyin_of(entry).contains(term.as_str())) {
+                    seen.insert(position);
+                    matched.push(position);
+                }
+                continue;
+            };
+            if terms
+                .iter()
+                .all(|term| {
+                    name.contains(term.as_str())
+                        || initials.contains(term.as_str())
+                        || self.pinyin_of(entry).contains(term.as_str())
+                })
+            {
+                seen.insert(position);
+                matched.push(position);
+            }
         }
     }
 
@@ -128,4 +172,19 @@ impl Volume {
             cursor = name_end;
         }
     }
+}
+
+fn pinyin_query(terms: &[String]) -> bool {
+    !terms.is_empty()
+        && terms
+            .iter()
+            .all(|term| !term.is_empty() && term.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+}
+
+fn should_match_pinyin(terms: &[String], literal_matches: usize) -> bool {
+    pinyin_query(terms)
+        && (literal_matches < PINYIN_FALLBACK_THRESHOLD
+            || terms
+                .iter()
+                .any(|term| term.len() >= MIN_FULL_PINYIN_QUERY_LEN))
 }

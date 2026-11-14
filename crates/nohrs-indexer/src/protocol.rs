@@ -32,6 +32,8 @@ use std::io::{self, Read, Write};
 
 #[path = "protocol/search.rs"]
 mod search;
+#[path = "protocol/pinyin.rs"]
+mod pinyin;
 
 #[cfg(test)]
 #[path = "protocol/search_tests.rs"]
@@ -71,7 +73,10 @@ pub struct Volume {
     // The names lowercased, apart: a search compares against these, so it is
     // a plain substring test rather than a fold per byte.
     lower: String,
+    pinyin: String,
     entries: Vec<Entry>,
+    /// Entries whose names may have pinyin initials, in table order.
+    non_ascii: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +86,8 @@ struct Entry {
     len: u16,
     lower_start: u32,
     lower_len: u16,
+    pinyin_start: u32,
+    pinyin_len: u16,
     dir: bool,
     size: u64,
     modified: u32,
@@ -100,6 +107,7 @@ impl Volume {
         let end = clip(name);
         let name = &name[..end];
         let lower = name.to_lowercase();
+        let full_pinyin = pinyin::full(&lower).unwrap_or_default();
         let lower_end = clip(&lower);
         self.entries.push(Entry {
             parent,
@@ -107,12 +115,18 @@ impl Volume {
             len: name.len() as u16,
             lower_start: self.lower.len() as u32,
             lower_len: lower_end as u16,
+            pinyin_start: self.pinyin.len() as u32,
+            pinyin_len: full_pinyin.len() as u16,
             dir,
             size,
             modified,
         });
         self.names.push_str(name);
         self.lower.push_str(&lower[..lower_end]);
+        self.pinyin.push_str(&full_pinyin);
+        if !name.is_ascii() {
+            self.non_ascii.push((self.entries.len() - 1) as u32);
+        }
         (self.entries.len() - 1) as u32
     }
 
@@ -153,6 +167,10 @@ impl Volume {
 
     fn lower_of(&self, entry: &Entry) -> &str {
         self.lower.get(entry.lower_start as usize..entry.lower_start as usize + entry.lower_len as usize).unwrap_or("")
+    }
+
+    fn pinyin_of(&self, entry: &Entry) -> &str {
+        self.pinyin.get(entry.pinyin_start as usize..entry.pinyin_start as usize + entry.pinyin_len as usize).unwrap_or("")
     }
 
     /// The whole path of entry `index`: its name and every parent's, from the

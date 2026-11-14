@@ -158,7 +158,8 @@ impl NameMatcher {
             None => {
                 name.contains(pattern.as_str())
                     || (self.pinyin
-                        && super::pinyin::initials(&name).is_some_and(|initials| initials.contains(pattern.as_str())))
+                        && (super::pinyin::initials(&name).is_some_and(|initials| initials.contains(pattern.as_str()))
+                            || super::pinyin::full(&name).is_some_and(|full| full.contains(pattern.as_str()))))
             }
             Some(pattern) => wildcard(pattern, &name.chars().collect::<Vec<_>>()),
         }
@@ -228,6 +229,12 @@ mod tests {
         assert!(!name_matches("img_????.jpg", "IMG_42.jpg"));
         assert!(name_matches("*a*b*", "xxaYYbzz"));
         assert!(!name_matches("*a*b", "xxaYYbzz"));
+    }
+
+    #[test]
+    fn han_names_are_found_by_full_pinyin() {
+        assert!(name_matches("wenjianjia", "文件夹"));
+        assert!(name_matches("gongzuobaogao", "工作报告.docx"));
     }
 
     // Windows' zh-CN collation is what supplies the initials; elsewhere the

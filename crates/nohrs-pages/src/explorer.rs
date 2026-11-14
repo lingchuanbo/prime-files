@@ -80,10 +80,12 @@ pub fn search_indexed(query: &str, limit: u32) -> Result<(Vec<IndexedSearchHit>,
     if terms.is_empty() {
         return Ok((Vec::new(), false));
     }
-    if !everything::mft::searchable() {
-        return Err("Prime Files 索引服务不可用，请确认服务已启动".to_string());
-    }
-    let hits = everything::mft::search(&terms, limit)?;
+    // Do not gate on `searchable()`: it caches a negative result for the whole
+    // process, so an app started before the service becomes ready would keep
+    // reporting it unavailable even after the service starts. The query itself
+    // is the authoritative availability check.
+    let hits = everything::mft::search(&terms, limit)
+        .map_err(|error| format!("Prime Files 索引服务暂不可用：{error}"))?;
     let truncated = hits.len() >= limit as usize;
     Ok((
         hits.into_iter()

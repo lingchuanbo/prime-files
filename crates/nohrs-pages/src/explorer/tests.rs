@@ -135,6 +135,7 @@ async fn apply_config_ui_reflects_ui_section(cx: &mut TestAppContext) {
     window
         .update(cx, |page, _window, cx| {
             let ui = config::Ui {
+                app_name: String::new(),
                 language: "auto".to_string(),
                 default_sort: config::SortOrder::Size,
                 default_sort_descending: false,
@@ -186,6 +187,7 @@ async fn config_reload_keeps_a_sort_chosen_in_the_session(cx: &mut TestAppContex
     window
         .update(cx, |page, _window, cx| {
             let ui = config::Ui {
+                app_name: String::new(),
                 language: "auto".to_string(),
                 default_sort: config::SortOrder::Name,
                 default_sort_descending: false,
@@ -986,6 +988,7 @@ async fn split_pane_inherits_applied_ui_config(cx: &mut TestAppContext) {
     window
         .update(cx, |page, window, cx| {
             let ui = config::Ui {
+                app_name: String::new(),
                 language: "auto".to_string(),
                 default_sort: config::SortOrder::Size,
                 default_sort_descending: false,
@@ -2890,6 +2893,7 @@ async fn each_folder_opens_with_the_zoom_and_sort_it_was_left_with(cx: &mut Test
     window
         .update(cx, |page, window, cx| {
             let ui = config::Ui {
+                app_name: String::new(),
                 language: "auto".to_string(),
                 default_sort: config::SortOrder::Name,
                 default_sort_descending: true,

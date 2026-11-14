@@ -1020,5 +1020,12 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ("Pastas recentes", "Recent folders", "Carpetas recientes"),
     ("Nenhuma pasta visitada ainda", "No folder visited yet", "Ninguna carpeta visitada todavía"),
     ("O serviço de indexação guarda os nomes e responde às buscas.", "The indexing service keeps the names and answers the searches.", "El servicio de indexación guarda los nombres y responde a las búsquedas."),
+    ("Aplicativo", "Application", "Aplicación"),
+    ("Nome do aplicativo", "Application name", "Nombre de la aplicación"),
+    (
+        "Mostrado na barra de título. Deixe vazio para usar o nome padrão; pressione Enter ou saia do campo para salvar.",
+        "Shown in the title bar. Leave it empty to use the default name; press Enter or leave the field to save.",
+        "Se muestra en la barra de título. Déjalo vacío para usar el nombre predeterminado; pulsa Intro o sal del campo para guardar.",
+    ),
     ("Arquivos dentro de um compactado ainda não abrem: descompacte a pasta para abri-los.", "Files inside an archive do not open yet: unpack the folder to open them.", "Los archivos dentro de un comprimido aún no se abren: extrae la carpeta para abrirlos."),
 ];
