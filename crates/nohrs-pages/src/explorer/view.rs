@@ -192,6 +192,17 @@ pub fn render(
                     cx.stop_propagation();
                     return;
                 }
+                "backspace"
+                    if !cfg!(target_os = "macos")
+                        && !with_modifier
+                        && !modifiers.alt
+                        && !shift
+                        && this.focus_handle.is_focused(window) =>
+                {
+                    this.go_up(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 // macOS also trashes on Backspace (§6); on Linux only Delete does.
                 "backspace" if cfg!(target_os = "macos") && !shift => {
                     this.trash_selection(cx);

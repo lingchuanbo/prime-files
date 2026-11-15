@@ -1,9 +1,17 @@
 mod chrome;
 mod controls;
+mod history;
 mod operations;
 mod plan;
 mod preview;
+mod preview_state;
 mod rules;
+mod scan;
+mod scope;
+mod scope_controls;
+#[cfg(test)]
+mod scope_tests;
+mod session;
 mod transaction;
 mod window;
 use super::{ExplorerPane, StatusLevel};

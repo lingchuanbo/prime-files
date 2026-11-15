@@ -3091,3 +3091,38 @@ async fn the_folder_on_screen_follows_what_other_programs_do(cx: &mut TestAppCon
     std::fs::remove_file(dir.path().join("a.txt")).unwrap();
     assert!(wait_for(cx, &["b.txt"]), "after a delete elsewhere: {:?}", names(cx));
 }
+
+#[cfg(not(target_os = "macos"))]
+#[gpui::test]
+async fn backspace_goes_to_parent_instead_of_previous_directory(cx: &mut TestAppContext) {
+    let fixture = tempfile::tempdir().unwrap();
+    let first = fixture.path().to_string_lossy().into_owned();
+    let previous = fixture.path().join("other");
+    std::fs::create_dir(&previous).unwrap();
+    let second = fixture.path().join("child");
+    std::fs::create_dir(&second).unwrap();
+    let second = second.to_string_lossy().into_owned();
+    let (window, pane) = new_explorer_with_dialog_layer(cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.change_dir(previous.to_string_lossy().into_owned(), window, cx);
+            pane.change_dir(second.clone(), window, cx);
+            window.focus(&pane.focus_handle);
+        });
+        window.draw(cx).clear();
+    }).unwrap();
+    cx.simulate_keystrokes(window.into(), "backspace");
+    pane.read_with(cx, |pane, _| assert_eq!(first, pane.cwd));
+    cx.update_window(window.into(), |_, window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.change_dir(second.clone(), window, cx);
+            pane.focus_quick_input(Some("ab"), window, cx);
+        });
+        window.draw(cx).clear();
+    }).unwrap();
+    cx.simulate_keystrokes(window.into(), "backspace");
+    pane.read_with(cx, |pane, cx| {
+        assert_eq!(second, pane.cwd);
+        assert_eq!("a", pane.name_filter_input.as_ref().unwrap().read(cx).value().as_str());
+    });
+}

@@ -41,6 +41,50 @@ fn batch_rename_expands_each_files_own_ancestors_and_counter() {
 }
 
 #[test]
+fn batch_rename_pinyin_translates_stems_and_preserves_other_characters() {
+    let rules = Rules {
+        name: "[拼音]".into(),
+        ..Rules::default()
+    };
+    for (original, directory, expected) in [
+        ("中国.txt", false, "zhongguo.txt"),
+        (
+            "中国 Report_2026😀.JPG",
+            false,
+            "zhongguo Report_2026😀.JPG",
+        ),
+        ("Report_2026.txt", false, "Report_2026.txt"),
+        ("中国", false, "zhongguo"),
+        ("中国.v2", true, "zhongguo.v2"),
+    ] {
+        assert_eq!(
+            expected,
+            rules
+                .filename(&entry(Path::new(original), directory), 0)
+                .unwrap(),
+            "{original}"
+        );
+    }
+}
+
+#[test]
+fn batch_rename_pinyin_composes_with_tokens_replacement_and_case() {
+    let rules = Rules {
+        name: "[拼音]_[C]_[N]".into(),
+        find: "guo".into(),
+        replacement: "hua".into(),
+        case: CaseMode::Upper,
+        ..Rules::default()
+    };
+    assert_eq!(
+        "ZHONGHUA_002_中国.TXT",
+        rules
+            .filename(&entry(Path::new("中国.txt"), false), 1)
+            .unwrap()
+    );
+}
+
+#[test]
 fn batch_rename_defaults_preserve_extensions_dotfiles_and_dotted_directories() {
     for (name, directory) in [
         ("a.tar.gz", false),

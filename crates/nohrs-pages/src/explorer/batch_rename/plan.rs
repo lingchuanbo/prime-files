@@ -1,7 +1,7 @@
 use super::rules::Rules;
 use nohrs_services::fs::listing::FileEntryDto;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -10,6 +10,7 @@ pub(super) struct Preview {
     pub entry: FileEntryDto,
     pub name: String,
     pub error: Option<String>,
+    pub selected: bool,
 }
 
 impl Preview {
@@ -23,11 +24,37 @@ impl Preview {
     }
 }
 
+#[cfg(test)]
 pub(super) fn preview(entries: &[FileEntryDto], rules: &Rules) -> Vec<Preview> {
+    preview_selected(entries, rules, &HashSet::new(), false)
+}
+
+pub(super) fn preview_selected(
+    entries: &[FileEntryDto],
+    rules: &Rules,
+    excluded: &HashSet<String>,
+    restart: bool,
+) -> Vec<Preview> {
+    let mut counters = HashMap::new();
+    let mut sequence = 0;
     let mut rows: Vec<_> = entries
         .iter()
-        .enumerate()
-        .map(|(index, entry)| {
+        .map(|entry| {
+            if excluded.contains(&entry.path) {
+                return Preview {
+                    entry: entry.clone(),
+                    name: entry.name.clone(),
+                    error: None,
+                    selected: false,
+                };
+            }
+            let count = if restart {
+                counters.entry(Path::new(&entry.path).parent()).or_insert(0)
+            } else {
+                &mut sequence
+            };
+            let index = *count;
+            *count += 1;
             match rules.filename(entry, index).and_then(|name| {
                 validate_name(&name)?;
                 Ok(name)
@@ -36,11 +63,13 @@ pub(super) fn preview(entries: &[FileEntryDto], rules: &Rules) -> Vec<Preview> {
                     entry: entry.clone(),
                     name,
                     error: None,
+                    selected: true,
                 },
                 Err(error) => Preview {
                     entry: entry.clone(),
                     name: String::new(),
                     error: Some(error),
+                    selected: true,
                 },
             }
         })

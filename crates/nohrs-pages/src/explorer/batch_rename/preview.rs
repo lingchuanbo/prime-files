@@ -1,11 +1,12 @@
 use super::{chrome, plan::Preview, window::RenameWindow};
 use gpui::{prelude::*, *};
+use gpui_component::{Disableable, checkbox::Checkbox};
+use nohrs_core::telemetry::LogErr;
 use nohrs_ui::theme::theme;
 
 pub(super) fn render(view: &RenameWindow, cx: &Context<RenameWindow>) -> impl IntoElement + use<> {
     let rows = view.rows.clone();
-    let applied = view.applied;
-    let pending = view.pending;
+    let entity = cx.entity().downgrade();
     div()
         .debug_selector(|| "rename-preview".into())
         .flex_1()
@@ -15,42 +16,38 @@ pub(super) fn render(view: &RenameWindow, cx: &Context<RenameWindow>) -> impl In
         .flex_col()
         .child(chrome::preview_toolbar(view, cx))
         .child(headings())
-        .when(view.rows.is_empty(), |body| {
-            body.child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .p_6()
-                    .child(div().text_sm().child(if pending {
-                        "正在生成预览…"
-                    } else {
-                        "暂时无法生成预览"
-                    }))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme::fg_secondary()))
-                            .child(if pending {
-                                "文件较多时，请稍候。"
-                            } else {
-                                "请检查左侧规则，详细原因见下方提示。"
-                            }),
-                    ),
-            )
-        })
+        .when(view.rows.is_empty(), |body| body.child(empty_state(view)))
         .when(!view.rows.is_empty(), |body| {
             body.child(
-                uniform_list("batch-rename-preview", rows.len(), move |range, _, _| {
-                    range
-                        .filter_map(|index| {
-                            rows.get(index)
-                                .map(|item| row(item, index, (applied, pending)))
+                uniform_list("batch-rename-preview", rows.len(), move |range, _, cx| {
+                    entity
+                        .read_with(cx, |view, _| {
+                            range
+                                .filter_map(|index| {
+                                    rows.get(index).map(|item| {
+                                        row(
+                                            item,
+                                            index,
+                                            RowContext {
+                                                view: entity.clone(),
+                                                directory: view
+                                                    .scope
+                                                    .directory_label(&item.entry.path),
+                                                selected: !view
+                                                    .scope
+                                                    .excluded
+                                                    .contains(&item.entry.path),
+                                                disabled: view.busy
+                                                    || view.scope.scanning
+                                                    || view.applied,
+                                                state: (view.applied, view.pending),
+                                            },
+                                        )
+                                    })
+                                })
+                                .collect::<Vec<_>>()
                         })
-                        .collect::<Vec<_>>()
+                        .unwrap_or_default()
                 })
                 .flex_1()
                 .min_h_0(),
@@ -58,91 +55,116 @@ pub(super) fn render(view: &RenameWindow, cx: &Context<RenameWindow>) -> impl In
         })
 }
 
+fn empty_state(view: &RenameWindow) -> Div {
+    let (title, description) = if view.scope.scanning {
+        ("正在扫描目录…", "可在左侧取消扫描，完成后显示匹配文件。")
+    } else if view.pending {
+        ("正在生成预览…", "文件较多时，请稍候。")
+    } else if view.scope.ready && view.entries.is_empty() {
+        (
+            "没有匹配的文件",
+            "请调整文件格式或子目录选项；如需更换目录，请回到主界面重新选择。",
+        )
+    } else {
+        ("暂时无法生成预览", "请检查左侧输入，详细原因见下方提示。")
+    };
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .p_6()
+        .child(div().text_sm().child(title))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::fg_secondary()))
+                .child(description),
+        )
+}
+
 fn headings() -> Div {
     div()
         .h_8()
         .flex_shrink_0()
-        .px_4()
+        .px_3()
         .flex()
         .items_center()
-        .gap_3()
+        .gap_2()
         .text_xs()
         .text_color(rgb(theme::fg_secondary()))
         .bg(rgb(theme::footer_bg()))
         .border_b_1()
         .border_color(rgb(theme::border()))
-        .child(div().w_6().flex_shrink_0().child("#"))
-        .child(div().flex_1().min_w_0().child("原名称 / 所在目录"))
-        .child(div().w_4().flex_shrink_0())
+        .child(div().w_5().flex_shrink_0())
+        .child(div().flex_1().min_w_0().child("原名称"))
         .child(div().flex_1().min_w_0().child("新名称"))
-        .child(div().w(px(96.0)).flex_shrink_0().child("状态"))
+        .child(div().w(px(144.0)).flex_shrink_0().child("所在目录"))
+        .child(div().w(px(76.0)).flex_shrink_0().child("状态"))
 }
 
-fn row(item: &Preview, index: usize, state: (bool, bool)) -> impl IntoElement + use<> {
-    let path = std::path::Path::new(&item.entry.path)
-        .parent()
-        .unwrap_or(std::path::Path::new(""))
-        .to_string_lossy()
-        .into_owned();
-    let (applied, pending) = state;
-    let (status, color) = row_status(item, (applied, pending));
+struct RowContext {
+    view: WeakEntity<RenameWindow>,
+    directory: String,
+    selected: bool,
+    disabled: bool,
+    state: (bool, bool),
+}
+
+fn row(item: &Preview, index: usize, context: RowContext) -> impl IntoElement + use<> {
+    let (status, color) = row_status(item, context.state);
     let details = format!(
-        "原名称：{}\n新名称：{}\n所在目录：{}\n{}",
-        item.entry.name, item.name, path, status
+        "原名称：{}\n新名称：{}\n完整路径：{}\n{}",
+        item.entry.name, item.name, item.entry.path, status
     );
+    let path = item.entry.path.clone();
     div()
         .id(("batch-rename-row", index))
-        .h(px(60.0))
-        .px_4()
+        .debug_selector(move || format!("rename-row-{index}"))
+        .h(px(44.0))
+        .px_3()
         .flex()
         .items_center()
-        .gap_3()
+        .gap_2()
         .text_sm()
         .border_b_1()
         .border_color(rgb(theme::border()))
         .when(index % 2 == 1, |row| row.bg(rgb(theme::bg_secondary())))
         .hover(|row| row.bg(rgb(theme::bg_hover())))
         .child(
-            div()
-                .w_6()
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(rgb(theme::muted()))
-                .child((index + 1).to_string()),
+            div().w_5().flex_shrink_0().child(
+                Checkbox::new(("rename-file-check", index))
+                    .checked(context.selected)
+                    .disabled(context.disabled)
+                    .on_click(move |selected, _, cx| {
+                        context
+                            .view
+                            .update(cx, |view, cx| view.select_file(&path, *selected, cx))
+                            .log_err();
+                    }),
+            ),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(ellipsis(item.entry.name.clone()))
-                .child(
-                    ellipsis(path)
-                        .text_xs()
-                        .text_color(rgb(theme::fg_secondary())),
-                ),
-        )
-        .child(
-            div()
-                .w_4()
-                .flex_shrink_0()
-                .text_color(rgb(theme::muted()))
-                .child("→"),
-        )
+        .child(ellipsis(item.entry.name.clone()).flex_1())
         .child(
             ellipsis(item.name.clone())
                 .flex_1()
                 .when(item.changed(), |cell| cell.text_color(rgb(color))),
         )
         .child(
-            div()
-                .w(px(96.0))
+            ellipsis(context.directory)
+                .w(px(144.0))
                 .flex_shrink_0()
                 .text_xs()
-                .text_color(rgb(color))
-                .child(ellipsis(status)),
+                .text_color(rgb(theme::fg_secondary())),
+        )
+        .child(
+            ellipsis(status)
+                .w(px(76.0))
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(rgb(color)),
         )
         .tooltip(move |window, cx| {
             gpui_component::tooltip::Tooltip::new(details.clone()).build(window, cx)
@@ -151,6 +173,7 @@ fn row(item: &Preview, index: usize, state: (bool, bool)) -> impl IntoElement + 
 
 fn row_status(item: &Preview, state: (bool, bool)) -> (String, u32) {
     match state {
+        _ if !item.selected => ("已排除".into(), theme::muted()),
         (_, true) => ("等待更新".into(), theme::muted()),
         _ if item.error.is_some() => (
             format!("需处理：{}", item.error.as_deref().unwrap_or_default()),

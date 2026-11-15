@@ -1,14 +1,17 @@
-use super::{rules::CaseMode, window::RenameWindow};
+use super::{history, rules::CaseMode, window::RenameWindow};
 use gpui::{prelude::*, *};
 use gpui_component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    input::Input,
 };
 use nohrs_ui::theme::theme;
 
-pub(super) fn render(view: &RenameWindow, cx: &Context<RenameWindow>) -> impl IntoElement + use<> {
+pub(super) fn render(
+    view: &RenameWindow,
+    window: &mut Window,
+    cx: &mut Context<RenameWindow>,
+) -> impl IntoElement + use<> {
     div()
         .id("rename-settings")
         .debug_selector(|| "rename-settings".into())
@@ -25,14 +28,15 @@ pub(super) fn render(view: &RenameWindow, cx: &Context<RenameWindow>) -> impl In
                 .flex()
                 .flex_col()
                 .gap_5()
-                .child(naming(view, cx))
-                .child(replacement(view, cx))
-                .child(counter(view))
+                .child(super::scope_controls::render(view, window, cx))
+                .child(naming(view, window, cx))
+                .child(replacement(view, window, cx))
+                .child(counter(view, window, cx))
                 .child(case_options(view, cx)),
         )
 }
 
-fn section(title: &'static str, description: &'static str) -> Div {
+pub(super) fn section(title: &'static str, description: &'static str) -> Div {
     div().flex().flex_col().gap_3().child(
         div()
             .flex()
@@ -55,11 +59,11 @@ fn hint(text: &'static str) -> Div {
         .child(text)
 }
 
-fn naming(view: &RenameWindow, cx: &Context<RenameWindow>) -> Div {
+fn naming(view: &RenameWindow, window: &mut Window, cx: &mut Context<RenameWindow>) -> Div {
     section("命名规则", "输入文字，或点击下方占位符插入名称。")
-        .child(field(view, 0, "文件名"))
+        .child(field(view, (0, "文件名"), (window, cx)))
         .child(tokens(view, cx))
-        .child(field(view, 1, "扩展名"))
+        .child(field(view, (1, "扩展名"), (window, cx)))
         .child(hint("扩展名不含句点；留空可移除扩展名。"))
         .child(
             div()
@@ -70,7 +74,13 @@ fn naming(view: &RenameWindow, cx: &Context<RenameWindow>) -> Div {
         )
 }
 
-fn field(view: &RenameWindow, index: usize, label: &'static str) -> Div {
+fn field(
+    view: &RenameWindow,
+    field: (usize, &'static str),
+    context: (&mut Window, &mut App),
+) -> Div {
+    let (index, label) = field;
+    let (window, cx) = context;
     div()
         .debug_selector(|| format!("rename-field-{index}"))
         .flex_1()
@@ -84,7 +94,11 @@ fn field(view: &RenameWindow, index: usize, label: &'static str) -> Div {
                 .text_color(rgb(theme::fg_secondary()))
                 .child(label),
         )
-        .child(Input::new(&view.inputs[index]).disabled(view.busy))
+        .child(history::input(
+            (&view.inputs[index], index, view.busy),
+            window,
+            cx,
+        ))
 }
 
 fn preset(
@@ -119,6 +133,11 @@ fn tokens(view: &RenameWindow, cx: &Context<RenameWindow>) -> Div {
         ("[C]", "编号", "按下方计数器设置生成序号"),
         ("[YMD]", "日期", "文件修改日期"),
         ("[hms]", "时间", "文件修改时间"),
+        (
+            "[拼音]",
+            "全拼",
+            "将原名称（不含扩展名）中的汉字转为小写无声调全拼，例如：中国 → zhongguo；其他字符保留，多音字使用默认读音",
+        ),
     ];
     div()
         .flex()
@@ -144,10 +163,10 @@ fn tokens(view: &RenameWindow, cx: &Context<RenameWindow>) -> Div {
         )
 }
 
-fn replacement(view: &RenameWindow, cx: &Context<RenameWindow>) -> Div {
+fn replacement(view: &RenameWindow, window: &mut Window, cx: &mut Context<RenameWindow>) -> Div {
     section("查找与替换", "区分大小写；查找留空时不替换。")
-        .child(field(view, 2, "查找"))
-        .child(field(view, 3, "替换为"))
+        .child(field(view, (2, "查找"), (window, cx)))
+        .child(field(view, (3, "替换为"), (window, cx)))
         .child(
             Checkbox::new("rename-first")
                 .label("仅替换第一次匹配")
@@ -170,15 +189,15 @@ fn replacement(view: &RenameWindow, cx: &Context<RenameWindow>) -> Div {
         )
 }
 
-fn counter(view: &RenameWindow) -> Div {
+fn counter(view: &RenameWindow, window: &mut Window, cx: &mut Context<RenameWindow>) -> Div {
     section("计数器 [C]", "在文件名中插入 [C] 后生效。")
         .child(
             div()
                 .flex()
                 .gap_2()
-                .child(field(view, 4, "起始值"))
-                .child(field(view, 5, "步长"))
-                .child(field(view, 6, "位数")),
+                .child(field(view, (4, "起始值"), (window, cx)))
+                .child(field(view, (5, "步长"), (window, cx)))
+                .child(field(view, (6, "位数"), (window, cx))),
         )
         .child(hint("例如：起始 1、步长 1、位数 3 → 001、002、003"))
 }

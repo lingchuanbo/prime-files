@@ -7,6 +7,11 @@ use gpui_component::{Root, input::InputState, resizable::ResizableState};
 use nohrs_services::fs::{listing::FileEntryDto, trash::Ledger};
 use std::time::Duration;
 
+#[path = "directory_tests.rs"]
+mod directories;
+#[path = "interaction_tests.rs"]
+mod interactions;
+
 fn rename_window(
     cx: &mut TestAppContext,
 ) -> (
@@ -18,6 +23,12 @@ fn rename_window(
     let path = fixture.path().join("项目说明.txt");
     std::fs::write(&path, "layout preview").expect("test file");
     cx.update(gpui_component::init);
+    cx.update(|cx| {
+        cx.set_global(super::SessionStore {
+            data: Default::default(),
+            path: Some(fixture.path().join("batch-rename.json")),
+        })
+    });
     let mut rename = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
         let resizable = cx.new(|_| ResizableState::default());

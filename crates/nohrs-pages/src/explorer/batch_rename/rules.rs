@@ -1,7 +1,8 @@
 use nohrs_services::fs::listing::FileEntryDto;
+use pinyin::ToPinyin;
 use std::path::Path;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum CaseMode {
     #[default]
     Keep,
@@ -142,6 +143,7 @@ impl Rules {
         };
         match token {
             "N" => Ok(stem.into()),
+            "拼音" => Ok(pinyin_name(stem)),
             "E" => Ok(extension.into()),
             "A" => Ok(entry.name.clone()),
             "C" => self
@@ -160,6 +162,18 @@ impl Rules {
             _ => Err(format!("未知占位符 [{token}]")),
         }
     }
+}
+
+fn pinyin_name(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for character in text.chars() {
+        if let Some(syllable) = character.to_pinyin() {
+            output.push_str(syllable.plain());
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn ancestor(path: &Path, depth: &str) -> Result<String, String> {
