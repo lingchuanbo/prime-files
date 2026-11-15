@@ -19,6 +19,7 @@ use nohrs_services::fs::listing::FileEntryDto;
 use nohrs_store::{KvKey, KvStore, kv_key};
 use serde::{Deserialize, Serialize};
 use super::workspace_icons::WorkspaceIcon;
+mod batch_rename;
 
 const TAGS_KEY: KvKey = kv_key!("explorer.tags");
 

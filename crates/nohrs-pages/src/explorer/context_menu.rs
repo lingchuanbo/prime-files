@@ -5,12 +5,12 @@ use gpui::{AppContext as _, AsyncWindowContext, Context, Pixels, Point, WeakEnti
 use nohrs_core::config::{self, ThemeMode};
 use nohrs_core::telemetry::LogErr;
 
-use crate::explorer::commands::{OpenIn, interned, keys_of};
-use nohrs_core::shortcuts::Action;
 use super::ExplorerPane;
 use super::grouping::GroupBy;
 use super::types::{SortKey, StatusLevel, ViewMode};
+use crate::explorer::commands::{OpenIn, interned, keys_of};
 use crate::shell_menu::{self, Choice, Entry, MenuItem, Request, Session, Target};
+use nohrs_core::shortcuts::Action;
 
 // Nohrs's own menu entries. The values are the menu ids, so they stay below
 // the range the Shell's entries are numbered from.
@@ -21,6 +21,7 @@ enum Command {
     ViewGrid,
     ViewTree,
     ViewCompact,
+    ToggleDirectoryExpand,
     ToggleHidden,
     ThemeDark,
     ThemeLight,
@@ -62,14 +63,16 @@ enum Command {
     OpenWorkspaceCard,
     RemoveWorkspaceCard,
     AddFavoriteCurrent,
+    BatchRename,
 }
 
 impl Command {
-    const ALL: [Command; 45] = [
+    const ALL: [Command; 47] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
         Command::ViewCompact,
+        Command::ToggleDirectoryExpand,
         Command::ToggleHidden,
         Command::ThemeDark,
         Command::ThemeLight,
@@ -111,6 +114,7 @@ impl Command {
         Command::OpenWorkspaceCard,
         Command::RemoveWorkspaceCard,
         Command::AddFavoriteCurrent,
+        Command::BatchRename,
     ];
 
     fn from_id(id: u32) -> Option<Self> {
@@ -134,7 +138,10 @@ pub(crate) fn note_theme_mode(mode: ThemeMode) {
 // a submenu the user made up becomes a submenu of the menu, holding its
 // own. `counter` numbers the shortcuts in menu order, the same order
 // `nth_favorite_path` reads them back in.
-fn favorite_menu_entries(items: &[super::favorites::FavoriteItem], counter: &mut u32) -> Vec<Entry> {
+fn favorite_menu_entries(
+    items: &[super::favorites::FavoriteItem],
+    counter: &mut u32,
+) -> Vec<Entry> {
     items
         .iter()
         .filter_map(|item| {
@@ -176,7 +183,13 @@ fn nth_favorite_path(items: &[super::favorites::FavoriteItem], index: usize) -> 
 fn favorite_link_count(items: &[super::favorites::FavoriteItem]) -> usize {
     items
         .iter()
-        .map(|item| if item.is_submenu() { favorite_link_count(&item.children) } else { 1 })
+        .map(|item| {
+            if item.is_submenu() {
+                favorite_link_count(&item.children)
+            } else {
+                1
+            }
+        })
         .sum()
 }
 
@@ -286,7 +299,11 @@ impl ExplorerPane {
         let Some(hwnd) = crate::ipc::window_hwnd(window) else {
             return;
         };
-        let paths = if row.is_some() { self.selected_paths() } else { Vec::new() };
+        let paths = if row.is_some() {
+            self.selected_paths()
+        } else {
+            Vec::new()
+        };
         let one_folder = match paths.as_slice() {
             [path] => self
                 .filtered_entries
@@ -314,25 +331,43 @@ impl ExplorerPane {
             .with_icon("icons/ellipsis.svg")
             .with_shortcut("Shift+F10");
         match purpose {
-            MenuPurpose::Listing { target: Target::Background(_), .. } => {
+            MenuPurpose::Listing {
+                target: Target::Background(_),
+                ..
+            } => {
                 let mut entries = self.background_entries(cx);
                 entries.push(Entry::Separator);
                 entries.push(more);
                 entries
             }
-            MenuPurpose::Listing { target: Target::Items(paths), .. } => {
+            MenuPurpose::Listing {
+                target: Target::Items(paths),
+                ..
+            } => {
                 // Ticked when every selected item has it; a click puts it on
                 // all of them, or takes it off all of them.
                 let mut tags: Vec<Entry> = super::tags::Tags::all(cx)
                     .into_iter()
                     .filter(|tag| tag.id < TAG_IDS)
                     .map(|tag| {
-                        Entry::check(FIRST_TAG + tag.id, &tag.name, super::tags::Tags::all_have(paths, tag.id, cx))
+                        Entry::check(
+                            FIRST_TAG + tag.id,
+                            &tag.name,
+                            super::tags::Tags::all_have(paths, tag.id, cx),
+                        )
                     })
                     .collect();
                 tags.push(Entry::Separator);
-                tags.push(Entry::command(Command::NewTag as u32, t!("Novo espaço de trabalho…")).with_icon("icons/plus.svg"));
-                vec![Entry::submenu(t!("Espaços de trabalho"), tags).with_icon("icons/tag.svg"), Entry::Separator, more]
+                tags.push(
+                    Entry::command(Command::NewTag as u32, t!("Novo espaço de trabalho…"))
+                        .with_icon("icons/plus.svg"),
+                );
+                vec![
+                    Entry::command(Command::BatchRename as u32, "批量重命名…").with_icon("icons/pencil.svg").with_shortcut("Ctrl+M"),
+                    Entry::submenu(t!("Espaços de trabalho"), tags).with_icon("icons/tag.svg"),
+                    Entry::Separator,
+                    more,
+                ]
             }
             _ => vec![more],
         }
@@ -353,7 +388,11 @@ impl ExplorerPane {
             window,
             async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
                 let (target, own_first, extended, intercept, hide, quick) = match &purpose {
-                    MenuPurpose::Listing { target, one_folder, extended } => {
+                    MenuPurpose::Listing {
+                        target,
+                        one_folder,
+                        extended,
+                    } => {
                         let files = matches!(target, Target::Items(_));
                         (
                             target.clone(),
@@ -362,7 +401,11 @@ impl ExplorerPane {
                             intercepted(*one_folder).to_vec(),
                             // Paste is Nohrs's own; on files the four in the
                             // row above replace the Shell's.
-                            if files { SHELL_HIDDEN_FOR_ITEMS } else { &["paste"][..] },
+                            if files {
+                                SHELL_HIDDEN_FOR_ITEMS
+                            } else {
+                                &["paste"][..]
+                            },
                             files,
                         )
                     }
@@ -370,12 +413,21 @@ impl ExplorerPane {
                         Target::Items(vec![place.parsing_name.clone()]),
                         false,
                         false,
-                        if place.path.is_some() { vec!["open", "explore"] } else { Vec::new() },
+                        if place.path.is_some() {
+                            vec!["open", "explore"]
+                        } else {
+                            Vec::new()
+                        },
                         &[][..],
                         false,
                     ),
-                    MenuPurpose::Columns(_) | MenuPurpose::Filter | MenuPurpose::Tag(_) | MenuPurpose::NetworkPlace(_)
-                    | MenuPurpose::FavoriteLink(_) | MenuPurpose::FavoriteSubmenu(_) | MenuPurpose::FavoritesMenu
+                    MenuPurpose::Columns(_)
+                    | MenuPurpose::Filter
+                    | MenuPurpose::Tag(_)
+                    | MenuPurpose::NetworkPlace(_)
+                    | MenuPurpose::FavoriteLink(_)
+                    | MenuPurpose::FavoriteSubmenu(_)
+                    | MenuPurpose::FavoritesMenu
                     | MenuPurpose::WorkspaceCard { .. } => {
                         (Target::None, true, false, Vec::new(), &[][..], false)
                     }
@@ -416,7 +468,13 @@ impl ExplorerPane {
 
     /// The pointer is over entry `index` of `level`: its submenu opens, and
     /// any deeper one closes.
-    pub(crate) fn hover_menu_entry(&mut self, level: usize, index: usize, submenu: bool, cx: &mut Context<Self>) {
+    pub(crate) fn hover_menu_entry(
+        &mut self,
+        level: usize,
+        index: usize,
+        submenu: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(menu) = self.context_menu.as_mut() else {
             return;
         };
@@ -434,7 +492,12 @@ impl ExplorerPane {
     }
 
     /// Runs entry `id` of the open menu and closes it.
-    pub(crate) fn choose_menu_item(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn choose_menu_item(
+        &mut self,
+        id: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(menu) = self.context_menu.take() else {
             return;
         };
@@ -453,15 +516,23 @@ impl ExplorerPane {
             window,
             async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
                 let choice = shell_menu::run(session, id);
-                this.update_in(cx, |pane, window, cx| pane.apply_choice(purpose, choice, window, cx))
-                    .log_err();
+                this.update_in(cx, |pane, window, cx| {
+                    pane.apply_choice(purpose, choice, window, cx)
+                })
+                .log_err();
             },
         )
         .detach();
     }
 
     // What an entry does, by what the menu was opened for.
-    fn apply_choice(&mut self, purpose: MenuPurpose, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_choice(
+        &mut self,
+        purpose: MenuPurpose,
+        choice: Choice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match purpose {
             MenuPurpose::Listing { .. } => self.apply_menu_choice(choice, window, cx),
             MenuPurpose::Place(place) => {
@@ -481,7 +552,9 @@ impl ExplorerPane {
                                 self.fit_column(column);
                             }
                         }
-                        Some(Command::FitAllColumns) => (0..4).for_each(|column| self.fit_column(column)),
+                        Some(Command::FitAllColumns) => {
+                            (0..4).for_each(|column| self.fit_column(column))
+                        }
                         Some(Command::ColumnType) => self.toggle_column(1),
                         Some(Command::ColumnSize) => self.toggle_column(2),
                         Some(Command::ColumnModified) => self.toggle_column(3),
@@ -494,8 +567,15 @@ impl ExplorerPane {
                 if let Choice::Own(id) = choice {
                     match Command::from_id(id) {
                         Some(Command::RenameTag) => {
-                            let name = super::tags::Tags::get(tag, cx).map(|tag| tag.name).unwrap_or_default();
-                            self.begin_sidebar_input(super::places::SidebarInputPurpose::RenameTag(tag), name, window, cx);
+                            let name = super::tags::Tags::get(tag, cx)
+                                .map(|tag| tag.name)
+                                .unwrap_or_default();
+                            self.begin_sidebar_input(
+                                super::places::SidebarInputPurpose::RenameTag(tag),
+                                name,
+                                window,
+                                cx,
+                            );
                         }
                         Some(Command::DeleteTag) => {
                             super::tags::Tags::delete(tag, cx);
@@ -509,8 +589,10 @@ impl ExplorerPane {
                                 .and_then(|index| super::tags::COLORS.get(index as usize))
                             {
                                 super::tags::Tags::recolor(tag, *color, cx);
-                            } else if let Some(icon) = id.checked_sub(FIRST_TAG_ICON)
-                                .and_then(|index| super::workspace_icons::WorkspaceIcon::ALL.get(index as usize))
+                            } else if let Some(icon) =
+                                id.checked_sub(FIRST_TAG_ICON).and_then(|index| {
+                                    super::workspace_icons::WorkspaceIcon::ALL.get(index as usize)
+                                })
                             {
                                 super::tags::Tags::set_icon(tag, *icon, cx);
                             }
@@ -533,8 +615,12 @@ impl ExplorerPane {
             MenuPurpose::FavoriteLink(favorite) => {
                 if let Choice::Own(id) = choice {
                     match Command::from_id(id) {
-                        Some(Command::RenameFavorite) => self.begin_favorite_rename(favorite, window, cx),
-                        Some(Command::RemoveFavorite) => super::favorites::Favorites::remove(favorite, cx),
+                        Some(Command::RenameFavorite) => {
+                            self.begin_favorite_rename(favorite, window, cx)
+                        }
+                        Some(Command::RemoveFavorite) => {
+                            super::favorites::Favorites::remove(favorite, cx)
+                        }
                         _ => {}
                     }
                 }
@@ -543,11 +629,15 @@ impl ExplorerPane {
             MenuPurpose::FavoriteSubmenu(favorite) => {
                 if let Choice::Own(id) = choice {
                     match Command::from_id(id) {
-                        Some(Command::RenameFavorite) => self.begin_favorite_rename(favorite, window, cx),
+                        Some(Command::RenameFavorite) => {
+                            self.begin_favorite_rename(favorite, window, cx)
+                        }
                         Some(Command::AddFavoriteCurrent) => {
                             super::favorites::Favorites::add_link(Some(favorite), &self.cwd, cx);
                         }
-                        Some(Command::RemoveFavorite) => super::favorites::Favorites::remove(favorite, cx),
+                        Some(Command::RemoveFavorite) => {
+                            super::favorites::Favorites::remove(favorite, cx)
+                        }
                         _ => {}
                     }
                 }
@@ -558,8 +648,13 @@ impl ExplorerPane {
             // list or into one of the submenus.
             MenuPurpose::FavoritesMenu => {
                 if let Choice::Own(id) = choice {
-                    if let Some(index) = id.checked_sub(FIRST_FAVORITE).filter(|offset| *offset < FAVORITE_IDS) {
-                        if let Some(path) = nth_favorite_path(&super::favorites::Favorites::all(cx), index as usize) {
+                    if let Some(index) = id
+                        .checked_sub(FIRST_FAVORITE)
+                        .filter(|offset| *offset < FAVORITE_IDS)
+                    {
+                        if let Some(path) =
+                            nth_favorite_path(&super::favorites::Favorites::all(cx), index as usize)
+                        {
                             self.change_dir(path, window, cx);
                         }
                     } else if Command::from_id(id) == Some(Command::AddFavoriteCurrent) {
@@ -567,7 +662,8 @@ impl ExplorerPane {
                     } else if let Some(index) = id
                         .checked_sub(FIRST_SUBMENU_TARGET)
                         .filter(|offset| *offset < SUBMENU_TARGETS)
-                        && let Some((submenu, _)) = super::favorites::Favorites::submenus(cx).get(index as usize)
+                        && let Some((submenu, _)) =
+                            super::favorites::Favorites::submenus(cx).get(index as usize)
                     {
                         super::favorites::Favorites::add_link(Some(*submenu), &self.cwd, cx);
                     }
@@ -585,7 +681,9 @@ impl ExplorerPane {
                             self.refresh_workspace(cx);
                             self.reload(cx);
                         }
-                        _ if id == FIRST_CARD_COLOR => super::tags::Tags::set_card_color(tag, &path, None, cx),
+                        _ if id == FIRST_CARD_COLOR => {
+                            super::tags::Tags::set_card_color(tag, &path, None, cx)
+                        }
                         _ => {
                             if let Some((color, _)) = id
                                 .checked_sub(FIRST_CARD_COLOR + 1)
@@ -613,11 +711,21 @@ impl ExplorerPane {
 
     // "Show more options": the classic Windows menu, with every entry an
     // extension draws itself, as Windows 11 keeps it.
-    fn show_classic_menu(&mut self, purpose: MenuPurpose, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_classic_menu(
+        &mut self,
+        purpose: MenuPurpose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(hwnd) = crate::ipc::window_hwnd(window) else {
             return;
         };
-        let MenuPurpose::Listing { target, one_folder, extended } = purpose.clone() else {
+        let MenuPurpose::Listing {
+            target,
+            one_folder,
+            extended,
+        } = purpose.clone()
+        else {
             return;
         };
         let own = match &target {
@@ -638,8 +746,10 @@ impl ExplorerPane {
                     intercept: intercepted(one_folder),
                     hide: &["paste"],
                 });
-                this.update_in(cx, |pane, window, cx| pane.apply_choice(purpose, choice, window, cx))
-                    .log_err();
+                this.update_in(cx, |pane, window, cx| {
+                    pane.apply_choice(purpose, choice, window, cx)
+                })
+                .log_err();
             },
         )
         .detach();
@@ -667,15 +777,27 @@ impl ExplorerPane {
         let workspace = super::tags::Tags::get(tag, cx);
         let current = workspace.as_ref().map(|tag| tag.color);
         let current_icon = workspace.as_ref().map(|tag| tag.icon());
-        let icons = super::workspace_icons::WorkspaceIcon::ALL.iter().enumerate()
-            .map(|(index, icon)| Entry::radio(FIRST_TAG_ICON + index as u32, icon.label(), current_icon == Some(*icon))
-                .with_icon(icon.path()))
+        let icons = super::workspace_icons::WorkspaceIcon::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, icon)| {
+                Entry::radio(
+                    FIRST_TAG_ICON + index as u32,
+                    icon.label(),
+                    current_icon == Some(*icon),
+                )
+                .with_icon(icon.path())
+            })
             .collect();
         let colors = super::tags::COLORS
             .iter()
             .enumerate()
             .map(|(index, (color, name))| {
-                Entry::radio(FIRST_TAG_COLOR + index as u32, nohrs_core::i18n::tr(name), current == Some(*color))
+                Entry::radio(
+                    FIRST_TAG_COLOR + index as u32,
+                    nohrs_core::i18n::tr(name),
+                    current == Some(*color),
+                )
             })
             .collect();
         let own = vec![
@@ -683,18 +805,28 @@ impl ExplorerPane {
             Entry::submenu(t!("Alterar ícone"), icons).with_icon("icons/aura-layers.svg"),
             Entry::submenu(t!("Cor"), colors).with_icon("icons/palette-2.svg"),
             Entry::Separator,
-            Entry::command(Command::DeleteTag as u32, t!("Excluir espaço de trabalho")).with_icon("icons/trash-2.svg"),
+            Entry::command(Command::DeleteTag as u32, t!("Excluir espaço de trabalho"))
+                .with_icon("icons/trash-2.svg"),
         ];
         self.show_menu(MenuPurpose::Tag(tag), own, hwnd, window, cx);
     }
 
     /// A network place's menu in the sidebar.
-    pub(crate) fn open_network_place_menu(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_network_place_menu(
+        &mut self,
+        address: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(hwnd) = crate::ipc::window_hwnd(window) else {
             return;
         };
         let own = vec![
-            Entry::command(Command::RemoveNetworkPlace as u32, t!("Remover dos locais de rede")).with_icon("icons/trash-2.svg"),
+            Entry::command(
+                Command::RemoveNetworkPlace as u32,
+                t!("Remover dos locais de rede"),
+            )
+            .with_icon("icons/trash-2.svg"),
         ];
         self.show_menu(MenuPurpose::NetworkPlace(address), own, hwnd, window, cx);
     }
@@ -713,7 +845,8 @@ impl ExplorerPane {
             return;
         };
         let mut own = vec![
-            Entry::command(Command::OpenWorkspaceCard as u32, t!("Abrir")).with_icon("icons/folder-open.svg"),
+            Entry::command(Command::OpenWorkspaceCard as u32, t!("Abrir"))
+                .with_icon("icons/folder-open.svg"),
             Entry::Separator,
         ];
         if colorable {
@@ -723,60 +856,102 @@ impl ExplorerPane {
                 t!("Seguir a cor do espaço de trabalho"),
                 current_color.is_none(),
             )];
-            colors.extend(super::tags::COLORS.iter().enumerate().map(|(index, (color, name))| {
-                Entry::radio(
-                    FIRST_CARD_COLOR + 1 + index as u32,
-                    nohrs_core::i18n::tr(name),
-                    current_color == Some(*color),
-                )
-            }));
+            colors.extend(
+                super::tags::COLORS
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (color, name))| {
+                        Entry::radio(
+                            FIRST_CARD_COLOR + 1 + index as u32,
+                            nohrs_core::i18n::tr(name),
+                            current_color == Some(*color),
+                        )
+                    }),
+            );
             own.push(Entry::submenu(t!("Cor do cartão"), colors).with_icon("icons/palette-2.svg"));
             own.push(Entry::Separator);
         }
         own.push(
-            Entry::command(Command::RemoveWorkspaceCard as u32, t!("Remover do espaço de trabalho"))
-                .with_icon("icons/trash-2.svg"),
+            Entry::command(
+                Command::RemoveWorkspaceCard as u32,
+                t!("Remover do espaço de trabalho"),
+            )
+            .with_icon("icons/trash-2.svg"),
         );
-        self.show_menu(MenuPurpose::WorkspaceCard { tag, path }, own, hwnd, window, cx);
+        self.show_menu(
+            MenuPurpose::WorkspaceCard { tag, path },
+            own,
+            hwnd,
+            window,
+            cx,
+        );
     }
 
     /// A favorite shortcut's menu in the sidebar: rename, or take the
     /// shortcut out. The folder itself is never touched.
-    pub(crate) fn open_favorite_link_menu(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_favorite_link_menu(
+        &mut self,
+        id: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(hwnd) = crate::ipc::window_hwnd(window) else {
             return;
         };
         let own = vec![
-            Entry::command(Command::RenameFavorite as u32, t!("Renomear")).with_icon("icons/pencil.svg"),
+            Entry::command(Command::RenameFavorite as u32, t!("Renomear"))
+                .with_icon("icons/pencil.svg"),
             Entry::Separator,
-            Entry::command(Command::RemoveFavorite as u32, t!("Remover das pastas favoritas"))
-                .with_icon("icons/trash-2.svg"),
+            Entry::command(
+                Command::RemoveFavorite as u32,
+                t!("Remover das pastas favoritas"),
+            )
+            .with_icon("icons/trash-2.svg"),
         ];
         self.show_menu(MenuPurpose::FavoriteLink(id), own, hwnd, window, cx);
     }
 
     /// A favorite submenu's menu in the sidebar: rename, take the pane's
     /// current folder into it, or delete it with everything it holds.
-    pub(crate) fn open_favorite_submenu_menu(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_favorite_submenu_menu(
+        &mut self,
+        id: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(hwnd) = crate::ipc::window_hwnd(window) else {
             return;
         };
         let own = vec![
-            Entry::command(Command::RenameFavorite as u32, t!("Renomear")).with_icon("icons/pencil.svg"),
-            Entry::command(Command::AddFavoriteCurrent as u32, t!("Adicionar pasta atual"))
-                .with_icon("icons/plus.svg"),
+            Entry::command(Command::RenameFavorite as u32, t!("Renomear"))
+                .with_icon("icons/pencil.svg"),
+            Entry::command(
+                Command::AddFavoriteCurrent as u32,
+                t!("Adicionar pasta atual"),
+            )
+            .with_icon("icons/plus.svg"),
             Entry::Separator,
-            Entry::command(Command::RemoveFavorite as u32, t!("Remover das pastas favoritas"))
-                .with_icon("icons/trash-2.svg"),
+            Entry::command(
+                Command::RemoveFavorite as u32,
+                t!("Remover das pastas favoritas"),
+            )
+            .with_icon("icons/trash-2.svg"),
         ];
         self.show_menu(MenuPurpose::FavoriteSubmenu(id), own, hwnd, window, cx);
     }
 
     // Opens a field in the sidebar holding entry `id`'s name, selected.
     fn begin_favorite_rename(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
-        let name = super::favorites::Favorites::get(id, cx).map(|item| item.name).unwrap_or_default();
+        let name = super::favorites::Favorites::get(id, cx)
+            .map(|item| item.name)
+            .unwrap_or_default();
         self.sidebar_visible = true;
-        self.begin_sidebar_input(super::places::SidebarInputPurpose::RenameFavorite(id), name, window, cx);
+        self.begin_sidebar_input(
+            super::places::SidebarInputPurpose::RenameFavorite(id),
+            name,
+            window,
+            cx,
+        );
     }
 
     /// The directory menu (Ctrl+D), as Total Commander's: the favorite
@@ -795,8 +970,11 @@ impl ExplorerPane {
         // entry is the one command instead of a submenu of one.
         let submenus = super::favorites::Favorites::submenus(cx);
         own.push(if submenus.is_empty() {
-            Entry::command(Command::AddFavoriteCurrent as u32, t!("Adicionar pasta atual"))
-                .with_icon("icons/plus.svg")
+            Entry::command(
+                Command::AddFavoriteCurrent as u32,
+                t!("Adicionar pasta atual"),
+            )
+            .with_icon("icons/plus.svg")
         } else {
             let mut entries = vec![
                 Entry::command(Command::AddFavoriteCurrent as u32, t!("No início da lista")),
@@ -825,12 +1003,23 @@ impl ExplorerPane {
             Entry::command(Command::FitColumn as u32, t!("Ajustar coluna ao conteúdo"))
                 .with_icon("icons/columns.svg")
                 .enabled(column.is_some_and(|column| self.column_visible(column))),
-            Entry::command(Command::FitAllColumns as u32, t!("Ajustar todas as colunas ao conteúdo"))
-                .with_icon("icons/table.svg"),
+            Entry::command(
+                Command::FitAllColumns as u32,
+                t!("Ajustar todas as colunas ao conteúdo"),
+            )
+            .with_icon("icons/table.svg"),
             Entry::Separator,
             Entry::check(Command::ColumnName as u32, t!("Nome"), true).enabled(false),
-            Entry::check(Command::ColumnType as u32, t!("Tipo"), self.column_visible(1)),
-            Entry::check(Command::ColumnSize as u32, t!("Tamanho"), self.column_visible(2)),
+            Entry::check(
+                Command::ColumnType as u32,
+                t!("Tipo"),
+                self.column_visible(1),
+            ),
+            Entry::check(
+                Command::ColumnSize as u32,
+                t!("Tamanho"),
+                self.column_visible(2),
+            ),
             Entry::check(
                 Command::ColumnModified as u32,
                 t!("Data de modificação"),
@@ -862,8 +1051,12 @@ impl ExplorerPane {
                 KindFilter::Programs => "icons/app-window.svg",
             };
             own.push(
-                Entry::check(FIRST_KIND + index as u32, kind.menu_label(), kind == current)
-                    .with_icon(icon),
+                Entry::check(
+                    FIRST_KIND + index as u32,
+                    kind.menu_label(),
+                    kind == current,
+                )
+                .with_icon(icon),
             );
             // "Tudo", then folders and files, then the kinds of file.
             if matches!(kind, KindFilter::All | KindFilter::Files) {
@@ -902,7 +1095,17 @@ impl ExplorerPane {
                         self.view_mode == ViewMode::List,
                     ),
                     Entry::Separator,
-                    Entry::check(Command::ToggleHidden as u32, t!("Itens ocultos"), self.show_hidden),
+                    Entry::check(
+                        Command::ToggleDirectoryExpand as u32,
+                        t!("Expandir diretórios"),
+                        self.directory_expanded,
+                    ),
+                    Entry::Separator,
+                    Entry::check(
+                        Command::ToggleHidden as u32,
+                        t!("Itens ocultos"),
+                        self.show_hidden,
+                    ),
                     Entry::Separator,
                     Entry::submenu(
                         t!("Tema"),
@@ -934,10 +1137,22 @@ impl ExplorerPane {
                     sort(Command::SortName, t!("Nome"), SortKey::Name),
                     sort(Command::SortType, t!("Tipo"), SortKey::Type),
                     sort(Command::SortSize, t!("Tamanho"), SortKey::Size),
-                    sort(Command::SortModified, t!("Data de modificação"), SortKey::Modified),
+                    sort(
+                        Command::SortModified,
+                        t!("Data de modificação"),
+                        SortKey::Modified,
+                    ),
                     Entry::Separator,
-                    Entry::radio(Command::SortAscending as u32, t!("Crescente"), self.sort_asc),
-                    Entry::radio(Command::SortDescending as u32, t!("Decrescente"), !self.sort_asc),
+                    Entry::radio(
+                        Command::SortAscending as u32,
+                        t!("Crescente"),
+                        self.sort_asc,
+                    ),
+                    Entry::radio(
+                        Command::SortDescending as u32,
+                        t!("Decrescente"),
+                        !self.sort_asc,
+                    ),
                 ],
             )
             .with_icon("icons/arrow-up-down.svg"),
@@ -947,7 +1162,11 @@ impl ExplorerPane {
                     group(Command::GroupNone, t!("Nenhum"), GroupBy::None),
                     Entry::Separator,
                     group(Command::GroupKind, t!("Tipo"), GroupBy::Kind),
-                    group(Command::GroupModified, t!("Data de modificação"), GroupBy::Modified),
+                    group(
+                        Command::GroupModified,
+                        t!("Data de modificação"),
+                        GroupBy::Modified,
+                    ),
                     group(Command::GroupSize, t!("Tamanho"), GroupBy::Size),
                 ],
             )
@@ -980,9 +1199,12 @@ impl ExplorerPane {
                     );
                 }
                 programs.push(
-                    Entry::command(Command::OpenFileExplorer as u32, t!("Explorador do Windows"))
-                        .with_icon("icons/folder-open.svg")
-                        .with_shortcut(keys_of(Action::OpenFileExplorer)),
+                    Entry::command(
+                        Command::OpenFileExplorer as u32,
+                        t!("Explorador do Windows"),
+                    )
+                    .with_icon("icons/folder-open.svg")
+                    .with_shortcut(keys_of(Action::OpenFileExplorer)),
                 );
                 programs
             })
@@ -1012,13 +1234,12 @@ impl ExplorerPane {
                     }
                 }
                 "open" | "explore" => {
-                    let folder = self
-                        .selected_paths()
-                        .into_iter()
-                        .next()
-                        .and_then(|path| {
-                            self.filtered_entries.iter().find(|entry| entry.path == path).cloned()
-                        });
+                    let folder = self.selected_paths().into_iter().next().and_then(|path| {
+                        self.filtered_entries
+                            .iter()
+                            .find(|entry| entry.path == path)
+                            .cloned()
+                    });
                     if let Some(folder) = folder {
                         self.activate_entry(folder, window, cx);
                     }
@@ -1038,6 +1259,10 @@ impl ExplorerPane {
             Command::ViewGrid => self.set_view_mode(ViewMode::Grid, cx),
             Command::ViewTree => self.set_view_mode(ViewMode::Tree, cx),
             Command::ViewCompact => self.set_view_mode(ViewMode::Compact, cx),
+            Command::ToggleDirectoryExpand => {
+                self.directory_expanded = !self.directory_expanded;
+                self.reload(cx);
+            }
             // Written to the config like the theme, so it lasts; the reload
             // that follows is what applies it.
             Command::ToggleHidden => {
@@ -1056,6 +1281,7 @@ impl ExplorerPane {
             Command::Refresh => self.reload(cx),
             Command::Paste => self.paste_into_cwd(window, cx),
             Command::NewFolder => self.create_new_folder(window, cx),
+            Command::BatchRename => self.open_batch_rename(window, cx),
             Command::GroupNone => self.set_group_by(GroupBy::None),
             Command::GroupKind => self.set_group_by(GroupBy::Kind),
             Command::GroupModified => self.set_group_by(GroupBy::Modified),
@@ -1074,7 +1300,12 @@ impl ExplorerPane {
                 let name = t!("Novo espaço de trabalho").to_string();
                 let id = super::tags::Tags::create(name.clone(), &paths, cx);
                 self.sidebar_visible = true;
-                self.begin_sidebar_input(super::places::SidebarInputPurpose::RenameTag(id), name, window, cx);
+                self.begin_sidebar_input(
+                    super::places::SidebarInputPurpose::RenameTag(id),
+                    name,
+                    window,
+                    cx,
+                );
             }
             Command::FitColumn
             | Command::FitAllColumns
@@ -1098,15 +1329,27 @@ impl ExplorerPane {
         }
     }
 
-    fn write_config(&mut self, section: &'static str, key: &'static str, value: String, cx: &mut Context<Self>) {
+    fn write_config(
+        &mut self,
+        section: &'static str,
+        key: &'static str,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
         let path = config::paths::config_file();
-        let write = cx.background_spawn(async move { config::set_value(&path, section, key, &value) });
+        let write =
+            cx.background_spawn(async move { config::set_value(&path, section, key, &value) });
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             if let Err(error) = write.await {
                 this.update(cx, |pane, cx| {
                     pane.set_status(
                         StatusLevel::Error,
-                        tf!("Não foi possível salvar {section}.{key}: {error}", section = section, key = key, error = error),
+                        tf!(
+                            "Não foi possível salvar {section}.{key}: {error}",
+                            section = section,
+                            key = key,
+                            error = error
+                        ),
                     );
                     cx.notify();
                 })
@@ -1124,10 +1367,26 @@ fn labelled(label: &str, action: Action) -> &'static str {
 
 fn quick_actions() -> Vec<QuickAction> {
     vec![
-        QuickAction { id: Command::Cut as u32, icon: "icons/scissors.svg", label: labelled(t!("Recortar"), Action::Cut) },
-        QuickAction { id: Command::Copy as u32, icon: "icons/copy.svg", label: labelled(t!("Copiar"), Action::Copy) },
-        QuickAction { id: Command::Rename as u32, icon: "icons/pencil.svg", label: labelled(t!("Renomear"), Action::Rename) },
-        QuickAction { id: Command::Delete as u32, icon: "icons/trash-2.svg", label: labelled(t!("Excluir"), Action::Trash) },
+        QuickAction {
+            id: Command::Cut as u32,
+            icon: "icons/scissors.svg",
+            label: labelled(t!("Recortar"), Action::Cut),
+        },
+        QuickAction {
+            id: Command::Copy as u32,
+            icon: "icons/copy.svg",
+            label: labelled(t!("Copiar"), Action::Copy),
+        },
+        QuickAction {
+            id: Command::Rename as u32,
+            icon: "icons/pencil.svg",
+            label: labelled(t!("Renomear"), Action::Rename),
+        },
+        QuickAction {
+            id: Command::Delete as u32,
+            icon: "icons/trash-2.svg",
+            label: labelled(t!("Excluir"), Action::Trash),
+        },
     ]
 }
 

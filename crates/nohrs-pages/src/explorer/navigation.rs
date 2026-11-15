@@ -1,15 +1,63 @@
 // Only the real opening reports a failure; tests record the request instead.
-use nohrs_core::tf;
 use nohrs_core::config;
 use nohrs_core::telemetry::LogErr;
+use nohrs_core::tf;
 use nohrs_services::fs::listing::{FileEntryDto, ListParams, list_dir_sync};
 
 use gpui::{AppContext as _, Context, WeakEntity, Window};
+use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use super::ExplorerPane;
 use super::types::{PaneEvent, StatusLevel};
+
+#[cfg(test)]
+mod directory_expand_tests {
+    use super::flatten_directory_files;
+    use nohrs_services::fs::listing::{ListParams, list_dir_sync};
+    use std::fs;
+
+    #[test]
+    fn expands_nested_directories_into_one_file_level() {
+        let root = tempfile::tempdir().expect("temp root");
+        fs::write(root.path().join("root.txt"), "root").expect("root file");
+        fs::create_dir(root.path().join("one")).expect("first directory");
+        fs::write(root.path().join("one").join("one.txt"), "one").expect("first file");
+        fs::create_dir(root.path().join("one").join("two")).expect("nested directory");
+        fs::write(root.path().join("one").join("two").join("two.txt"), "two").expect("nested file");
+
+        let entries = list_dir_sync(ListParams {
+            path: root.path().to_str().expect("utf8 path"),
+            limit: usize::MAX,
+            cursor: None,
+        })
+        .expect("root listing")
+        .entries;
+        let expanded = flatten_directory_files(entries);
+        let mut names: Vec<_> = expanded.iter().map(|entry| entry.name.as_str()).collect();
+        names.sort_unstable();
+
+        assert_eq!(names, ["one.txt", "root.txt", "two.txt"]);
+        assert!(expanded.iter().all(|entry| entry.kind != "dir"));
+    }
+
+    #[test]
+    fn empty_child_directories_do_not_add_rows() {
+        let root = tempfile::tempdir().expect("temp root");
+        fs::create_dir(root.path().join("empty")).expect("empty directory");
+        let entries = list_dir_sync(ListParams {
+            path: root.path().to_str().expect("utf8 path"),
+            limit: usize::MAX,
+            cursor: None,
+        })
+        .expect("root listing")
+        .entries;
+
+        assert!(flatten_directory_files(entries).is_empty());
+    }
+}
 
 /// How long a navigation lets the UI thread wait for the folder. A local
 /// folder answers well inside it (System32, 5,218 entries, in about 6 ms) and
@@ -59,7 +107,9 @@ pub(crate) fn parent_location(path: &str) -> Option<String> {
     if let Some(parent) = super::archive::parent(path) {
         return Some(parent);
     }
-    if path.eq_ignore_ascii_case(super::places::THIS_PC) || super::tags::tag_of_location(path).is_some() {
+    if path.eq_ignore_ascii_case(super::places::THIS_PC)
+        || super::tags::tag_of_location(path).is_some()
+    {
         return None;
     }
     if path.eq_ignore_ascii_case(super::network::NETWORK) {
@@ -72,10 +122,16 @@ pub(crate) fn parent_location(path: &str) -> Option<String> {
     if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return Some(super::places::THIS_PC.to_string());
     }
-    std::path::Path::new(path).parent().map(|parent| parent.to_string_lossy().into_owned())
+    std::path::Path::new(path)
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
 }
 
 fn read_folder(path: &str) -> Listing {
+    read_folder_with_expand(path, false)
+}
+
+fn read_folder_with_expand(path: &str, directory_expanded: bool) -> Listing {
     // An archive browsed as a folder: its entries, listed the same way.
     if super::archive::split(path).is_some() {
         return super::archive::read_folder(path);
@@ -94,13 +150,74 @@ fn read_folder(path: &str) -> Listing {
     }
     // A share that wants a login gets the credential window first.
     super::network::log_in_if_asked(path);
-    list_dir_sync(ListParams {
+    let entries = list_dir_sync(ListParams {
         path,
         limit: config::DIR_LISTING_LIMIT,
         cursor: None,
     })
     .map(|result| result.entries)
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(if directory_expanded {
+        flatten_directory_files(entries)
+    } else {
+        entries
+    })
+}
+
+/// Flattens a directory listing by replacing every directory with the files
+/// found below it. Child directories are read independently so an inaccessible
+/// subtree does not make the current folder fail to load.
+fn flatten_directory_files(entries: Vec<FileEntryDto>) -> Vec<FileEntryDto> {
+    let mut files = Vec::new();
+    let mut directories = VecDeque::new();
+    for entry in entries {
+        if entry.kind == "dir" {
+            directories.push_back(entry.path);
+        } else {
+            files.push(entry);
+        }
+    }
+
+    let mut visited = HashSet::new();
+    while let Some(directory) = directories.pop_front() {
+        let Some(identity) = directory_identity(&directory) else {
+            continue;
+        };
+        if !visited.insert(identity) {
+            continue;
+        }
+        let Ok(children) = list_dir_sync(ListParams {
+            path: &directory,
+            limit: config::DIR_LISTING_LIMIT,
+            cursor: None,
+        }) else {
+            continue;
+        };
+        for entry in children.entries {
+            if entry.kind == "dir" {
+                directories.push_back(entry.path);
+            } else {
+                files.push(entry);
+            }
+        }
+    }
+    files
+}
+
+/// Returns a stable identity for a real directory and skips symlinked folders.
+/// This prevents a junction or symlink cycle from making expansion run forever.
+fn directory_identity(path: &str) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    Some(
+        canonical
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_lowercase(),
+    )
 }
 
 /// A directory read running on a thread of its own. Its own thread rather
@@ -113,13 +230,13 @@ struct PendingListing {
 }
 
 impl PendingListing {
-    fn start(path: String, extras: RefreshExtras) -> Self {
+    fn start(path: String, extras: RefreshExtras, directory_expanded: bool) -> Self {
         let slot: Arc<(Mutex<Option<FolderRead>>, Condvar)> = Arc::default();
         let (signal, done) = async_channel::bounded(1);
         let read = {
             let slot = slot.clone();
             move || {
-                let listing = read_folder(&path);
+                let listing = read_folder_with_expand(&path, directory_expanded);
                 let open_folders = extras
                     .open_folders
                     .into_iter()
@@ -231,7 +348,7 @@ impl ExplorerPane {
         // Replacing the tasks cancels those of the previous read.
         self.listing_tasks.clear();
 
-        let pending = PendingListing::start(self.cwd.clone(), extras);
+        let pending = PendingListing::start(self.cwd.clone(), extras, self.directory_expanded);
         if let Some(read) = pending.wait(self.listing_wait) {
             self.listing_pending = false;
             self.apply_listing(read, refresh, cx);
@@ -493,7 +610,11 @@ impl ExplorerPane {
                     Err(error) => {
                         pane.set_status(
                             StatusLevel::Error,
-                            tf!("Não foi possível abrir {path}: {error}", path = item.path, error = error),
+                            tf!(
+                                "Não foi possível abrir {path}: {error}",
+                                path = item.path,
+                                error = error
+                            ),
                         );
                         cx.notify();
                     }
@@ -533,7 +654,14 @@ impl ExplorerPane {
         // without a shell in between to misread `&` or `^` in the name.
         #[cfg(not(test))]
         if let Err(error) = std::process::Command::new("explorer.exe").arg(path).spawn() {
-            self.set_status(StatusLevel::Error, tf!("Não foi possível abrir {path}: {error}", path = path, error = error));
+            self.set_status(
+                StatusLevel::Error,
+                tf!(
+                    "Não foi possível abrir {path}: {error}",
+                    path = path,
+                    error = error
+                ),
+            );
         }
     }
 }

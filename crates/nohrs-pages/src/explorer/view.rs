@@ -13,6 +13,7 @@ const QUICK_BAR_HEIGHT: f32 = 32.0;
 
 /// Modal dialogs for file operations (permanent-delete confirm, paste conflict).
 mod dialogs;
+pub(crate) mod new_folder;
 /// The filter bar: narrowing the listing by name pattern and kind.
 mod filter_bar;
 /// The explorer header with navigation controls and the path bar.
@@ -132,6 +133,11 @@ pub fn render(
             }
             if key_lc == "escape" && this.search_visible {
                 this.toggle_search(window, cx);
+                cx.stop_propagation();
+                return;
+            }
+            if with_modifier && !modifiers.alt && !modifiers.shift && key_lc == "m" && this.renaming.is_none() {
+                this.open_batch_rename(window, cx);
                 cx.stop_propagation();
                 return;
             }

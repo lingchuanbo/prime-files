@@ -14,6 +14,7 @@ use nohrs_core::i18n;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use gpui::*;
 use gpui_component::input::{InputEvent, InputState};
@@ -1148,24 +1149,37 @@ impl ExplorerPane {
         cx.notify();
     }
 
-    /// Creates a new folder in the current directory and immediately starts an
-    /// inline rename of it so the user can name it (§1, §6).
+    /// Opens the folder-name dialog. The dialog calls [`Self::create_folder_named`]
+    /// once the user confirms the name (§1, §6).
     pub(crate) fn create_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_new_folder_dialog(window, cx);
+    }
+
+    /// Creates a folder using the name confirmed by the new-folder dialog.
+    /// Returns `false` when the dialog should remain open for correction.
+    pub(crate) fn create_folder_named(&mut self, name: String, cx: &mut Context<Self>) -> bool {
         let parent = PathBuf::from(&self.cwd);
-        let name = ops::unique_name(&parent, t!("Nova pasta"));
-        match ops::create_dir(&parent, &name) {
-            Ok(path) => {
-                self.reload(cx);
-                let created = path.to_string_lossy();
-                if let Some(index) = self
-                    .filtered_entries
-                    .iter()
-                    .position(|entry| entry.path == created)
-                {
-                    self.select_single(index);
-                    self.begin_rename(index, window, cx);
-                }
+        let components = match parse_new_folder_name(&name) {
+            Ok(components) => components,
+            Err(NewFolderNameError::Empty) => {
+                self.set_status(StatusLevel::Error, t!("O nome da pasta não pode ficar vazio."));
                 cx.notify();
+                return false;
+            }
+            Err(NewFolderNameError::Invalid) => {
+                self.set_status(StatusLevel::Error, t!("O nome da pasta contém caracteres inválidos."));
+                cx.notify();
+                return false;
+            }
+        };
+        match create_folder_path(&parent, &components) {
+            Ok(_path) => {
+                super::view::new_folder::FolderNameHistory::remember(components.join("\\"), cx);
+                let visible = parent.join(&components[0]);
+                self.reveal_after_listing = Some(visible.to_string_lossy().into_owned());
+                self.reload(cx);
+                cx.notify();
+                true
             }
             Err(error) => {
                 self.set_status(
@@ -1173,9 +1187,77 @@ impl ExplorerPane {
                     tf!("Não foi possível criar a pasta: {error}", error = error),
                 );
                 cx.notify();
+                false
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NewFolderNameError {
+    Empty,
+    Invalid,
+}
+
+fn parse_new_folder_name(name: &str) -> std::result::Result<Vec<String>, NewFolderNameError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(NewFolderNameError::Empty);
+    }
+
+    let mut components = Vec::new();
+    for raw in name.split(|character| character == '/' || character == '\\') {
+        let component = raw.trim();
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(NewFolderNameError::Invalid);
+        }
+        if component.chars().any(|character| {
+            character.is_control() || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+        }) || component
+            .chars()
+            .last()
+            .is_some_and(|character| matches!(character, '.' | ' '))
+        {
+            return Err(NewFolderNameError::Invalid);
+        }
+        let stem = component.split('.').next().unwrap_or_default();
+        if matches!(
+            stem.to_ascii_uppercase().as_str(),
+            "CON" | "PRN" | "AUX" | "NUL"
+                | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8"
+                | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7"
+                | "LPT8" | "LPT9"
+        ) {
+            return Err(NewFolderNameError::Invalid);
+        }
+        components.push(component.to_string());
+    }
+    Ok(components)
+}
+
+/// Creates each component of a relative folder path, reusing existing
+/// intermediate directories and refusing an existing final directory.
+fn create_folder_path(parent: &Path, components: &[String]) -> Result<PathBuf> {
+    let mut current = parent.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        let candidate = current.join(component);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if index + 1 < components.len() && metadata.is_dir() => {
+                current = candidate;
+            }
+            Ok(_) if index + 1 == components.len() => {
+                return Err(Error::Other(format!("folder already exists: {}", candidate.display())));
+            }
+            Ok(_) => {
+                return Err(Error::Other(format!("path component is not a folder: {}", candidate.display())));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                current = ops::create_dir(&current, component)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(current)
 }
 
 #[cfg(test)]
@@ -1538,5 +1620,65 @@ mod rename_selection_tests {
         assert_eq!(rename_selection_end("日本語.txt", false), 3);
         // Astral-plane characters take two UTF-16 units each.
         assert_eq!(rename_selection_end("🎉🎉.txt", false), 4);
+    }
+}
+
+#[cfg(test)]
+mod new_folder_name_tests {
+    use super::{
+        NewFolderNameError, create_folder_path, parse_new_folder_name,
+    };
+
+    #[test]
+    fn rejects_blank_names() {
+        assert_eq!(parse_new_folder_name(" \t\n"), Err(NewFolderNameError::Empty));
+    }
+
+    #[test]
+    fn trims_user_input_before_creation() {
+        assert_eq!(parse_new_folder_name("  项目资料  ").unwrap(), ["项目资料"]);
+    }
+
+    #[test]
+    fn accepts_nested_folder_paths_with_both_separators() {
+        assert_eq!(
+            parse_new_folder_name("目录A\\目录B/目录C").unwrap(),
+            ["目录A", "目录B", "目录C"]
+        );
+    }
+
+    #[test]
+    fn rejects_path_escape_and_empty_components() {
+        assert_eq!(parse_new_folder_name("目录A\\..\\目录B"), Err(NewFolderNameError::Invalid));
+        assert_eq!(parse_new_folder_name("目录A//目录B"), Err(NewFolderNameError::Invalid));
+        assert_eq!(parse_new_folder_name("/绝对路径"), Err(NewFolderNameError::Invalid));
+    }
+
+    #[test]
+    fn rejects_windows_invalid_and_reserved_names() {
+        assert_eq!(parse_new_folder_name("a:b"), Err(NewFolderNameError::Invalid));
+        assert_eq!(parse_new_folder_name("CON.txt"), Err(NewFolderNameError::Invalid));
+        assert_eq!(parse_new_folder_name("目录A. "), Err(NewFolderNameError::Invalid));
+    }
+
+    #[test]
+    fn creates_nested_folders_and_reuses_existing_intermediate_directory() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("目录A")).unwrap();
+        let components = parse_new_folder_name("目录A\\目录B").unwrap();
+
+        let created = create_folder_path(root.path(), &components).unwrap();
+
+        assert_eq!(created, root.path().join("目录A").join("目录B"));
+        assert!(created.is_dir());
+    }
+
+    #[test]
+    fn refuses_existing_final_folder() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("目录A").join("目录B")).unwrap();
+        let components = parse_new_folder_name("目录A\\目录B").unwrap();
+
+        assert!(create_folder_path(root.path(), &components).is_err());
     }
 }

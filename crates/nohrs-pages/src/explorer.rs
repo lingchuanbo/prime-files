@@ -1,6 +1,7 @@
 pub(crate) mod commands;
 pub(crate) mod context_menu;
 mod archive;
+mod batch_rename;
 mod creative;
 mod documents;
 mod drag;

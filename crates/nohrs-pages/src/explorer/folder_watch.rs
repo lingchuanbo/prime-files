@@ -34,6 +34,7 @@ const RETRY: Duration = Duration::from_secs(1);
 /// The watch on a pane's folders; dropping it stops it.
 pub(crate) struct FolderWatch {
     folders: Vec<String>,
+    recursive: bool,
     _watcher: notify::RecommendedWatcher,
     _task: Task<()>,
 }
@@ -50,7 +51,12 @@ impl ExplorerPane {
             .collect();
         folders.sort();
         folders.dedup();
-        if self.folder_watch.as_ref().is_some_and(|watch| watch.folders == folders) {
+        let recursive = self.directory_expanded;
+        if self
+            .folder_watch
+            .as_ref()
+            .is_some_and(|watch| watch.folders == folders && watch.recursive == recursive)
+        {
             return;
         }
         self.folder_watch = None;
@@ -81,7 +87,12 @@ impl ExplorerPane {
         for folder in &folders {
             // A drive that sends no notifications (some network and cloud
             // drives) is refreshed by F5 as before.
-            if let Err(error) = watcher.watch(Path::new(folder), RecursiveMode::NonRecursive) {
+            let mode = if recursive {
+                RecursiveMode::Recursive
+            } else {
+                RecursiveMode::NonRecursive
+            };
+            if let Err(error) = watcher.watch(Path::new(folder), mode) {
                 tracing::debug!("cannot watch {folder}: {error}");
             }
         }
@@ -107,7 +118,12 @@ impl ExplorerPane {
                 last = Some(Instant::now());
             }
         });
-        self.folder_watch = Some(FolderWatch { folders, _watcher: watcher, _task: task });
+        self.folder_watch = Some(FolderWatch {
+            folders,
+            recursive,
+            _watcher: watcher,
+            _task: task,
+        });
     }
 
     /// Reads the folder again because the disk changed. Put off (false)

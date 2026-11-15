@@ -5,7 +5,10 @@ use nohrs_services::search::{SearchScope, SearchService};
 use nohrs_services::syntax::SyntaxService;
 use nohrs_ui::components::file_list::FileListDelegate;
 
-use gpui::{AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Window, px, size};
+use gpui::{
+    AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window, px,
+    size,
+};
 use gpui_component::VirtualListScrollHandle;
 use gpui_component::input::InputState;
 use gpui_component::list::ListState;
@@ -15,6 +18,12 @@ use std::{rc::Rc, sync::Arc, time::Instant};
 use super::entries;
 use super::types::*;
 use super::view::preview::editor::PreviewEditor;
+
+/// State retained while the new-folder modal is open.
+pub(crate) struct NewFolderDialogState {
+    pub(crate) input: Entity<InputState>,
+    pub(crate) _subscription: Subscription,
+}
 
 /// State for the file explorer page: the current directory listing, navigation
 /// history, sorting and filtering, search, preview, and view layout.
@@ -49,6 +58,9 @@ pub struct ExplorerPane {
     /// The folder the rows on screen were read from. A read of the same folder
     /// is a refresh and keeps what the user had open (`navigation::reload`).
     pub(crate) listed_cwd: Option<String>,
+    /// Whether child-directory files are shown alongside the current folder's
+    /// files instead of showing directory rows.
+    pub(crate) directory_expanded: bool,
     /// The sort a folder opens with when it was never changed
     /// (`ui.default_sort`, `ui.default_sort_descending`).
     pub(crate) default_sort_key: SortKey,
@@ -96,6 +108,8 @@ pub struct ExplorerPane {
     pub search_visible: bool,
     /// Input state backing the search field.
     pub search_input: Entity<InputState>,
+    /// Input and event subscription for the new-folder modal, while open.
+    pub(crate) new_folder_dialog: Option<NewFolderDialogState>,
     /// State of the resizable split between listing and preview.
     pub resizable: Entity<ResizableState>,
     /// The listing's virtualized list entity, once initialized.
@@ -456,7 +470,11 @@ impl crate::pane_group::PaneItem for ExplorerPane {
         if self.compact != *settings {
             self.compact = settings.clone();
         }
-        if !self.top_reveal.as_ref().is_some_and(|mine| std::rc::Rc::ptr_eq(mine, top)) {
+        if !self
+            .top_reveal
+            .as_ref()
+            .is_some_and(|mine| std::rc::Rc::ptr_eq(mine, top))
+        {
             self.top_reveal = Some(top.clone());
         }
     }
@@ -507,6 +525,7 @@ impl ExplorerPane {
             listing_wait: super::navigation::LISTING_WAIT,
             reveal_after_listing: None,
             listed_cwd: None,
+            directory_expanded: false,
             default_sort_key: SortKey::Name,
             default_sort_asc: true,
             view_folder: None,
@@ -526,6 +545,7 @@ impl ExplorerPane {
             search_query: String::new(),
             search_visible: false,
             search_input,
+            new_folder_dialog: None,
             resizable,
             list: None,
             subs: Vec::new(),
@@ -1154,10 +1174,18 @@ impl ExplorerPane {
             // Chinese name can be typed in pinyin initials (`wjj` finds
             // 文件夹).
             let query = super::filter::NameMatcher::new(&self.search_query);
-            self.filtered_entries = visible.filter(|entry| query.matches(&entry.name)).cloned().collect();
+            self.filtered_entries = visible
+                .filter(|entry| query.matches(&entry.name))
+                .cloned()
+                .collect();
         }
 
-        entries::sort_entries_with(&mut self.filtered_entries, self.sort_key, self.sort_asc, self.folder_order);
+        entries::sort_entries_with(
+            &mut self.filtered_entries,
+            self.sort_key,
+            self.sort_asc,
+            self.folder_order,
+        );
         if self.view_mode == ViewMode::Tree {
             // Groups would pull a folder's children away from it.
             self.group_runs.clear();

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{AppContext, ClipboardItem, Entity, TestAppContext, WindowHandle, point, px};
-use gpui_component::Root;
+use gpui_component::{Root, WindowExt};
 use gpui_component::input::InputState;
 use gpui_component::resizable::ResizableState;
 use nohrs_core::config;
@@ -2246,25 +2246,143 @@ async fn a_rename_runs_off_the_ui_thread(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn new_folder_picks_a_unique_name(cx: &mut TestAppContext) {
+async fn new_folder_uses_the_confirmed_name(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::create_dir(root.join("Nova pasta")).unwrap();
     let (window, pane) = new_explorer_in_root(cx);
     window
-        .update(cx, |_root, window, cx| {
+        .update(cx, |_root, _window, cx| {
             pane.update(cx, |pane, cx| {
                 pane.cwd = root.to_string_lossy().to_string();
                 pane.reload(cx);
-                pane.create_new_folder(window, cx);
+                assert!(pane.create_folder_named("Nova pasta (2)".into(), cx));
             });
         })
         .unwrap();
     cx.run_until_parked();
     assert!(
         root.join("Nova pasta (2)").is_dir(),
-        "a new folder avoids colliding with the existing one"
+        "the confirmed folder name is created"
     );
+}
+
+#[gpui::test]
+async fn new_folder_dialog_opens_after_event_cycle(cx: &mut TestAppContext) {
+    let (window, pane) = new_explorer_in_root(cx);
+    window
+        .update(cx, |_root, window, cx| {
+            pane.update(cx, |pane, cx| pane.open_new_folder_dialog(window, cx));
+            window.defer(cx, |window, cx| {
+                assert!(window.has_active_dialog(cx));
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+}
+
+fn new_explorer_with_dialog_layer(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<ExplorerPane>) {
+    use gpui::{IntoElement, ParentElement, Render, AppContext, div};
+    struct DialogHost(Entity<ExplorerPane>);
+    impl Render for DialogHost {
+        fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            div().child(self.0.clone()).children(Root::render_dialog_layer(window, cx))
+        }
+    }
+    cx.update(gpui_component::init);
+    let mut pane = None;
+    let window = cx.add_window(|window, cx| {
+        let resizable = cx.new(|_| ResizableState::default());
+        let search_input = cx.new(|cx| InputState::new(window, cx));
+        let entity = cx.new(|cx| ExplorerPane::new(
+            resizable, search_input, None, TrashLedger::KeptByOs, cx.focus_handle(),
+        ));
+        pane = Some(entity.clone());
+        let host = cx.new(|_| DialogHost(entity));
+        Root::new(host, window, cx)
+    });
+    (window, pane.unwrap())
+}
+
+#[gpui::test]
+async fn new_folder_history_keyboard_opens_selects_and_cancels(cx: &mut TestAppContext) {
+    use gpui::Focusable;
+    use super::view::new_folder::FolderNameHistory;
+
+    let (window, pane) = new_explorer_with_dialog_layer(cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        FolderNameHistory::remember("历史目录".into(), cx);
+        pane.update(cx, |pane, cx| pane.open_new_folder_dialog(window, cx));
+    }).unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.run_until_parked();
+    let input = pane.read_with(cx, |pane, _| {
+        pane.new_folder_dialog.as_ref().unwrap().input.clone()
+    });
+    cx.simulate_keystrokes(window.into(), "down");
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(!input.focus_handle(cx).is_focused(window), "history receives keyboard focus");
+    }).unwrap();
+    cx.simulate_keystrokes(window.into(), "down enter");
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.has_active_dialog(cx), "selecting history must not submit the dialog");
+        assert_eq!("历史目录", input.read(cx).value().as_str());
+        assert!(input.focus_handle(cx).is_focused(window));
+    }).unwrap();
+    cx.simulate_keystrokes(window.into(), "down");
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.run_until_parked();
+    cx.simulate_keystrokes(window.into(), "escape");
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.has_active_dialog(cx), "Escape closes only the history menu");
+        assert!(input.focus_handle(cx).is_focused(window));
+        assert_eq!("历史目录", input.read(cx).value().as_str());
+    }).unwrap();
+}
+
+#[gpui::test]
+async fn new_folder_prefill_uses_active_selected_name(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window.update(cx, |pane, _window, _cx| {
+        pane.filtered_entries = vec![
+            file("新建文本文档.jpg", "file", 0),
+            file("项目.v2", "dir", 0),
+            file("archive.tar.gz", "file", 0),
+            file(".gitignore", "file", 0),
+        ];
+        assert_eq!(nohrs_core::t!("Nova pasta"), pane.new_folder_default_name());
+        for (index, expected) in [(0, "新建文本文档"), (1, "项目.v2"), (2, "archive.tar"), (3, ".gitignore")] {
+            pane.select_single(index);
+            assert_eq!(expected, pane.new_folder_default_name());
+        }
+        pane.select_all();
+        pane.active_path = Some(pane.filtered_entries[1].path.clone());
+        assert_eq!("项目.v2", pane.new_folder_default_name());
+        pane.selection.remove(&pane.filtered_entries[1].path);
+        assert_eq!("新建文本文档", pane.new_folder_default_name());
+    }).unwrap();
+}
+
+#[gpui::test]
+async fn new_folder_history_only_records_successful_creation(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let window = new_explorer(cx);
+    window.update(cx, |pane, _window, cx| {
+        pane.cwd = dir.path().to_string_lossy().into_owned();
+        assert!(pane.create_folder_named("资料\\图片".into(), cx));
+        assert!(!pane.create_folder_named("资料\\图片".into(), cx));
+        assert!(!pane.create_folder_named("不合法?".into(), cx));
+        assert_eq!(vec!["资料\\图片"], super::view::new_folder::FolderNameHistory::all(cx));
+        assert!(pane.create_folder_named("项目".into(), cx));
+        assert_eq!(vec!["项目", "资料\\图片"], super::view::new_folder::FolderNameHistory::all(cx));
+    }).unwrap();
 }
 
 #[gpui::test]

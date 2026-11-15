@@ -86,7 +86,7 @@ pub const ACTIONS: &[ActionInfo] = &[
     info(Action::Refresh, "refresh", FILES, crate::k!("Atualizar a pasta"), &["f5"]),
     info(Action::Trash, "trash", FILES, crate::k!("Mandar para a Lixeira"), &["delete"]),
     info(Action::DeletePermanently, "delete_permanently", FILES, crate::k!("Excluir para sempre"), &["shift-delete"]),
-    info(Action::NewFolder, "new_folder", FILES, crate::k!("Nova pasta"), &["ctrl-shift-n"]),
+    info(Action::NewFolder, "new_folder", FILES, crate::k!("Nova pasta"), &["f7", "ctrl-shift-n"]),
     info(Action::GoUp, "go_up", FILES, crate::k!("Subir para a pasta de cima"), &["alt-up"]),
     // The recent folders, under the header's arrow: the places visited last.
     info(Action::RecentFolders, "recent_folders", FILES, crate::k!("Pastas recentes"), &["alt-down"]),
@@ -416,5 +416,12 @@ mod tests {
         // `+` with the Shift the layout needs for it.
         assert_eq!(resolve(true, false, true, "+"), Some(Action::ZoomIn));
         assert_eq!(resolve(true, false, true, "c"), None);
+    }
+
+    #[test]
+    fn new_folder_keeps_ctrl_shift_n_and_adds_f7() {
+        let info = info_of(Action::NewFolder);
+        assert!(info.defaults.contains(&"ctrl-shift-n"));
+        assert!(info.defaults.contains(&"f7"));
     }
 }
