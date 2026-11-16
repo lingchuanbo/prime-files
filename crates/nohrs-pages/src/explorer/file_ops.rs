@@ -9,8 +9,8 @@
 //! surfaced to the footer status bar — the aggregated error dialog and progress
 //! UI are tracked separately in #188.
 
-use nohrs_core::{k, t, tf};
 use nohrs_core::i18n;
+use nohrs_core::{k, t, tf};
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -123,7 +123,10 @@ fn free_destination(dir: &Path, name: &OsStr) -> Result<PathBuf> {
         return Ok(dst);
     }
     let name = name.to_str().ok_or_else(|| {
-        Error::Other(tf!("{path} já existe e não dá para numerar o nome", path = dst.display()))
+        Error::Other(tf!(
+            "{path} já existe e não dá para numerar o nome",
+            path = dst.display()
+        ))
     })?;
     ops::destination_in(dir, OsStr::new(&ops::unique_name(dir, name)))
 }
@@ -295,7 +298,11 @@ impl OpReport {
             }
             return (
                 StatusLevel::Error,
-                tf!("{failed} de {total} falharam", failed = self.failures.len(), total = total),
+                tf!(
+                    "{failed} de {total} falharam",
+                    failed = self.failures.len(),
+                    total = total
+                ),
             );
         }
         match self.leftovers.as_slice() {
@@ -645,6 +652,12 @@ impl ExplorerPane {
     /// Moves the selected entries to the OS trash.
     pub(crate) fn trash_selection(&mut self, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
+        self.trash_paths(paths, cx);
+    }
+
+    pub(crate) fn trash_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        use nohrs_core::telemetry::LogErr as _;
+
         if paths.is_empty() {
             return;
         }
@@ -656,33 +669,62 @@ impl ExplorerPane {
         // item in the trash would succeed, and it would be a one-way door.
         let ledger = self.trash_ledger.clone();
         if let Err(error) = ledger.to_record() {
-            self.set_status(StatusLevel::Error, tf!("Não dá para mandar para a Lixeira: {error}", error = error));
+            self.set_status(
+                StatusLevel::Error,
+                tf!("Não dá para mandar para a Lixeira: {error}", error = error),
+            );
             cx.notify();
             return;
         }
         let total = paths.len();
-        let label = i18n::plural(total, k!("{n} item enviado para a Lixeira"), k!("{n} itens enviados para a Lixeira"));
-        self.run_fs_op(total, label, cx, move || {
-            let mut report = OpReport::default();
-            // Read in here rather than captured: `to_record` borrows from
-            // `ledger`, which this closure owns.
-            let record = match ledger.to_record() {
-                Ok(record) => record,
-                Err(error) => {
-                    for path in &paths {
-                        report.failed(format!("{path}: {error}"));
+        let label = i18n::plural(
+            total,
+            k!("{n} item enviado para a Lixeira"),
+            k!("{n} itens enviados para a Lixeira"),
+        );
+        let scan = self.space_delete_scan();
+        let pane = cx.entity().downgrade();
+        self.run_fs_op_with(
+            total,
+            label,
+            cx,
+            move || {
+                let mut report = OpReport::default();
+                // Read in here rather than captured: `to_record` borrows from
+                // `ledger`, which this closure owns.
+                let record = match ledger.to_record() {
+                    Ok(record) => record,
+                    Err(error) => {
+                        for path in &paths {
+                            report.failed(format!("{path}: {error}"));
+                        }
+                        return (report, Vec::new());
                     }
-                    return report;
+                };
+                // One call for the whole selection: on Windows that is one Shell
+                // operation instead of one per item (`ops::trash_paths`).
+                let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+                let failures = ops::trash_paths(&paths, record);
+                let trashed = paths
+                    .iter()
+                    .filter(|path| !failures.iter().any(|(failed, _)| failed == *path))
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                for (path, error) in failures {
+                    report.failed(format!("{}: {error}", path.display()));
                 }
-            };
-            // One call for the whole selection: on Windows that is one Shell
-            // operation instead of one per item (`ops::trash_paths`).
-            let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-            for (path, error) in ops::trash_paths(&paths, record) {
-                report.failed(format!("{}: {error}", path.display()));
-            }
-            report
-        });
+                (report, trashed)
+            },
+            move |trashed, cx| {
+                if let Some(scan) = scan {
+                    pane.update(cx, |pane, cx| {
+                        pane.space_files_trashed(&trashed, &scan);
+                        cx.notify();
+                    })
+                    .log_err();
+                }
+            },
+        );
     }
 
     pub(crate) fn delete_permanent_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
@@ -720,8 +762,16 @@ impl ExplorerPane {
         ExplorerClipboard::write(Some((mode, buffers)), cx);
         cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
         let message = match mode {
-            ClipMode::Copy => i18n::plural(paths.len(), k!("{n} item copiado"), k!("{n} itens copiados")),
-            ClipMode::Cut => i18n::plural(paths.len(), k!("{n} item recortado"), k!("{n} itens recortados")),
+            ClipMode::Copy => i18n::plural(
+                paths.len(),
+                k!("{n} item copiado"),
+                k!("{n} itens copiados"),
+            ),
+            ClipMode::Cut => i18n::plural(
+                paths.len(),
+                k!("{n} item recortado"),
+                k!("{n} itens recortados"),
+            ),
         };
         self.set_status(StatusLevel::Info, message);
         cx.notify();
@@ -1105,8 +1155,10 @@ impl ExplorerPane {
         });
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let (original_path, final_name, renamed) = task.await;
-            this.update(cx, |pane, cx| pane.finish_rename(&original_path, &final_name, renamed, cx))
-                .log_err();
+            this.update(cx, |pane, cx| {
+                pane.finish_rename(&original_path, &final_name, renamed, cx)
+            })
+            .log_err();
         })
         .detach();
         cx.notify();
@@ -1140,10 +1192,16 @@ impl ExplorerPane {
                 // Its tags go with it.
                 super::tags::Tags::moved(&old, &new, cx);
                 self.reload(cx);
-                self.set_status(StatusLevel::Info, tf!("Renomeado para {name}", name = final_name));
+                self.set_status(
+                    StatusLevel::Info,
+                    tf!("Renomeado para {name}", name = final_name),
+                );
             }
             Err(error) => {
-                self.set_status(StatusLevel::Error, tf!("Não foi possível renomear: {error}", error = error));
+                self.set_status(
+                    StatusLevel::Error,
+                    tf!("Não foi possível renomear: {error}", error = error),
+                );
             }
         }
         cx.notify();
@@ -1162,12 +1220,18 @@ impl ExplorerPane {
         let components = match parse_new_folder_name(&name) {
             Ok(components) => components,
             Err(NewFolderNameError::Empty) => {
-                self.set_status(StatusLevel::Error, t!("O nome da pasta não pode ficar vazio."));
+                self.set_status(
+                    StatusLevel::Error,
+                    t!("O nome da pasta não pode ficar vazio."),
+                );
                 cx.notify();
                 return false;
             }
             Err(NewFolderNameError::Invalid) => {
-                self.set_status(StatusLevel::Error, t!("O nome da pasta contém caracteres inválidos."));
+                self.set_status(
+                    StatusLevel::Error,
+                    t!("O nome da pasta contém caracteres inválidos."),
+                );
                 cx.notify();
                 return false;
             }
@@ -1223,10 +1287,28 @@ fn parse_new_folder_name(name: &str) -> std::result::Result<Vec<String>, NewFold
         let stem = component.split('.').next().unwrap_or_default();
         if matches!(
             stem.to_ascii_uppercase().as_str(),
-            "CON" | "PRN" | "AUX" | "NUL"
-                | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8"
-                | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7"
-                | "LPT8" | "LPT9"
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
         ) {
             return Err(NewFolderNameError::Invalid);
         }
@@ -1246,10 +1328,16 @@ fn create_folder_path(parent: &Path, components: &[String]) -> Result<PathBuf> {
                 current = candidate;
             }
             Ok(_) if index + 1 == components.len() => {
-                return Err(Error::Other(format!("folder already exists: {}", candidate.display())));
+                return Err(Error::Other(format!(
+                    "folder already exists: {}",
+                    candidate.display()
+                )));
             }
             Ok(_) => {
-                return Err(Error::Other(format!("path component is not a folder: {}", candidate.display())));
+                return Err(Error::Other(format!(
+                    "path component is not a folder: {}",
+                    candidate.display()
+                )));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 current = ops::create_dir(&current, component)?;
@@ -1625,13 +1713,14 @@ mod rename_selection_tests {
 
 #[cfg(test)]
 mod new_folder_name_tests {
-    use super::{
-        NewFolderNameError, create_folder_path, parse_new_folder_name,
-    };
+    use super::{NewFolderNameError, create_folder_path, parse_new_folder_name};
 
     #[test]
     fn rejects_blank_names() {
-        assert_eq!(parse_new_folder_name(" \t\n"), Err(NewFolderNameError::Empty));
+        assert_eq!(
+            parse_new_folder_name(" \t\n"),
+            Err(NewFolderNameError::Empty)
+        );
     }
 
     #[test]
@@ -1649,16 +1738,34 @@ mod new_folder_name_tests {
 
     #[test]
     fn rejects_path_escape_and_empty_components() {
-        assert_eq!(parse_new_folder_name("目录A\\..\\目录B"), Err(NewFolderNameError::Invalid));
-        assert_eq!(parse_new_folder_name("目录A//目录B"), Err(NewFolderNameError::Invalid));
-        assert_eq!(parse_new_folder_name("/绝对路径"), Err(NewFolderNameError::Invalid));
+        assert_eq!(
+            parse_new_folder_name("目录A\\..\\目录B"),
+            Err(NewFolderNameError::Invalid)
+        );
+        assert_eq!(
+            parse_new_folder_name("目录A//目录B"),
+            Err(NewFolderNameError::Invalid)
+        );
+        assert_eq!(
+            parse_new_folder_name("/绝对路径"),
+            Err(NewFolderNameError::Invalid)
+        );
     }
 
     #[test]
     fn rejects_windows_invalid_and_reserved_names() {
-        assert_eq!(parse_new_folder_name("a:b"), Err(NewFolderNameError::Invalid));
-        assert_eq!(parse_new_folder_name("CON.txt"), Err(NewFolderNameError::Invalid));
-        assert_eq!(parse_new_folder_name("目录A. "), Err(NewFolderNameError::Invalid));
+        assert_eq!(
+            parse_new_folder_name("a:b"),
+            Err(NewFolderNameError::Invalid)
+        );
+        assert_eq!(
+            parse_new_folder_name("CON.txt"),
+            Err(NewFolderNameError::Invalid)
+        );
+        assert_eq!(
+            parse_new_folder_name("目录A. "),
+            Err(NewFolderNameError::Invalid)
+        );
     }
 
     #[test]

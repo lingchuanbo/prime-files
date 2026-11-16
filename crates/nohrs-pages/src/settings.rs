@@ -300,8 +300,13 @@ impl SettingsPage {
                 let result = cx.background_spawn(async { everything::mft::index_status() }).await;
                 let Ok(()) = this.update(cx, |_page, cx| {
                     let state = cx.default_global::<everything::Everything>();
-                    state.mft_index_status = Some(result);
-                    cx.refresh_windows();
+                    let updated = everything::mft::apply_index_status_poll(
+                        &mut state.mft_index_status,
+                        result,
+                    );
+                    if updated {
+                        cx.refresh_windows();
+                    }
                 }) else {
                     return;
                 };

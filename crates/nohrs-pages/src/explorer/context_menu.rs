@@ -9,7 +9,7 @@ use super::ExplorerPane;
 use super::grouping::GroupBy;
 use super::types::{SortKey, StatusLevel, ViewMode};
 use crate::explorer::commands::{OpenIn, interned, keys_of};
-use crate::shell_menu::{self, Choice, Entry, MenuItem, Request, Session, Target};
+use crate::shell_menu::{self, Choice, Entry, MenuIcon, MenuItem, Request, Session, Target};
 use nohrs_core::shortcuts::Action;
 
 // Nohrs's own menu entries. The values are the menu ids, so they stay below
@@ -67,10 +67,12 @@ enum Command {
     BatchRename,
     /// The selected folder's sizes, drawn as the space map.
     SpaceMapSelection,
+    SpaceOpenLocation,
+    SpaceDelete,
 }
 
 impl Command {
-    const ALL: [Command; 49] = [
+    const ALL: [Command; 51] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
@@ -120,6 +122,8 @@ impl Command {
         Command::AddFavoriteCurrent,
         Command::BatchRename,
         Command::SpaceMapSelection,
+        Command::SpaceOpenLocation,
+        Command::SpaceDelete,
     ];
 
     fn from_id(id: u32) -> Option<Self> {
@@ -249,6 +253,8 @@ pub(crate) enum MenuPurpose {
     /// A folder card of a workspace page: the workspace it is in, and the
     /// folder it points at.
     WorkspaceCard { tag: u32, path: String },
+    /// A tile in the space map.
+    SpaceTile(String),
 }
 
 /// A menu on screen: what it shows, where, and what runs its entries.
@@ -327,6 +333,54 @@ impl ExplorerPane {
         };
         let own = self.listing_entries(&purpose, cx);
         self.show_menu(purpose, own, hwnd, window, cx);
+    }
+
+    pub(crate) fn open_space_tile_menu(
+        &mut self,
+        crumbs: Vec<usize>,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self
+            .space
+            .as_ref()
+            .and_then(|map| map.tree.as_deref())
+            .and_then(|tree| tree.node_at(&crumbs))
+            .map(|node| node.path.clone())
+            .filter(|path| !path.is_empty())
+        else {
+            return;
+        };
+        let items = [
+            (
+                Command::SpaceOpenLocation,
+                t!("打开所在位置"),
+                "icons/folder-open.svg",
+            ),
+            (Command::SpaceDelete, t!("删除"), "icons/trash-2.svg"),
+        ]
+        .into_iter()
+        .map(|(command, label, icon)| MenuItem {
+            id: command as u32,
+            label: label.to_string(),
+            shortcut: None,
+            icon: MenuIcon::Asset(icon),
+            enabled: true,
+            checked: false,
+            radio: false,
+            bold: false,
+            kind: crate::shell_menu::ItemKind::Command,
+        })
+        .collect();
+        self.context_menu = Some(OpenMenu {
+            items,
+            quick: Vec::new(),
+            position,
+            open_path: Vec::new(),
+            session: None,
+            purpose: MenuPurpose::SpaceTile(path),
+        });
+        cx.notify();
     }
 
     // Nohrs's entries for a listing menu: the view and sort submenus on the
@@ -446,7 +500,8 @@ impl ExplorerPane {
                     | MenuPurpose::FavoriteLink(_)
                     | MenuPurpose::FavoriteSubmenu(_)
                     | MenuPurpose::FavoritesMenu
-                    | MenuPurpose::WorkspaceCard { .. } => {
+                    | MenuPurpose::WorkspaceCard { .. }
+                    | MenuPurpose::SpaceTile(_) => {
                         (Target::None, true, false, Vec::new(), &[][..], false)
                     }
                 };
@@ -709,6 +764,18 @@ impl ExplorerPane {
                                 super::tags::Tags::set_card_color(tag, &path, Some(*color), cx);
                             }
                         }
+                    }
+                }
+                cx.notify();
+            }
+            MenuPurpose::SpaceTile(path) => {
+                if let Choice::Own(id) = choice {
+                    match Command::from_id(id) {
+                        Some(Command::SpaceOpenLocation) => {
+                            self.space_open_location(&path, window, cx)
+                        }
+                        Some(Command::SpaceDelete) => self.space_delete(&path, cx),
+                        _ => {}
                     }
                 }
                 cx.notify();
@@ -1356,6 +1423,8 @@ impl ExplorerPane {
             | Command::AddFavoriteCurrent
             | Command::OpenWorkspaceCard
             | Command::RemoveWorkspaceCard
+            | Command::SpaceOpenLocation
+            | Command::SpaceDelete
             | Command::MoreOptions => {}
             Command::OpenCommandPrompt => self.open_in(OpenIn::CommandPrompt, cx),
             Command::OpenPowerShell => self.open_in(OpenIn::PowerShell, cx),

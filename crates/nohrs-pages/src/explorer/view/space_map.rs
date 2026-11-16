@@ -29,6 +29,12 @@ const BAR_HEIGHT: f32 = 36.0;
 
 /// Depth steps a fill distinguishes; deeper clamps.
 const DEPTHS: usize = 5;
+const MIN_NAME_WIDTH_EM: f32 = 8.0;
+const MIN_NAME_HEIGHT_EM: f32 = 3.0;
+const DETAIL_WIDTH_EM: f32 = 13.0;
+const DETAIL_HEIGHT_EM: f32 = 5.0;
+const HEADER_MIN_HEIGHT_EM: f32 = 1.4;
+const HEADER_DETAIL_WIDTH_EM: f32 = 18.0;
 
 /// The map fills the listing's place: the bar that says what is measured and
 /// where, then the mosaic.
@@ -43,10 +49,9 @@ pub fn render(
     let error = page.space.as_ref().and_then(|map| map.error.clone());
     let still_scanning = page.space.as_ref().is_some_and(|map| map.is_scanning());
     // A folder with nothing in it has no mosaic to draw.
-    let empty = page
-        .space
-        .as_ref()
-        .is_some_and(|map| map.focus_node().is_some_and(|node| node.bytes == 0));
+    let empty = page.space.as_ref().is_some_and(|map| {
+        !map.is_animating() && map.focus_node().is_some_and(|node| node.bytes == 0)
+    });
     let bar = bar(page, cx);
     let body: AnyElement = match (error, still_scanning) {
         (Some(reason), _) => notice(
@@ -463,6 +468,9 @@ fn mosaic(
     let measured = viewport.get();
     let width = f32::from(measured.size.width).max(0.0);
     let height = f32::from(measured.size.height).max(0.0);
+    if page.space.as_ref().is_some_and(|map| map.is_animating()) {
+        window.request_animation_frame();
+    }
     let tiles = page
         .space_tiles(width, height)
         .unwrap_or_else(|| Rc::new(Vec::new()));
@@ -482,6 +490,7 @@ fn mosaic(
 
     let move_viewport = Rc::clone(&viewport);
     let press_viewport = Rc::clone(&viewport);
+    let menu_viewport = Rc::clone(&viewport);
     let paint_tiles_rc = Rc::clone(&tiles);
     let paint_selection = selected;
     let paint_tree = tree.clone();
@@ -545,6 +554,27 @@ fn mosaic(
                     }
                 } else {
                     this.space_select(crumbs, cx);
+                }
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                let bounds = menu_viewport.get();
+                let crumbs = this.space.as_ref().and_then(|map| {
+                    let x = f32::from(event.position.x - bounds.origin.x);
+                    let y = f32::from(event.position.y - bounds.origin.y);
+                    map.layout.as_ref().and_then(|layout| {
+                        layout
+                            .tiles
+                            .iter()
+                            .rposition(|tile| tile.rect.contains(x, y))
+                            .and_then(|index| layout.tiles.get(index))
+                            .map(|tile| tile.crumbs.clone())
+                    })
+                });
+                if let Some(crumbs) = crumbs {
+                    this.open_space_tile_menu(crumbs, event.position, cx);
                 }
             }),
         )
@@ -656,7 +686,7 @@ impl Kind {
 /// what it holds. Each level of nesting steps a little away from the surface
 /// so the mosaic reads as layers rather than as a flat stain.
 fn tile_fill(style: &SpaceMap, node: &SpaceNode, depth: u32, dark: bool, header: bool) -> Hsla {
-    match style.color {
+    let fill = match style.color {
         SpaceMapColor::Kind => kind_fill(Kind::of(node), depth, dark, header),
         SpaceMapColor::Size => {
             let base: Hsla = style
@@ -665,7 +695,17 @@ fn tile_fill(style: &SpaceMap, node: &SpaceNode, depth: u32, dark: bool, header:
                 .into();
             hsla(base.h, base.s, shade(base.l, depth, dark, header), 1.0)
         }
-    }
+    };
+    calm_fill(fill, dark)
+}
+
+fn calm_fill(fill: Hsla, dark: bool) -> Hsla {
+    let lightness = if dark {
+        fill.l.clamp(0.28, 0.48)
+    } else {
+        fill.l.clamp(0.60, 0.74)
+    };
+    hsla(fill.h, (fill.s * 0.62).min(0.42), lightness, fill.a)
 }
 
 // The kind's hue, lighter or darker for each level of nesting.
@@ -676,14 +716,14 @@ fn kind_fill(kind: Kind, depth: u32, dark: bool, header: bool) -> Hsla {
         hsla(
             kind.hue(),
             kind.saturation(true),
-            (0.32 + step * 0.035 + shift).min(0.62),
+            (0.32 + step * 0.05 + shift).min(0.62),
             1.0,
         )
     } else {
         hsla(
             kind.hue(),
             kind.saturation(false),
-            (0.80 - step * 0.030 - shift).max(0.42),
+            (0.80 - step * 0.04 - shift).max(0.42),
             1.0,
         )
     }
@@ -695,9 +735,9 @@ fn shade(lightness: f32, depth: u32, dark: bool, header: bool) -> f32 {
     let step = depth.min(DEPTHS as u32 - 1) as f32;
     let shift = if header { 0.05 } else { 0.0 };
     if dark {
-        (lightness + step * 0.04 + shift).min(0.86)
+        (lightness + step * 0.05 + shift).min(0.86)
     } else {
-        (lightness - step * 0.035 - shift).max(0.14)
+        (lightness - step * 0.04 - shift).max(0.14)
     }
 }
 
@@ -738,14 +778,23 @@ fn paint_mosaic(
         let Some(node) = focus_node.node_at(&tile.crumbs) else {
             continue;
         };
+        let rect = tile.rect;
+        if rect.w <= 0.5 || rect.h <= 0.5 {
+            continue;
+        }
         let quad_bounds = snap(
             Bounds::new(
-                point(px(origin_x + tile.rect.x), px(origin_y + tile.rect.y)),
-                size(px(tile.rect.w), px(tile.rect.h)),
+                point(px(origin_x + rect.x), px(origin_y + rect.y)),
+                size(px(rect.w), px(rect.h)),
             ),
             scale,
         );
-        window.paint_quad(fill(quad_bounds, tile_fill(style, node, tile.depth, dark, false)));
+        let base = if tile.header.is_some() {
+            rgb(theme::bg_secondary()).into()
+        } else {
+            tile_fill(style, node, tile.depth, dark, false)
+        };
+        window.paint_quad(fill(quad_bounds, base));
         if let Some(header) = tile.header {
             let band = snap(
                 Bounds::new(
@@ -831,20 +880,54 @@ fn paint_labels(
         // A subdivided directory keeps its name in the band it reserved; a
         // leaf's sits at the top of its own tile.
         let owned = tile.header.unwrap_or(tile.rect);
-        if owned.w < name_px * 3.0 || owned.h < line_height {
+        let mode = label_mode(owned.w, owned.h, tile.header.is_some(), name_px);
+        if mode == LabelMode::Hidden {
             continue;
         }
         // The text has to read on the tile's own colour, whatever the palette.
-        let (name_color, size_color) =
-            text_on(tile_fill(style, node, tile.depth, dark, tile.header.is_some()));
-        let label_x = origin_x + owned.x + padding;
-        let label_y = origin_y + owned.y + (owned.h.min(line_height * 1.6) - line_height) * 0.5;
-        let max_name_width = (owned.w - padding * 2.0 - size_px).max(name_px * 2.0);
+        let (name_color, size_color) = text_on(tile_fill(
+            style,
+            node,
+            tile.depth,
+            dark,
+            tile.header.is_some(),
+        ));
         let name = if node.name.is_empty() {
             i18n::plural(node.count as usize, k!("{n} item"), k!("{n} itens"))
         } else {
             node.name.clone()
         };
+        let size_line = (mode == LabelMode::NameAndSize).then(|| {
+            let size_text = human_size(node.bytes);
+            let size_run = TextRun {
+                len: size_text.len(),
+                font: font.clone(),
+                color: size_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window.text_system().shape_line(
+                SharedString::from(size_text),
+                size_size,
+                &[size_run],
+                None,
+            )
+        });
+        let size_width = size_line.as_ref().map_or(0.0, |line| f32::from(line.width));
+        let gap = if tile.header.is_some() {
+            padding * 0.6
+        } else {
+            0.0
+        };
+        let max_name_width = (owned.w
+            - padding * 2.0
+            - if tile.header.is_some() {
+                size_width + gap
+            } else {
+                0.0
+            })
+        .max(name_px * 2.0);
         // The first level is set in semibold: it names a region, not an entry.
         let weight = if tile.depth == 0 && tile.header.is_some() {
             FontWeight::SEMIBOLD
@@ -862,50 +945,73 @@ fn paint_labels(
             max_name_width,
             weight,
         );
+        let name_width = f32::from(name_line.width);
+        let stacked = tile.header.is_none() && size_line.is_some();
+        let label_height = if stacked {
+            line_height * 2.0
+        } else {
+            line_height
+        };
+        let label_y = origin_y + owned.y + (owned.h - label_height).max(0.0) * 0.5;
+        let name_x = if tile.header.is_some() && size_line.is_some() {
+            origin_x + centered_label_origin(owned.x, owned.w, name_width + gap + size_width)
+        } else {
+            origin_x + centered_label_origin(owned.x, owned.w, name_width)
+        };
         if let Err(error) =
-            name_line.paint(point(px(label_x), px(label_y)), px(line_height), window, cx)
+            name_line.paint(point(px(name_x), px(label_y)), px(line_height), window, cx)
         {
             tracing::debug!("painting a space-map label: {error}");
         }
 
-        // The weight: at the far end of a band, under the name on a tall tile,
-        // or after the name when there is room on one line.
-        let size_text = human_size(node.bytes);
-        let size_run = TextRun {
-            len: size_text.len(),
-            font: font.clone(),
-            color: size_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let size_line = window.text_system().shape_line(
-            SharedString::from(size_text),
-            size_size,
-            &[size_run],
-            None,
-        );
-        let name_width = f32::from(name_line.width);
-        let size_width = f32::from(size_line.width);
-        let size_origin = if tile.header.is_some() {
-            let right = origin_x + owned.x + owned.w - padding - size_width;
-            if right <= label_x + name_width + padding * 0.5 {
-                continue;
+        if let Some(size_line) = size_line {
+            let size_x = if stacked {
+                origin_x + centered_label_origin(owned.x, owned.w, size_width)
+            } else {
+                name_x + name_width + gap
+            };
+            let size_y = label_y
+                + if stacked {
+                    line_height
+                } else {
+                    (name_px - size_px) * 0.35
+                };
+            if let Err(error) =
+                size_line.paint(point(px(size_x), px(size_y)), px(line_height), window, cx)
+            {
+                tracing::debug!("painting a space-map size: {error}");
             }
-            point(px(right), px(label_y + (name_px - size_px) * 0.35))
-        } else if owned.h >= line_height * 2.0 + name_px * 0.4 {
-            point(px(label_x), px(label_y + line_height * 0.95))
-        } else {
-            let left = label_x + name_width + padding * 0.6;
-            if origin_x + owned.x + owned.w - padding - left < size_width {
-                continue;
-            }
-            point(px(left), px(label_y + (name_px - size_px) * 0.35))
-        };
-        if let Err(error) = size_line.paint(size_origin, px(line_height), window, cx) {
-            tracing::debug!("painting a space-map size: {error}");
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabelMode {
+    Hidden,
+    Name,
+    NameAndSize,
+}
+
+fn label_mode(width: f32, height: f32, header: bool, font_size: f32) -> LabelMode {
+    if header {
+        if width < font_size * MIN_NAME_WIDTH_EM || height < font_size * HEADER_MIN_HEIGHT_EM {
+            LabelMode::Hidden
+        } else if width >= font_size * HEADER_DETAIL_WIDTH_EM {
+            LabelMode::NameAndSize
+        } else {
+            LabelMode::Name
+        }
+    } else if width < font_size * MIN_NAME_WIDTH_EM || height < font_size * MIN_NAME_HEIGHT_EM {
+        LabelMode::Hidden
+    } else if width >= font_size * DETAIL_WIDTH_EM && height >= font_size * DETAIL_HEIGHT_EM {
+        LabelMode::NameAndSize
+    } else {
+        LabelMode::Name
+    }
+}
+
+fn centered_label_origin(tile_x: f32, tile_width: f32, label_width: f32) -> f32 {
+    tile_x + (tile_width - label_width).max(0.0) * 0.5
 }
 
 /// `text` shaped for one line, shortened with an ellipsis until it fits
@@ -978,4 +1084,23 @@ fn display_name(path: &str) -> String {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| path.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tile_label_origin_centres_the_shaped_text() {
+        assert_eq!(48.0, super::centered_label_origin(8.0, 100.0, 20.0));
+    }
+
+    #[test]
+    fn labels_scale_down_with_tile_size() {
+        use super::LabelMode::{Hidden, Name, NameAndSize};
+
+        assert_eq!(Hidden, super::label_mode(80.0, 60.0, false, 12.0));
+        assert_eq!(Name, super::label_mode(120.0, 50.0, false, 12.0));
+        assert_eq!(NameAndSize, super::label_mode(180.0, 72.0, false, 12.0));
+        assert_eq!(Name, super::label_mode(160.0, 22.0, true, 12.0));
+        assert_eq!(NameAndSize, super::label_mode(240.0, 22.0, true, 12.0));
+    }
 }

@@ -4,7 +4,8 @@
 //! which runs off the UI thread and reports its progress to the status line
 //! while it goes. The map lives beside the listing: it is opened from the
 //! sidebar or the listing's "View" menu, replaces the listing while it is up,
-//! and follows the pane when the user navigates to another folder.
+//! and follows the pane when the user navigates to another folder. It opens
+//! from the listing's "View" menu.
 //!
 //! Inside the map, a click selects a tile and a double-click zooms into a
 //! directory — no second read, the scan already has its contents — while the
@@ -23,6 +24,8 @@ use nohrs_services::fs::space::{SpaceError, SpaceLimits, SpaceNode, SpaceProgres
 
 use super::ExplorerPane;
 use super::places::{THIS_PC, THIS_PC_NAME};
+
+mod motion;
 
 /// How often the status line is repainted while a scan runs: often enough to
 /// see the counts move, rarely enough that the walk keeps the cores.
@@ -89,6 +92,7 @@ pub(crate) struct SpaceMap {
     pub(crate) hover: Option<usize>,
     /// The selected entry, as child indices from the scanned tree.
     pub(crate) selection: Option<Vec<usize>>,
+    transition: Option<motion::Transition>,
     /// When the scan started, for the "taking a while" line.
     pub(crate) started: Instant,
     /// Bumped for every scan, so an answer to an older one is ignored.
@@ -114,6 +118,7 @@ impl SpaceMap {
             layout: None,
             hover: None,
             selection: None,
+            transition: None,
             started: Instant::now(),
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -131,6 +136,10 @@ impl SpaceMap {
     /// Whether the scan is still running, for the "scanning" line.
     pub(crate) fn is_scanning(&self) -> bool {
         self.tree.is_none() && self.error.is_none()
+    }
+
+    pub(crate) fn is_animating(&self) -> bool {
+        self.transition.is_some()
     }
 
     /// The layout `generation` `focus` last produced for an area, if it is
@@ -252,9 +261,24 @@ impl ExplorerPane {
         width: f32,
         height: f32,
     ) -> Option<Rc<Vec<nohrs_services::fs::space::Tile>>> {
-        let map = self.space.as_ref()?;
+        let map = self.space.as_mut()?;
         let generation = map.generation;
         let focus = map.focus.clone();
+        if map.cached(generation, &focus, width, height).is_some()
+            && let Some(transition) = map.transition.as_ref()
+        {
+            let now = Instant::now();
+            let tiles = transition.frame(now);
+            let finished = transition.finished(now);
+            if let Some(layout) = map.layout.as_mut() {
+                layout.tiles = Rc::clone(&tiles);
+            }
+            if finished {
+                map.transition = None;
+            }
+            return Some(tiles);
+        }
+        map.transition = None;
         if let Some(tiles) = map.cached(generation, &focus, width, height) {
             return Some(tiles);
         }
@@ -263,7 +287,7 @@ impl ExplorerPane {
         let tiles = Rc::new(nohrs_services::fs::space::layout(
             node,
             area,
-            &nohrs_services::fs::space::LayoutOptions::default(),
+            &motion::layout_options(),
         ));
         if let Some(map) = self.space.as_mut() {
             map.layout = Some(SpaceLayout {
@@ -380,6 +404,75 @@ impl ExplorerPane {
         }
     }
 
+    pub(crate) fn space_open_location(
+        &mut self,
+        path: &str,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(folder) = parent_of(path) else {
+            return;
+        };
+        let same_folder = super::same_path(&folder, &self.cwd);
+        self.close_space_map(cx);
+        if same_folder {
+            self.reveal(path);
+            cx.notify();
+        } else {
+            self.change_dir(folder, window, cx);
+            self.reveal(path);
+        }
+    }
+
+    pub(crate) fn space_delete(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.trash_paths(vec![path.to_string()], cx);
+    }
+
+    pub(crate) fn space_files_trashed(&mut self, paths: &[String], scan: &Arc<AtomicBool>) {
+        let Some(map) = self
+            .space
+            .as_mut()
+            .filter(|map| Arc::ptr_eq(&map.cancel, scan))
+        else {
+            return;
+        };
+        let Some(tree) = map.tree.as_mut() else {
+            return;
+        };
+        let tree = Rc::make_mut(tree);
+        let removed: u64 = paths
+            .iter()
+            .map(|path| motion::remove_path(tree, path))
+            .sum();
+        if removed == 0 {
+            return;
+        }
+        map.hover = None;
+        map.selection = None;
+        map.transition = None;
+        let Some(layout) = map.layout.as_ref() else {
+            return;
+        };
+        let Some(node) = tree.node_at(&map.focus) else {
+            return;
+        };
+        let area = nohrs_services::fs::space::Rect::new(0.0, 0.0, layout.width, layout.height);
+        let target = Rc::new(nohrs_services::fs::space::layout(
+            node,
+            area,
+            &motion::layout_options(),
+        ));
+        map.transition = Some(motion::Transition::new(
+            Rc::clone(&layout.tiles),
+            target,
+            Instant::now(),
+        ));
+    }
+
+    pub(crate) fn space_delete_scan(&self) -> Option<Arc<AtomicBool>> {
+        self.space.as_ref().map(|map| Arc::clone(&map.cancel))
+    }
+
     /// Measures the map's root again, from scratch.
     pub(crate) fn space_refresh(&mut self, cx: &mut Context<Self>) {
         if self.space.is_none() {
@@ -479,6 +572,7 @@ impl ExplorerPane {
         map.error = None;
         map.focus.clear();
         map.layout = None;
+        map.transition = None;
         map.hover = None;
         map.selection = None;
         map.started = Instant::now();
@@ -663,7 +757,6 @@ fn parent_of(path: &str) -> Option<String> {
     })
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::{parent_of, tree_from_index};

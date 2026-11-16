@@ -132,7 +132,10 @@ fn indexed_names_are_found_by_full_pinyin() {
     let actual = segment.search(&query, false, &AtomicBool::new(false));
 
     assert_eq!(
-        actual.into_iter().map(|(_, _, position)| segment.path(position)).collect::<Vec<_>>(),
+        actual
+            .into_iter()
+            .map(|(_, _, position)| segment.path(position))
+            .collect::<Vec<_>>(),
         ["C:\\文件夹"]
     );
 }
