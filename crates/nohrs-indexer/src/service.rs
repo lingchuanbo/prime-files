@@ -220,6 +220,11 @@ fn answer(pipe: &File) -> io::Result<()> {
         if let Some(index) = INDEX.get() { index.refresh(); }
         out.write_all(format!("PFIX1 OK {}\n", protocol::HELLO_VERSION).as_bytes())?;
         out.flush()?;
+    } else if request == protocol::STATUS {
+        match INDEX.get().ok_or_else(|| io::Error::other("index worker not running")).and_then(|index| index.status()) {
+            Ok(status) => protocol::write_index_status(&mut out, status)?,
+            Err(error) => protocol::write_error(&mut out, &error.to_string())?,
+        }
     } else if request == protocol::SEARCH {
         // The terms and the count were written after the request line.
         let body = read_request_body(reader)?;

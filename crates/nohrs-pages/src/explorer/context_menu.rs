@@ -369,7 +369,9 @@ impl ExplorerPane {
                         .with_icon("icons/plus.svg"),
                 );
                 let mut entries = vec![
-                    Entry::command(Command::BatchRename as u32, "批量重命名…").with_icon("icons/pencil.svg").with_shortcut("Ctrl+M"),
+                    Entry::command(Command::BatchRename as u32, "批量重命名…")
+                        .with_icon("icons/pencil.svg")
+                        .with_shortcut("Ctrl+M"),
                 ];
                 // What the folder weighs, without leaving the one on screen.
                 if *one_folder {
@@ -378,7 +380,9 @@ impl ExplorerPane {
                             .with_icon("icons/treemap.svg"),
                     );
                 }
-                entries.push(Entry::submenu(t!("Espaços de trabalho"), tags).with_icon("icons/tag.svg"));
+                entries.push(
+                    Entry::submenu(t!("Espaços de trabalho"), tags).with_icon("icons/tag.svg"),
+                );
                 entries.push(Entry::Separator);
                 entries.push(more);
                 entries
@@ -684,8 +688,7 @@ impl ExplorerPane {
                 }
                 cx.notify();
             }
-            // A folder card of a workspace: opening it, or taking it out of
-            // the workspace — the folder itself is never touched.
+            // A workspace item: opening it, or taking it out of the workspace.
             MenuPurpose::WorkspaceCard { tag, path } => {
                 if let Choice::Own(id) = choice {
                     match Command::from_id(id) {
@@ -845,13 +848,13 @@ impl ExplorerPane {
         self.show_menu(MenuPurpose::NetworkPlace(address), own, hwnd, window, cx);
     }
 
-    /// A folder card's menu on a workspace page: open it, colour it for this
-    /// run, or take it out of the workspace. The folder itself is untouched.
+    /// An item's menu on a workspace page: open it, colour it for this run,
+    /// or take it out of the workspace. The item itself is untouched.
     pub(crate) fn open_workspace_card_menu(
         &mut self,
         tag: u32,
         path: String,
-        colorable: bool,
+        is_directory: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -863,28 +866,31 @@ impl ExplorerPane {
                 .with_icon("icons/folder-open.svg"),
             Entry::Separator,
         ];
-        if colorable {
-            let current_color = super::tags::Tags::card_color(tag, &path, cx);
-            let mut colors = vec![Entry::radio(
-                FIRST_CARD_COLOR,
-                t!("Seguir a cor do espaço de trabalho"),
-                current_color.is_none(),
-            )];
-            colors.extend(
-                super::tags::COLORS
-                    .iter()
-                    .enumerate()
-                    .map(|(index, (color, name))| {
-                        Entry::radio(
-                            FIRST_CARD_COLOR + 1 + index as u32,
-                            nohrs_core::i18n::tr(name),
-                            current_color == Some(*color),
-                        )
-                    }),
-            );
-            own.push(Entry::submenu(t!("Cor do cartão"), colors).with_icon("icons/palette-2.svg"));
-            own.push(Entry::Separator);
-        }
+        let current_color = super::tags::Tags::card_color(tag, &path, cx);
+        let default_color = if is_directory {
+            t!("Seguir a cor do espaço de trabalho")
+        } else {
+            t!("Seguir a regra de cor do tipo de arquivo")
+        };
+        let mut colors = vec![Entry::radio(
+            FIRST_CARD_COLOR,
+            default_color,
+            current_color.is_none(),
+        )];
+        colors.extend(
+            super::tags::COLORS
+                .iter()
+                .enumerate()
+                .map(|(index, (color, name))| {
+                    Entry::radio(
+                        FIRST_CARD_COLOR + 1 + index as u32,
+                        nohrs_core::i18n::tr(name),
+                        current_color == Some(*color),
+                    )
+                }),
+        );
+        own.push(Entry::submenu(t!("Cor do item"), colors).with_icon("icons/palette-2.svg"));
+        own.push(Entry::Separator);
         own.push(
             Entry::command(
                 Command::RemoveWorkspaceCard as u32,

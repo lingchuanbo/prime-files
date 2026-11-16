@@ -4,8 +4,8 @@ use crate::compact::{self, Edge};
 use crate::explorer::ExplorerPane;
 use crate::explorer::state::FramedBars;
 use gpui::prelude::FluentBuilder;
-use nohrs_core::telemetry::LogErr;
 use gpui::*;
+use nohrs_core::telemetry::LogErr;
 use nohrs_ui::theme::theme;
 
 /// Height of the bar under the listing (`quick_bar`'s own `h`).
@@ -13,31 +13,31 @@ const QUICK_BAR_HEIGHT: f32 = 32.0;
 
 /// Modal dialogs for file operations (permanent-delete confirm, paste conflict).
 mod dialogs;
-pub(crate) mod new_folder;
 /// The filter bar: narrowing the listing by name pattern and kind.
 mod filter_bar;
 /// The explorer header with navigation controls and the path bar.
 pub mod header;
 /// The main file listing, in list or grid mode, with the search bar.
 pub mod listing;
+mod navigation_icons;
+pub(crate) mod new_folder;
 /// The file preview pane.
 pub mod preview;
 /// The explorer sidebar with quick-access locations.
 pub mod sidebar;
-mod navigation_icons;
 
-/// The page a workspace (a tag, renamed) opens to: its folders as cards.
-pub mod workspace;
-/// The space map over the listing: what the folder weighs, as a treemap.
-pub mod space_map;
-/// The filter and subfolder-search field under the listing.
-pub mod quick_bar;
-/// Shared search field: in the header, or the compact footer.
-mod quick_search;
 /// The drawn context menus.
 pub mod menu;
 /// Sidebar, listing and preview side by side, with draggable dividers.
 pub(crate) mod panels;
+/// The filter and subfolder-search field under the listing.
+pub mod quick_bar;
+/// Shared search field: in the header, or the compact footer.
+mod quick_search;
+/// The space map over the listing: what the folder weighs, as a treemap.
+pub mod space_map;
+/// The page a workspace (a tag, renamed) opens to: its folders as cards.
+pub mod workspace;
 
 /// Renders the explorer page: header, sidebar, listing, and preview panes.
 pub fn render(
@@ -148,15 +148,24 @@ pub fn render(
                 cx.stop_propagation();
                 return;
             }
-            if with_modifier && !modifiers.alt && !modifiers.shift && key_lc == "m" && this.renaming.is_none() {
+            if with_modifier
+                && !modifiers.alt
+                && !modifiers.shift
+                && key_lc == "m"
+                && this.renaming.is_none()
+            {
                 this.open_batch_rename(window, cx);
                 cx.stop_propagation();
                 return;
             }
             // The configurable shortcuts (Settings › Shortcuts). A bare letter
             // never resolves to one here: typed on the listing it filters.
-            if let Some(action) = nohrs_core::shortcuts::resolve(with_modifier, modifiers.alt, modifiers.shift, &key_lc)
-                && this.run_shortcut(action, window, cx)
+            if let Some(action) = nohrs_core::shortcuts::resolve(
+                with_modifier,
+                modifiers.alt,
+                modifiers.shift,
+                &key_lc,
+            ) && this.run_shortcut(action, window, cx)
             {
                 cx.stop_propagation();
                 return;
@@ -181,7 +190,9 @@ pub fn render(
                 && !modifiers.alt
                 && let Some(text) = event.keystroke.key_char.as_deref()
                 && text.chars().count() == 1
-                && text.chars().all(|character| !character.is_control() && !character.is_whitespace())
+                && text
+                    .chars()
+                    .all(|character| !character.is_control() && !character.is_whitespace())
             {
                 this.focus_quick_input(Some(text), window, cx);
                 cx.stop_propagation();
@@ -277,12 +288,22 @@ pub fn render(
                 // In the List view a column is a run of entries; sideways
                 // crosses a whole column.
                 "left" if this.view_mode == super::types::ViewMode::Compact => {
-                    this.move_active_following(-(this.compact_rows.max(1) as isize), modifiers.shift, window, cx);
+                    this.move_active_following(
+                        -(this.compact_rows.max(1) as isize),
+                        modifiers.shift,
+                        window,
+                        cx,
+                    );
                     cx.stop_propagation();
                     cx.notify();
                 }
                 "right" if this.view_mode == super::types::ViewMode::Compact => {
-                    this.move_active_following(this.compact_rows.max(1) as isize, modifiers.shift, window, cx);
+                    this.move_active_following(
+                        this.compact_rows.max(1) as isize,
+                        modifiers.shift,
+                        window,
+                        cx,
+                    );
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -318,7 +339,8 @@ pub fn render(
         .on_mouse_move(
             cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
                 // The button came up outside the pane: the drag ends there.
-                if this.dock_drag.is_some() && event.pressed_button != Some(gpui::MouseButton::Left) {
+                if this.dock_drag.is_some() && event.pressed_button != Some(gpui::MouseButton::Left)
+                {
                     if this.finish_dock_drag(cx) {
                         cx.notify();
                     }
@@ -401,7 +423,11 @@ fn render_body(
     // Zen's frame: the pane's content in a card with rounded corners, set in
     // from the window by this much. The strips stay on the outside and reach
     // across the frame, so the window's edge still calls the bars.
-    let frame = if page.compact.enabled { page.compact.frame_px as f32 } else { 0.0 };
+    let frame = if page.compact.enabled {
+        page.compact.frame_px as f32
+    } else {
+        0.0
+    };
     // With a frame, a bar comes out of it, as in Zen: the frame's colour, no
     // shadow, square corners, so the frame looks to grow in on that side.
     // Floating, it lies over the card (see `frame_bar`); pushing, it takes
@@ -455,11 +481,15 @@ fn render_body(
                 // frame's top band; out of the band itself otherwise.
                 let lead = (frame - inset).max(0.0);
                 out_of_frame.push(
-                    frame_bar(compact::slider(Edge::Top, lead, height, amount, measure, header), Edge::Top, amount)
-                        .top(px(inset))
-                        .left(px(frame))
-                        .right(px(frame))
-                        .into_any_element(),
+                    frame_bar(
+                        compact::slider(Edge::Top, lead, height, amount, measure, header),
+                        Edge::Top,
+                        amount,
+                    )
+                    .top(px(inset))
+                    .left(px(frame))
+                    .right(px(frame))
+                    .into_any_element(),
                 );
                 body
             } else if overlay {
@@ -475,10 +505,20 @@ fn render_body(
                 );
                 body
             } else if framed {
-                above_card = Some(compact::slider(Edge::Top, 0.0, height, amount, measure, header).into_any_element());
+                above_card = Some(
+                    compact::slider(Edge::Top, 0.0, height, amount, measure, header)
+                        .into_any_element(),
+                );
                 body
             } else {
-                body.child(compact::slider(Edge::Top, 0.0, height, amount, measure, header))
+                body.child(compact::slider(
+                    Edge::Top,
+                    0.0,
+                    height,
+                    amount,
+                    measure,
+                    header,
+                ))
             }
         }
         None => body.child(header),
@@ -500,7 +540,8 @@ fn render_body(
     // is what is inside each of them, row after row. The space map takes the
     // listing's place while it is up.
     let listing = match super::tags::tag_of_location(&page.cwd) {
-        Some(tag) => page.workspace_page(tag, cx),
+        Some(tag) if page.view_mode == super::types::ViewMode::Grid => page.workspace_page(tag, cx),
+        Some(_) => listing::render(page, window, cx),
         None if page.space_map_open() => space_map::render(page, window, cx),
         None => listing::render(page, window, cx),
     };
@@ -532,7 +573,11 @@ fn render_body(
             continue;
         };
         if !sliding {
-            docked.push(panels::Docked { panel, element, amount: 1.0 });
+            docked.push(panels::Docked {
+                panel,
+                element,
+                amount: 1.0,
+            });
             continue;
         }
         let on_right = panels::side(panel) == nohrs_core::config::DockSide::Right;
@@ -550,34 +595,64 @@ fn render_body(
                 // pushing: the listing narrows as the preview widens, and
                 // capping by it would chase its own tail.
                 let room = f32::from(page.columns_bounds.get().size.width);
-                if overlay && room > 0.0 { width.min(room * 0.9) } else { width }
+                if overlay && room > 0.0 {
+                    width.min(room * 0.9)
+                } else {
+                    width
+                }
             }
         };
         if !overlay && framed {
             // The frame's width again between the bar and the card, as on
             // the window's side of it.
             let padded = div().size_full().flex().flex_col();
-            let padded = if on_right { padded.pl(px(frame)) } else { padded.pr(px(frame)) }.child(element);
-            let slid = compact::slider(edge, 0.0, width + frame, amount, None, padded).into_any_element();
-            if on_right { right_of_card.push(slid) } else { left_of_card.push(slid) }
+            let padded = if on_right {
+                padded.pl(px(frame))
+            } else {
+                padded.pr(px(frame))
+            }
+            .child(element);
+            let slid =
+                compact::slider(edge, 0.0, width + frame, amount, None, padded).into_any_element();
+            if on_right {
+                right_of_card.push(slid)
+            } else {
+                left_of_card.push(slid)
+            }
         } else if !overlay {
             docked.push(panels::Docked {
                 panel,
-                element: compact::slider(edge, 0.0, width, amount, None, element).into_any_element(),
+                element: compact::slider(edge, 0.0, width, amount, None, element)
+                    .into_any_element(),
                 amount,
             });
         } else if framed {
-            let bar = frame_bar(compact::slider(edge, frame, width, amount, None, element), edge, amount)
-                .top(px(frame))
-                .bottom(px(frame));
-            let bar = if on_right { bar.right_0() } else { bar.left_0() };
+            let bar = frame_bar(
+                compact::slider(edge, frame, width, amount, None, element),
+                edge,
+                amount,
+            )
+            .top(px(frame))
+            .bottom(px(frame));
+            let bar = if on_right {
+                bar.right_0()
+            } else {
+                bar.left_0()
+            };
             out_of_frame.push(bar.into_any_element());
         } else {
-            let floating_side = side_panel(compact::slider(edge, 0.0, width, amount, None, element), amount);
+            let floating_side = side_panel(
+                compact::slider(edge, 0.0, width, amount, None, element),
+                amount,
+            );
             let floating_side = if on_right {
-                floating_side.right_0().when(amount > 0.0, |this| this.border_l_1())
+                floating_side
+                    .right_0()
+                    .when(amount > 0.0, |this| this.border_l_1())
             } else {
-                floating_side.left_0().when(amount > 0.0, |this| this.border_r_1())
+                floating_side
+                    .left_0()
+                    .when(amount > 0.0, |this| this.border_r_1())
             };
             sides.push(floating_side.into_any_element());
         }
@@ -625,14 +700,21 @@ fn render_body(
                 // it, so the bar's contents sit centred between the outline
                 // above and the window's edge (see `quick_bar`'s height).
                 frame_bar(
-                    compact::slider(Edge::Bottom, 0.0, QUICK_BAR_HEIGHT + frame, amount, None, quick),
+                    compact::slider(
+                        Edge::Bottom,
+                        0.0,
+                        QUICK_BAR_HEIGHT + frame,
+                        amount,
+                        None,
+                        quick,
+                    ),
                     Edge::Bottom,
                     amount,
                 )
-                    .bottom_0()
-                    .left(px(frame))
-                    .right(px(frame))
-                    .into_any_element(),
+                .bottom_0()
+                .left(px(frame))
+                .right(px(frame))
+                .into_any_element(),
             );
             body
         } else if overlay {
@@ -651,10 +733,20 @@ fn render_body(
             // The bar is 32 px plus the frame tall (`quick_bar`), its contents
             // centred; shown 32 px of it over the frame's own band below, the
             // gaps above and below its contents come out even.
-            below_card = Some(compact::slider(Edge::Bottom, 0.0, QUICK_BAR_HEIGHT, amount, None, quick).into_any_element());
+            below_card = Some(
+                compact::slider(Edge::Bottom, 0.0, QUICK_BAR_HEIGHT, amount, None, quick)
+                    .into_any_element(),
+            );
             body
         } else {
-            body.child(compact::slider(Edge::Bottom, 0.0, QUICK_BAR_HEIGHT, amount, None, quick))
+            body.child(compact::slider(
+                Edge::Bottom,
+                0.0,
+                QUICK_BAR_HEIGHT,
+                amount,
+                None,
+                quick,
+            ))
         }
     } else {
         body.child(quick)
@@ -790,8 +882,12 @@ fn compact_chrome(
         header: settings.hide_header && page.top_reveal.is_some(),
         // Only a panel docked to the left or the right slides: the top and
         // the bottom edges already call the address bar and the bottom bar.
-        sidebar: settings.hide_sidebar && page.sidebar_visible && panels::side(panels::Panel::Sidebar).is_column(),
-        preview: settings.hide_preview && page.preview_visible && panels::side(panels::Panel::Preview).is_column(),
+        sidebar: settings.hide_sidebar
+            && page.sidebar_visible
+            && panels::side(panels::Panel::Sidebar).is_column(),
+        preview: settings.hide_preview
+            && page.preview_visible
+            && panels::side(panels::Panel::Preview).is_column(),
         bottom: settings.hide_bottom_bar,
     };
     // An open menu freezes every bar: the pointer going into the menu must
@@ -801,7 +897,10 @@ fn compact_chrome(
         .name_filter_input
         .as_ref()
         .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window));
-    let filtering = filter_focused || page.quick_recursive || page.everything_on() || !page.name_filter.is_empty();
+    let filtering = filter_focused
+        || page.quick_recursive
+        || page.everything_on()
+        || !page.name_filter.is_empty();
 
     let mut frame = false;
     if let Some(top) = &page.top_reveal {
@@ -961,9 +1060,10 @@ impl ExplorerPane {
     }
 
     fn ensure_workspace(&mut self, tag: u32, cx: &mut Context<Self>) {
-        let ready = self.workspace.as_ref().is_some_and(|view| {
-            view.tag == tag && (view.cards.is_some() || view.task.is_some())
-        });
+        let ready = self
+            .workspace
+            .as_ref()
+            .is_some_and(|view| view.tag == tag && (view.cards.is_some() || view.task.is_some()));
         if ready {
             return;
         }

@@ -16,7 +16,7 @@
 use gpui::{
     AnyElement, Bounds, Context, DispatchPhase, Div, ElementId, Entity, FocusHandle, ImageSource, KeyDownEvent,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, Window, canvas, div,
-    img, linear_color_stop, linear_gradient, prelude::*, px, rgb, MouseButton, Subscription,
+    img, linear_color_stop, linear_gradient, prelude::*, px, rgb, MouseButton, Subscription, Task,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -217,6 +217,7 @@ pub struct SettingsPage {
     // What Listary opens folders with; `None` until its file has been read.
     listary: Option<crate::listary::State>,
     updater: Entity<crate::updater::Updater>,
+    index_status_task: Option<Task<()>>,
     // The search field, made on the first render (it needs a `Window`).
     search: Option<Entity<InputState>>,
     // Window title field, committed when the user presses Enter or leaves it.
@@ -279,6 +280,7 @@ impl SettingsPage {
             starts_with_windows: None,
             listary: None,
             updater,
+            index_status_task: None,
             search: None,
             app_name: None,
             _app_name_subscription: None,
@@ -293,6 +295,19 @@ impl SettingsPage {
         };
         page.refresh_default_explorer(cx);
         page.refresh_listary(cx);
+        page.index_status_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let result = cx.background_spawn(async { everything::mft::index_status() }).await;
+                let Ok(()) = this.update(cx, |_page, cx| {
+                    let state = cx.default_global::<everything::Everything>();
+                    state.mft_index_status = Some(result);
+                    cx.refresh_windows();
+                }) else {
+                    return;
+                };
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            }
+        }));
         page
     }
 
@@ -1808,14 +1823,31 @@ impl SettingsPage {
     fn search_section(&self, cx: &mut Context<Self>) -> Vec<Group> {
         let status = everything::status(cx);
         let source = status.source;
+        let refresh_feedback = if status.service_refreshing {
+            Some(t!("Pedindo para reconstruir o índice…").to_string())
+        } else {
+            status.service_refresh_result.as_ref().map(|result| match result {
+                Ok(()) => t!("O serviço de indexação aceitou o pedido.").to_string(),
+                Err(error) => format!("{} {error}", t!("Não foi possível pedir a reconstrução do índice:")),
+            })
+        };
         // The own index's count while it is walked or read; with Everything
         // answering, what its index holds instead.
         let state = if source == Source::Everything {
             everything::external_text(status.external.as_ref())
         } else if status.service {
-            // The names live in the service: this process holds none, and the
-            // count is the service's to keep to itself.
-            t!("O serviço de indexação guarda os nomes e responde às buscas.").to_string()
+            match status.service_index_status.as_ref() {
+                Some(Ok(index)) if index.ready => {
+                    let message = if index.refreshing {
+                        tf!("{n} 个索引条目，正在重建", n = index.entries)
+                    } else {
+                        tf!("{n} 个索引条目，已就绪", n = index.entries)
+                    };
+                    message
+                }
+                Some(Ok(_)) | None => t!("索引服务正在建立索引…").to_string(),
+                Some(Err(error)) => format!("{} {error}", t!("无法读取索引服务状态：")),
+            }
         } else {
             match (status.building, status.entries) {
                 (Some(found), _) => tf!("Indexando… {n} itens até agora", n = found),
@@ -1839,8 +1871,19 @@ impl SettingsPage {
                     .items_end()
                     .gap_2()
                     .child(div().text_xs().text_color(rgb(theme::fg_secondary())).child(state))
+                    .when_some(refresh_feedback, |this, feedback| {
+                        this.child(div().text_xs().text_color(rgb(theme::fg_secondary())).child(feedback))
+                    })
                     .when(own_index && !building, |this| {
-                        this.child(button("everything-rebuild", t!("Reindexar agora"), false).on_click(cx.listener(
+                        this.child(button(
+                            "everything-rebuild",
+                            if status.service_refreshing {
+                                t!("Pedindo para reconstruir o índice…")
+                            } else {
+                                t!("Reindexar agora")
+                            },
+                            status.service_refreshing,
+                        ).on_click(cx.listener(
                             |_page, _event, _window, cx| crate::explorer::everything::rebuild(cx),
                         )))
                     }),

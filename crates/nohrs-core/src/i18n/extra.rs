@@ -3201,6 +3201,94 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
         ],
     ),
     (
+        "{n} 个索引条目，正在重建",
+        [
+            "{n} éléments indexés, reconstruction en cours",
+            "{n} indexierte Einträge, Neuaufbau läuft",
+            "{n} voci indicizzate, ricostruzione in corso",
+            "{n} записей в индексе, перестроение",
+            "{n} 件をインデックス済み、再構築中",
+            "{n} 个索引条目，正在重建",
+        ],
+    ),
+    (
+        "{n} 个索引条目，已就绪",
+        [
+            "{n} éléments indexés, prêt",
+            "{n} indexierte Einträge, bereit",
+            "{n} voci indicizzate, pronto",
+            "{n} записей в индексе, готово",
+            "{n} 件をインデックス済み、準備完了",
+            "{n} 个索引条目，已就绪",
+        ],
+    ),
+    (
+        "索引服务正在建立索引…",
+        [
+            "Le service d’indexation crée l’index…",
+            "Der Indizierungsdienst erstellt den Index…",
+            "Il servizio di indicizzazione sta creando l’indice…",
+            "Служба индексации создаёт индекс…",
+            "インデックスサービスが作成中…",
+            "索引服务正在建立索引…",
+        ],
+    ),
+    (
+        "无法读取索引服务状态：",
+        [
+            "Impossible de lire l’état du service d’indexation :",
+            "Der Status des Indizierungsdienstes konnte nicht gelesen werden:",
+            "Impossibile leggere lo stato del servizio di indicizzazione:",
+            "Не удалось прочитать состояние службы индексации:",
+            "インデックスサービスの状態を読み取れませんでした:",
+            "无法读取索引服务状态：",
+        ],
+    ),
+    (
+        "当前索引服务版本不支持数量查询，请更新索引服务。",
+        [
+            "Cette version du service ne fournit pas le nombre d’éléments. Mettez le service à jour.",
+            "Diese Dienstversion kann keine Anzahl melden. Aktualisieren Sie den Indizierungsdienst.",
+            "Questa versione del servizio non comunica il numero. Aggiorna il servizio.",
+            "Эта версия службы не сообщает количество. Обновите службу индексации.",
+            "このインデックスサービスは件数を報告できません。サービスを更新してください。",
+            "当前索引服务版本不支持数量查询，请更新索引服务。",
+        ],
+    ),
+    (
+        "Pedindo para reconstruir o índice…",
+        [
+            "Demande de reconstruction de l’index…",
+            "Index wird neu erstellt…",
+            "Richiesta ricostruzione indice…",
+            "Запрашивается перестроение индекса…",
+            "インデックスの再構築を要求中…",
+            "正在请求重建索引…",
+        ],
+    ),
+    (
+        "O serviço de indexação aceitou o pedido.",
+        [
+            "Le service d’indexation a accepté la demande.",
+            "Der Indizierungsdienst hat die Anfrage angenommen.",
+            "Il servizio di indicizzazione ha accettato la richiesta.",
+            "Служба индексации приняла запрос.",
+            "インデックスサービスが要求を受け付けました。",
+            "索引服务已接受重建请求",
+        ],
+    ),
+    (
+        "Não foi possível pedir a reconstrução do índice:",
+        [
+            "Impossible de demander la reconstruction de l’index :",
+            "Der Neuaufbau des Index konnte nicht angefordert werden:",
+            "Impossibile richiedere la ricostruzione dell’indice:",
+            "Не удалось запросить перестроение индекса:",
+            "インデックスの再構築を要求できませんでした:",
+            "无法请求重建索引：",
+        ],
+    ),
+    (
         "Remover o atalho",
         [
             "Supprimer le raccourci",

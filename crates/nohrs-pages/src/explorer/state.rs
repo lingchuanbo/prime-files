@@ -383,13 +383,6 @@ pub struct ExplorerPane {
     pub(crate) space: Option<super::space_map::SpaceMap>,
     /// How the space map colours its tiles (`[space_map]` in the config).
     pub(crate) space_map_style: config::SpaceMap,
-    /// The folder card the pointer is on, if any: its folder art opens up.
-    pub(crate) workspace_hover: Option<String>,
-    /// How far out each folder card's sheets are (0..=1), easing towards the
-    /// hovered card's 1 and the others' 0: the card art's animation.
-    pub(crate) workspace_glow: std::collections::HashMap<String, f32>,
-    /// The easing step still running for the card art.
-    pub(crate) workspace_glow_task: Option<gpui::Task<()>>,
     /// The mouse is on the zoom menu.
     pub(crate) zoom_menu_hovered: bool,
     /// The header's "open in another program" menu is open.
@@ -673,9 +666,6 @@ impl ExplorerPane {
             workspace: None,
             space: None,
             space_map_style: config::SpaceMap::default(),
-            workspace_hover: None,
-            workspace_glow: std::collections::HashMap::new(),
-            workspace_glow_task: None,
             zoom_menu_hovered: false,
             open_in_menu: false,
             recent_menu: false,
@@ -759,6 +749,20 @@ impl ExplorerPane {
             };
             self.zoom_to(zoom, cx);
         }
+    }
+
+    /// Switches views without passing through the intermediate zoom modes.
+    pub(crate) fn set_view_mode_immediately(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
+        let zoom = match mode {
+            ViewMode::List => 0.0,
+            ViewMode::Tree => super::zoom::TREE,
+            ViewMode::Compact => super::zoom::LIST_MAX,
+            ViewMode::Grid => self.last_grid_zoom,
+        };
+        self.zoom_target = zoom;
+        self.zoom_tick = None;
+        self.apply_zoom(zoom, cx);
+        self.remember_folder_view(cx);
     }
 
     /// The image cache the preview draws `path` from.
@@ -1375,6 +1379,12 @@ impl ExplorerPane {
             None => {
                 self.sort_key = self.default_sort_key;
                 self.sort_asc = self.default_sort_asc;
+                if super::tags::tag_of_location(&self.cwd).is_some() {
+                    self.zoom_target = super::zoom::DEFAULT_GRID;
+                    self.zoom_tick = None;
+                    self.apply_zoom(self.zoom_target, cx);
+                    self.remember_folder_view(cx);
+                }
             }
         }
     }

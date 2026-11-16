@@ -784,14 +784,15 @@ impl Query {
                 return None;
             }
         }
-        // A name written in Han characters is also matched by its pinyin
-        // initials, as the local table matches them: Everything answers a
-        // search for "wjj" with 文件夹, and that is the query this keeps.
+        // Service and Everything results need both pinyin forms checked
+        // here, just as the local index checks initials and full pinyin.
         let initials = (self.pinyin && !name.is_ascii()).then(|| pinyin_initials(&name)).flatten();
+        let full_pinyin = (self.pinyin && !name.is_ascii()).then(|| super::pinyin::full(&name)).flatten();
         let names_match = self.terms.iter().all(|term| match term {
             Term::Name(part) => {
                 name.contains(part.as_str())
                     || initials.as_deref().is_some_and(|initials| initials.contains(part.as_str()))
+                    || full_pinyin.as_deref().is_some_and(|full| full.contains(part.as_str()))
             }
             Term::Pattern(pattern) => wildcard(pattern, &name),
             Term::Path(_) => true,
@@ -1194,12 +1195,12 @@ fn build(
 pub(crate) mod mft {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use gpui::{App, AppContext as _};
     use nohrs_core::telemetry::LogErr as _;
 
-    use super::{Everything, Found, Segment};
+    use super::{Everything, Found, Segment, ServiceIndexStatus};
 
     /// What the settings page shows.
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1268,16 +1269,33 @@ pub(crate) mod mft {
     /// Every NTFS drive's table from the service, or none when it is not
     /// installed or cannot answer (the drives are walked then).
     /// Whether the running service can search its own copy of the names
-    /// (protocol 2 and later). Asked once: the answer only changes when the
-    /// service is reinstalled, and the app is restarted then any way.
+    /// (protocol 2 and later). A successful answer stays cached; an
+    /// unavailable service is retried periodically in case it starts later.
     pub(crate) fn searchable() -> bool {
         #[cfg(windows)]
         {
-            static SEARCHABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            *SEARCHABLE.get_or_init(|| match nohrs_indexer::client::hello() {
-                Ok(version) => version >= nohrs_indexer::protocol::VERSION,
-                Err(_) => false,
-            })
+            static SEARCHABLE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            static LAST_PROBE: std::sync::OnceLock<std::sync::Mutex<Option<Instant>>> =
+                std::sync::OnceLock::new();
+            if SEARCHABLE.get().is_some() {
+                return true;
+            }
+            let last_probe = LAST_PROBE.get_or_init(|| std::sync::Mutex::new(None));
+            {
+                let mut last_probe =
+                    last_probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if last_probe.is_some_and(|time| time.elapsed() < Duration::from_secs(2)) {
+                    return false;
+                }
+                *last_probe = Some(Instant::now());
+            }
+            if nohrs_indexer::client::hello()
+                .is_ok_and(|version| version >= nohrs_indexer::protocol::VERSION)
+            {
+                let _ = SEARCHABLE.set(());
+                return true;
+            }
+            false
         }
         #[cfg(not(windows))]
         false
@@ -1302,6 +1320,29 @@ pub(crate) mod mft {
         #[cfg(not(windows))]
         {
             let _ = (terms, limit);
+            Err("the service runs on Windows only".to_string())
+        }
+    }
+
+    pub(crate) fn index_status() -> Result<ServiceIndexStatus, String> {
+        #[cfg(windows)]
+        {
+            let status = nohrs_indexer::client::index_status().map_err(|error| {
+                let message = error.to_string();
+                if message.contains("does not support status") || message.contains("unknown request") {
+                    nohrs_core::t!("当前索引服务版本不支持数量查询，请更新索引服务。").to_string()
+                } else {
+                    message
+                }
+            })?;
+            Ok(ServiceIndexStatus {
+                ready: status.ready,
+                refreshing: status.refreshing,
+                entries: status.entries,
+            })
+        }
+        #[cfg(not(windows))]
+        {
             Err("the service runs on Windows only".to_string())
         }
     }
@@ -3127,6 +3168,14 @@ pub(crate) struct Everything {
     pub mft_busy: bool,
     /// Why the last install or removal failed.
     pub mft_error: Option<String>,
+    /// A request for the indexer service to refresh its index is in flight.
+    pub mft_refreshing: bool,
+    /// Whether the last refresh request was accepted, or why it failed.
+    pub mft_refresh_result: Option<Result<(), String>>,
+    /// Prevents an older success timer from clearing a newer result.
+    pub mft_refresh_generation: u64,
+    /// The latest status returned by the index service, when it supports it.
+    pub mft_index_status: Option<Result<ServiceIndexStatus, String>>,
     /// Where `[indexing] source` sends the whole-computer names.
     engine: IndexSource,
     /// Everything's answer to the last probe; `None` until it is asked.
@@ -3146,6 +3195,13 @@ pub(crate) struct Everything {
 }
 
 impl Global for Everything {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ServiceIndexStatus {
+    pub ready: bool,
+    pub refreshing: bool,
+    pub entries: u64,
+}
 
 /// Where the names of the whole-computer search come from, as resolved.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3505,6 +3561,9 @@ pub(crate) struct Status {
     /// The indexer service keeps and searches the names itself: this process
     /// holds none of them.
     pub service: bool,
+    pub service_refreshing: bool,
+    pub service_refresh_result: Option<Result<(), String>>,
+    pub service_index_status: Option<Result<ServiceIndexStatus, String>>,
     /// Where the names come from right now.
     pub source: Source,
     /// Everything's index, as the last probe found it.
@@ -3522,6 +3581,9 @@ pub(crate) fn status(cx: &App) -> Status {
             .and_then(|state| state.building.as_ref())
             .map(|progress| progress.load(Ordering::Relaxed)),
         service: mft::searchable(),
+        service_refreshing: everything.is_some_and(|state| state.mft_refreshing),
+        service_refresh_result: everything.and_then(|state| state.mft_refresh_result.clone()),
+        service_index_status: everything.and_then(|state| state.mft_index_status.clone()),
         source,
         external: everything.and_then(|state| state.external.clone()),
     }
@@ -3602,13 +3664,47 @@ pub(crate) fn rebuild(cx: &mut App) {
         Source::Own => {}
     }
     if mft::searchable() {
-        let task = cx.background_spawn(async {
-            match mft::refresh() {
-                Ok(()) => tracing::info!("the indexer service will re-read the volumes"),
-                Err(error) => tracing::warn!("the indexer service could not be asked to reindex: {error}"),
+        {
+            let state = cx.default_global::<Everything>();
+            if state.mft_refreshing {
+                return;
+            }
+            state.mft_refreshing = true;
+            state.mft_refresh_result = None;
+            state.mft_refresh_generation = state.mft_refresh_generation.wrapping_add(1);
+        }
+        let refresh_generation = cx.default_global::<Everything>().mft_refresh_generation;
+        cx.refresh_windows();
+        let task = cx.background_spawn(async { mft::refresh() });
+        let ui_task = cx.spawn(async move |cx| {
+            let result = task.await;
+            let accepted = result.is_ok();
+            cx.update(|cx| {
+                let state = cx.global_mut::<Everything>();
+                state.mft_refreshing = false;
+                state.mft_refresh_result = Some(result.clone());
+                match result {
+                    Ok(()) => tracing::info!("the indexer service will re-read the volumes"),
+                    Err(error) => {
+                        tracing::warn!("the indexer service could not be asked to reindex: {error}")
+                    }
+                }
+                cx.refresh_windows();
+            })
+            .log_err();
+            if accepted {
+                cx.background_executor().timer(Duration::from_secs(4)).await;
+                cx.update(|cx| {
+                    let state = cx.global_mut::<Everything>();
+                    if state.mft_refresh_generation == refresh_generation {
+                        state.mft_refresh_result = None;
+                        cx.refresh_windows();
+                    }
+                })
+                .log_err();
             }
         });
-        cx.global_mut::<Everything>()._task = Some(task);
+        cx.global_mut::<Everything>()._task = Some(ui_task);
         return;
     }
     let state = cx.default_global::<Everything>();
@@ -3622,6 +3718,7 @@ pub(crate) fn rebuild(cx: &mut App) {
     // What the watcher saw before this walk, the walk sees too.
     let walk_started = SystemTime::now();
     let fresh = state.fresh.clone();
+    cx.refresh_windows();
     let (sender, receiver) = async_channel::unbounded::<Walked>();
     let spawned = std::thread::Builder::new().name("nohrs-everything".into()).spawn({
         let progress = progress.clone();
@@ -3645,6 +3742,7 @@ pub(crate) fn rebuild(cx: &mut App) {
     if let Err(error) = spawned {
         tracing::error!("could not start the everything walk: {error}");
         cx.global_mut::<Everything>().building = None;
+        cx.refresh_windows();
         return;
     }
     let task = cx.spawn(async move |cx| {
@@ -3703,6 +3801,7 @@ pub(crate) fn rebuild(cx: &mut App) {
                         state.building = None;
                         state.walking = None;
                         state.generation += 1;
+                        cx.refresh_windows();
                     })
                     .log_err();
                     return;
@@ -3712,6 +3811,7 @@ pub(crate) fn rebuild(cx: &mut App) {
                         let state = cx.global_mut::<Everything>();
                         state.building = None;
                         state.walking = None;
+                        cx.refresh_windows();
                     })
                     .log_err();
                     return;
@@ -4009,6 +4109,7 @@ impl ExplorerPane {
             },
             Source::Pending => Some(nohrs_core::t!("Verificando o Everything…").to_string()),
             Source::Own => match (&state.index, &state.building) {
+                (_, _) if mft::searchable() => None,
                 (None, Some(progress)) => Some(nohrs_core::tf!(
                     "Indexando o computador… {n} itens",
                     n = progress.load(Ordering::Relaxed)
@@ -4403,6 +4504,12 @@ mod tests {
         assert!(query.score("notes.txt", "C:\\notes.txt", false, 1, clamp_seconds(NOW)).is_none());
         // A Han name whose initials are something else is not kept.
         assert!(query.score("工作报告.docx", "C:\\工作报告.docx", false, 1, clamp_seconds(NOW)).is_none());
+    }
+
+    #[test]
+    fn a_hit_from_the_indexer_is_kept_by_full_pinyin() {
+        let query = Query::parse_at("shuangyou", "", now()).unwrap();
+        assert!(query.score("双游", "C:\\双游", true, 0, clamp_seconds(NOW)).is_some());
     }
 
     #[test]

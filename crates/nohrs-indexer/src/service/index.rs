@@ -15,6 +15,7 @@ struct Published {
     volumes: Option<Arc<Snapshot>>,
     generation: u64,
     stopped: bool,
+    refreshing: bool,
 }
 
 #[derive(Default)]
@@ -49,7 +50,23 @@ impl Index {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.generation = state.generation.wrapping_add(1);
+        state.refreshing = true;
         self.changed.notify_all();
+    }
+
+    pub fn status(&self) -> io::Result<protocol::IndexStatus> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(volumes) = &state.volumes else {
+            return Err(io::Error::other("index is not ready"));
+        };
+        Ok(protocol::IndexStatus {
+            ready: true,
+            refreshing: state.refreshing,
+            entries: volumes.iter().map(|volume| volume.len() as u64).sum(),
+        })
     }
 
     pub fn stop(&self) {
@@ -75,6 +92,7 @@ impl Index {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = state.volumes.replace(Arc::new(volumes));
+        state.refreshing = false;
         drop(state);
         self.changed.notify_all();
         // 释放数百万条旧名称可能耗时，不能占着搜索读取快照的锁。
@@ -127,7 +145,7 @@ pub(super) fn run(index: &Index) {
             changed |= add_missing(&mut tracked, &roots, index);
             missing_retry = Some(Instant::now());
         }
-        if changed || applied_generation.is_none() {
+        if changed || forced || applied_generation.is_none() {
             index.publish(tracked.iter().map(|volume| volume.volume.clone()).collect());
         }
         applied_generation = Some(generation);

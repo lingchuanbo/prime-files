@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! request   "PFIX1 HELLO\n" | "PFIX1 SNAPSHOT\n" | "PFIX1 SEARCH\n"
-//!           | "PFIX1 SUBTREE\n"
+//!           | "PFIX1 SUBTREE\n" | "PFIX1 STATUS\n"
 //! hello     "PFIX1 OK <hello version>\n"
 //! snapshot  "PFIX" u32 version, u32 volumes, then per volume:
 //!             u16 root length, root (UTF-8, "C:"), u64 entries, then per entry:
@@ -23,6 +23,8 @@
 //!             u32 parent (u32::MAX for the folder asked about, first)
 //!             u64 size, u32 last write, u8 flags (1 = folder),
 //!             u16 name length, name (UTF-8)
+//! status    "PFIX1 STATUS\n" answered by "PFSI" u32 version,
+//!           u8 flags (1 = ready, 2 = refreshing), u64 indexed entries
 //! error     "PFER" u16 length, message (UTF-8)
 //! ```
 //!
@@ -61,13 +63,19 @@ pub const VERSION: u32 = 2;
 /// requests it knows. 3 added the subtree request, which is why the hello
 /// needed a number of its own — a 2 and a 3 are compatible in both
 /// directions otherwise, and an old app must keep reading a new service.
-pub const HELLO_VERSION: u32 = 3;
+pub const HELLO_VERSION: u32 = 4;
 /// The hello version that first knows the subtree request.
 pub const SUBTREE_HELLO: u32 = 3;
+/// The hello version that first knows the index status request.
+pub const STATUS_HELLO: u32 = 4;
 /// Whether a service answering `hello` with `version` knows the subtree
 /// request.
 pub fn supports_subtree(version: u32) -> bool {
     version >= SUBTREE_HELLO
+}
+/// Whether a service answering `hello` knows the index status request.
+pub fn supports_status(version: u32) -> bool {
+    version >= STATUS_HELLO
 }
 /// Asks for every volume's names.
 pub const SNAPSHOT: &[u8] = b"PFIX1 SNAPSHOT\n";
@@ -79,6 +87,8 @@ pub const SEARCH: &[u8] = b"PFIX1 SEARCH\n";
 pub const REFRESH: &[u8] = b"PFIX1 REFRESH\n";
 /// Asks for one folder's tree, `levels` deep; the body follows.
 pub const SUBTREE: &[u8] = b"PFIX1 SUBTREE\n";
+/// Asks for the published index count and whether a refresh is underway.
+pub const STATUS: &[u8] = b"PFIX1 STATUS\n";
 /// The root's parent.
 pub const NO_PARENT: u32 = u32::MAX;
 /// The most hits one search may ask for.
@@ -96,8 +106,11 @@ pub const SUBTREE_VERSION: u32 = 1;
 const MAGIC: &[u8; 4] = b"PFIX";
 const HITS: &[u8; 4] = b"PFIS";
 const TREE: &[u8; 4] = b"PFST";
+const STATUS_MAGIC: &[u8; 4] = b"PFSI";
 const ERROR: &[u8; 4] = b"PFER";
 const FOLDER: u8 = 1;
+const STATUS_READY: u8 = 1;
+const STATUS_REFRESHING: u8 = 2;
 // No real name is longer (255 UTF-16 units, at most 765 bytes of UTF-8).
 const LONGEST_NAME: usize = 1024;
 // A whole path, in UTF-8 bytes: well past the 260 a Windows path usually is.
@@ -490,6 +503,54 @@ pub struct Hit {
     pub modified: u32,
 }
 
+/// What the resident index service has published for searches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexStatus {
+    /// Whether at least one snapshot is ready to search.
+    pub ready: bool,
+    /// Whether the service is rebuilding or refreshing the snapshot.
+    pub refreshing: bool,
+    /// Total entries in the published snapshot, including volume roots.
+    pub entries: u64,
+}
+
+/// Writes the fixed-size index status response.
+pub fn write_index_status(out: &mut impl Write, status: IndexStatus) -> io::Result<()> {
+    let flags = u8::from(status.ready) * STATUS_READY | u8::from(status.refreshing) * STATUS_REFRESHING;
+    out.write_all(STATUS_MAGIC)?;
+    out.write_all(&VERSION.to_le_bytes())?;
+    out.write_all(&[flags])?;
+    out.write_all(&status.entries.to_le_bytes())?;
+    out.flush()
+}
+
+/// Reads a fixed-size status response or a service error.
+pub fn read_index_status(input: &mut impl Read) -> io::Result<IndexStatus> {
+    let magic = read_array::<4>(input)?;
+    if &magic == ERROR {
+        let length = u16::from_le_bytes(read_array(input)?) as usize;
+        let mut message = Vec::new();
+        read_text(input, length, &mut message)?;
+        return Err(io::Error::other(String::from_utf8_lossy(&message).into_owned()));
+    }
+    if &magic != STATUS_MAGIC {
+        return Err(invalid("not an index status answer"));
+    }
+    let version = u32::from_le_bytes(read_array(input)?);
+    if version != VERSION {
+        return Err(invalid(&format!("version {version}, this app reads {VERSION}")));
+    }
+    let flags = read_array::<1>(input)?[0];
+    if flags & !(STATUS_READY | STATUS_REFRESHING) != 0 {
+        return Err(invalid("unknown index status flags"));
+    }
+    Ok(IndexStatus {
+        ready: flags & STATUS_READY != 0,
+        refreshing: flags & STATUS_REFRESHING != 0,
+        entries: u64::from_le_bytes(read_array(input)?),
+    })
+}
+
 /// Writes a search request: the terms every name must hold, and how many
 /// hits are wanted.
 pub fn write_search_request(out: &mut impl Write, terms: &[String], limit: u32) -> io::Result<()> {
@@ -871,6 +932,19 @@ mod tests {
             read_hits(&mut error.as_slice()).unwrap_err().to_string(),
             "access denied"
         );
+    }
+
+    #[test]
+    fn index_status_round_trips_readiness_refresh_and_entry_count() {
+        let status = IndexStatus { ready: true, refreshing: false, entries: 1_234 };
+        let mut answer = Vec::new();
+        write_index_status(&mut answer, status).unwrap();
+        assert_eq!(read_index_status(&mut answer.as_slice()).unwrap(), status);
+
+        let building = IndexStatus { ready: false, refreshing: true, entries: 0 };
+        let mut answer = Vec::new();
+        write_index_status(&mut answer, building).unwrap();
+        assert_eq!(read_index_status(&mut answer.as_slice()).unwrap(), building);
     }
 
     #[test]

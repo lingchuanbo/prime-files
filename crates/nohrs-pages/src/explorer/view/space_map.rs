@@ -96,6 +96,7 @@ fn bar(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> AnyElement {
         }
     }
     let status = status_text(page);
+    let status_tooltip = status.clone();
     let scanning = page.space.as_ref().is_some_and(|map| map.is_scanning());
     // The figures came from the indexer's memory, not from a walk of the
     // folder: worth saying, since its sizes are what the volume allocates.
@@ -173,6 +174,7 @@ fn bar(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> AnyElement {
     }
     right = right.child(
         div()
+            .id("space-status")
             .max_w(px(420.0))
             .min_w(px(0.0))
             .overflow_hidden()
@@ -184,7 +186,12 @@ fn bar(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> AnyElement {
             } else {
                 theme::fg_secondary()
             }))
-            .child(status),
+            .child(status)
+            .when(!status_tooltip.is_empty(), |this| {
+                this.tooltip(move |window, cx| {
+                    Tooltip::new(status_tooltip.clone()).build(window, cx)
+                })
+            }),
     );
     // A drive's mosaic is made of the shell's own figures, not of a walk: it
     // has nothing to measure again.
@@ -297,8 +304,8 @@ fn bar_icon(id: &'static str, icon: Icon, enabled: bool) -> Stateful<Div> {
         .child(icon.size_4())
 }
 
-/// What the bar says on the right: the tile under the pointer, else what the
-/// mosaic is made of.
+/// What the bar says on the right: the tile under the pointer, else the
+/// selected tile, else what the mosaic is made of.
 fn status_text(page: &ExplorerPane) -> String {
     let Some(map) = page.space.as_ref() else {
         return String::new();
@@ -325,13 +332,17 @@ fn status_text(page: &ExplorerPane) -> String {
     let Some(focus_node) = tree.node_at(&map.focus) else {
         return String::new();
     };
-    if let Some(node) = map
+    let hovered = map
         .layout
         .as_ref()
         .zip(map.hover)
         .and_then(|(layout, index)| layout.tiles.get(index))
-        .and_then(|tile| focus_node.node_at(&tile.crumbs))
-    {
+        .and_then(|tile| focus_node.node_at(&tile.crumbs));
+    let selected = map
+        .selection
+        .as_deref()
+        .and_then(|crumbs| tree.node_at(crumbs));
+    if let Some(node) = hovered.or(selected) {
         let share = if focus_node.bytes == 0 {
             0.0
         } else {
@@ -342,7 +353,12 @@ fn status_text(page: &ExplorerPane) -> String {
         } else {
             node.name.clone()
         };
-        return format!("{name} · {} · {share:.1}%", human_size(node.bytes));
+        let path = if node.path.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", node.path)
+        };
+        return format!("{name} · {} · {share:.1}%{path}", human_size(node.bytes));
     }
     if focus_node.bytes == 0 {
         return t!("Pasta vazia").to_string();
@@ -425,14 +441,14 @@ fn scanning_body(page: &ExplorerPane) -> AnyElement {
         .into_any_element()
 }
 
-/// The mosaic itself: tiles painted on one canvas, with the pointer's tile
-/// outlined and the click that follows it.
+/// The mosaic itself: the selected tile stays outlined and the pointer's tile
+/// gets a temporary outline.
 fn mosaic(
     page: &mut ExplorerPane,
     window: &mut Window,
     cx: &mut Context<ExplorerPane>,
 ) -> AnyElement {
-    let (viewport, tree, focus, hovered) = {
+    let (viewport, tree, focus, hovered, selection) = {
         let Some(map) = page.space.as_ref() else {
             return div().into_any_element();
         };
@@ -441,6 +457,7 @@ fn mosaic(
             map.tree.clone(),
             map.focus.clone(),
             map.hover,
+            map.selection.clone(),
         )
     };
     let measured = viewport.get();
@@ -449,6 +466,11 @@ fn mosaic(
     let tiles = page
         .space_tiles(width, height)
         .unwrap_or_else(|| Rc::new(Vec::new()));
+    let selected = selection.as_ref().and_then(|crumbs| {
+        tiles
+            .iter()
+            .position(|tile| tile.crumbs.as_slice() == crumbs.as_slice())
+    });
     let dark = theme::is_dark();
     let style = page.space_map_style.clone();
     let rem = window.rem_size();
@@ -461,6 +483,7 @@ fn mosaic(
     let move_viewport = Rc::clone(&viewport);
     let press_viewport = Rc::clone(&viewport);
     let paint_tiles_rc = Rc::clone(&tiles);
+    let paint_selection = selected;
     let paint_tree = tree.clone();
     let paint_focus = focus.clone();
     let paint_style = style.clone();
@@ -516,8 +539,12 @@ fn mosaic(
                         .find(|tile| tile.rect.contains(x, y))
                         .map(|tile| tile.crumbs.clone())
                 });
-                if let Some(crumbs) = crumbs {
-                    this.space_click(crumbs, window, cx);
+                if event.click_count > 1 {
+                    if let Some(crumbs) = crumbs {
+                        this.space_click(crumbs, window, cx);
+                    }
+                } else {
+                    this.space_select(crumbs, cx);
                 }
             }),
         )
@@ -543,6 +570,7 @@ fn mosaic(
                         focus_node,
                         &paint_style,
                         bounds,
+                        paint_selection,
                         hovered,
                         dark,
                         window,
@@ -693,6 +721,7 @@ fn paint_mosaic(
     focus_node: &SpaceNode,
     style: &SpaceMap,
     bounds: Bounds<Pixels>,
+    selected: Option<usize>,
     hovered: Option<usize>,
     dark: bool,
     window: &mut Window,
@@ -700,7 +729,8 @@ fn paint_mosaic(
     let origin_x = f32::from(bounds.origin.x);
     let origin_y = f32::from(bounds.origin.y);
     let scale = window.scale_factor();
-    let mut ring: Option<Bounds<Pixels>> = None;
+    let mut selected_ring: Option<Bounds<Pixels>> = None;
+    let mut hover_ring: Option<Bounds<Pixels>> = None;
     for (index, tile) in tiles.iter().enumerate() {
         if tile.rect.w < 0.5 || tile.rect.h < 0.5 {
             continue;
@@ -726,17 +756,30 @@ fn paint_mosaic(
             );
             window.paint_quad(fill(band, tile_fill(style, node, tile.depth, dark, true)));
         }
-        if hovered == Some(index) {
-            ring = Some(quad_bounds);
+        if selected == Some(index) {
+            selected_ring = Some(quad_bounds);
+        }
+        if hovered == Some(index) && hovered != selected {
+            hover_ring = Some(quad_bounds);
         }
     }
-    if let Some(ring) = ring {
+    if let Some(ring) = selected_ring {
         window.paint_quad(quad(
             ring,
             Corners::<Pixels>::default(),
             transparent_black(),
             Edges::all(px(2.0)),
             rgb(theme::accent()),
+            BorderStyle::Solid,
+        ));
+    }
+    if let Some(ring) = hover_ring {
+        window.paint_quad(quad(
+            ring,
+            Corners::<Pixels>::default(),
+            transparent_black(),
+            Edges::all(px(1.0)),
+            rgb(theme::fg_secondary()),
             BorderStyle::Solid,
         ));
     }

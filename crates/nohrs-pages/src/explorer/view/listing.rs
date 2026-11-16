@@ -250,6 +250,15 @@ fn with_wheel_zoom(
                         };
                         if notches != 0.0 {
                             entity.update(cx, |page, cx| {
+                                if super::super::tags::tag_of_location(&page.cwd).is_some() {
+                                    let mode = if notches > 0.0 {
+                                        ViewMode::Grid
+                                    } else {
+                                        ViewMode::List
+                                    };
+                                    page.set_view_mode_immediately(mode, cx);
+                                    return;
+                                }
                                 let next = zoom::step(page.zoom_target, notches * zoom::STEP);
                                 page.zoom_to(next, cx);
                                 page.flash_zoom_menu(cx);

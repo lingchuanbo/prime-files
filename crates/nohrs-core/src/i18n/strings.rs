@@ -1047,6 +1047,46 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ),
     ("Recortar", "Cut", "Cortar"),
     ("Reindexar agora", "Reindex now", "Reindexar ahora"),
+    (
+        "{n} 个索引条目，正在重建",
+        "{n} indexed entries, rebuilding",
+        "{n} elementos indexados, reconstruyendo",
+    ),
+    (
+        "{n} 个索引条目，已就绪",
+        "{n} indexed entries, ready",
+        "{n} elementos indexados, listo",
+    ),
+    (
+        "索引服务正在建立索引…",
+        "The index service is building its index…",
+        "El servicio de indexación está creando el índice…",
+    ),
+    (
+        "无法读取索引服务状态：",
+        "Could not read index service status:",
+        "No se pudo leer el estado del servicio de indexación:",
+    ),
+    (
+        "当前索引服务版本不支持数量查询，请更新索引服务。",
+        "This index service version cannot report counts. Update the index service.",
+        "Esta versión del servicio no informa cantidades. Actualiza el servicio de indexación.",
+    ),
+    (
+        "Pedindo para reconstruir o índice…",
+        "Requesting index rebuild…",
+        "Solicitando reconstruir el índice…",
+    ),
+    (
+        "O serviço de indexação aceitou o pedido.",
+        "The index service accepted the request.",
+        "El servicio de indexación aceptó la solicitud.",
+    ),
+    (
+        "Não foi possível pedir a reconstrução do índice:",
+        "Could not request an index rebuild:",
+        "No se pudo solicitar la reconstrucción del índice:",
+    ),
     ("Remover o atalho", "Remove the shortcut", "Quitar el atajo"),
     (
         "Renomeado para {name}",

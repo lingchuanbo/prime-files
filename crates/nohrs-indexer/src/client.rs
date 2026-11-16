@@ -156,6 +156,16 @@ pub fn search(terms: &[String], limit: u32) -> io::Result<Vec<protocol::Hit>> {
     protocol::read_hits(&mut BufReader::with_capacity(1 << 20, pipe))
 }
 
+/// Reads the index worker's published count and refresh state.
+pub fn index_status() -> io::Result<protocol::IndexStatus> {
+    if !protocol::supports_status(hello()?) {
+        return Err(io::Error::other("the indexer does not support status queries"));
+    }
+    let mut pipe = connect()?;
+    pipe.write_all(protocol::STATUS)?;
+    protocol::read_index_status(&mut BufReader::with_capacity(128, pipe))
+}
+
 /// Asks the service for one folder's tree: the folder first, then what is
 /// under it `levels` deep, each folder carrying the size of everything below
 /// it. The answer is measured from the copy the service keeps in memory, so

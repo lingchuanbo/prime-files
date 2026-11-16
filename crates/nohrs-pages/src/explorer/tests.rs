@@ -28,6 +28,9 @@ use nohrs_core::shortcuts::Action;
 use super::types::{SortKey, StatusLevel, ViewMode};
 use super::{ExplorerPage, ExplorerPane};
 
+#[path = "workspace_tests.rs"]
+mod workspace_interaction;
+
 /// Build a real `ExplorerPane` inside a test window. The sub-entities
 /// (`ResizableState`, `InputState`) are window-bound, so the page is
 /// constructed in the `add_window` build closure — the canonical pattern for
@@ -2701,6 +2704,22 @@ async fn choosing_the_view_back_mid_glide_turns_the_glide_around(cx: &mut TestAp
 }
 
 #[gpui::test]
+async fn immediate_view_switch_skips_intermediate_modes(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window
+        .update(cx, |page, _window, cx| {
+            page.set_view_mode_immediately(ViewMode::Grid, cx);
+            page.set_view_mode_immediately(ViewMode::List, cx);
+
+            assert!(page.view_mode == ViewMode::List);
+            assert_eq!(page.zoom, 0.0);
+            assert_eq!(page.zoom_target, 0.0);
+            assert!(page.zoom_tick.is_none());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 async fn the_highlight_is_the_literal_part_of_the_filter(cx: &mut TestAppContext) {
     let window = new_explorer(cx);
     window
@@ -3224,15 +3243,28 @@ async fn the_space_map_measures_the_folder_and_draws_its_tiles(cx: &mut TestAppC
                     .any(|tile| tile.crumbs == vec![1] && tile.header.is_some()),
                 "the folder names itself in its band"
             );
-            // Clicking a directory tile zooms into it, without a second read.
+            // A single click selects; the second click enters without rescanning.
             let nested = tiles
                 .iter()
                 .find(|tile| tile.crumbs == vec![1])
                 .expect("the folder's tile")
                 .crumbs
                 .clone();
+            pane.space_select(Some(nested.clone()), cx);
+            assert_eq!(
+                pane.space.as_ref().map(|map| map.selection.clone()),
+                Some(Some(nested.clone()))
+            );
+            assert!(
+                pane.space.as_ref().is_some_and(|map| map.focus.is_empty()),
+                "selecting a folder does not enter it"
+            );
             pane.space_click(nested.clone(), _window, cx);
             assert_eq!(pane.space.as_ref().map(|map| map.focus.clone()), Some(nested));
+            assert!(
+                pane.space.as_ref().is_some_and(|map| map.selection.is_none()),
+                "entering a folder clears the prior tile selection"
+            );
             // Escape takes it down, back to the listing.
             pane.close_space_map(cx);
             assert!(!pane.space_map_open(), "the map closes again");

@@ -6,10 +6,10 @@
 //! sidebar or the listing's "View" menu, replaces the listing while it is up,
 //! and follows the pane when the user navigates to another folder.
 //!
-//! Inside the map, a click zooms into a directory — no second read, the scan
-//! already has its contents — and the breadcrumb above the mosaic walks back
-//! out. A file's tile shows where it is: clicking it opens its folder with the
-//! file selected.
+//! Inside the map, a click selects a tile and a double-click zooms into a
+//! directory — no second read, the scan already has its contents — while the
+//! breadcrumb above the mosaic walks back out. A file's tile shows where it
+//! is: double-clicking it opens its folder with the file selected.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -87,6 +87,8 @@ pub(crate) struct SpaceMap {
     pub(crate) layout: Option<SpaceLayout>,
     /// The tile under the pointer, as an index into `layout.tiles`.
     pub(crate) hover: Option<usize>,
+    /// The selected entry, as child indices from the scanned tree.
+    pub(crate) selection: Option<Vec<usize>>,
     /// When the scan started, for the "taking a while" line.
     pub(crate) started: Instant,
     /// Bumped for every scan, so an answer to an older one is ignored.
@@ -111,6 +113,7 @@ impl SpaceMap {
             viewport: Rc::new(Cell::new(Bounds::default())),
             layout: None,
             hover: None,
+            selection: None,
             started: Instant::now(),
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -290,7 +293,24 @@ impl ExplorerPane {
         map.focus = crumbs;
         map.layout = None;
         map.hover = None;
+        map.selection = None;
         cx.notify();
+    }
+
+    /// Selects a tile by its tree path, or clears the selection on empty space.
+    pub(crate) fn space_select(&mut self, crumbs: Option<Vec<usize>>, cx: &mut Context<Self>) {
+        let Some(map) = self.space.as_mut() else {
+            return;
+        };
+        let selection = crumbs.filter(|crumbs| {
+            map.tree
+                .as_deref()
+                .is_some_and(|tree| tree.node_at(crumbs).is_some())
+        });
+        if map.selection != selection {
+            map.selection = selection;
+            cx.notify();
+        }
     }
 
     /// Zooms out one directory, as the breadcrumb's parent does.
@@ -301,6 +321,7 @@ impl ExplorerPane {
         if map.focus.pop().is_some() {
             map.layout = None;
             map.hover = None;
+            map.selection = None;
             cx.notify();
         }
     }
@@ -459,6 +480,7 @@ impl ExplorerPane {
         map.focus.clear();
         map.layout = None;
         map.hover = None;
+        map.selection = None;
         map.started = Instant::now();
     }
 
