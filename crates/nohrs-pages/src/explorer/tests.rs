@@ -3126,3 +3126,116 @@ async fn backspace_goes_to_parent_instead_of_previous_directory(cx: &mut TestApp
         assert_eq!("a", pane.name_filter_input.as_ref().unwrap().read(cx).value().as_str());
     });
 }
+
+#[gpui::test]
+async fn the_space_map_takes_its_colours_from_the_config(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window
+        .update(cx, |pane, _window, cx| {
+            assert_eq!(
+                pane.space_map_style.color,
+                nohrs_core::config::SpaceMapColor::Size,
+                "the heat map by size is the default"
+            );
+            let mut style = nohrs_core::config::SpaceMap::default();
+            style.color = nohrs_core::config::SpaceMapColor::Kind;
+            style.bands_gb = [20, 8, 2];
+            style.colors = [
+                "#111111".into(),
+                "#222222".into(),
+                "#333333".into(),
+                "#444444".into(),
+            ];
+            pane.apply_config_space_map(&style, cx);
+            assert_eq!(pane.space_map_style, style, "the palette reaches the pane");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn the_space_map_measures_the_folder_and_draws_its_tiles(cx: &mut TestAppContext) {
+    // The counts below are the walk's apparent sizes; the indexer reports what
+    // the volume allocates and may not have a folder created a moment ago.
+    crate::explorer::space_map::INDEX_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = tempfile::tempdir().unwrap();
+    let folder = fixture.path().join("measured");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("big.bin"), vec![b'x'; 4000]).unwrap();
+    std::fs::create_dir(folder.join("nested")).unwrap();
+    std::fs::write(folder.join("nested").join("small.bin"), vec![b'x'; 1000]).unwrap();
+    let folder = folder.to_string_lossy().into_owned();
+
+    let window = new_explorer(cx);
+    window
+        .update(cx, |pane, _window, cx| {
+            pane.cwd = folder.clone();
+            pane.open_space_map(cx);
+            assert!(pane.space_map_open(), "the map opens on the pane");
+        })
+        .unwrap();
+    // The walk runs on the background executor, off the UI thread.
+    cx.run_until_parked();
+    window
+        .read_with(cx, |pane, _| {
+            let tree = pane
+                .space
+                .as_ref()
+                .and_then(|map| map.tree.clone())
+                .expect("the folder was measured");
+            assert_eq!(tree.bytes, 5000);
+            // Bigger first: the mosaic draws the largest children first.
+            let names: Vec<&str> = tree.children.iter().map(|child| child.name.as_str()).collect();
+            assert_eq!(names, ["big.bin", "nested"]);
+        })
+        .unwrap();
+    // The mosaic is laid out for the area a paint measured: the first frame
+    // measures it, the second draws the tiles.
+    for _ in 0..2 {
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        cx.run_until_parked();
+    }
+    window
+        .update(cx, |pane, _window, cx| {
+            let tiles = pane
+                .space
+                .as_ref()
+                .and_then(|map| map.layout.as_ref())
+                .map(|layout| layout.tiles.clone())
+                .expect("the mosaic was laid out");
+            assert!(tiles.len() >= 2, "the mosaic has the folder's entries");
+            // The file's tile is four fifths of the mosaic, and the folder
+            // that holds the rest has a band for its own name.
+            let mut areas = tiles
+                .iter()
+                .filter(|tile| tile.depth == 0)
+                .map(|tile| (tile.crumbs.clone(), tile.rect.w * tile.rect.h));
+            let (biggest, big_area) = areas.next().expect("a top-level tile");
+            assert_eq!(biggest, vec![0], "the file is the largest tile");
+            let total: f32 = big_area + areas.map(|(_, area)| area).sum::<f32>();
+            assert!(
+                (big_area / total - 0.8).abs() < 0.05,
+                "areas follow sizes: {}",
+                big_area / total
+            );
+            assert!(
+                tiles
+                    .iter()
+                    .any(|tile| tile.crumbs == vec![1] && tile.header.is_some()),
+                "the folder names itself in its band"
+            );
+            // Clicking a directory tile zooms into it, without a second read.
+            let nested = tiles
+                .iter()
+                .find(|tile| tile.crumbs == vec![1])
+                .expect("the folder's tile")
+                .crumbs
+                .clone();
+            pane.space_click(nested.clone(), _window, cx);
+            assert_eq!(pane.space.as_ref().map(|map| map.focus.clone()), Some(nested));
+            // Escape takes it down, back to the listing.
+            pane.close_space_map(cx);
+            assert!(!pane.space_map_open(), "the map closes again");
+        })
+        .unwrap();
+}

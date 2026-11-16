@@ -403,6 +403,62 @@
         }
       ]
     },
+    "SpaceMap": {
+      "description": "Space map (the treemap of what a folder weighs) settings.",
+      "properties": {
+        "bands_gb": {
+          "default": [
+            10,
+            5,
+            1
+          ],
+          "description": "Thresholds in gigabytes, largest first. `[10, 5, 1]` means 10 GB and up\ntakes the first colour, 5–10 GB the second, 1–5 GB the third, and\nanything smaller the fourth.",
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "color": {
+          "$ref": "#/$defs/SpaceMapColor",
+          "default": "size",
+          "description": "How tiles are coloured: by how much they weigh, or by what they hold."
+        },
+        "colors": {
+          "default": [
+            "#ef4444",
+            "#f97316",
+            "#fb923c",
+            "#22c55e"
+          ],
+          "description": "One `#rrggbb` colour per band, plus the one for what is under the\nsmallest threshold: four colours for three thresholds.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SpaceMapColor": {
+      "description": "What a space-map tile's colour says.",
+      "oneOf": [
+        {
+          "const": "size",
+          "description": "How much the tile weighs: the heat map proper.",
+          "type": "string"
+        },
+        {
+          "const": "kind",
+          "description": "What the tile holds: folders, pictures, video, and the rest.",
+          "type": "string"
+        }
+      ]
+    },
     "SplitDirection": {
       "description": "How a 2-way split arranges its panes.",
       "oneOf": [
@@ -663,6 +719,24 @@
         "backend": "auto"
       },
       "description": "Search backend selection."
+    },
+    "space_map": {
+      "$ref": "#/$defs/SpaceMap",
+      "default": {
+        "bands_gb": [
+          10,
+          5,
+          1
+        ],
+        "color": "size",
+        "colors": [
+          "#ef4444",
+          "#f97316",
+          "#fb923c",
+          "#22c55e"
+        ]
+      },
+      "description": "The space map (the treemap of what a folder weighs)."
     },
     "theme": {
       "$ref": "#/$defs/Theme",

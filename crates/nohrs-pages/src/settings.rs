@@ -229,6 +229,9 @@ pub struct SettingsPage {
     /// Editable filename-colour rules and their input controls.
     file_type_color_draft: Vec<FileTypeColorRule>,
     file_type_color_inputs: Vec<(Entity<InputState>, Entity<InputState>)>,
+    /// The space map's three size thresholds and four band colours, as fields.
+    space_map_bands: Vec<Entity<InputState>>,
+    space_map_colors: Vec<Entity<InputState>>,
     // Takes the key presses that record a shortcut.
     focus_handle: FocusHandle,
     // The command whose new keys are being waited for.
@@ -283,6 +286,8 @@ impl SettingsPage {
             font_select: None,
             file_type_color_draft: Vec::new(),
             file_type_color_inputs: Vec::new(),
+            space_map_bands: Vec::new(),
+            space_map_colors: Vec::new(),
             focus_handle: cx.focus_handle(),
             recording: None,
         };
@@ -547,8 +552,200 @@ impl SettingsPage {
             self.file_type_color_draft = config.ui.file_type_colors.clone();
             self.file_type_color_inputs.clear();
         }
+        if self.config.space_map != config.space_map {
+            // The fields are made from the config; a change from anywhere else
+            // (a hand edit, the defaults button) is shown again.
+            self.space_map_bands.clear();
+            self.space_map_colors.clear();
+        }
         self.config = config;
         cx.notify();
+    }
+
+    /// The space map's thresholds and colours as fields, made once from the
+    /// config and kept while they are being edited.
+    fn ensure_space_map_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.space_map_bands.len() == 3 && self.space_map_colors.len() == 4 {
+            return;
+        }
+        let map = self.config.space_map.clone();
+        self.space_map_bands = map
+            .bands_gb
+            .iter()
+            .map(|band| {
+                let input = cx.new(|cx| InputState::new(window, cx));
+                input.update(cx, |state, cx| {
+                    state.set_placeholder("10", window, cx);
+                    state.set_value(band.to_string(), window, cx);
+                });
+                input
+            })
+            .collect();
+        self.space_map_colors = map
+            .colors
+            .iter()
+            .map(|color| {
+                let input = cx.new(|cx| InputState::new(window, cx));
+                input.update(cx, |state, cx| {
+                    state.set_placeholder("#rrggbb", window, cx);
+                    state.set_value(color.clone(), window, cx);
+                });
+                input
+            })
+            .collect();
+    }
+
+    /// Writes the fields to `[space_map]`, if they are usable: three
+    /// descending gigabytes and four hex colours.
+    fn save_space_map(&mut self, cx: &mut Context<Self>) {
+        let mut bands = [0_u32; 3];
+        let readable = self.space_map_bands.len() == 3
+            && self.space_map_bands.iter().enumerate().all(|(index, input)| {
+                match input.read(cx).value().trim().parse::<u32>() {
+                    Ok(value) if value > 0 => {
+                        bands[index] = value;
+                        true
+                    }
+                    _ => false,
+                }
+            })
+            && bands[0] > bands[1]
+            && bands[1] > bands[2];
+        let colors: Vec<String> = self
+            .space_map_colors
+            .iter()
+            .map(|input| {
+                let value = input.read(cx).value().trim().to_string();
+                if value.starts_with('#') { value } else { format!("#{value}") }
+            })
+            .collect();
+        let colored = colors.len() == 4
+            && colors.iter().all(|color| theme::parse_color(color).is_some());
+        if !readable || !colored {
+            self.status = Some((
+                t!("Digite três tamanhos decrescentes em GB e quatro cores #rrggbb.").to_string(),
+                true,
+            ));
+            cx.notify();
+            return;
+        }
+        self.write(
+            "space_map",
+            "bands_gb",
+            format!("[{}, {}, {}]", bands[0], bands[1], bands[2]),
+            cx,
+        );
+        self.write(
+            "space_map",
+            "colors",
+            format!("[{}]", colors.iter().map(|color| format!("\"{color}\"")).collect::<Vec<_>>().join(", ")),
+            cx,
+        );
+    }
+
+    /// Puts the space map's colours back to the built-in palette.
+    fn reset_space_map(&mut self, cx: &mut Context<Self>) {
+        let defaults = config::SpaceMap::default();
+        self.space_map_bands.clear();
+        self.space_map_colors.clear();
+        self.write(
+            "space_map",
+            "bands_gb",
+            format!(
+                "[{}, {}, {}]",
+                defaults.bands_gb[0], defaults.bands_gb[1], defaults.bands_gb[2]
+            ),
+            cx,
+        );
+        self.write(
+            "space_map",
+            "colors",
+            format!(
+                "[{}]",
+                defaults
+                    .colors
+                    .iter()
+                    .map(|color| format!("\"{color}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            cx,
+        );
+    }
+
+    /// The threshold and colour fields of the space map, with their save and
+    /// reset buttons.
+    fn space_map_editor(&self, cx: &mut Context<Self>) -> Div {
+        let bands = self.space_map_bands.iter().map(|input| {
+            div()
+                .w(px(84.0))
+                .flex_shrink_0()
+                .child(Input::new(input).small())
+        });
+        let colors = self.space_map_colors.iter().map(|input| {
+            let swatch = theme::parse_color(input.read(cx).value().trim()).unwrap_or(theme::accent());
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .size(px(16.0))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .bg(rgb(swatch)),
+                )
+                .child(div().w(px(96.0)).child(Input::new(input).small()))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(190.0))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(rgb(theme::muted()))
+                            .child(t!("Tamanho (GB), do maior para o menor")),
+                    )
+                    .children(bands),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(190.0))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(rgb(theme::muted()))
+                            .child(t!("Cor de cada faixa")),
+                    )
+                    .children(colors),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        button("space-map-save", t!("Salvar cores"), false)
+                            .on_click(cx.listener(|page, _, _, cx| page.save_space_map(cx))),
+                    )
+                    .child(
+                        button("space-map-reset", t!("Restaurar padrão"), false)
+                            .on_click(cx.listener(|page, _, _, cx| page.reset_space_map(cx))),
+                    ),
+            )
     }
 
     fn ensure_file_type_color_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1488,6 +1685,23 @@ impl SettingsPage {
             t!("Cor dos nomes por tipo de arquivo"),
             t!("Use padrões de nome sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*. As regras anteriores têm prioridade."),
             self.file_type_color_editor(cx),
+        ).wide()]), Group::titled(t!("Mapa de espaço"), vec![Row::hint(
+            t!("Cor dos blocos"),
+            t!("Por tamanho pinta cada bloco pela faixa em que ele cai; por tipo pinta pelo que ele contém."),
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(self.config_choice(
+                    "space-map-color",
+                    &[
+                        (t!("Por tamanho"), self.config.space_map.color == config::SpaceMapColor::Size, "\"size\""),
+                        (t!("Por tipo"), self.config.space_map.color == config::SpaceMapColor::Kind, "\"kind\""),
+                    ],
+                    ("space_map", "color"),
+                    cx,
+                ))
+                .child(self.space_map_editor(cx)),
         ).wide()])]
     }
 
@@ -2578,6 +2792,7 @@ impl Render for SettingsPage {
         let input = self.search_input(window, cx);
         self.app_name_input(window, cx);
         self.ensure_file_type_color_inputs(window, cx);
+        self.ensure_space_map_inputs(window, cx);
         // The font list needs the window's text system, so it is made here.
         self.ensure_font_select(window, cx);
         let query = input.read(cx).value().to_string();

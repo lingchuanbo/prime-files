@@ -26,3 +26,26 @@ fn pipe_search_body_preserves_wire_lengths_and_limit() {
     let decoded = protocol::read_search_request(&mut actual.as_slice()).unwrap();
     assert_eq!((terms, 123), decoded);
 }
+
+#[test]
+fn pipe_subtree_body_preserves_wire_lengths_and_levels() {
+    let path = r"D:\BoBO\prime-files\项目";
+    let mut request = vec![];
+    protocol::write_subtree_request(&mut request, path, 3).unwrap();
+    let body = &request[protocol::SUBTREE.len()..];
+    let file_path = std::env::temp_dir().join(format!("prime-pipe-subtree-{}.tmp", std::process::id()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&file_path)
+        .unwrap();
+    file.write_all(body).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let actual = read_subtree_body(&file).unwrap();
+    drop(file);
+    std::fs::remove_file(file_path).unwrap();
+    assert_eq!(body, actual);
+    let decoded = protocol::read_subtree_request(&mut actual.as_slice()).unwrap();
+    assert_eq!((path.to_string(), 3), decoded);
+}

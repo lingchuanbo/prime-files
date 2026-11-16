@@ -6,5 +6,7 @@
 pub mod listing;
 /// Synchronous file mutation operations with cross-volume and conflict handling.
 pub mod ops;
+/// Directory sizes as a tree, and the treemap layout that draws them.
+pub mod space;
 /// Listing, restoring from, and emptying the trash.
 pub mod trash;

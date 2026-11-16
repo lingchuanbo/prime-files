@@ -10,8 +10,11 @@ use nohrs_core::i18n;
 use nohrs_core::{t, tf};
 use std::time::{Duration, SystemTime};
 
+use gpui::FontWeight;
+
 use gpui::prelude::*;
 use gpui::*;
+use nohrs_core::telemetry::LogErr;
 use gpui_component::{Icon, IconName};
 use nohrs_ui::theme::theme;
 
@@ -153,6 +156,162 @@ pub(crate) fn pick_folder(_owner: i64) -> Option<String> {
     None
 }
 
+impl ExplorerPane {
+    /// Eases the folder art of the cards towards the hovered one: its sheets
+    /// come out, the others' go back. One step per frame while any card still
+    /// has a distance to go.
+    pub(crate) fn animate_hover(&mut self, cx: &mut Context<Self>) {
+        if self.workspace_glow_task.is_some() || self.workspace_glow.is_empty() {
+            return;
+        }
+        let task = cx.spawn(async move |this: WeakEntity<ExplorerPane>, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(16)).await;
+                let running = this.update(cx, |pane, cx| step_glow(pane, cx)).unwrap_or(false);
+                if !running {
+                    this.update(cx, |pane, _| pane.workspace_glow_task = None).log_err();
+                    return;
+                }
+            }
+        });
+        self.workspace_glow_task = Some(task);
+    }
+}
+
+// One frame of the easing. Returns whether any card still has to move.
+fn step_glow(pane: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> bool {
+    const STEP: f32 = 16.0 / 190.0;
+    let hovered = pane.workspace_hover.clone();
+    let mut running = false;
+    for (path, value) in pane.workspace_glow.iter_mut() {
+        let target = if hovered.as_deref() == Some(path.as_str()) { 1.0 } else { 0.0 };
+        if (*value - target).abs() <= STEP {
+            *value = target;
+        } else if *value < target {
+            *value += STEP;
+        } else {
+            *value -= STEP;
+        }
+        if (*value - target).abs() > f32::EPSILON {
+            running = true;
+        }
+    }
+    pane.workspace_glow.retain(|_, value| *value > 0.0);
+    if running {
+        cx.notify();
+    }
+    running
+}
+
+/// The folder a card shows, after the home screen of Quiet.md: the folder's
+/// back with its tab, a stack of sheets in front of it with the writing on
+/// the first, and the front panel over their feet. `glow` (0..=1) is how far
+/// the sheets are out: they rise while the card is hovered.
+fn folder_art(name: &str, glow: f32) -> AnyElement {
+    const HEIGHT: f32 = 148.0;
+    const RISE: f32 = 13.0;
+    let glow = glow.clamp(0.0, 1.0);
+
+    let dark = theme::is_dark();
+    let (back, tab, paper, edge, ink, body, front_top, front_bottom) = if dark {
+        (0x33333A, 0x3A3A42, 0x27272D, 0x50505E, 0xF4F4F8, 0x767687, 0x45454F, 0x35353D)
+    } else {
+        (0xE7E7EA, 0xEFEFF2, 0xFFFFFF, 0xDFDFE6, 0x191920, 0xC6C6D0, 0xF6F6F8, 0xE6E6EB)
+    };
+
+    // The sheets behind the first: they peek at its top and sides, each a
+    // little further in, and rise a little less than the one before them.
+    let behind = [(36.0, 26.0, 146.0, 106.0, 0.70), (29.0, 32.0, 154.0, 104.0, 0.85)];
+    let mut sheets = Vec::with_capacity(2);
+    for (left, top, width, height, weight) in behind {
+        sheets.push(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top - RISE * glow * weight))
+                .w(px(width))
+                .h(px(height))
+                .rounded(px(9.0))
+                .bg(rgb(paper))
+                .border_1()
+                .border_color(rgb(edge))
+                .into_any_element(),
+        );
+    }
+
+    // The writing on the first sheet: the folder's name as its heading, then
+    // lines as a page has, so the sheet reads as a document and not a slab.
+    let lines = [0.94, 0.72, 0.88, 0.58, 0.8];
+    let writing = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .p(px(13.0))
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(ink))
+                .line_height(relative(1.2))
+                .child(name.to_string()),
+        )
+        .child(
+            div()
+                .mt(px(2.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .children(lines.iter().map(|share| {
+                    div()
+                        .w(px(126.0 * share))
+                        .h(px(3.0))
+                        .rounded_full()
+                        .bg(rgb(body))
+                        .into_any_element()
+                })),
+        );
+    let first = div()
+        .absolute()
+        .left(px(22.0))
+        .top(px(38.0 - RISE * glow))
+        .w(px(164.0))
+        .h(px(104.0))
+        .rounded(px(9.0))
+        .bg(rgb(paper))
+        .border_1()
+        .border_color(rgb(edge))
+        .overflow_hidden()
+        .child(writing);
+
+    div()
+        .relative()
+        .w_full()
+        .h(px(HEIGHT))
+        .overflow_hidden()
+        // The folder's back, with the tab that rises over the sheets.
+        .child(div().absolute().left(px(2.0)).right(px(2.0)).top(px(12.0)).bottom(px(0.0)).rounded(px(18.0)).bg(rgb(back)))
+        .child(div().absolute().left(px(8.0)).top(px(2.0)).w(px(94.0)).h(px(24.0)).rounded_t(px(13.0)).bg(rgb(tab)))
+        .children(sheets)
+        .child(first)
+        // The front panel over their feet: the lightest of the three, as the
+        // card of the reference has it, eased from its edge to its foot.
+        .child(
+            div()
+                .absolute()
+                .left(px(2.0))
+                .right(px(2.0))
+                .top(px(110.0))
+                .bottom(px(0.0))
+                .rounded(px(18.0))
+                .bg(linear_gradient(
+                    180.0,
+                    linear_color_stop(rgb(front_top), 0.0),
+                    linear_color_stop(rgb(front_bottom), 1.0),
+                )),
+        )
+        .into_any_element()
+}
 /// The page of workspace `tag`, with `cards` for what it holds.
 pub(crate) fn page(
     page: &mut ExplorerPane,
@@ -160,7 +319,8 @@ pub(crate) fn page(
     cards: &[Card],
     cx: &mut Context<ExplorerPane>,
 ) -> AnyElement {
-    let icon_px = 32;
+    // The small folder icon on the card art, drawn at the size it is shown.
+    let icon_px = 18;
     let workspace = tags::Tags::get(tag, cx);
     let name = workspace.as_ref().map(|tag| tag.name.clone()).unwrap_or_default();
     let color = workspace.as_ref().map(|tag| tag.color).unwrap_or(theme::accent());
@@ -196,9 +356,16 @@ pub(crate) fn page(
                 ),
         );
 
-    fn tile(card: &Card, icon: AnyElement, tag: u32, color: u32, cx: &mut Context<ExplorerPane>) -> AnyElement {
+    fn tile(
+        card: &Card,
+        tag: u32,
+        hovered: bool,
+        glow: f32,
+        cx: &mut Context<ExplorerPane>,
+    ) -> AnyElement {
         let path = card.path.clone();
         let menu = card.path.clone();
+        let hover = card.path.clone();
         // Dragging the card onto another moves it in the workspace's order;
         // the folder itself stays where it is.
         let dragged = card.path.clone();
@@ -215,14 +382,27 @@ pub(crate) fn page(
             .w(px(232.0))
             .flex()
             .flex_col()
-            .gap_2()
-            .p(px(12.0))
-            .rounded(px(12.0))
+            .gap(px(6.0))
+            .p(px(10.0))
+            .rounded(px(16.0))
             .border_1()
-            .border_color(rgb(color))
-            .bg(rgb(theme::bg_secondary()))
+            .border_color(rgb(if hovered { theme::accent() } else { theme::border() }))
+            .bg(rgb(if hovered { theme::bg_hover() } else { theme::bg_secondary() }))
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(theme::bg_hover())))
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                let current = this.workspace_hover.clone();
+                let shows = Some(hover.as_str());
+                if *hovered && current.as_deref() != shows {
+                    this.workspace_hover = Some(hover.clone());
+                    this.workspace_glow.entry(hover.clone()).or_insert(0.0);
+                    this.animate_hover(cx);
+                    cx.notify();
+                } else if !*hovered && current.as_deref() == shows {
+                    this.workspace_hover = None;
+                    this.animate_hover(cx);
+                    cx.notify();
+                }
+            }))
             .on_drag(
                 CardDrag { path: dragged },
                 move |_drag, _offset, _window, cx| {
@@ -244,20 +424,32 @@ pub(crate) fn page(
                     this.open_workspace_card_menu(tag, menu.clone(), true, window, cx);
                 }),
             )
-            .child(div().h(px(3.0)).w_full().rounded_full().bg(rgb(color)))
-            .child(div().flex().items_center().justify_between().child(icon).child(
-                Icon::new(IconName::Ellipsis)
-                    .size_4()
-                    .text_color(rgb(theme::muted())),
-            ))
+            // The folder's own art, a paper stack peeking out of it: the
+            // cards of the home screen this workspace layout follows.
+            .child(folder_art(&card.name, glow))
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(theme::fg()))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(card.name.clone()),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme::fg()))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(card.name.clone()),
+                    )
+                    .child(
+                        Icon::new(IconName::Ellipsis)
+                            .size_4()
+                            .text_color(rgb(theme::muted())),
+                    ),
             )
             .child(
                 div()
@@ -280,16 +472,17 @@ pub(crate) fn page(
             .when(!changed.is_empty(), |this| {
                 this.child(
                     div()
-                        .rounded(px(20.0))
+                        .w_full()
+                        .rounded(px(8.0))
                         .px(px(8.0))
-                        .py(px(1.0))
+                        .py(px(3.0))
                         .bg(rgb(theme::bg_hover()))
                         .text_xs()
                         .text_color(rgb(theme::muted()))
                         .child(tf!("Alterado {ago}", ago = changed)),
                 )
             })
-        .into_any_element()
+            .into_any_element()
     }
 
     let add = div()
@@ -340,25 +533,15 @@ pub(crate) fn page(
         }))
         .into_any_element();
 
-    // The icons first: each is one lookup into the sidebar's cache, which
-    // borrows the pane between tiles.
-    let icons: Vec<(AnyElement, u32)> = cards
-        .iter()
-        .map(|card| {
-            let color = tags::Tags::card_color(tag, &card.path, cx).unwrap_or(color);
-            let icon = match page.sidebar.icons.icon_in(&card.path, true, icon_px, |pane| &mut pane.sidebar.icons, cx) {
-                Some(image) => img(ImageSource::Render(image)).size(px(28.0)).into_any_element(),
-                None => Icon::new(IconName::Folder).size_6().text_color(rgb(color)).into_any_element(),
-            };
-            (icon, color)
-        })
-        .collect();
-
     let grid = div()
         .flex()
         .flex_wrap()
         .gap_4()
-        .children(cards.iter().zip(icons).map(|(card, (icon, color))| tile(card, icon, tag, color, cx)))
+        .children(cards.iter().map(|card| {
+            let hovered = page.workspace_hover.as_deref() == Some(card.path.as_str());
+            let glow = page.workspace_glow.get(&card.path).copied().unwrap_or(0.0);
+            tile(card, tag, hovered, glow, cx)
+        }))
         .child(add);
 
     // The files the workspace holds: a compact row each, the folder cards

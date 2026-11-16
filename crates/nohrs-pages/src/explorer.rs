@@ -34,6 +34,7 @@ pub(crate) mod preview_listing;
 mod quick_search;
 mod recent;
 mod search;
+pub(crate) mod space_map;
 mod state;
 pub(crate) mod thumbnails;
 pub(crate) mod waveforms;

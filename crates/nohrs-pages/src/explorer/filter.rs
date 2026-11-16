@@ -62,48 +62,48 @@ impl KindFilter {
         }
     }
 
-    /// Whether `entry` passes this filter.
-    pub fn matches(self, entry: &FileEntryDto) -> bool {
-        let is_dir = entry.kind == "dir";
-        let extension = std::path::Path::new(&entry.name)
+    /// The kind a file's extension puts it in. A directory is not a file kind:
+    /// callers that have one ask for it before asking this.
+    pub fn of_extension(extension: &str) -> Self {
+        match extension.to_ascii_lowercase().as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "ico" | "tif" | "tiff"
+            | "heic" | "heif" | "avif" | "psd" | "raw" | "cr2" | "nef" | "dng" => Self::Images,
+            "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" | "flv" | "m4v" | "mpg" | "mpeg"
+            | "3gp" | "ts" | "mts" | "m2ts" => Self::Videos,
+            "mp3" | "wav" | "flac" | "aac" | "ogg" | "opus" | "m4a" | "wma" | "aiff" | "aif"
+            | "mid" | "midi" => Self::Audio,
+            "txt" | "md" | "pdf" | "doc" | "docx" | "xls" | "xlsx" | "csv" | "ppt" | "pptx"
+            | "odt" | "ods" | "odp" | "rtf" | "json" | "xml" | "html" | "htm" | "log"
+            | "epub" => Self::Documents,
+            "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "iso" | "cab" => {
+                Self::Archives
+            }
+            "exe" | "msi" | "msix" | "appx" | "bat" | "cmd" | "ps1" | "lnk" | "com" | "scr" => {
+                Self::Programs
+            }
+            _ => Self::Files,
+        }
+    }
+
+    /// The kind a file name's extension puts it in; [`Self::Files`] for a name
+    /// with no extension, or one no kind claims.
+    pub fn of_name(name: &str) -> Self {
+        let extension = std::path::Path::new(name)
             .extension()
             .map(|extension| extension.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        let extension = extension.as_str();
+        Self::of_extension(&extension)
+    }
+
+    /// Whether `entry` passes this filter.
+    pub fn matches(self, entry: &FileEntryDto) -> bool {
+        let is_dir = entry.kind == "dir";
         match self {
             KindFilter::All => true,
             KindFilter::Folders => is_dir,
             KindFilter::Files => !is_dir,
             _ if is_dir => false,
-            KindFilter::Images => matches!(
-                extension,
-                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "ico" | "tif" | "tiff"
-                    | "heic" | "heif" | "avif" | "psd" | "raw" | "cr2" | "nef" | "dng"
-            ),
-            KindFilter::Videos => matches!(
-                extension,
-                "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" | "flv" | "m4v" | "mpg" | "mpeg"
-                    | "3gp" | "ts" | "mts" | "m2ts"
-            ),
-            KindFilter::Audio => matches!(
-                extension,
-                "mp3" | "wav" | "flac" | "aac" | "ogg" | "opus" | "m4a" | "wma" | "aiff" | "aif"
-                    | "mid" | "midi"
-            ),
-            KindFilter::Documents => matches!(
-                extension,
-                "txt" | "md" | "pdf" | "doc" | "docx" | "xls" | "xlsx" | "csv" | "ppt" | "pptx"
-                    | "odt" | "ods" | "odp" | "rtf" | "json" | "xml" | "html" | "htm" | "log"
-                    | "epub"
-            ),
-            KindFilter::Archives => matches!(
-                extension,
-                "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "iso" | "cab"
-            ),
-            KindFilter::Programs => matches!(
-                extension,
-                "exe" | "msi" | "msix" | "appx" | "bat" | "cmd" | "ps1" | "lnk" | "com" | "scr"
-            ),
+            kind => kind == Self::of_name(&entry.name),
         }
     }
 }

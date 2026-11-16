@@ -21,6 +21,7 @@ enum Command {
     ViewGrid,
     ViewTree,
     ViewCompact,
+    ViewSpaceMap,
     ToggleDirectoryExpand,
     ToggleHidden,
     ThemeDark,
@@ -64,14 +65,17 @@ enum Command {
     RemoveWorkspaceCard,
     AddFavoriteCurrent,
     BatchRename,
+    /// The selected folder's sizes, drawn as the space map.
+    SpaceMapSelection,
 }
 
 impl Command {
-    const ALL: [Command; 47] = [
+    const ALL: [Command; 49] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
         Command::ViewCompact,
+        Command::ViewSpaceMap,
         Command::ToggleDirectoryExpand,
         Command::ToggleHidden,
         Command::ThemeDark,
@@ -115,6 +119,7 @@ impl Command {
         Command::RemoveWorkspaceCard,
         Command::AddFavoriteCurrent,
         Command::BatchRename,
+        Command::SpaceMapSelection,
     ];
 
     fn from_id(id: u32) -> Option<Self> {
@@ -342,6 +347,7 @@ impl ExplorerPane {
             }
             MenuPurpose::Listing {
                 target: Target::Items(paths),
+                one_folder,
                 ..
             } => {
                 // Ticked when every selected item has it; a click puts it on
@@ -362,12 +368,20 @@ impl ExplorerPane {
                     Entry::command(Command::NewTag as u32, t!("Novo espaço de trabalho…"))
                         .with_icon("icons/plus.svg"),
                 );
-                vec![
+                let mut entries = vec![
                     Entry::command(Command::BatchRename as u32, "批量重命名…").with_icon("icons/pencil.svg").with_shortcut("Ctrl+M"),
-                    Entry::submenu(t!("Espaços de trabalho"), tags).with_icon("icons/tag.svg"),
-                    Entry::Separator,
-                    more,
-                ]
+                ];
+                // What the folder weighs, without leaving the one on screen.
+                if *one_folder {
+                    entries.push(
+                        Entry::command(Command::SpaceMapSelection as u32, t!("Mapa de espaço"))
+                            .with_icon("icons/treemap.svg"),
+                    );
+                }
+                entries.push(Entry::submenu(t!("Espaços de trabalho"), tags).with_icon("icons/tag.svg"));
+                entries.push(Entry::Separator);
+                entries.push(more);
+                entries
             }
             _ => vec![more],
         }
@@ -1095,6 +1109,14 @@ impl ExplorerPane {
                         self.view_mode == ViewMode::List,
                     ),
                     Entry::Separator,
+                    // The folder's size, drawn instead of listed.
+                    Entry::radio(
+                        Command::ViewSpaceMap as u32,
+                        t!("Mapa de espaço"),
+                        self.space_map_open(),
+                    )
+                    .with_icon("icons/treemap.svg"),
+                    Entry::Separator,
                     Entry::check(
                         Command::ToggleDirectoryExpand as u32,
                         t!("Expandir diretórios"),
@@ -1259,6 +1281,13 @@ impl ExplorerPane {
             Command::ViewGrid => self.set_view_mode(ViewMode::Grid, cx),
             Command::ViewTree => self.set_view_mode(ViewMode::Tree, cx),
             Command::ViewCompact => self.set_view_mode(ViewMode::Compact, cx),
+            Command::ViewSpaceMap => self.toggle_space_map(cx),
+            Command::SpaceMapSelection => {
+                let folder = self.selected_paths().into_iter().next();
+                if let Some(folder) = folder {
+                    self.open_space_map_on(folder, cx);
+                }
+            }
             Command::ToggleDirectoryExpand => {
                 self.directory_expanded = !self.directory_expanded;
                 self.reload(cx);

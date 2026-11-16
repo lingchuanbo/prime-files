@@ -15,7 +15,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::resizable::ResizableState;
-use nohrs_core::config::{Compact, DockSide, Explorer as ExplorerConfig, Layout, SplitDirection, Ui};
+use nohrs_core::config::{Compact, DockSide, Explorer as ExplorerConfig, Layout, SpaceMap, SplitDirection, Ui};
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::fs::trash::Ledger as TrashLedger;
 use nohrs_services::search::SearchService;
@@ -207,6 +207,9 @@ pub struct ExplorerPage {
     // Last-applied `[ui]` settings, replayed onto tabs opened later so they match
     // config rather than reverting to pane defaults.
     ui: Ui,
+    // Last-applied `[space_map]` settings, replayed the same way: how the
+    // treemap colours its tiles.
+    space_map: SpaceMap,
     // Host KV store for session persistence (§4). `None` disables save/restore
     // (e.g. when the store failed to open, or in tests).
     store: Option<Arc<dyn KvStore>>,
@@ -285,6 +288,7 @@ impl ExplorerPage {
             synced_panes: false,
             preview_visible: true,
             ui: Ui::default(),
+            space_map: SpaceMap::default(),
             store,
             save_task: None,
             focus_handle: cx.focus_handle(),
@@ -409,8 +413,10 @@ impl ExplorerPage {
         cx: &mut Context<Self>,
     ) {
         let ui = self.ui.clone();
+        let space_map = self.space_map.clone();
         tab.update(cx, |pane, cx| {
             pane.apply_config_ui(&ui, cx);
+            pane.apply_config_space_map(&space_map, cx);
             pane.sidebar_visible = sidebar_visible;
             pane.preview_visible = self.preview_visible;
             if let Some(cwd) = cwd {
@@ -705,6 +711,15 @@ impl ExplorerPage {
         self.group.set_app_name(&ui.app_name);
         for tab in self.group.all_tabs() {
             tab.update(cx, |pane, cx| pane.apply_config_ui(ui, cx));
+        }
+    }
+
+    /// Applies the `[space_map]` config section to every tab: how the treemap
+    /// colours its tiles.
+    pub fn apply_config_space_map(&mut self, style: &SpaceMap, cx: &mut Context<Self>) {
+        self.space_map = style.clone();
+        for tab in self.group.all_tabs() {
+            tab.update(cx, |pane, cx| pane.apply_config_space_map(style, cx));
         }
     }
 
@@ -1839,3 +1854,4 @@ mod tab_feature_tests {
     }
 
 }
+

@@ -209,7 +209,7 @@ fn answer(pipe: &File) -> io::Result<()> {
     }
     let mut out = BufWriter::with_capacity(1 << 20, pipe);
     if request == protocol::HELLO {
-        out.write_all(format!("PFIX1 OK {}\n", protocol::VERSION).as_bytes())?;
+        out.write_all(format!("PFIX1 OK {}\n", protocol::HELLO_VERSION).as_bytes())?;
         out.flush()?;
     } else if request == protocol::SNAPSHOT {
         match cached() {
@@ -218,7 +218,7 @@ fn answer(pipe: &File) -> io::Result<()> {
         }
     } else if request == protocol::REFRESH {
         if let Some(index) = INDEX.get() { index.refresh(); }
-        out.write_all(format!("PFIX1 OK {}\n", protocol::VERSION).as_bytes())?;
+        out.write_all(format!("PFIX1 OK {}\n", protocol::HELLO_VERSION).as_bytes())?;
         out.flush()?;
     } else if request == protocol::SEARCH {
         // The terms and the count were written after the request line.
@@ -226,6 +226,16 @@ fn answer(pipe: &File) -> io::Result<()> {
         let (terms, limit) = protocol::read_search_request(&mut &body[..])?;
         match search(&terms, limit) {
             Ok(hits) => protocol::write_hits(&mut out, &hits)?,
+            Err(error) => protocol::write_error(&mut out, &error.to_string())?,
+        }
+    } else if request == protocol::SUBTREE {
+        // The folder and how deep to look were written after the request line.
+        let body = read_subtree_body(reader)?;
+        match protocol::read_subtree_request(&mut &body[..]) {
+            Ok((path, levels)) => match subtree(&path, levels) {
+                Ok(tree) => protocol::write_subtree(&mut out, &tree)?,
+                Err(error) => protocol::write_error(&mut out, &error.to_string())?,
+            },
             Err(error) => protocol::write_error(&mut out, &error.to_string())?,
         }
     } else {
@@ -262,8 +272,40 @@ fn read_request_body(mut pipe: &File) -> io::Result<Vec<u8>> {
     Ok(body)
 }
 
+// The rest of a subtree request after its line: a counted path, then the
+// levels wanted. Read whole so the protocol reader sees exactly what the
+// app wrote.
+fn read_subtree_body(mut pipe: &File) -> io::Result<Vec<u8>> {
+    let mut head = [0u8; 2];
+    pipe.read_exact(&mut head)?;
+    let length = u16::from_le_bytes(head) as usize;
+    if length > 32_768 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "subtree path too long"));
+    }
+    let mut body = vec![0u8; 2 + length + 2];
+    body[..2].copy_from_slice(&head);
+    pipe.read_exact(&mut body[2..])?;
+    Ok(body)
+}
+
 fn cached() -> io::Result<Arc<Vec<Arc<protocol::Volume>>>> {
     INDEX.get().ok_or_else(|| io::Error::other("index worker not running"))?.snapshot()
+}
+
+/// The folder `path` and what is under it, from the copy the service keeps.
+fn subtree(path: &str, levels: u16) -> io::Result<Vec<protocol::TreeNode>> {
+    let volumes = cached()?;
+    let drive = path.split(['\\', '/']).next().unwrap_or_default().trim_end_matches(':');
+    if drive.is_empty() {
+        return Err(io::Error::other("the path names no drive"));
+    }
+    let volume = volumes
+        .iter()
+        .find(|volume| volume.root.trim_end_matches(':').eq_ignore_ascii_case(drive))
+        .ok_or_else(|| io::Error::other("the drive is not indexed"))?;
+    volume
+        .subtree(path, levels)
+        .ok_or_else(|| io::Error::other("the folder is not in the index"))
 }
 
 /// The paths holding every one of `terms`, whole, ignoring case, limited to
@@ -381,3 +423,4 @@ pub fn log(line: &str) {
         }
     }
 }
+

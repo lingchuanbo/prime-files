@@ -1319,6 +1319,81 @@ pub(crate) mod mft {
         }
     }
 
+    /// What the service has under `folder`, `levels` deep, each folder with
+    /// the size of everything below it. `None` when it cannot answer — no
+    /// service, a folder it does not hold, or a build of it that predates the
+    /// request — and the caller measures the folder itself instead.
+    pub(crate) fn subtree(folder: &str, levels: u16) -> Option<Vec<nohrs_indexer::protocol::TreeNode>> {
+        #[cfg(windows)]
+        {
+            if remembered_subtree_support() == Some(false) {
+                return None;
+            }
+            let started = Instant::now();
+            match nohrs_indexer::client::subtree(folder, levels) {
+                Ok(tree) => {
+                    tracing::debug!(
+                        folder,
+                        entries = tree.len(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "everything service subtree"
+                    );
+                    Some(tree)
+                }
+                Err(error) => {
+                    // An older service answers `unknown request` and will keep
+                    // doing so until it is reinstalled: no point asking again
+                    // this run. Anything else — a stopped service, a folder the
+                    // table has not caught up with — may well work next time.
+                    if error.to_string().contains("unknown request") {
+                        remember_subtree_support(false);
+                    }
+                    tracing::debug!("the indexer service cannot list {folder}: {error}");
+                    None
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (folder, levels);
+            None
+        }
+    }
+
+    /// Whether the running service knows the subtree request. Asked once and
+    /// remembered: it changes when the service is reinstalled, and the app is
+    /// restarted then any way. A service that does not answer yet says nothing
+    /// about itself — the request is tried, and fails into a walk if it must.
+    fn remembered_subtree_support() -> Option<bool> {
+        #[cfg(windows)]
+        {
+            static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if let Some(supported) = SUPPORTED.get() {
+                return Some(*supported);
+            }
+            match nohrs_indexer::client::hello() {
+                Ok(version) => {
+                    let supported = nohrs_indexer::protocol::supports_subtree(version);
+                    let _ = SUPPORTED.set(supported);
+                    Some(supported)
+                }
+                Err(_) => None,
+            }
+        }
+        #[cfg(not(windows))]
+        Some(false)
+    }
+
+    fn remember_subtree_support(supported: bool) {
+        #[cfg(windows)]
+        {
+            static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let _ = SUPPORTED.set(supported);
+        }
+        #[cfg(not(windows))]
+        let _ = supported;
+    }
+
     pub(super) fn snapshot(progress: &AtomicUsize) -> Vec<Arc<Segment>> {
         #[cfg(windows)]
         {

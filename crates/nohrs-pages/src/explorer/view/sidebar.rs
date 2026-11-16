@@ -56,6 +56,9 @@ pub fn render(
 
     let mut list = div().flex().flex_col().px(px(10.0)).gap(px(3.0));
     list = tag_rows(page, list, cx);
+    // The way into the space map, beside the workspaces: what the folders on
+    // screen weigh, drawn instead of listed.
+    list = list.child(space_map_row(page, cx));
     if page.show_quick_access {
         list = list.child(section_label(t!("Acesso rápido").to_string()));
         for place in &places.quick_access {
@@ -110,6 +113,59 @@ pub fn render(
 fn section_label(label: String) -> impl IntoElement {
     div().px(px(8.0)).pb(px(6.0)).text_xs().font_weight(FontWeight::MEDIUM)
         .text_color(rgb(theme::muted())).child(label)
+}
+
+// The row that opens the space map over the listing, and closes it again.
+fn space_map_row(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> Stateful<Div> {
+    let open = page.space_map_open();
+    simple_row(
+        "space-map-row",
+        Icon::new(Icon::empty())
+            .path(SharedString::from("icons/treemap.svg"))
+            .size_4()
+            .text_color(rgb(theme::accent()))
+            .into_any_element(),
+        t!("Mapa de espaço").to_string(),
+        open,
+        0,
+    )
+    .on_click(cx.listener(|this, _, _, cx| this.toggle_space_map(cx)))
+}
+
+// The same way in, as a chip of the sidebar band.
+fn space_map_chip(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> Stateful<Div> {
+    let open = page.space_map_open();
+    div()
+        .id("space-map-chip")
+        .h(px(ROW_HEIGHT))
+        .max_w(px(220.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .cursor_pointer()
+        .when(open, |this| this.bg(rgb(theme::accent_subtle())))
+        .when(!open, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_space_map(cx)))
+        .child(
+            Icon::new(Icon::empty())
+                .path(SharedString::from("icons/treemap.svg"))
+                .size_4()
+                .text_color(rgb(theme::accent())),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .text_sm()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_color(rgb(theme::fg()))
+                .child(t!("Mapa de espaço")),
+        )
 }
 
 // The sidebar as a band: Quick access, the drives and the other places, each
@@ -183,6 +239,8 @@ fn render_band(
                 .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().gap(px(4.0)).children(chips)),
         );
     }
+    // The space map's way in, as a chip of its own.
+    band = band.child(div().flex().items_center().gap(px(8.0)).child(space_map_chip(page, cx)));
     for (index, (name, members)) in groups.into_iter().enumerate() {
         if members.is_empty() {
             continue;

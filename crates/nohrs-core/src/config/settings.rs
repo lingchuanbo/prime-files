@@ -72,6 +72,8 @@ pub struct Config {
     pub launcher: Launcher,
     /// Diagnostics / performance-logging settings.
     pub diagnostics: Diagnostics,
+    /// The space map (the treemap of what a folder weighs).
+    pub space_map: SpaceMap,
 }
 
 impl Default for Config {
@@ -90,6 +92,103 @@ impl Default for Config {
             search: Search::default(),
             launcher: Launcher::default(),
             diagnostics: Diagnostics::default(),
+            space_map: SpaceMap::default(),
+        }
+    }
+}
+
+/// Space map (the treemap of what a folder weighs) settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SpaceMap {
+    /// How tiles are coloured: by how much they weigh, or by what they hold.
+    pub color: SpaceMapColor,
+    /// Thresholds in gigabytes, largest first. `[10, 5, 1]` means 10 GB and up
+    /// takes the first colour, 5–10 GB the second, 1–5 GB the third, and
+    /// anything smaller the fourth.
+    pub bands_gb: [u32; 3],
+    /// One `#rrggbb` colour per band, plus the one for what is under the
+    /// smallest threshold: four colours for three thresholds.
+    pub colors: [String; 4],
+}
+
+impl Default for SpaceMap {
+    fn default() -> Self {
+        Self {
+            color: SpaceMapColor::Size,
+            bands_gb: [10, 5, 1],
+            // Red for what is filling the drive, orange for the next two
+            // steps down, green for everything that is not the problem.
+            colors: [
+                "#ef4444".into(),
+                "#f97316".into(),
+                "#fb923c".into(),
+                "#22c55e".into(),
+            ],
+        }
+    }
+}
+
+impl SpaceMap {
+    /// The parsed colour of a band: `None` for a hand-edited value that is not
+    /// a hex colour, so a typo leaves the palette alone.
+    pub fn band_color(&self, band: usize) -> Option<u32> {
+        let color = self.colors.get(band)?;
+        if !is_hex_colour(color) {
+            return None;
+        }
+        u32::from_str_radix(color.trim_start_matches('#'), 16).ok()
+    }
+
+    /// The colour a tile of `bytes` takes, as `0xrrggbb`: the first threshold
+    /// it reaches, or the last colour when it is under all of them.
+    pub fn color_for_bytes(&self, bytes: u64) -> Option<u32> {
+        let gigabytes = bytes / (1024 * 1024 * 1024);
+        let mut band = self.colors.len().saturating_sub(1);
+        for (index, threshold) in self.bands_gb.iter().enumerate() {
+            if gigabytes >= u64::from(*threshold) {
+                band = index;
+                break;
+            }
+        }
+        self.band_color(band)
+    }
+
+    /// Whether the bands and colours can be used by the renderer: three
+    /// descending gigabytes, and four hex colours.
+    pub fn is_valid(&self) -> bool {
+        self.bands_gb.windows(2).all(|pair| pair[0] > pair[1])
+            && self.bands_gb.iter().all(|band| *band > 0)
+            && (0..self.colors.len()).all(|band| self.band_color(band).is_some())
+    }
+}
+
+/// What a space-map tile's colour says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceMapColor {
+    /// How much the tile weighs: the heat map proper.
+    #[default]
+    Size,
+    /// What the tile holds: folders, pictures, video, and the rest.
+    Kind,
+}
+
+impl SpaceMapColor {
+    /// The setting's name in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Size => "size",
+            Self::Kind => "kind",
+        }
+    }
+
+    /// Reads a `space_map.color` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "size" => Some(Self::Size),
+            "kind" => Some(Self::Kind),
+            _ => None,
         }
     }
 }
@@ -936,6 +1035,12 @@ impl Config {
                 }
             }
         }
+        if let Some(value) = table.get("space_map") {
+            match value.as_table() {
+                Some(map) => read_space_map(map, &mut config.space_map, &mut diagnostics),
+                None => diagnostics.push(Diagnostic::warn("[space_map] is not a table; ignoring")),
+            }
+        }
 
         warn_unknown_keys(
             table,
@@ -953,6 +1058,7 @@ impl Config {
                 "search",
                 "launcher",
                 "diagnostics",
+                "space_map",
             ],
             "",
             &mut diagnostics,
@@ -1051,6 +1157,16 @@ impl Config {
              log_all_queries = false   # log every SQL query at debug\n\
              slow_query_ms = 0         # warn on SQL slower than this (0 = off)\n\
              log_redb_ops = false      # log redb get/put/delete/batch timings\n\
+             \n\
+             # The space map's tiles: their colour says how much each entry\n\
+             # weighs (color = \"size\") or what it holds (\"kind\"). By size,\n\
+             # bands_gb are the thresholds, largest first: 10 GB and up takes\n\
+             # colors[0], 5–10 GB colors[1], 1–5 GB colors[2], and anything\n\
+             # smaller colors[3].\n\
+             [space_map]\n\
+             color = \"size\"   # \"size\" | \"kind\"\n\
+             bands_gb = [10, 5, 1]\n\
+             colors = [\"#ef4444\", \"#f97316\", \"#fb923c\", \"#22c55e\"]\n\
              \n\
              # Draft sections; defaults are built-in, so these stay empty until\n\
              # keybindings (P3) and plugins (P4) are wired up.\n\
@@ -1657,8 +1773,72 @@ fn read_diagnostics_store(
     );
 }
 
-/// Emit a warning for every key in `table` that is not a known key. `prefix` is
-/// prepended for nested tables (e.g. `"theme."`) so messages point at the
+/// Reads `[space_map]`: how the treemap colours its tiles, and the colours by
+/// size.
+fn read_space_map(table: &toml::Table, map: &mut SpaceMap, diagnostics: &mut Vec<Diagnostic>) {
+    if let Some(value) = table.get("color") {
+        match value.as_str().and_then(SpaceMapColor::parse) {
+            Some(color) => map.color = color,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid space_map.color {value}; using \"{}\"",
+                map.color.as_str()
+            ))),
+        }
+    }
+    if let Some(value) = table.get("bands_gb") {
+        match read_gigabyte_bands(value) {
+            Some(bands) => map.bands_gb = bands,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid space_map.bands_gb {value}; expected three descending gigabytes, like [10, 5, 1]"
+            ))),
+        }
+    }
+    if let Some(value) = table.get("colors") {
+        match read_band_colours(value) {
+            Some(colors) => map.colors = colors,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid space_map.colors {value}; expected four #rrggbb colours"
+            ))),
+        }
+    }
+    warn_unknown_keys(table, &["color", "bands_gb", "colors"], "space_map.", diagnostics);
+}
+
+// Three positive gigabytes, largest first.
+fn read_gigabyte_bands(value: &toml::Value) -> Option<[u32; 3]> {
+    let array = value.as_array()?;
+    if array.len() != 3 {
+        return None;
+    }
+    let mut bands = [0_u32; 3];
+    for (slot, value) in bands.iter_mut().zip(array) {
+        let band = u32::try_from(value.as_integer()?).ok()?;
+        if band == 0 || band > 100_000 {
+            return None;
+        }
+        *slot = band;
+    }
+    (bands[0] > bands[1] && bands[1] > bands[2]).then_some(bands)
+}
+
+// Four hex colours, one per band plus the one under the smallest threshold.
+fn read_band_colours(value: &toml::Value) -> Option<[String; 4]> {
+    let array = value.as_array()?;
+    if array.len() != 4 {
+        return None;
+    }
+    let mut colors: [String; 4] = Default::default();
+    for (slot, value) in colors.iter_mut().zip(array) {
+        let color = value.as_str()?.trim();
+        if !is_hex_colour(color) {
+            return None;
+        }
+        *slot = color.to_string();
+    }
+    Some(colors)
+}
+
+/// Emit a warning for every key in `table` that is not a known key. `prefix` is/// prepended for nested tables (e.g. `"theme."`) so messages point at the
 /// offending path.
 fn warn_unknown_keys(
     table: &toml::Table,
@@ -2089,6 +2269,48 @@ mod tests {
         let (config, diagnostics) = Config::from_toml_str(&Config::default_toml_template());
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn space_map_colours_follow_the_configured_bands() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        let map = SpaceMap::default();
+        assert_eq!(map.color_for_bytes(10 * GB), map.band_color(0));
+        assert_eq!(map.color_for_bytes(5 * GB), map.band_color(1));
+        assert_eq!(map.color_for_bytes(GB), map.band_color(2));
+        assert_eq!(map.color_for_bytes(GB - 1), map.band_color(3));
+        // The default palette is the red/orange/orange/green the settings page
+        // shows, and it is valid.
+        assert_eq!(map.colors[3], "#22c55e");
+        assert!(map.is_valid());
+
+        // A hand-edited palette is validated, not trusted: a wrong order of
+        // the thresholds keeps the defaults and says why.
+        let text = "[space_map]\ncolor = \"kind\"\nbands_gb = [1, 5, 10]\ncolors = [\"#123456\", \"nope\", \"#000000\", \"#ffffff\"]\n";
+        let (config, diagnostics) = Config::from_toml_str(text);
+        assert_eq!(config.space_map.color, SpaceMapColor::Kind);
+        assert_eq!(config.space_map.bands_gb, [10, 5, 1]);
+        assert_eq!(config.space_map.colors[1], "#f97316");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("space_map.bands_gb"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("space_map.colors"))
+        );
+
+        // A good hand-edited palette is used as it is, and the colours are
+        // picked by the thresholds read.
+        let text = "[space_map]\nbands_gb = [20, 8, 2]\ncolors = [\"#111111\", \"#222222\", \"#333333\", \"#444444\"]\n";
+        let (config, diagnostics) = Config::from_toml_str(text);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(config.space_map.bands_gb, [20, 8, 2]);
+        assert_eq!(config.space_map.color_for_bytes(30 * GB), Some(0x111111));
+        assert_eq!(config.space_map.color_for_bytes(3 * GB), Some(0x333333));
+        assert_eq!(config.space_map.color_for_bytes(GB), Some(0x444444));
     }
 
     #[test]

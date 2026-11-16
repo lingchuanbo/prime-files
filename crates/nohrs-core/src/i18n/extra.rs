@@ -5646,4 +5646,86 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
         ],
     ),
     ("Histórico", ["Historique", "Verlauf", "Cronologia", "История", "履歴", "输入历史"]),
+    (
+        "Mapa de espaço",
+        [
+            "Carte de l’espace",
+            "Speicherkarte",
+            "Mappa dello spazio",
+            "Карта пространства",
+            "スペースマップ",
+            "空间热力图",
+        ],
+    ),
+    (
+        "Analisando…",
+        [
+            "Analyse…",
+            "Wird analysiert…",
+            "Analisi…",
+            "Сканирование…",
+            "分析中…",
+            "正在分析…",
+        ],
+    ),
+    ("Fechar", ["Fermer", "Schließen", "Chiudi", "Закрыть", "閉じる", "关闭"]),
+    (
+        "Não foi possível analisar a pasta",
+        [
+            "Impossible d’analyser le dossier",
+            "Der Ordner konnte nicht analysiert werden",
+            "Impossibile analizzare la cartella",
+            "Не удалось проанализировать папку",
+            "フォルダーを分析できませんでした",
+            "无法分析该文件夹",
+        ],
+    ),
+    ("Índice", ["Index", "Index", "Indice", "Индекс", "インデックス", "索引"]),
+    (
+        "Cor dos blocos",
+        ["Couleur des blocs", "Blockfarbe", "Colore dei blocchi", "Цвет блоков", "ブロックの色", "方块颜色"],
+    ),
+    ("Por tamanho", ["Par taille", "Nach Größe", "Per dimensione", "По размеру", "サイズ順", "按大小"]),
+    ("Por tipo", ["Par type", "Nach Typ", "Per tipo", "По типу", "種類順", "按类型"]),
+    (
+        "Por tamanho pinta cada bloco pela faixa em que ele cai; por tipo pinta pelo que ele contém.",
+        [
+            "Par taille colore chaque bloc selon sa tranche ; par type, selon son contenu.",
+            "Nach Größe färbt jeden Block nach seinem Bereich; nach Typ nach seinem Inhalt.",
+            "Per dimensione colora ogni blocco in base alla fascia; per tipo in base a ciò che contiene.",
+            "По размеру красит блок по его диапазону; по типу — по содержимому.",
+            "サイズは各ブロックを範囲で塗り分け、種類は中身で塗り分けます。",
+            "按大小依据方块所在的区间上色；按类型依据内容上色。",
+        ],
+    ),
+    (
+        "Tamanho (GB), do maior para o menor",
+        [
+            "Taille (Go), du plus grand au plus petit",
+            "Größe (GB), absteigend",
+            "Dimensione (GB), dalla più grande",
+            "Размер (ГБ), по убыванию",
+            "サイズ (GB)、大きい順",
+            "大小 (GB)，从大到小",
+        ],
+    ),
+    (
+        "Cor de cada faixa",
+        ["Couleur de chaque plage", "Farbe je Bereich", "Colore di ogni fascia", "Цвет каждой полосы", "各範囲の色", "每档颜色"],
+    ),
+    (
+        "Salvar cores",
+        ["Enregistrer les couleurs", "Farben speichern", "Salva colori", "Сохранить цвета", "色を保存", "保存颜色"],
+    ),
+    (
+        "Digite três tamanhos decrescentes em GB e quatro cores #rrggbb.",
+        [
+            "Saisissez trois tailles décroissantes en Go et quatre couleurs #rrggbb.",
+            "Geben Sie drei absteigende Größen in GB und vier #rrggbb-Farben ein.",
+            "Inserisci tre dimensioni decrescenti in GB e quattro colori #rrggbb.",
+            "Введите три убывающих размера в ГБ и четыре цвета #rrggbb.",
+            "GB 単位の降順のサイズ 3 つと #rrggbb の色 4 つを入力してください。",
+            "请输入三个递减的 GB 大小和四个 #rrggbb 颜色。",
+        ],
+    ),
 ];

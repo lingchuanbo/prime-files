@@ -378,6 +378,18 @@ pub struct ExplorerPane {
     /// The workspace page being shown: its tag, the cards read for it, and
     /// the read still running. Empty until a workspace is opened.
     pub(crate) workspace: Option<WorkspaceView>,
+    /// The space map over the listing: what the folder weighs, drawn as a
+    /// treemap of its contents (`space_map`). `None` while the listing shows.
+    pub(crate) space: Option<super::space_map::SpaceMap>,
+    /// How the space map colours its tiles (`[space_map]` in the config).
+    pub(crate) space_map_style: config::SpaceMap,
+    /// The folder card the pointer is on, if any: its folder art opens up.
+    pub(crate) workspace_hover: Option<String>,
+    /// How far out each folder card's sheets are (0..=1), easing towards the
+    /// hovered card's 1 and the others' 0: the card art's animation.
+    pub(crate) workspace_glow: std::collections::HashMap<String, f32>,
+    /// The easing step still running for the card art.
+    pub(crate) workspace_glow_task: Option<gpui::Task<()>>,
     /// The mouse is on the zoom menu.
     pub(crate) zoom_menu_hovered: bool,
     /// The header's "open in another program" menu is open.
@@ -659,6 +671,11 @@ impl ExplorerPane {
             zoom_menu_open: false,
             zoom_menu_flash: None,
             workspace: None,
+            space: None,
+            space_map_style: config::SpaceMap::default(),
+            workspace_hover: None,
+            workspace_glow: std::collections::HashMap::new(),
+            workspace_glow_task: None,
             zoom_menu_hovered: false,
             open_in_menu: false,
             recent_menu: false,
@@ -1322,6 +1339,16 @@ impl ExplorerPane {
         }
         self.apply_filter();
         self.remember_folder_view(cx);
+    }
+
+    /// Applies the `[space_map]` config section: how the treemap colours its
+    /// tiles. The mosaic keeps its layout, not its palette, so the next frame
+    /// repaints with the new colours.
+    pub fn apply_config_space_map(&mut self, style: &config::SpaceMap, cx: &mut Context<Self>) {
+        if &self.space_map_style != style {
+            self.space_map_style = style.clone();
+            cx.notify();
+        }
     }
 
     /// Puts on screen the view `cwd` was left with, or the defaults for a

@@ -247,8 +247,10 @@ impl RootView {
         let explorer_cfg = config.explorer.clone();
         let compact = config.compact.clone();
         let layout = config.layout.clone();
+        let space_map = config.space_map.clone();
         self.explorer.update(cx, |page, cx| {
             page.apply_config_ui(&ui, cx);
+            page.apply_config_space_map(&space_map, cx);
             page.apply_config_explorer(&explorer_cfg, cx);
             page.apply_config_compact(&compact, cx);
             page.apply_config_layout(&layout, cx);

@@ -28,6 +28,8 @@ mod navigation_icons;
 
 /// The page a workspace (a tag, renamed) opens to: its folders as cards.
 pub mod workspace;
+/// The space map over the listing: what the folder weighs, as a treemap.
+pub mod space_map;
 /// The filter and subfolder-search field under the listing.
 pub mod quick_bar;
 /// Shared search field: in the header, or the compact footer.
@@ -47,6 +49,10 @@ pub fn render(
     page.tick_zoom(window, cx);
     page.tick_scroll(window, cx);
     page.tick_marquee(window, cx);
+    // The space map follows the pane: opened on one folder, it measures the
+    // next one as soon as the pane goes there, or comes down when the pane
+    // goes somewhere that cannot be measured.
+    page.tick_space_map(cx);
     // The played part of a sound under the mouse moves while it plays.
     if page.hover_audio.is_some() && super::hover_audio::playing() {
         window.request_animation_frame();
@@ -93,6 +99,12 @@ pub fn render(
             // Escape closes an open menu before anything else hears it.
             if key_lc == "escape" && this.context_menu.is_some() {
                 this.close_menu(cx);
+                cx.stop_propagation();
+                return;
+            }
+            // Escape takes the space map down, back to the listing.
+            if key_lc == "escape" && this.space_map_open() {
+                this.close_space_map(cx);
                 cx.stop_propagation();
                 return;
             }
@@ -485,9 +497,11 @@ fn render_body(
     };
     // A workspace opens as a page of folder cards, not as a listing of the
     // same paths: what it holds is the folders, and what a listing would show
-    // is what is inside each of them, row after row.
+    // is what is inside each of them, row after row. The space map takes the
+    // listing's place while it is up.
     let listing = match super::tags::tag_of_location(&page.cwd) {
         Some(tag) => page.workspace_page(tag, cx),
+        None if page.space_map_open() => space_map::render(page, window, cx),
         None => listing::render(page, window, cx),
     };
     // While Space's quick look shows the preview over everything, the side

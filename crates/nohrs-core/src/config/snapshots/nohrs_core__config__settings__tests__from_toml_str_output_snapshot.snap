@@ -89,6 +89,20 @@ expression: parsed
                 log_redb_ops: false,
             },
         },
+        space_map: SpaceMap {
+            color: Size,
+            bands_gb: [
+                10,
+                5,
+                1,
+            ],
+            colors: [
+                "#ef4444",
+                "#f97316",
+                "#fb923c",
+                "#22c55e",
+            ],
+        },
     },
     [
         Diagnostic {
