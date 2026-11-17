@@ -74,6 +74,11 @@
     "Diagnostics": {
       "description": "Diagnostics / performance-logging settings (see `docs/persistence.md` §5).",
       "properties": {
+        "runtime_log": {
+          "default": false,
+          "description": "Write GUI runtime logs to files; disabled by default, requires restart.",
+          "type": "boolean"
+        },
         "store": {
           "$ref": "#/$defs/DiagnosticsStore",
           "default": {
@@ -643,6 +648,7 @@
     "diagnostics": {
       "$ref": "#/$defs/Diagnostics",
       "default": {
+        "runtime_log": false,
         "store": {
           "log_all_queries": false,
           "log_redb_ops": false,

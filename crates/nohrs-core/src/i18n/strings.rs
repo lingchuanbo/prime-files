@@ -4,6 +4,17 @@
 //! has a row here. Sorted by key to keep duplicates easy to spot.
 
 pub(super) static STRINGS: &[(&str, &str, &str)] = &[
+    (
+        "Não foi possível copiar arquivos para a área de transferência: {error}",
+        "Could not copy files to the clipboard: {error}",
+        "No se pudieron copiar los archivos al portapapeles: {error}",
+    ),
+    ("Logs de execução", "Runtime logs", "Registros de ejecución"),
+    (
+        "Desativado por padrão. Reinicie para aplicar. Salva logs ao lado do aplicativo; podem conter caminhos de arquivos. Desativar não apaga logs existentes.",
+        "Off by default. Restart to apply. Saves logs beside the application; they may contain file paths. Turning off does not delete existing logs.",
+        "Desactivado de forma predeterminada. Reinicie para aplicar. Guarda registros junto a la aplicación; pueden contener rutas de archivos. Desactivar no elimina registros existentes.",
+    ),
     ("Alterar ícone", "Change icon", "Cambiar icono"),
     ("Marcador", "Bookmark", "Marcador"),
     ("Maleta", "Briefcase", "Maletín"),

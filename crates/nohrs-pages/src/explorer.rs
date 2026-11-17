@@ -11,6 +11,9 @@ pub(crate) mod everything;
 pub(crate) mod favorites;
 pub(crate) mod folder_watch;
 pub(crate) mod file_ops;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod file_clipboard;
 mod filter;
 mod folder_views;
 mod grouping;

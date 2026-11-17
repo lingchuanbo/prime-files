@@ -22,7 +22,7 @@ use crate::explorer::ExplorerPane;
 use crate::explorer::filter::KindFilter;
 use crate::explorer::places::THIS_PC;
 use crate::explorer::preview_listing::human_size;
-use crate::explorer::space_map::SpaceSource;
+use crate::explorer::space_map::{SpaceMapMode, SpaceSource};
 
 /// Height of the row above the mosaic.
 const BAR_HEIGHT: f32 = 36.0;
@@ -107,6 +107,11 @@ fn bar(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> AnyElement {
     // folder: worth saying, since its sizes are what the volume allocates.
     let indexed = page.space.as_ref().and_then(|map| map.source) == Some(SpaceSource::Index);
     let style = page.space_map_style.clone();
+    let mode = page
+        .space
+        .as_ref()
+        .map_or(SpaceMapMode::Size, |map| map.mode);
+    let include_hidden = page.space.as_ref().is_some_and(|map| map.include_hidden);
     let can_go_up = !focus.is_empty();
     let drives = page
         .space
@@ -250,11 +255,95 @@ fn bar(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> AnyElement {
         .child(up)
         .child(crumbs)
         .child(div().flex_1().min_w(px(0.0)))
-        .when(style.color == SpaceMapColor::Size, |this| {
-            this.child(size_legend(&style))
-        })
+        .child(map_controls(mode, include_hidden, cx))
+        .when(
+            mode == SpaceMapMode::Size && style.color == SpaceMapColor::Size,
+            |this| this.child(size_legend(&style)),
+        )
         .child(right)
         .into_any_element()
+}
+
+fn map_controls(
+    mode: SpaceMapMode,
+    include_hidden: bool,
+    cx: &mut Context<ExplorerPane>,
+) -> impl IntoElement {
+    let modes = [
+        (SpaceMapMode::Size, "Size", "space-mode-size"),
+        (SpaceMapMode::Files, "Files", "space-mode-files"),
+        (SpaceMapMode::Age, "Age", "space-mode-age"),
+        (SpaceMapMode::Kind, "Type", "space-mode-type"),
+    ];
+    let mut controls = div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .p(px(2.0))
+        .rounded(px(6.0))
+        .bg(rgb(theme::bg_secondary()));
+    for (choice, label, id) in modes {
+        let active = mode == choice;
+        controls = controls.child(
+            div()
+                .id(id)
+                .px(px(8.0))
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .rounded(px(4.0))
+                .text_xs()
+                .font_weight(if active {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(rgb(if active {
+                    theme::fg()
+                } else {
+                    theme::fg_secondary()
+                }))
+                .when(active, |this| this.bg(rgb(theme::bg())))
+                .when(!active, |this| {
+                    this.cursor_pointer()
+                        .hover(|style| style.bg(rgb(theme::bg_hover())))
+                })
+                .child(label)
+                .when(!active, |this| {
+                    this.on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(map) = this.space.as_mut() {
+                            map.mode = choice;
+                        }
+                        cx.notify();
+                    }))
+                }),
+        );
+    }
+    controls.child(
+        div()
+            .id("space-hidden-toggle")
+            .ml(px(4.0))
+            .px(px(7.0))
+            .h(px(24.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .rounded(px(4.0))
+            .text_xs()
+            .text_color(rgb(theme::fg_secondary()))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme::bg_hover())))
+            .child(if include_hidden { "☑" } else { "□" })
+            .child("Hidden files")
+            .on_click(cx.listener(|this, _, _, cx| {
+                if let Some(map) = this.space.as_mut() {
+                    map.include_hidden = !map.include_hidden;
+                    map.layout = None;
+                    map.hover = None;
+                }
+                cx.notify();
+            })),
+    )
 }
 
 /// What the colours mean: one swatch per size band, as the configured palette
@@ -309,8 +398,7 @@ fn bar_icon(id: &'static str, icon: Icon, enabled: bool) -> Stateful<Div> {
         .child(icon.size_4())
 }
 
-/// What the bar says on the right: the tile under the pointer, else the
-/// selected tile, else what the mosaic is made of.
+/// What the bar says on the right: the focused folder's stable total.
 fn status_text(page: &ExplorerPane) -> String {
     let Some(map) = page.space.as_ref() else {
         return String::new();
@@ -337,48 +425,57 @@ fn status_text(page: &ExplorerPane) -> String {
     let Some(focus_node) = tree.node_at(&map.focus) else {
         return String::new();
     };
-    let hovered = map
-        .layout
-        .as_ref()
-        .zip(map.hover)
-        .and_then(|(layout, index)| layout.tiles.get(index))
-        .and_then(|tile| focus_node.node_at(&tile.crumbs));
-    let selected = map
-        .selection
-        .as_deref()
-        .and_then(|crumbs| tree.node_at(crumbs));
-    if let Some(node) = hovered.or(selected) {
-        let share = if focus_node.bytes == 0 {
-            0.0
-        } else {
-            node.bytes as f64 / focus_node.bytes as f64 * 100.0
-        };
-        let name = if node.name.is_empty() {
-            i18n::plural(node.count as usize, k!("{n} item"), k!("{n} itens"))
-        } else {
-            node.name.clone()
-        };
-        let path = if node.path.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", node.path)
-        };
-        return format!("{name} · {} · {share:.1}%{path}", human_size(node.bytes));
-    }
-    if focus_node.bytes == 0 {
+    let include_hidden = map.include_hidden;
+    let focus_bytes = visible_bytes(focus_node, include_hidden);
+    if focus_bytes == 0 {
         return t!("Pasta vazia").to_string();
     }
-    let total = tree.bytes;
+    let total = visible_bytes(tree, include_hidden);
     let share = if total == 0 {
         100.0
     } else {
-        focus_node.bytes as f64 / total as f64 * 100.0
+        focus_bytes as f64 / total as f64 * 100.0
     };
     if map.focus.is_empty() {
-        human_size(focus_node.bytes)
+        human_size(focus_bytes)
     } else {
-        format!("{} · {share:.1}%", human_size(focus_node.bytes))
+        format!("{} · {share:.1}%", human_size(focus_bytes))
     }
+}
+
+/// The hovered tile's additional details, shown at the pointer rather than in
+/// the fixed toolbar so hovering never changes the bar's width.
+fn hover_text(page: &ExplorerPane) -> Option<String> {
+    let map = page.space.as_ref()?;
+    let tree = map.tree.as_deref()?;
+    let focus_node = tree.node_at(&map.focus)?;
+    let tile = map.layout.as_ref()?.tiles.get(map.hover?)?;
+    let node = focus_node.node_at(&tile.crumbs)?;
+    let include_hidden = map.include_hidden;
+    let node_bytes = visible_bytes(node, include_hidden);
+    let focus_bytes = visible_bytes(focus_node, include_hidden);
+    let share = if focus_bytes == 0 {
+        0.0
+    } else {
+        node_bytes as f64 / focus_bytes as f64 * 100.0
+    };
+    let name = if node.name.is_empty() {
+        i18n::plural(node.count as usize, k!("{n} item"), k!("{n} itens"))
+    } else {
+        node.name.clone()
+    };
+    let path = if node.path.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", node.path)
+    };
+    let detail = tile_detail(node, map.mode, include_hidden);
+    let description = if map.mode == SpaceMapMode::Size {
+        detail
+    } else {
+        format!("{detail} · {}", human_size(node_bytes))
+    };
+    Some(format!("{name} · {description} · {share:.1}%{path}"))
 }
 
 /// The message a map that could not measure its folder shows instead of a
@@ -453,7 +550,8 @@ fn mosaic(
     window: &mut Window,
     cx: &mut Context<ExplorerPane>,
 ) -> AnyElement {
-    let (viewport, tree, focus, hovered, selection) = {
+    let tooltip_text = hover_text(page);
+    let (viewport, tree, focus, hovered, selection, mode, include_hidden) = {
         let Some(map) = page.space.as_ref() else {
             return div().into_any_element();
         };
@@ -463,6 +561,8 @@ fn mosaic(
             map.focus.clone(),
             map.hover,
             map.selection.clone(),
+            map.mode,
+            map.include_hidden,
         )
     };
     let measured = viewport.get();
@@ -491,6 +591,7 @@ fn mosaic(
     let move_viewport = Rc::clone(&viewport);
     let press_viewport = Rc::clone(&viewport);
     let menu_viewport = Rc::clone(&viewport);
+    let scroll_viewport = Rc::clone(&viewport);
     let paint_tiles_rc = Rc::clone(&tiles);
     let paint_selection = selected;
     let paint_tree = tree.clone();
@@ -503,6 +604,9 @@ fn mosaic(
         .min_h(px(0.0))
         .min_w(px(0.0))
         .overflow_hidden()
+        .when_some(tooltip_text, |this, text| {
+            this.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+        })
         .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
             let Some(map) = this.space.as_mut() else {
                 return;
@@ -528,6 +632,36 @@ fn mosaic(
                 if map.hover != hit {
                     map.hover = hit;
                     cx.notify();
+                }
+            }),
+        )
+        .on_scroll_wheel(
+            cx.listener(move |this, event: &ScrollWheelEvent, _window, cx| {
+                let direction = match event.delta {
+                    ScrollDelta::Lines(lines) => lines.y.signum(),
+                    ScrollDelta::Pixels(pixels) => f32::from(pixels.y).signum(),
+                };
+                if direction > 0.0 {
+                    let bounds = scroll_viewport.get();
+                    let target = this.space.as_ref().and_then(|map| {
+                        let x = f32::from(event.position.x - bounds.origin.x);
+                        let y = f32::from(event.position.y - bounds.origin.y);
+                        map.layout.as_ref()?.tiles.iter().rev().find_map(|tile| {
+                            if !tile.rect.contains(x, y) {
+                                return None;
+                            }
+                            let node = map.tree.as_deref()?.node_at(&tile.crumbs)?;
+                            (node.is_dir && !node.children.is_empty()).then(|| tile.crumbs.clone())
+                        })
+                    });
+                    if let Some(target) = target {
+                        this.space_zoom_to(target, cx);
+                    }
+                } else if direction < 0.0 {
+                    this.space_zoom_out(cx);
+                }
+                if direction != 0.0 {
+                    cx.stop_propagation();
                 }
             }),
         )
@@ -602,6 +736,8 @@ fn mosaic(
                         bounds,
                         paint_selection,
                         hovered,
+                        mode,
+                        include_hidden,
                         dark,
                         window,
                     );
@@ -613,6 +749,8 @@ fn mosaic(
                         &font,
                         name_size,
                         size_size,
+                        mode,
+                        include_hidden,
                         window,
                         cx,
                     );
@@ -685,18 +823,96 @@ impl Kind {
 /// The fill of a tile: by how much it weighs (the configured bands), or by
 /// what it holds. Each level of nesting steps a little away from the surface
 /// so the mosaic reads as layers rather than as a flat stain.
-fn tile_fill(style: &SpaceMap, node: &SpaceNode, depth: u32, dark: bool, header: bool) -> Hsla {
-    let fill = match style.color {
-        SpaceMapColor::Kind => kind_fill(Kind::of(node), depth, dark, header),
-        SpaceMapColor::Size => {
+fn tile_fill(
+    style: &SpaceMap,
+    node: &SpaceNode,
+    mode: SpaceMapMode,
+    include_hidden: bool,
+    depth: u32,
+    dark: bool,
+    header: bool,
+) -> Hsla {
+    let step = depth.min(DEPTHS as u32 - 1) as f32;
+    let value = match mode {
+        SpaceMapMode::Kind => kind_fill(Kind::of(node), depth, dark, header),
+        SpaceMapMode::Size => {
+            let bytes = visible_bytes(node, include_hidden);
             let base: Hsla = style
-                .color_for_bytes(node.bytes)
+                .color_for_bytes(bytes)
                 .map_or_else(|| rgb(theme::muted()), rgb)
                 .into();
             hsla(base.h, base.s, shade(base.l, depth, dark, header), 1.0)
         }
+        SpaceMapMode::Files => {
+            let files = visible_files(node, include_hidden).max(1) as f32;
+            let bucket = (files.log10() / 6.0).clamp(0.0, 1.0);
+            let hue = 0.58 - bucket * 0.25;
+            let lightness = if dark {
+                0.34 + step * 0.035
+            } else {
+                0.76 - step * 0.025
+            };
+            hsla(hue, 0.42, lightness, 1.0)
+        }
+        SpaceMapMode::Age => {
+            let age = age_days(node.modified);
+            let (hue, saturation) = match age {
+                0..=7 => (0.36, 0.50),
+                8..=30 => (0.27, 0.46),
+                31..=182 => (0.14, 0.46),
+                183..=365 => (0.07, 0.42),
+                _ => (0.0, 0.18),
+            };
+            let lightness = if dark {
+                0.34 + step * 0.035
+            } else {
+                0.76 - step * 0.025
+            };
+            hsla(hue, saturation, lightness, 1.0)
+        }
     };
-    calm_fill(fill, dark)
+    calm_fill(value, dark)
+}
+
+fn visible_bytes(node: &SpaceNode, include_hidden: bool) -> u64 {
+    if include_hidden {
+        node.bytes
+    } else {
+        node.bytes.saturating_sub(node.hidden_bytes)
+    }
+}
+
+fn visible_files(node: &SpaceNode, include_hidden: bool) -> u64 {
+    if include_hidden {
+        node.files
+    } else {
+        node.files.saturating_sub(node.hidden_files)
+    }
+}
+
+fn age_days(modified: u64) -> u64 {
+    if modified == 0 {
+        return u64::MAX;
+    }
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |now| {
+            now.as_secs().saturating_sub(modified) / 86_400
+        })
+}
+
+fn tile_detail(node: &SpaceNode, mode: SpaceMapMode, include_hidden: bool) -> String {
+    match mode {
+        SpaceMapMode::Files => format!("{} files", visible_files(node, include_hidden)),
+        SpaceMapMode::Age => match age_days(node.modified) {
+            0 => "Today".to_string(),
+            1 => "1 day ago".to_string(),
+            days if days < 365 => format!("{days} days ago"),
+            days if days < u64::MAX => format!("{} years ago", days / 365),
+            _ => "Unknown".to_string(),
+        },
+        _ => human_size(visible_bytes(node, include_hidden)),
+    }
 }
 
 fn calm_fill(fill: Hsla, dark: bool) -> Hsla {
@@ -763,6 +979,8 @@ fn paint_mosaic(
     bounds: Bounds<Pixels>,
     selected: Option<usize>,
     hovered: Option<usize>,
+    mode: SpaceMapMode,
+    include_hidden: bool,
     dark: bool,
     window: &mut Window,
 ) {
@@ -792,7 +1010,7 @@ fn paint_mosaic(
         let base = if tile.header.is_some() {
             rgb(theme::bg_secondary()).into()
         } else {
-            tile_fill(style, node, tile.depth, dark, false)
+            tile_fill(style, node, mode, include_hidden, tile.depth, dark, false)
         };
         window.paint_quad(fill(quad_bounds, base));
         if let Some(header) = tile.header {
@@ -803,7 +1021,10 @@ fn paint_mosaic(
                 ),
                 scale,
             );
-            window.paint_quad(fill(band, tile_fill(style, node, tile.depth, dark, true)));
+            window.paint_quad(fill(
+                band,
+                tile_fill(style, node, mode, include_hidden, tile.depth, dark, true),
+            ));
         }
         if selected == Some(index) {
             selected_ring = Some(quad_bounds);
@@ -863,6 +1084,8 @@ fn paint_labels(
     font: &Font,
     name_size: Pixels,
     size_size: Pixels,
+    view_mode: SpaceMapMode,
+    include_hidden: bool,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -888,6 +1111,8 @@ fn paint_labels(
         let (name_color, size_color) = text_on(tile_fill(
             style,
             node,
+            view_mode,
+            include_hidden,
             tile.depth,
             dark,
             tile.header.is_some(),
@@ -898,7 +1123,7 @@ fn paint_labels(
             node.name.clone()
         };
         let size_line = (mode == LabelMode::NameAndSize).then(|| {
-            let size_text = human_size(node.bytes);
+            let size_text = tile_detail(node, view_mode, include_hidden);
             let size_run = TextRun {
                 len: size_text.len(),
                 font: font.clone(),

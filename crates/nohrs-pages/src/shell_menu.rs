@@ -464,11 +464,33 @@ mod platform {
     }
 
     pub fn prepare(request: &Request) -> Option<(Vec<MenuItem>, ShellSession)> {
+        timed_menu_stage("prepare_total", || prepare_inner(request))
+    }
+
+    fn timed_menu_stage<T>(stage: &'static str, operation: impl FnOnce() -> T) -> T {
+        let started = std::time::Instant::now();
+        tracing::info!(stage, "context_menu stage begin");
+        let result = operation();
+        tracing::info!(
+            stage,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "context_menu stage end"
+        );
+        result
+    }
+
+    fn prepare_inner(request: &Request) -> Option<(Vec<MenuItem>, ShellSession)> {
+        let (target_kind, item_count) = match request.target {
+            Target::Items(paths) => ("items", paths.len()),
+            Target::Background(_) => ("background", 0),
+            Target::None => ("none", 0),
+        };
+        tracing::info!(target_kind, item_count, extended = request.extended, "context_menu request");
         if let Err(error) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
             tracing::debug!("CoInitializeEx: {error}");
         }
         let hwnd = HWND(request.hwnd as *mut _);
-        let shell = match shell_menu(hwnd, request.target) {
+        let shell = match timed_menu_stage("get_shell_menu", || shell_menu(hwnd, request.target)) {
             Ok(shell) => shell,
             Err(error) => {
                 tracing::warn!("no Shell menu for this selection: {error}");
@@ -481,15 +503,16 @@ mod platform {
         if request.extended {
             flags |= CMF_EXTENDEDVERBS;
         }
-        if let Err(error) =
+        if let Err(error) = timed_menu_stage("query_context_menu", || {
             unsafe { shell.QueryContextMenu(popup, 0, FIRST_SHELL_ID, LAST_SHELL_ID, flags) }.ok()
+        })
         {
             tracing::warn!("QueryContextMenu: {error}");
             return None;
         }
-        remove_verbs(popup, &shell, request.hide);
+        timed_menu_stage("remove_verbs", || remove_verbs(popup, &shell, request.hide));
         let filler = shell.cast::<IContextMenu3>().ok();
-        let items = read_menu(popup, filler.as_ref(), 0);
+        let items = timed_menu_stage("read_menu_tree", || read_menu(popup, filler.as_ref(), 0));
         Some((
             items,
             ShellSession {
@@ -575,8 +598,10 @@ mod platform {
                 if let Some(filler) = filler {
                     let wparam = WPARAM(full.hSubMenu.0 as usize);
                     let lparam = LPARAM(position as isize);
-                    if let Err(error) =
+                    tracing::info!(depth, position, menu_label = %label, "context_menu submenu");
+                    if let Err(error) = timed_menu_stage("init_submenu", || {
                         unsafe { filler.HandleMenuMsg2(WM_INITMENUPOPUP, wparam, lparam, None) }
+                    })
                     {
                         tracing::debug!("filling a submenu: {error}");
                     }
@@ -589,7 +614,7 @@ mod platform {
                 id: full.wID,
                 label,
                 shortcut,
-                icon: menu_bitmap(full.hbmpItem),
+                icon: timed_menu_stage("read_menu_bitmap", || menu_bitmap(full.hbmpItem)),
                 enabled: !full.fState.contains(MFS_DISABLED),
                 checked: full.fState.contains(MFS_CHECKED),
                 radio: full.fType.contains(MFT_RADIOCHECK),
@@ -657,7 +682,9 @@ mod platform {
         fn parse(path: &str) -> windows::core::Result<Self> {
             let wide = wide(path);
             let mut pidl = std::ptr::null_mut();
-            unsafe { SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None) }?;
+            timed_menu_stage("parse_shell_path", || unsafe {
+                SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None)
+            })?;
             Ok(Self(pidl))
         }
     }
@@ -681,19 +708,24 @@ mod platform {
                     .map(|path| Pidl::parse(path))
                     .collect::<windows::core::Result<Vec<_>>>()?;
                 let first = pidls.first().ok_or_else(windows::core::Error::empty)?;
-                let parent: IShellFolder = unsafe { SHBindToParent(first.0, None) }?;
+                let parent: IShellFolder =
+                    timed_menu_stage("bind_parent", || unsafe { SHBindToParent(first.0, None) })?;
                 let children: Vec<*const ITEMIDLIST> = pidls
                     .iter()
                     .map(|pidl| unsafe { ILFindLastID(pidl.0) } as *const ITEMIDLIST)
                     .collect();
-                unsafe { parent.GetUIObjectOf(hwnd, &children, None) }
+                timed_menu_stage("get_ui_object", || unsafe {
+                    parent.GetUIObjectOf(hwnd, &children, None)
+                })
             }
             Target::None => Err(windows::core::Error::empty()),
             Target::Background(folder) => {
                 let pidl = Pidl::parse(folder)?;
-                let desktop = unsafe { SHGetDesktopFolder() }?;
-                let shell_folder: IShellFolder = unsafe { desktop.BindToObject(pidl.0, None) }?;
-                unsafe { shell_folder.CreateViewObject(hwnd) }
+                let desktop = timed_menu_stage("get_desktop_folder", || unsafe { SHGetDesktopFolder() })?;
+                let shell_folder: IShellFolder = timed_menu_stage("bind_folder", || unsafe {
+                    desktop.BindToObject(pidl.0, None)
+                })?;
+                timed_menu_stage("create_view_object", || unsafe { shell_folder.CreateViewObject(hwnd) })
             }
         }
     }

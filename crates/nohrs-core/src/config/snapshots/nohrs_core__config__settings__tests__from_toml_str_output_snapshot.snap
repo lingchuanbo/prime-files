@@ -83,6 +83,7 @@ expression: parsed
             position_remember: true,
         },
         diagnostics: Diagnostics {
+            runtime_log: false,
             store: DiagnosticsStore {
                 log_all_queries: false,
                 slow_query_ms: 0,

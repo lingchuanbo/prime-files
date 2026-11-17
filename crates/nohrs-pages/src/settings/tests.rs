@@ -1,12 +1,34 @@
 use super::*;
 use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext, point};
 
+#[gpui::test]
+fn runtime_log_setting_is_off_by_default_and_resets_to_off(cx: &mut TestAppContext) {
+    let page = cx.new(SettingsPage::new);
+    page.update(cx, |page, cx| {
+        assert!(!page.config.diagnostics.runtime_log);
+        let groups = page.about(cx);
+        let row = groups.iter().flat_map(|group| &group.rows)
+            .find(|row| row.label == t!("Logs de execução")).expect("runtime log setting");
+        assert!(row.hint.is_some());
+        assert!(row.reset.is_none());
+        page.config.diagnostics.runtime_log = true;
+        let groups = page.about(cx);
+        let row = groups.iter().flat_map(|group| &group.rows)
+            .find(|row| row.label == t!("Logs de execução")).expect("runtime log setting");
+        assert!(matches!(&row.reset,
+            Some(Pick::Config("diagnostics", "runtime_log", value)) if value.as_ref() == "false"
+        ));
+    });
+}
+
 struct WheelPreview(Entity<SettingsPage>);
 
 impl Render for WheelPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let control = self.0.update(cx, |page, cx| {
-            page.wheel_row(cx).expect("open wheel").control
+            page.wheel_row(WheelTarget::Background, cx)
+                .expect("open wheel")
+                .control
         });
         div()
             .id("wheel-scroll")
@@ -24,6 +46,7 @@ fn wheel_preview(cx: &mut TestAppContext) -> (Entity<SettingsPage>, &mut VisualT
             page.wheel = Some(Wheel {
                 hsv: Hsv::from_rgb(0xFF0000),
                 dragging: None,
+                target: WheelTarget::Background,
             });
             page
         });

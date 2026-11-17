@@ -5,6 +5,32 @@
 
 pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
     (
+        "Não foi possível copiar arquivos para a área de transferência: {error}",
+        [
+            "Impossible de copier les fichiers dans le presse-papiers : {error}",
+            "Dateien konnten nicht in die Zwischenablage kopiert werden: {error}",
+            "Impossibile copiare i file negli appunti: {error}",
+            "Не удалось скопировать файлы в буфер обмена: {error}",
+            "ファイルをクリップボードにコピーできませんでした: {error}",
+            "无法将文件复制到系统剪贴板：{error}",
+        ],
+    ),
+    (
+        "Logs de execução",
+        ["Journaux d’exécution", "Laufzeitprotokolle", "Log di esecuzione", "Журналы работы", "実行ログ", "运行日志"],
+    ),
+    (
+        "Desativado por padrão. Reinicie para aplicar. Salva logs ao lado do aplicativo; podem conter caminhos de arquivos. Desativar não apaga logs existentes.",
+        [
+            "Désactivé par défaut. Redémarrez pour appliquer. Les journaux sont enregistrés à côté de l’application et peuvent contenir des chemins de fichiers. La désactivation ne supprime pas les journaux existants.",
+            "Standardmäßig deaktiviert. Neustart erforderlich. Protokolle werden neben der Anwendung gespeichert und können Dateipfade enthalten. Das Deaktivieren löscht keine vorhandenen Protokolle.",
+            "Disattivato per impostazione predefinita. Riavvia per applicare. I log vengono salvati accanto all’applicazione e possono contenere percorsi di file. La disattivazione non elimina i log esistenti.",
+            "По умолчанию выключено. Перезапустите для применения. Журналы сохраняются рядом с приложением и могут содержать пути к файлам. Отключение не удаляет существующие журналы.",
+            "既定ではオフです。反映には再起動が必要です。ログはアプリと同じフォルダーに保存され、ファイルパスを含む場合があります。オフにしても既存のログは削除されません。",
+            "默认关闭，重启软件后生效。日志保存在软件同级目录，可能包含文件路径；关闭不会删除已有日志。",
+        ],
+    ),
+    (
         "Alterar ícone",
         [
             "Changer l’icône",

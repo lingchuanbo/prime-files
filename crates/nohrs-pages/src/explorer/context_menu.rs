@@ -69,10 +69,11 @@ enum Command {
     SpaceMapSelection,
     SpaceOpenLocation,
     SpaceDelete,
+    OpenSelection,
 }
 
 impl Command {
-    const ALL: [Command; 51] = [
+    const ALL: [Command; 52] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
@@ -124,6 +125,7 @@ impl Command {
         Command::SpaceMapSelection,
         Command::SpaceOpenLocation,
         Command::SpaceDelete,
+        Command::OpenSelection,
     ];
 
     fn from_id(id: u32) -> Option<Self> {
@@ -289,7 +291,38 @@ const FAVORITE_IDS: u32 = 0x100;
 const FIRST_SUBMENU_TARGET: u32 = 0xE00;
 const SUBMENU_TARGETS: u32 = 0x100;
 
-const SHELL_HIDDEN_FOR_ITEMS: &[&str] = &["paste", "cut", "copy", "rename", "delete"];
+fn listing_menu(purpose: MenuPurpose, own: &[Entry], position: Point<Pixels>) -> OpenMenu {
+    let prepared = shell_menu::prepare(&Request {
+        hwnd: 0,
+        target: &Target::None,
+        own,
+        own_first: true,
+        extended: false,
+        dark: true,
+        intercept: &[],
+        hide: &[],
+    });
+    let quick = match &purpose {
+        MenuPurpose::Listing {
+            target: Target::Items(_),
+            ..
+        } => quick_actions(),
+        _ => Vec::new(),
+    };
+    tracing::info!(
+        item_count = prepared.items.len(),
+        shell_deferred = true,
+        "context_menu ready"
+    );
+    OpenMenu {
+        items: prepared.items,
+        quick,
+        position,
+        open_path: Vec::new(),
+        session: None,
+        purpose,
+    }
+}
 
 impl ExplorerPane {
     /// Opens the right-click menu: for the row `row` (selecting it first if
@@ -301,15 +334,13 @@ impl ExplorerPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        tracing::info!(on_item = row.is_some(), extended, "context_menu right_click received");
         if let Some(row) = row
             && !self.is_selected(row)
         {
             self.select_single(row);
             cx.notify();
         }
-        let Some(hwnd) = crate::ipc::window_hwnd(window) else {
-            return;
-        };
         let paths = if row.is_some() {
             self.selected_paths()
         } else {
@@ -331,8 +362,14 @@ impl ExplorerPane {
             one_folder,
             extended,
         };
+        let started = std::time::Instant::now();
+        tracing::info!("context_menu own_entries begin");
         let own = self.listing_entries(&purpose, cx);
-        self.show_menu(purpose, own, hwnd, window, cx);
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "context_menu own_entries end"
+        );
+        self.show_menu(purpose, own, 0, window, cx);
     }
 
     pub(crate) fn open_space_tile_menu(
@@ -423,6 +460,9 @@ impl ExplorerPane {
                         .with_icon("icons/plus.svg"),
                 );
                 let mut entries = vec![
+                    Entry::command(Command::OpenSelection as u32, t!("Abrir"))
+                        .with_icon("icons/folder-open.svg")
+                        .with_shortcut("Enter"),
                     Entry::command(Command::BatchRename as u32, "批量重命名…")
                         .with_icon("icons/pencil.svg")
                         .with_shortcut("Ctrl+M"),
@@ -456,44 +496,27 @@ impl ExplorerPane {
         cx: &mut Context<Self>,
     ) {
         let position = window.mouse_position();
+        if matches!(&purpose, MenuPurpose::Listing { .. }) {
+            self.context_menu = Some(listing_menu(purpose, &own, position));
+            cx.notify();
+            return;
+        }
+        tracing::info!("context_menu preparation scheduled");
         cx.spawn_in(
             window,
             async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
-                let (target, own_first, extended, intercept, hide, quick) = match &purpose {
-                    MenuPurpose::Listing {
-                        target,
-                        one_folder,
-                        extended,
-                    } => {
-                        let files = matches!(target, Target::Items(_));
-                        (
-                            target.clone(),
-                            !files,
-                            *extended,
-                            intercepted(*one_folder).to_vec(),
-                            // Paste is Nohrs's own; on files the four in the
-                            // row above replace the Shell's.
-                            if files {
-                                SHELL_HIDDEN_FOR_ITEMS
-                            } else {
-                                &["paste"][..]
-                            },
-                            files,
-                        )
-                    }
+                let (target, own_first, intercept) = match &purpose {
                     MenuPurpose::Place(place) => (
                         Target::Items(vec![place.parsing_name.clone()]),
-                        false,
                         false,
                         if place.path.is_some() {
                             vec!["open", "explore"]
                         } else {
                             Vec::new()
                         },
-                        &[][..],
-                        false,
                     ),
-                    MenuPurpose::Columns(_)
+                    MenuPurpose::Listing { .. }
+                    | MenuPurpose::Columns(_)
                     | MenuPurpose::Filter
                     | MenuPurpose::Tag(_)
                     | MenuPurpose::NetworkPlace(_)
@@ -502,7 +525,7 @@ impl ExplorerPane {
                     | MenuPurpose::FavoritesMenu
                     | MenuPurpose::WorkspaceCard { .. }
                     | MenuPurpose::SpaceTile(_) => {
-                        (Target::None, true, false, Vec::new(), &[][..], false)
+                        (Target::None, true, Vec::new())
                     }
                 };
                 let prepared = shell_menu::prepare(&Request {
@@ -510,15 +533,16 @@ impl ExplorerPane {
                     target: &target,
                     own: &own,
                     own_first,
-                    extended,
+                    extended: false,
                     dark: true,
                     intercept: &intercept,
-                    hide,
+                    hide: &[],
                 });
                 this.update(cx, |pane, cx| {
+                    tracing::info!(item_count = prepared.items.len(), "context_menu ready");
                     pane.context_menu = Some(OpenMenu {
                         items: prepared.items,
-                        quick: if quick { quick_actions() } else { Vec::new() },
+                        quick: Vec::new(),
                         position,
                         open_path: Vec::new(),
                         session: Some(prepared.session),
@@ -817,6 +841,7 @@ impl ExplorerPane {
             _ => Vec::new(),
         };
         let dark = nohrs_ui::theme::theme::is_dark();
+        tracing::info!("context_menu more_options requested");
         cx.spawn_in(
             window,
             async move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
@@ -1350,6 +1375,7 @@ impl ExplorerPane {
 
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         match command {
+            Command::OpenSelection => self.open_menu_selection(window, cx),
             Command::ViewList => self.set_view_mode(ViewMode::List, cx),
             Command::ViewGrid => self.set_view_mode(ViewMode::Grid, cx),
             Command::ViewTree => self.set_view_mode(ViewMode::Tree, cx),
@@ -1433,6 +1459,23 @@ impl ExplorerPane {
         }
     }
 
+    fn open_menu_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries: Vec<_> = self
+            .filtered_entries
+            .iter()
+            .filter(|entry| self.selection.contains(&entry.path))
+            .cloned()
+            .collect();
+        for entry in entries {
+            let navigates = entry.kind == "dir" || super::archive::is_archive_file(&entry.path);
+            let picking = crate::file_dialog::picking().is_some();
+            self.activate_entry(entry, window, cx);
+            if navigates || picking {
+                break;
+            }
+        }
+    }
+
     fn write_config(
         &mut self,
         section: &'static str,
@@ -1493,6 +1536,10 @@ fn quick_actions() -> Vec<QuickAction> {
         },
     ]
 }
+
+#[cfg(test)]
+#[path = "context_menu_tests.rs"]
+mod interaction_tests;
 
 #[cfg(test)]
 mod tests {

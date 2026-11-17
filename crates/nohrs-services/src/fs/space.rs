@@ -49,6 +49,16 @@ pub struct SpaceNode {
     pub path: String,
     /// Everything this entry holds, in bytes. Its own length for a file.
     pub bytes: u64,
+    /// Files below this node, excluding directories.
+    pub files: u64,
+    /// Files below this node whose entries are hidden.
+    pub hidden_files: u64,
+    /// Newest last-write time below this node, in Unix seconds.
+    pub modified: u64,
+    /// Whether this entry itself is hidden.
+    pub hidden: bool,
+    /// Bytes below this node belonging to hidden entries.
+    pub hidden_bytes: u64,
     /// Whether the entry is a directory.
     pub is_dir: bool,
     /// How many files and folders this node stands for. One for a real entry,
@@ -62,10 +72,16 @@ pub struct SpaceNode {
 impl SpaceNode {
     /// A single file, as the scanner records it.
     fn file(name: String, path: String, bytes: u64) -> Self {
+        let hidden = name.starts_with('.');
         Self {
             name,
             path,
             bytes,
+            files: 1,
+            hidden_files: u64::from(hidden),
+            modified: 0,
+            hidden,
+            hidden_bytes: if hidden { bytes } else { 0 },
             is_dir: false,
             count: 1,
             children: Vec::new(),
@@ -207,6 +223,15 @@ pub fn scan(
             name: root.to_string(),
             path: root.to_string(),
             bytes: metadata.len(),
+            files: 1,
+            hidden_files: u64::from(is_hidden(root, &metadata)),
+            modified: modified_seconds(&metadata),
+            hidden: is_hidden(root, &metadata),
+            hidden_bytes: if is_hidden(root, &metadata) {
+                metadata.len()
+            } else {
+                0
+            },
             is_dir: false,
             count: 1,
             children: Vec::new(),
@@ -227,6 +252,11 @@ fn directory_node(name: &str, path: &Path, depth: u32, state: &mut ScanState<'_>
         name: name.to_string(),
         path: path.to_string_lossy().into_owned(),
         bytes: 0,
+        files: 0,
+        hidden_files: 0,
+        modified: 0,
+        hidden: path_hidden(path),
+        hidden_bytes: 0,
         is_dir: true,
         count: 1,
         children: Vec::new(),
@@ -260,34 +290,67 @@ fn directory_node(name: &str, path: &Path, depth: u32, state: &mut ScanState<'_>
         }
         let child_name = entry.file_name().to_string_lossy().into_owned();
         let child_path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let hidden = is_hidden(&child_name, &metadata);
+        node.modified = node.modified.max(modified_seconds(&metadata));
         if file_type.is_dir() {
             entries += 1;
             if depth < state.limits.max_depth && state.nodes < state.limits.max_nodes {
                 state.nodes += 1;
-                let child = directory_node(&child_name, &child_path, depth + 1, state);
+                let mut child = directory_node(&child_name, &child_path, depth + 1, state);
+                child.hidden = hidden;
+                if hidden {
+                    child.hidden_bytes = child.bytes;
+                    child.hidden_files = child.files;
+                }
                 total += child.bytes;
+                node.files += child.files;
+                node.hidden_files += if hidden {
+                    child.files
+                } else {
+                    child.hidden_files
+                };
+                node.modified = node.modified.max(child.modified);
+                node.hidden_bytes += child.hidden_bytes;
                 node.children.push(child);
             } else {
                 // Sizes have to stay exact even where the detail is dropped.
-                total += sum_directory(&child_path, state);
+                let summary = sum_directory(&child_path, state);
+                total += summary.bytes;
+                node.files += summary.files;
+                node.hidden_files += if hidden {
+                    summary.files
+                } else {
+                    summary.hidden_files
+                };
+                node.modified = node.modified.max(summary.modified);
+                node.hidden_bytes += if hidden {
+                    summary.bytes
+                } else {
+                    summary.hidden_bytes
+                };
             }
             continue;
         }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
         let bytes = metadata.len();
         total += bytes;
         entries += 1;
+        node.files += 1;
+        node.hidden_files += u64::from(hidden);
+        node.hidden_bytes += if hidden { bytes } else { 0 };
         counted_files += 1;
         counted_bytes += bytes;
         if depth < state.limits.max_depth && state.nodes < state.limits.max_nodes {
             state.nodes += 1;
-            node.children.push(SpaceNode::file(
-                child_name,
-                child_path.to_string_lossy().into_owned(),
-                bytes,
-            ));
+            let mut child =
+                SpaceNode::file(child_name, child_path.to_string_lossy().into_owned(), bytes);
+            child.modified = modified_seconds(&metadata);
+            child.hidden = hidden;
+            child.hidden_files = u64::from(hidden);
+            child.hidden_bytes = if hidden { bytes } else { 0 };
+            node.children.push(child);
         }
     }
     state.progress.add_files(counted_files, counted_bytes);
@@ -305,11 +368,20 @@ fn directory_node(name: &str, path: &Path, depth: u32, state: &mut ScanState<'_>
     let kept: u64 = node.children.iter().map(|child| child.bytes).sum();
     let mut merged_bytes = total.saturating_sub(kept);
     let mut merged_entries = entries.saturating_sub(node.children.len() as u64);
+    let kept_files: u64 = node.children.iter().map(|child| child.files).sum();
+    let kept_hidden_files: u64 = node.children.iter().map(|child| child.hidden_files).sum();
+    let kept_hidden_bytes: u64 = node.children.iter().map(|child| child.hidden_bytes).sum();
+    let mut merged_files = node.files.saturating_sub(kept_files);
+    let mut merged_hidden_files = node.hidden_files.saturating_sub(kept_hidden_files);
+    let mut merged_hidden_bytes = node.hidden_bytes.saturating_sub(kept_hidden_bytes);
     if node.children.len() > state.limits.max_children {
         let tail = node.children.split_off(state.limits.max_children);
         for child in tail {
             merged_bytes = merged_bytes.saturating_add(child.bytes);
             merged_entries = merged_entries.saturating_add(child.count);
+            merged_files = merged_files.saturating_add(child.files);
+            merged_hidden_files = merged_hidden_files.saturating_add(child.hidden_files);
+            merged_hidden_bytes = merged_hidden_bytes.saturating_add(child.hidden_bytes);
         }
     }
     if merged_bytes > 0 || merged_entries > 0 {
@@ -318,28 +390,46 @@ fn directory_node(name: &str, path: &Path, depth: u32, state: &mut ScanState<'_>
             name: String::new(),
             path: String::new(),
             bytes: merged_bytes,
+            files: merged_files,
+            hidden_files: merged_hidden_files,
+            modified: node.modified,
+            hidden: false,
+            hidden_bytes: merged_hidden_bytes,
             is_dir: false,
             count: merged_entries,
             children: Vec::new(),
         });
     }
     node.bytes = node.children.iter().map(|child| child.bytes).sum();
+    node.files = node.children.iter().map(|child| child.files).sum();
+    node.hidden_files = node.children.iter().map(|child| child.hidden_files).sum();
+    node.hidden_bytes = node.children.iter().map(|child| child.hidden_bytes).sum();
     node
 }
 
 /// The bytes under `path`, without keeping any of it: what a directory below
 /// the depth or node limit still contributes to its parent's size.
-fn sum_directory(path: &Path, state: &mut ScanState<'_>) -> u64 {
+#[derive(Default)]
+struct SpaceSummary {
+    bytes: u64,
+    files: u64,
+    hidden_files: u64,
+    modified: u64,
+    hidden_bytes: u64,
+}
+
+fn sum_directory(path: &Path, state: &mut ScanState<'_>) -> SpaceSummary {
     state.progress.add_directory();
     let reader = match std::fs::read_dir(path) {
         Ok(reader) => reader,
         Err(_) => {
             state.progress.add_unreadable();
-            return 0;
+            return SpaceSummary::default();
         }
     };
-    let mut total = 0_u64;
+    let mut summary = SpaceSummary::default();
     let mut files = 0_u64;
+    let mut direct_bytes = 0_u64;
     for entry in reader.flatten() {
         if state.cancel.load(Ordering::Relaxed) {
             break;
@@ -352,16 +442,79 @@ fn sum_directory(path: &Path, state: &mut ScanState<'_>) -> u64 {
             continue;
         }
         if file_type.is_dir() {
-            total += sum_directory(&entry.path(), state);
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let child = sum_directory(&entry.path(), state);
+            let hidden = is_hidden(&entry.file_name().to_string_lossy(), &metadata);
+            summary.bytes += child.bytes;
+            summary.files += child.files;
+            summary.hidden_files += if hidden {
+                child.files
+            } else {
+                child.hidden_files
+            };
+            summary.hidden_bytes += if hidden {
+                child.bytes
+            } else {
+                child.hidden_bytes
+            };
+            summary.modified = summary
+                .modified
+                .max(child.modified)
+                .max(modified_seconds(&metadata));
             continue;
         }
         if let Ok(metadata) = entry.metadata() {
-            total += metadata.len();
+            let bytes = metadata.len();
+            let hidden = is_hidden(&entry.file_name().to_string_lossy(), &metadata);
+            summary.bytes += bytes;
+            summary.files += 1;
+            summary.hidden_files += u64::from(hidden);
+            summary.hidden_bytes += if hidden { bytes } else { 0 };
+            summary.modified = summary.modified.max(modified_seconds(&metadata));
             files += 1;
+            direct_bytes += bytes;
         }
     }
-    state.progress.add_files(files, total);
-    total
+    state.progress.add_files(files, direct_bytes);
+    summary
+}
+
+fn modified_seconds(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn path_hidden(path: &Path) -> bool {
+    let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
+        return false;
+    };
+    if name.starts_with('.') {
+        return true;
+    }
+    std::fs::metadata(path)
+        .ok()
+        .is_some_and(|metadata| is_hidden(&name, &metadata))
+}
+
+fn is_hidden(name: &str, metadata: &std::fs::Metadata) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return metadata.file_attributes() & 0x2 != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
+    }
 }
 
 /// An axis-aligned rectangle in mosaic pixels.
@@ -465,9 +618,29 @@ impl Default for LayoutOptions {
 /// Tiles come out parents first: a parent precedes its own children, which is
 /// what lets a view paint them in order and hit-test in reverse.
 pub fn layout(root: &SpaceNode, area: Rect, options: &LayoutOptions) -> Vec<Tile> {
+    layout_with_hidden(root, area, options, true, false)
+}
+
+/// Lays out visible bytes, optionally excluding hidden entries from each area.
+pub fn layout_with_hidden(
+    root: &SpaceNode,
+    area: Rect,
+    options: &LayoutOptions,
+    include_hidden: bool,
+    by_files: bool,
+) -> Vec<Tile> {
     let mut tiles = Vec::new();
     let mut crumbs = Vec::new();
-    place_children(root, area, options, 0, &mut crumbs, &mut tiles);
+    place_children(
+        root,
+        area,
+        options,
+        include_hidden,
+        by_files,
+        0,
+        &mut crumbs,
+        &mut tiles,
+    );
     tiles
 }
 
@@ -475,6 +648,8 @@ fn place_children(
     node: &SpaceNode,
     area: Rect,
     options: &LayoutOptions,
+    include_hidden: bool,
+    by_files: bool,
     depth: u32,
     crumbs: &mut Vec<usize>,
     out: &mut Vec<Tile>,
@@ -485,12 +660,15 @@ fn place_children(
     // Ranked here rather than trusted from the scan: a hand-built tree must not
     // produce a bad layout.
     let mut order: Vec<usize> = (0..node.children.len())
-        .filter(|index| node.children[*index].bytes > 0)
+        .filter(|index| visible_weight(&node.children[*index], include_hidden, by_files) > 0)
         .collect();
     order.sort_by(|left, right| {
-        node.children[*right]
-            .bytes
-            .cmp(&node.children[*left].bytes)
+        visible_weight(&node.children[*right], include_hidden, by_files)
+            .cmp(&visible_weight(
+                &node.children[*left],
+                include_hidden,
+                by_files,
+            ))
             .then_with(|| node.children[*left].name.cmp(&node.children[*right].name))
     });
     if order.is_empty() {
@@ -498,7 +676,7 @@ fn place_children(
     }
     let values: Vec<f64> = order
         .iter()
-        .map(|index| node.children[*index].bytes as f64)
+        .map(|index| visible_weight(&node.children[*index], include_hidden, by_files) as f64)
         .collect();
     let rects = squarify(&values, area);
     for (slot, rect) in rects.iter().enumerate() {
@@ -537,10 +715,41 @@ fn place_children(
                 rect.w,
                 (rect.bottom() - header.bottom()).max(0.0),
             );
-            place_children(child, body, options, depth + 1, crumbs, out);
+            place_children(
+                child,
+                body,
+                options,
+                include_hidden,
+                by_files,
+                depth + 1,
+                crumbs,
+                out,
+            );
         }
         crumbs.pop();
     }
+}
+
+fn visible_bytes(node: &SpaceNode, include_hidden: bool) -> u64 {
+    if include_hidden {
+        node.bytes
+    } else {
+        node.bytes.saturating_sub(node.hidden_bytes)
+    }
+}
+
+fn visible_weight(node: &SpaceNode, include_hidden: bool, by_files: bool) -> u64 {
+    if by_files {
+        let files = if include_hidden {
+            node.files
+        } else {
+            node.files.saturating_sub(node.hidden_files)
+        };
+        if files > 0 {
+            return files;
+        }
+    }
+    visible_bytes(node, include_hidden)
 }
 
 /// The band a directory keeps for its name, or `None` when the tile is too
@@ -669,6 +878,15 @@ mod tests {
             name: name.to_string(),
             path: format!(r"C:\x\{name}"),
             bytes,
+            files: children.iter().map(|child| child.files).sum(),
+            hidden_files: children.iter().map(|child| child.hidden_files).sum(),
+            modified: children
+                .iter()
+                .map(|child| child.modified)
+                .max()
+                .unwrap_or(0),
+            hidden: false,
+            hidden_bytes: children.iter().map(|child| child.hidden_bytes).sum(),
             is_dir: true,
             count,
             children,
@@ -677,6 +895,44 @@ mod tests {
 
     fn area() -> Rect {
         Rect::new(0.0, 0.0, 800.0, 500.0)
+    }
+
+    #[test]
+    fn hidden_entries_are_removed_from_the_layout_without_reindexing_nodes() {
+        let root = directory(
+            "root",
+            vec![file("visible.txt", 60), file(".hidden.txt", 40)],
+        );
+        let all = layout_with_hidden(&root, area(), &LayoutOptions::default(), true, false);
+        let visible = layout_with_hidden(&root, area(), &LayoutOptions::default(), false, false);
+        assert_eq!(2, all.len());
+        assert_eq!(1, visible.len());
+        assert_eq!(
+            Some("visible.txt"),
+            root.node_at(&visible[0].crumbs)
+                .map(|node| node.name.as_str())
+        );
+    }
+
+    #[test]
+    fn file_mode_sizes_tiles_by_file_count() {
+        let many_files = directory(
+            "many",
+            vec![file("one", 1), file("two", 1), file("three", 1)],
+        );
+        let root = directory("root", vec![file("large.bin", 100), many_files]);
+        let by_size = layout_with_hidden(&root, area(), &LayoutOptions::default(), true, false);
+        let by_files = layout_with_hidden(&root, area(), &LayoutOptions::default(), true, true);
+        assert_eq!(
+            Some("large.bin"),
+            root.node_at(&by_size[0].crumbs)
+                .map(|node| node.name.as_str())
+        );
+        assert_eq!(
+            Some("many"),
+            root.node_at(&by_files[0].crumbs)
+                .map(|node| node.name.as_str())
+        );
     }
 
     #[test]
@@ -860,6 +1116,27 @@ mod tests {
         let nested = tree.node_at(&[0]).unwrap();
         assert_eq!(nested.bytes, 5000);
         assert_eq!(nested.node_at(&[0]).map(|node| node.bytes), Some(5000));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn a_scan_records_file_count_age_and_hidden_space() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, size) in [("visible.bin", 60_usize), (".private.bin", 40)] {
+            let mut file = std::fs::File::create(root.path().join(name)).unwrap();
+            file.write_all(&vec![b'x'; size]).unwrap();
+        }
+        let tree = scan(
+            root.path().to_str().unwrap(),
+            &AtomicBool::new(false),
+            &SpaceProgress::default(),
+            &SpaceLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(2, tree.files);
+        assert_eq!(1, tree.hidden_files);
+        assert_eq!(40, tree.hidden_bytes);
+        assert!(tree.modified > 0);
     }
 
     #[test]

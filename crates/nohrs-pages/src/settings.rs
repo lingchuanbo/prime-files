@@ -245,6 +245,14 @@ pub struct SettingsPage {
 struct Wheel {
     hsv: Hsv,
     dragging: Option<WheelPart>,
+    target: WheelTarget,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WheelTarget {
+    Background,
+    FileTypeColor(usize),
+    SpaceMapColor(usize),
 }
 
 /// Which of the wheel's two controls the pointer is on.
@@ -702,20 +710,28 @@ impl SettingsPage {
                 .flex_shrink_0()
                 .child(Input::new(input).small())
         });
-        let colors = self.space_map_colors.iter().map(|input| {
+        let colors = self.space_map_colors.iter().enumerate().map(|(index, input)| {
             let swatch = theme::parse_color(input.read(cx).value().trim()).unwrap_or(theme::accent());
+            let color_input = input.clone();
             div()
+                .id(("space-map-color-swatch", index))
                 .flex()
                 .items_center()
                 .gap_1()
                 .child(
                     div()
+                        .id(("space-map-color-picker", index))
                         .size(px(16.0))
                         .flex_shrink_0()
+                        .cursor_pointer()
                         .rounded_full()
                         .border_1()
                         .border_color(rgb(theme::border()))
-                        .bg(rgb(swatch)),
+                        .bg(rgb(swatch))
+                        .on_click(cx.listener(move |page, _, _, cx| {
+                            let value = color_input.read(cx).value().to_string();
+                            page.toggle_color_wheel(WheelTarget::SpaceMapColor(index), &value, cx);
+                        })),
                 )
                 .child(div().w(px(96.0)).child(Input::new(input).small()))
         });
@@ -753,6 +769,11 @@ impl SettingsPage {
                     )
                     .children(colors),
             )
+            .when(self.wheel.as_ref().is_some_and(|wheel| matches!(wheel.target, WheelTarget::SpaceMapColor(_))), |this| {
+                if let Some(target) = self.wheel.as_ref().map(|wheel| wheel.target) {
+                    if let Some(row) = self.wheel_row(target, cx) { this.child(row.control) } else { this }
+                } else { this }
+            })
             .child(
                 div()
                     .flex()
@@ -1144,7 +1165,7 @@ impl SettingsPage {
     // The wheel's button, beside the presets: it opens the ring under them and
     // shows the colour in use.
     fn wheel_button(&self, background: String, cx: &mut Context<Self>) -> Stateful<Div> {
-        let open = self.wheel.is_some();
+        let open = self.wheel.as_ref().is_some_and(|wheel| wheel.target == WheelTarget::Background);
         let color = theme::parse_color(&background)
             .unwrap_or(if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF });
         div()
@@ -1168,15 +1189,22 @@ impl SettingsPage {
 
     // Opens or closes the wheel, starting it on the colour in use.
     fn toggle_wheel(&mut self, cx: &mut Context<Self>) {
-        if self.wheel.take().is_some() {
+        let background = self.config.theme.background.clone();
+        self.toggle_color_wheel(WheelTarget::Background, &background, cx);
+    }
+
+    fn toggle_color_wheel(&mut self, target: WheelTarget, value: &str, cx: &mut Context<Self>) {
+        if self.wheel.as_ref().is_some_and(|wheel| wheel.target == target) {
+            self.wheel = None;
             cx.notify();
             return;
         }
-        let color = theme::parse_color(&self.config.theme.background)
+        let color = theme::parse_color(value)
             .unwrap_or(if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF });
         self.wheel = Some(Wheel {
             hsv: Hsv::from_rgb(color),
             dragging: None,
+            target,
         });
         cx.notify();
     }
@@ -1187,8 +1215,8 @@ impl SettingsPage {
     // this program does: a `canvas` hands out the element's own bounds and
     // listens on the window, because a listener hung on the element inside a
     // scrolling page never sees the press.
-    fn wheel_row(&self, cx: &mut Context<Self>) -> Option<Row> {
-        let wheel = self.wheel.as_ref()?;
+    fn wheel_row(&self, target: WheelTarget, cx: &mut Context<Self>) -> Option<Row> {
+        let wheel = self.wheel.as_ref().filter(|wheel| wheel.target == target)?;
         let color = wheel.hsv.to_rgb();
         let hue = wheel.hsv.to_hsla();
         let handle_angle = wheel.hsv.h.to_radians();
@@ -1269,12 +1297,12 @@ impl SettingsPage {
 
     // A press on the ring or the brightness bar: the colour follows the
     // pointer from here on, and the window previews it at once.
-    fn wheel_press(&mut self, part: WheelPart, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn wheel_press(&mut self, part: WheelPart, bounds: Bounds<Pixels>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(wheel) = self.wheel.as_mut() else {
             return;
         };
         wheel.dragging = Some(part);
-        self.wheel_apply(part, bounds, position, cx);
+        self.wheel_apply(part, bounds, position, window, cx);
     }
 
     // The pointer let go: what the wheel shows is written to the config, the
@@ -1286,12 +1314,14 @@ impl SettingsPage {
         if wheel.dragging.take().is_none() {
             return;
         }
-        let hex = wheel.hsv.hex();
-        self.write("theme", "background", format!("\"{hex}\""), cx);
+        let (target, hex) = (wheel.target, wheel.hsv.hex());
+        if target == WheelTarget::Background {
+            self.write("theme", "background", format!("\"{hex}\""), cx);
+        }
         cx.notify();
     }
 
-    fn wheel_apply(&mut self, part: WheelPart, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn wheel_apply(&mut self, part: WheelPart, bounds: Bounds<Pixels>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(wheel) = self.wheel.as_mut() else {
             return;
         };
@@ -1310,9 +1340,21 @@ impl SettingsPage {
                 wheel.hsv.v = value;
             }
         }
-        // Shown in the whole window while the pointer moves; written on
-        // release, so dragging a colour never touches the config file.
-        theme::set_background(Some(wheel.hsv.to_rgb()));
+        let (target, color, hex) = (wheel.target, wheel.hsv.to_rgb(), wheel.hsv.hex());
+        match target {
+            WheelTarget::Background => theme::set_background(Some(color)),
+            WheelTarget::FileTypeColor(index) => {
+                if let Some((_, input)) = self.file_type_color_inputs.get(index) {
+                    input.update(cx, |state, cx| state.set_value(hex.clone(), window, cx));
+                    if let Some(rule) = self.file_type_color_draft.get_mut(index) { rule.color = hex; }
+                }
+            }
+            WheelTarget::SpaceMapColor(index) => {
+                if let Some(input) = self.space_map_colors.get(index) {
+                    input.update(cx, |state, cx| state.set_value(hex, window, cx));
+                }
+            }
+        }
         cx.refresh_windows();
     }
     // Which side of the window a panel docks to. The same choice a bubble of
@@ -1480,7 +1522,7 @@ impl SettingsPage {
             ],
         )];
         // The ring itself, under the presets, while it is open.
-        if let Some(row) = self.wheel_row(cx) {
+        if let Some(row) = self.wheel_row(WheelTarget::Background, cx) {
             groups[0].rows.push(row);
         }
         groups.push(Group::titled(
@@ -1727,6 +1769,8 @@ impl SettingsPage {
 
     fn file_type_color_editor(&self, cx: &mut Context<Self>) -> Div {
         let rows = self.file_type_color_inputs.iter().enumerate().map(|(index, (pattern, color))| {
+            let color_input = color.clone();
+            let swatch = theme::parse_color(color.read(cx).value().trim()).unwrap_or(theme::accent());
             div()
                 .id(("file-type-color-rule", index))
                 .flex()
@@ -1739,10 +1783,15 @@ impl SettingsPage {
                         .id(("file-type-color-preview", index))
                         .size(px(18.0))
                         .flex_shrink_0()
+                        .cursor_pointer()
                         .rounded_full()
                         .border_1()
                         .border_color(rgb(theme::border()))
-                        .bg(rgb(theme::parse_color(&self.file_type_color_draft[index].color).unwrap_or(theme::accent()))),
+                        .bg(rgb(swatch))
+                        .on_click(cx.listener(move |page, _, _, cx| {
+                            let value = color_input.read(cx).value().to_string();
+                            page.toggle_color_wheel(WheelTarget::FileTypeColor(index), &value, cx);
+                        })),
                 )
                 .child(file_rule_button("↑", index, FileColorRuleAction::MoveUp(index), cx))
                 .child(file_rule_button("↓", index, FileColorRuleAction::MoveDown(index), cx))
@@ -1756,6 +1805,11 @@ impl SettingsPage {
                 this.child(div().text_xs().text_color(rgb(theme::muted())).child(t!("Ainda não há regras de cor.")))
             })
             .children(rows)
+            .when(self.wheel.as_ref().is_some_and(|wheel| matches!(wheel.target, WheelTarget::FileTypeColor(_))), |this| {
+                if let Some(target) = self.wheel.as_ref().map(|wheel| wheel.target) {
+                    if let Some(row) = self.wheel_row(target, cx) { this.child(row.control) } else { this }
+                } else { this }
+            })
             .child(
                 div()
                     .flex()
@@ -2145,6 +2199,20 @@ impl SettingsPage {
     fn about(&self, cx: &mut Context<Self>) -> Vec<Group> {
         let path = config::paths::config_file();
         vec![
+            Group::titled(
+                t!("Logs de execução"),
+                vec![Row::hint(
+                    t!("Logs de execução"),
+                    t!("Desativado por padrão. Reinicie para aplicar. Salva logs ao lado do aplicativo; podem conter caminhos de arquivos. Desativar não apaga logs existentes."),
+                    self.switch(
+                        "runtime-log",
+                        self.config.diagnostics.runtime_log,
+                        ("diagnostics", "runtime_log"),
+                        cx,
+                    ),
+                )
+                .reset(("diagnostics", "runtime_log"), !self.config.diagnostics.runtime_log, "false")],
+            ),
             Group::titled(
                 t!("Atualizações"),
                 vec![
@@ -2944,21 +3012,21 @@ fn pointer_events(page: Entity<SettingsPage>, part: WheelPart) -> AnyElement {
         |_, _, _| {},
         move |bounds, _, window, _| {
             let press = page.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
                     && event.button == MouseButton::Left
                     && bounds.contains(&event.position)
                 {
-                    press.update(cx, |page, cx| page.wheel_press(part, bounds, event.position, cx));
+                    press.update(cx, |page, cx| page.wheel_press(part, bounds, event.position, window, cx));
                 }
             });
             let drag = page.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
                     && event.pressed_button == Some(MouseButton::Left)
                     && drag.read(cx).wheel.as_ref().is_some_and(|wheel| wheel.dragging == Some(part))
                 {
-                    drag.update(cx, |page, cx| page.wheel_apply(part, bounds, event.position, cx));
+                    drag.update(cx, |page, cx| page.wheel_apply(part, bounds, event.position, window, cx));
                 }
             });
             let release = page;

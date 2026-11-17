@@ -29,24 +29,23 @@ actions!(nohrs, [OpenStandaloneSearch]);
 
 impl NohrsApp {
     pub fn run(cli: &Cli) {
-        // Held for the whole run: dropping it stops the log file being written.
-        // Installed before the config is read so a failure to load the config is
-        // itself recorded, which means the file sink uses its defaults rather
-        // than anything the user set — see `docs/logging.md` §4.
-        let _log_guard = init_logging_with_file(&FileLogConfig::default());
-
         // Load configuration before opening the window: defaults < file < env <
         // CLI (config.md §3). A missing file is created with defaults so users
         // have something to edit and the watcher has a target. Parse failures are
         // non-fatal — we fall back to defaults and surface the error in the UI.
         let config_path = config::paths::config_file();
-        if let Err(error) = config::ensure_exists(&config_path) {
-            tracing::warn!("could not create {}: {error}", config_path.display());
-        }
+        let config_creation = config::ensure_exists(&config_path);
         let (mut config, diagnostics) = config::load_from_path(&config_path);
         let config_overrides = vec![ConfigOverride::from_env(), cli.overrides()];
         for over in &config_overrides {
             config.apply_override(over);
+        }
+        let _log_guard = init_logging_with_file(&FileLogConfig {
+            enabled: config.diagnostics.runtime_log,
+            ..FileLogConfig::default()
+        });
+        if let Err(error) = config_creation {
+            tracing::warn!("could not create {}: {error}", config_path.display());
         }
         let config_error = config::report_diagnostics(&diagnostics);
 

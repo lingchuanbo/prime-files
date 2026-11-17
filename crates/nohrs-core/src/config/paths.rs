@@ -74,8 +74,16 @@ pub fn state_dir() -> PathBuf {
     state_home().join(APP_DIR)
 }
 
-/// Directory holding the rolling log files (`.../nohrs/logs`).
+/// Directory holding rolling logs: beside the executable on Windows,
+/// otherwise under the state directory. Falls back to state if the executable
+/// directory cannot be resolved.
 pub fn log_dir() -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        return directory.to_path_buf();
+    }
     state_dir().join("logs")
 }
 
@@ -157,6 +165,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn logs_live_under_the_state_directory() {
         // Not under `data_dir` (backed up beside the databases) and not under
         // `cache_dir` (a cleaner may empty it while nohrs is running).
@@ -164,6 +173,13 @@ mod tests {
         let logs = log_dir();
         assert!(logs.ends_with("nohrs/logs"), "{}", logs.display());
         assert!(logs.starts_with(state_home()), "{}", logs.display());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn logs_live_beside_the_executable() {
+        let executable = std::env::current_exe().expect("test executable");
+        assert_eq!(executable.parent().expect("executable directory"), log_dir());
     }
 
     #[test]

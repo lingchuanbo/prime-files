@@ -33,10 +33,9 @@ pub(crate) enum ClipMode {
 }
 
 /// Process-wide explorer clipboard, shared across panes and windows so a copy in
-/// one pane can be pasted in another. The paths are mirrored to the system
-/// clipboard as text for interop with external apps, but this global stays the
-/// source of truth for paste because the system clipboard cannot carry the
-/// copy/cut distinction across platforms.
+/// one pane can be pasted in another. Windows publishes a native file list and
+/// copy/cut effect; other platforms mirror paths as text. This global retains
+/// the internal transfer state while a paste is running.
 #[derive(Clone, Default)]
 pub(crate) struct ExplorerClipboard {
     entry: Option<(ClipMode, Vec<PathBuf>)>,
@@ -758,9 +757,17 @@ impl ExplorerPane {
         if paths.is_empty() {
             return;
         }
+        #[cfg(all(windows, not(test)))]
+        if let Err(error) = super::file_clipboard::write(&paths, mode) {
+            tracing::warn!(%error, "file clipboard write failed");
+            self.set_status(StatusLevel::Error, tf!("Não foi possível copiar arquivos para a área de transferência: {error}", error = error));
+            cx.notify();
+            return;
+        }
+        #[cfg(any(not(windows), test))]
+        cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
         let buffers = paths.iter().map(PathBuf::from).collect();
         ExplorerClipboard::write(Some((mode, buffers)), cx);
-        cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
         let message = match mode {
             ClipMode::Copy => i18n::plural(
                 paths.len(),

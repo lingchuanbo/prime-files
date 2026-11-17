@@ -729,6 +729,8 @@ impl Default for Launcher {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Diagnostics {
+    /// Write GUI runtime logs to files; disabled by default, requires restart.
+    pub runtime_log: bool,
     /// Performance logging for the persistence layer (`nohrs-store`).
     pub store: DiagnosticsStore,
 }
@@ -1153,6 +1155,9 @@ impl Config {
              \n\
              # Store performance logging for analysis; all off by default.\n\
              # Output via tracing (RUST_LOG), see docs/persistence.md §5.\n\
+             [diagnostics]\n\
+             runtime_log = false\n\
+             \n\
              [diagnostics.store]\n\
              log_all_queries = false   # log every SQL query at debug\n\
              slow_query_ms = 0         # warn on SQL slower than this (0 = off)\n\
@@ -1722,6 +1727,15 @@ fn read_diagnostics(
     diag: &mut Diagnostics,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    if let Some(value) = table.get("runtime_log") {
+        match value.as_bool() {
+            Some(enabled) => diag.runtime_log = enabled,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid diagnostics.runtime_log {value}; using {}",
+                diag.runtime_log
+            ))),
+        }
+    }
     if let Some(value) = table.get("store") {
         match value.as_table() {
             Some(store) => read_diagnostics_store(store, &mut diag.store, diagnostics),
@@ -1730,7 +1744,7 @@ fn read_diagnostics(
             )),
         }
     }
-    warn_unknown_keys(table, &["store"], "diagnostics.", diagnostics);
+    warn_unknown_keys(table, &["runtime_log", "store"], "diagnostics.", diagnostics);
 }
 
 fn read_diagnostics_store(
@@ -2439,6 +2453,36 @@ mod tests {
         let (config, diagnostics) = Config::from_toml_str("");
         assert_eq!(config, Config::default());
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn runtime_logging_is_opt_in_and_rejects_invalid_values() {
+        for input in ["", "[diagnostics]\nruntime_log = false"] {
+            let (config, warnings) = Config::from_toml_str(input);
+            assert!(!config.diagnostics.runtime_log);
+            assert!(warnings.is_empty());
+        }
+        let (config, warnings) = Config::from_toml_str("[diagnostics]\nruntime_log = true");
+        assert!(config.diagnostics.runtime_log);
+        assert!(warnings.is_empty());
+        let (config, warnings) = Config::from_toml_str("[diagnostics]\nruntime_log = \"yes\"");
+        assert!(!config.diagnostics.runtime_log);
+        assert_eq!(1, warnings.len());
+        assert!(warnings[0].message.contains("diagnostics.runtime_log"));
+    }
+
+    #[test]
+    fn runtime_logging_setting_survives_save_and_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        crate::config::write_default(&path).unwrap();
+        assert!(!load_from_path(&path).0.diagnostics.runtime_log);
+        for enabled in [true, false] {
+            crate::config::set_value(&path, "diagnostics", "runtime_log", &enabled.to_string()).unwrap();
+            let (config, warnings) = load_from_path(&path);
+            assert_eq!(enabled, config.diagnostics.runtime_log);
+            assert!(warnings.is_empty());
+        }
     }
 
     #[test]

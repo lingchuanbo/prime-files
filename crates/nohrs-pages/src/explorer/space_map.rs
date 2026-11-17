@@ -51,6 +51,15 @@ pub(crate) enum SpaceSource {
     Filesystem,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SpaceMapMode {
+    #[default]
+    Size,
+    Files,
+    Age,
+    Kind,
+}
+
 /// The mosaic as last laid out, kept between frames: it is rebuilt only when
 /// the tree, the zoomed-in directory or the painted area changes.
 pub(crate) struct SpaceLayout {
@@ -63,6 +72,8 @@ pub(crate) struct SpaceLayout {
     /// The area it was laid out for.
     width: f32,
     height: f32,
+    include_hidden: bool,
+    by_files: bool,
 }
 
 /// An open space map, and the scan filling it.
@@ -92,6 +103,8 @@ pub(crate) struct SpaceMap {
     pub(crate) hover: Option<usize>,
     /// The selected entry, as child indices from the scanned tree.
     pub(crate) selection: Option<Vec<usize>>,
+    pub(crate) mode: SpaceMapMode,
+    pub(crate) include_hidden: bool,
     transition: Option<motion::Transition>,
     /// When the scan started, for the "taking a while" line.
     pub(crate) started: Instant,
@@ -118,6 +131,8 @@ impl SpaceMap {
             layout: None,
             hover: None,
             selection: None,
+            mode: SpaceMapMode::Size,
+            include_hidden: true,
             transition: None,
             started: Instant::now(),
             generation: 0,
@@ -150,13 +165,24 @@ impl SpaceMap {
         focus: &[usize],
         width: f32,
         height: f32,
+        include_hidden: bool,
+        by_files: bool,
     ) -> Option<Rc<Vec<nohrs_services::fs::space::Tile>>> {
         let layout = self.layout.as_ref()?;
         (layout.generation == generation
             && layout.focus == focus
             && (layout.width - width).abs() < 0.5
-            && (layout.height - height).abs() < 0.5)
+            && (layout.height - height).abs() < 0.5
+            && layout.include_hidden == include_hidden
+            && layout.by_files == by_files)
             .then(|| Rc::clone(&layout.tiles))
+    }
+}
+
+fn initial_map_mode(color: nohrs_core::config::SpaceMapColor) -> SpaceMapMode {
+    match color {
+        nohrs_core::config::SpaceMapColor::Size => SpaceMapMode::Size,
+        nohrs_core::config::SpaceMapColor::Kind => SpaceMapMode::Kind,
     }
 }
 
@@ -182,7 +208,9 @@ impl ExplorerPane {
             return;
         }
         let cwd = self.cwd.clone();
-        self.space = Some(SpaceMap::starting(cwd.clone(), cwd));
+        let mut map = SpaceMap::starting(cwd.clone(), cwd);
+        map.mode = initial_map_mode(self.space_map_style.color);
+        self.space = Some(map);
         self.start_space_scan(cx);
         cx.notify();
     }
@@ -196,7 +224,9 @@ impl ExplorerPane {
             return;
         }
         let anchor = self.cwd.clone();
-        self.space = Some(SpaceMap::starting(folder, anchor));
+        let mut map = SpaceMap::starting(folder, anchor);
+        map.mode = initial_map_mode(self.space_map_style.color);
+        self.space = Some(map);
         self.start_space_scan(cx);
         cx.notify();
     }
@@ -264,7 +294,11 @@ impl ExplorerPane {
         let map = self.space.as_mut()?;
         let generation = map.generation;
         let focus = map.focus.clone();
-        if map.cached(generation, &focus, width, height).is_some()
+        let include_hidden = map.include_hidden;
+        let by_files = map.mode == SpaceMapMode::Files;
+        if map
+            .cached(generation, &focus, width, height, include_hidden, by_files)
+            .is_some()
             && let Some(transition) = map.transition.as_ref()
         {
             let now = Instant::now();
@@ -279,15 +313,18 @@ impl ExplorerPane {
             return Some(tiles);
         }
         map.transition = None;
-        if let Some(tiles) = map.cached(generation, &focus, width, height) {
+        if let Some(tiles) = map.cached(generation, &focus, width, height, include_hidden, by_files)
+        {
             return Some(tiles);
         }
         let node = map.focus_node()?;
         let area = nohrs_services::fs::space::Rect::new(0.0, 0.0, width, height);
-        let tiles = Rc::new(nohrs_services::fs::space::layout(
+        let tiles = Rc::new(nohrs_services::fs::space::layout_with_hidden(
             node,
             area,
             &motion::layout_options(),
+            include_hidden,
+            by_files,
         ));
         if let Some(map) = self.space.as_mut() {
             map.layout = Some(SpaceLayout {
@@ -296,6 +333,8 @@ impl ExplorerPane {
                 focus,
                 width,
                 height,
+                include_hidden,
+                by_files,
             });
         }
         Some(tiles)
@@ -633,6 +672,11 @@ impl ExplorerPane {
                 // A drive whose space the shell has not answered for yet is
                 // still worth a tile to click on.
                 bytes: used.max(1),
+                files: 0,
+                hidden_files: 0,
+                modified: 0,
+                hidden: false,
+                hidden_bytes: 0,
                 is_dir: true,
                 count: 1,
                 children: Vec::new(),
@@ -671,6 +715,11 @@ impl ExplorerPane {
             name,
             path: THIS_PC.to_string(),
             bytes: children.iter().map(|child| child.bytes).sum(),
+            files: children.iter().map(|child| child.files).sum(),
+            hidden_files: 0,
+            modified: 0,
+            hidden: false,
+            hidden_bytes: 0,
             is_dir: true,
             count: children.len() as u64,
             children,
@@ -724,6 +773,15 @@ fn tree_from_index(
             name: entry.name.clone(),
             path,
             bytes: entry.size,
+            files: u64::from(!entry.dir),
+            hidden_files: u64::from(!entry.dir && entry.name.starts_with('.')),
+            modified: u64::from(entry.modified),
+            hidden: entry.name.starts_with('.'),
+            hidden_bytes: if entry.name.starts_with('.') {
+                entry.size
+            } else {
+                0
+            },
             is_dir: entry.dir,
             count: 1,
             children: Vec::new(),
@@ -738,7 +796,29 @@ fn tree_from_index(
             slot.children.push(node);
         }
     }
-    nodes.into_iter().next().flatten()
+    let mut root = nodes.into_iter().next().flatten()?;
+    aggregate_space_metadata(&mut root);
+    Some(root)
+}
+
+fn aggregate_space_metadata(node: &mut SpaceNode) {
+    for child in &mut node.children {
+        aggregate_space_metadata(child);
+    }
+    if node.is_dir {
+        node.files = node.children.iter().map(|child| child.files).sum();
+        node.hidden_files = node.children.iter().map(|child| child.hidden_files).sum();
+        node.hidden_bytes = node.children.iter().map(|child| child.hidden_bytes).sum();
+        node.modified = node
+            .children
+            .iter()
+            .map(|child| child.modified)
+            .fold(node.modified, u64::max);
+    }
+    if node.hidden {
+        node.hidden_files = node.files;
+        node.hidden_bytes = node.bytes;
+    }
 }
 
 /// The folder that holds `path`, by its last separator.

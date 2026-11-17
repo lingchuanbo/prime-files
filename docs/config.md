@@ -171,6 +171,7 @@ config.toml の冒頭に:
 | `ui.default_sort_descending` | ✅ Yes | **P1** | 開いているビューに伝播 (表示を保存済みのフォルダーは除く) |
 | `ui.show_hidden` | ✅ Yes | **P1** | 開いているビューに伝播 |
 | `ui.icon_pack` | ✅ Yes | **P1** | アイコンキャッシュをクリア |
+| `diagnostics.runtime_log` | ❌ No (再起動) | 默认 `false`；设置 → 关于 → 运行日志 | GUI 启动时决定是否创建文件日志和 panic 日志 |
 | `diagnostics.store.*` | ❌ No (再起動) | P3 で hot reload に格上げ検討 | ストア接続 open 時に profile フックの登録可否を決めるため (off 時はフック未登録でオーバーヘッド 0) |
 | `keybindings.*` | ❌ No (再起動) | P3 で hot reload に格上げ検討 | キーマップは入力ハンドラに焼き込まれているため |
 | `plugins.enabled` | ❌ No (再起動) | P5 で動的 enable/disable に格上げ検討 | wasm host のライフサイクル安定化が前提 |
