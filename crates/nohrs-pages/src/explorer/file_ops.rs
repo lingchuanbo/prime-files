@@ -89,6 +89,32 @@ impl ExplorerClipboard {
     }
 }
 
+/// Puts `paths` on the clipboard as files, so a copy or cut started from
+/// another window (the standalone search window) can be pasted into this app's
+/// Explorer — or into Explorer.exe — exactly like one started here.
+///
+/// Separate from the pane's own copy because that one reads the pane's
+/// selection; the search window has paths but no pane. The status message and
+/// the refresh belong to the caller, which is the window the user is looking at.
+pub(crate) fn write_paths_to_clipboard(
+    mode: ClipMode,
+    paths: &[String],
+    cx: &mut App,
+) -> std::result::Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    #[cfg(all(windows, not(test)))]
+    if let Err(error) = super::file_clipboard::write(paths, mode) {
+        return Err(format!("{error}"));
+    }
+    #[cfg(any(not(windows), test))]
+    cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+    let buffers = paths.iter().map(PathBuf::from).collect();
+    ExplorerClipboard::write(Some((mode, buffers)), cx);
+    Ok(())
+}
+
 // Puts the sources a cut-paste could not move back on the clipboard, so the user
 // can retry them as a move. Without this the cleared clipboard falls through to
 // the system clipboard's path text, which carries no cut/copy distinction and so

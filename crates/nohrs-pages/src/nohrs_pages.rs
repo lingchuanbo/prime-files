@@ -8,6 +8,8 @@ use gpui::AnyElement;
 pub mod default_explorer;
 /// The file explorer page and its supporting state and views.
 pub mod explorer;
+/// The in-process way another window asks the Explorer to show a path.
+pub(crate) mod explorer_link;
 /// The git page.
 pub mod git;
 /// Picking files for a browser's "Open" dialog from Nohrs.

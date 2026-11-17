@@ -27,7 +27,7 @@ use nohrs_services::search::SearchService;
 use nohrs_store::KvStore;
 use nohrs_ui::components::layout::footer::{FooterProps, StatusTone, footer};
 use nohrs_ui::components::layout::unified_toolbar::{
-    AccountMenuAction, AccountMenuCommand, unified_toolbar,
+    AccountMenuAction, AccountMenuCommand, OpenSearch, unified_toolbar,
 };
 use nohrs_ui::theme::theme;
 use std::path::PathBuf;
@@ -138,6 +138,7 @@ impl RootView {
         view.apply_config(config, config_error, window, cx);
         view.start_config_watch(window, cx);
         crate::ipc::serve(window, cx);
+        crate::explorer_link::install(window, cx);
         crate::file_dialog::watch(window, cx);
         crate::reveal::watch(window, cx);
         view.start_updates(window, cx);
@@ -514,6 +515,7 @@ impl Render for RootView {
             .when(!self.font_family.is_empty(), |this| this.font_family(self.font_family.clone()))
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_account_action))
+            .on_action(cx.listener(Self::handle_open_search))
             .children(toolbar)
             .when_some(crate::file_dialog::picking(), |this, dialog| {
                 this.child(self.render_picking_banner(dialog, cx))
@@ -589,6 +591,17 @@ impl RootView {
         };
         self.settings.update(cx, |page, cx| page.show_section(section, cx));
         self.set_page(PageKind::Settings, cx);
+    }
+
+    /// The magnifying glass at the right end of the title bar: the same window
+    /// Ctrl+Shift+F opens.
+    fn handle_open_search(
+        &mut self,
+        _: &OpenSearch,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::search_window::toggle(cx).log_err();
     }
 
     fn render_active_page(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

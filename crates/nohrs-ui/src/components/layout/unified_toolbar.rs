@@ -1,8 +1,8 @@
 use nohrs_core::t;
 use crate::theme::theme;
 use gpui::{
-    Action, Context, IntoElement, Pixels, Render, Window, WindowControlArea, div, prelude::*, px,
-    rgb,
+    Action, Context, IntoElement, Pixels, Render, Window, WindowControlArea, actions, div, prelude::*,
+    px, rgb,
 };
 use gpui_component::{
     Icon, IconName, Sizable, Size,
@@ -13,9 +13,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
+actions!(
+    unified_toolbar,
+    [
+        /// Open the whole-computer search window.
+        OpenSearch
+    ]
+);
+
 /// Fixed height of the unified toolbar.
 pub const UNIFIED_TOOLBAR_HEIGHT: Pixels = px(36.0);
 const ACCOUNT_BUTTON_ID: &str = "unified-toolbar-account-button";
+const SEARCH_BUTTON_ID: &str = "unified-toolbar-search-button";
 
 /// Build the unified toolbar element: a draggable window region plus the
 /// settings button with its menu.
@@ -61,6 +70,24 @@ pub fn unified_toolbar<V: Render>(
 /// when the explorer has one pane, at the end of its tab row, which then is
 /// the title bar, as in the Explorer of Windows 11.
 pub fn title_bar_controls(window: &Window) -> impl IntoElement + use<> {
+    let search_button = Button::new(SEARCH_BUTTON_ID)
+        .icon(
+            Icon::new(IconName::Search)
+                .size_4()
+                .text_color(rgb(theme::fg_secondary())),
+        )
+        .rounded(ButtonRounded::Large)
+        .compact()
+        .with_variant(ButtonVariant::Ghost)
+        .with_size(Size::Small)
+        .tooltip(format!(
+            "{}  (Ctrl+Shift+F)",
+            t!("Buscar em todo o computador")
+        ))
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(OpenSearch), cx);
+        });
+
     let account_button = Button::new(ACCOUNT_BUTTON_ID)
         .icon(
             Icon::new(IconName::Settings)
@@ -98,6 +125,7 @@ pub fn title_bar_controls(window: &Window) -> impl IntoElement + use<> {
         .items_center()
         .gap_1()
         .when(!cfg!(target_os = "windows"), |controls| controls.pr(px(16.0)))
+        .child(search_button)
         .child(account_button)
         .when(cfg!(target_os = "windows"), |controls| {
             controls.child(windows_caption_buttons(window.is_maximized()))

@@ -4080,6 +4080,203 @@ pub(crate) fn status(cx: &App) -> Status {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Whole-computer search for other windows
+
+/// One hit of a whole-computer search made for another window.
+pub(crate) struct WholeComputerHit {
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: u32,
+}
+
+/// Why a whole-computer search could not answer.
+pub(crate) enum WholeComputerError {
+    /// The index is still being read or walked; the caller may ask again.
+    NotReady,
+    /// The chosen source answered with a failure.
+    Failed(String),
+}
+
+/// The index a whole-computer search runs against, copied out of the GPUI
+/// globals on the UI thread so the search itself can run on a background
+/// thread. This is what the standalone search window uses: the same names and
+/// the same source choice as the Explorer's Everything mode, without a pane.
+pub(crate) struct WholeComputerSearch {
+    source: Source,
+    /// The indexer service holds the names and searches them itself.
+    service: bool,
+    index: Option<Arc<Index>>,
+    /// The drive being walked, searchable while it fills.
+    walking: Option<Arc<Mutex<Segment>>>,
+    /// What the watcher saw created since the walks.
+    fresh: Arc<Mutex<Fresh>>,
+}
+
+impl WholeComputerSearch {
+    /// Whether there is anything to search yet. The window retries while this
+    /// is `false`: a cold start reads the saved index before the first answer.
+    pub(crate) fn ready(&self) -> bool {
+        self.service || self.index.is_some() || self.walking.is_some()
+    }
+
+    /// Runs `text` against the index the Explorer would search. Blocking:
+    /// called from a background thread.
+    pub(crate) fn search(
+        self,
+        text: &str,
+        limit: usize,
+    ) -> Result<Vec<WholeComputerHit>, WholeComputerError> {
+        let Some(query) = Query::parse(text, "") else {
+            return Ok(Vec::new());
+        };
+        let terms = query.name_terms();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(MAX_RESULTS);
+        if self.source == Source::Everything {
+            #[cfg(windows)]
+            {
+                let cancel = Arc::new(AtomicBool::new(false));
+                return match remote::search(&terms, limit as u32, &cancel, None, None) {
+                    Ok(hits) => Ok(hits
+                        .into_iter()
+                        .map(|hit| WholeComputerHit {
+                            path: hit.path,
+                            is_dir: hit.dir,
+                            size: hit.size,
+                            modified: hit.modified,
+                        })
+                        .collect()),
+                    Err(error) => Err(WholeComputerError::Failed(format!(
+                        "Everything 索引暂不可用：{error:?}"
+                    ))),
+                };
+            }
+            #[cfg(not(windows))]
+            return Err(WholeComputerError::Failed(
+                "Everything's index is not available here".to_string(),
+            ));
+        }
+        // The service keeps and searches the names itself. Its answer is
+        // preferred, but a service that stops answering must not empty the
+        // window when this process still holds the table.
+        if self.service {
+            match mft::search(&terms, limit as u32) {
+                Ok(hits) => {
+                    return Ok(hits
+                        .into_iter()
+                        .map(|hit| WholeComputerHit {
+                            path: hit.path,
+                            is_dir: hit.dir,
+                            size: hit.size,
+                            modified: hit.modified,
+                        })
+                        .collect());
+                }
+                Err(error) => {
+                    if self.index.is_none() && self.walking.is_none() {
+                        return Err(WholeComputerError::Failed(error));
+                    }
+                }
+            }
+        }
+        if !self.ready() {
+            return Err(WholeComputerError::NotReady);
+        }
+        Ok(self.local_hits(&query, limit))
+    }
+
+    /// Searches this process's own table, ranking and deduplicating the way
+    /// the Explorer's mode does, and keeping the size and date of each hit.
+    fn local_hits(&self, query: &Query, limit: usize) -> Vec<WholeComputerHit> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut sources: Vec<(usize, &Segment)> = Vec::new();
+        if let Some(index) = &self.index {
+            sources.extend(
+                index
+                    .segments
+                    .iter()
+                    .enumerate()
+                    .map(|(at, segment)| (at, &**segment)),
+            );
+        }
+        let walking = self.walking.as_ref().map(|table| lock(table));
+        let fresh = lock(&self.fresh);
+        if let Some(table) = &walking {
+            sources.push((WALKING, &**table));
+        }
+        sources.push((FRESH, &fresh.table));
+        let scan = || {
+            let mut hits = scan::search_index(self.index.as_deref(), query, false, &cancel);
+            for (source, segment) in sources
+                .iter()
+                .filter(|(source, _)| *source == WALKING || *source == FRESH)
+            {
+                hits.extend(
+                    segment
+                        .search(query, false, &cancel)
+                        .into_iter()
+                        .map(|(rank, length, position)| (rank, length, *source, position)),
+                );
+            }
+            hits
+        };
+        // No near-miss pass: Everything narrows "xjlx" to the names that hold
+        // the letters together (or whose pinyin initials do), not to every name
+        // whose letters appear in order — and this window is compared with it.
+        let mut hits = scan();
+        let mut shown = std::collections::HashSet::new();
+        let mut targets = Vec::new();
+        let mut remaining = hits.as_mut_slice();
+        while !remaining.is_empty() && targets.len() < limit {
+            let count = remaining.len().min(limit - targets.len());
+            scan::best_prefix(remaining, count);
+            let (best, rest) = remaining.split_at_mut(count);
+            for &mut (_, _, source, position) in best {
+                let Some((_, segment)) = sources.iter().find(|(id, _)| *id == source) else {
+                    continue;
+                };
+                let Some(entry) = segment.entries.get(position as usize) else {
+                    continue;
+                };
+                let path = segment.path(position);
+                if shown.insert(path.to_lowercase()) {
+                    targets.push(WholeComputerHit {
+                        path,
+                        is_dir: entry.flags & DIR != 0,
+                        size: entry.size,
+                        modified: entry.modified,
+                    });
+                }
+            }
+            remaining = rest;
+        }
+        targets
+    }
+}
+
+/// Reads the index state and hands back what a background search needs. The
+/// caller asks again while [`WholeComputerSearch::ready`] is false.
+pub(crate) fn prepare(cx: &mut App) -> WholeComputerSearch {
+    ensure(cx);
+    let source = source(cx);
+    let service = source == Source::Own && mft::searchable();
+    let state = cx.try_global::<Everything>();
+    WholeComputerSearch {
+        source,
+        service,
+        index: state.and_then(|state| state.index.clone()),
+        walking: state.and_then(|state| state.walking.clone()),
+        fresh: state.map_or_else(
+            || Arc::new(Mutex::new(Fresh::default())),
+            |state| state.fresh.clone(),
+        ),
+    }
+}
+
 /// Reads the saved index on first use and walks the drives again when it is
 /// missing or old. With Everything answering, nothing of that table belongs in
 /// this process, and `auto` has to hear from Everything before it can choose.
