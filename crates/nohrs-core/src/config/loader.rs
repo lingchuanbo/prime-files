@@ -92,6 +92,52 @@ pub fn set_value(path: &Path, section: &str, key: &str, value: &str) -> io::Resu
     std::fs::write(path, with_value(&text, section, key, value))
 }
 
+#[allow(clippy::disallowed_methods)]
+/// Sets a value in a sparse TOML file without writing default settings.
+pub fn set_value_sparse(path: &Path, section: &str, key: &str, value: &str) -> io::Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    ensure_parent_dir(path)?;
+    std::fs::write(path, with_value(&text, section, key, value))
+}
+
+/// Copies the active profile to the selected location and persists the mode.
+pub fn set_portable_mode(enabled: bool) -> io::Result<()> {
+    let portable = super::paths::portable_config_dir();
+    let default = super::paths::config_dir();
+    let source = super::paths::active_config_dir();
+    let target = if enabled { &portable } else { &default };
+    std::fs::create_dir_all(target)?;
+    if source != *target {
+        for name in ["config.toml", "appearance.toml", "search.toml"] {
+            let from = source.join(name);
+            let to = target.join(name);
+            if from.exists() && !to.exists() {
+                std::fs::copy(from, to)?;
+            }
+        }
+    }
+    if enabled {
+        set_value(
+            &portable.join("config.toml"),
+            "storage",
+            "portable_mode",
+            "true",
+        )?;
+        remove_value(&default.join("config.toml"), "storage", "portable_mode")
+    } else {
+        set_value(
+            &default.join("config.toml"),
+            "storage",
+            "portable_mode",
+            "false",
+        )?;
+        remove_value(&portable.join("config.toml"), "storage", "portable_mode")
+    }
+}
 /// Removes `key` from `[section]` of the file at `path`, so the built-in
 /// default applies again; every other line stays as it was. A missing file,
 /// section or key is not an error: the default already applies.
@@ -119,14 +165,18 @@ fn without_value(text: &str, section: &str, key: &str) -> String {
         if trimmed.starts_with('[') {
             in_section = line.trim() == header;
         } else if in_section
-            && trimmed.strip_prefix(key).is_some_and(|rest| rest.trim_start().starts_with('='))
+            && trimmed
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
         {
             continue;
         }
         kept.push(line);
     }
-    let mut out = kept.join("
-");
+    let mut out = kept.join(
+        "
+",
+    );
     if text.ends_with('\n') {
         out.push('\n');
     }
@@ -144,8 +194,10 @@ fn with_value(text: &str, section: &str, key: &str, value: &str) -> String {
         }
         lines.push(header);
         lines.push(format!("{key} = {value}"));
-        return lines.join("
-") + "
+        return lines.join(
+            "
+",
+        ) + "
 ";
     };
     let end = lines[start + 1..]
@@ -164,7 +216,10 @@ fn with_value(text: &str, section: &str, key: &str, value: &str) -> String {
             let comment = comment_start(&lines[ix])
                 .map(|at| lines[ix][at..].to_string())
                 .unwrap_or_default();
-            let indent: String = lines[ix].chars().take_while(|c| c.is_whitespace()).collect();
+            let indent: String = lines[ix]
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .collect();
             lines[ix] = format!("{indent}{key} = {value}{comment}");
         }
         None => {
@@ -177,8 +232,10 @@ fn with_value(text: &str, section: &str, key: &str, value: &str) -> String {
             lines.insert(at, format!("{key} = {value}"));
         }
     }
-    lines.join("
-") + "
+    lines.join(
+        "
+",
+    ) + "
 "
 }
 
@@ -214,9 +271,13 @@ mod tests {
 
     #[test]
     fn without_value_drops_only_that_key_in_that_section() {
-        let text = "[keybindings]\ncopy = \"ctrl-shift-c\"\ncopy_path = \"ctrl-p\"\n\n[ui]\ncopy = 1\n";
+        let text =
+            "[keybindings]\ncopy = \"ctrl-shift-c\"\ncopy_path = \"ctrl-p\"\n\n[ui]\ncopy = 1\n";
         let out = without_value(text, "keybindings", "copy");
-        assert_eq!(out, "[keybindings]\ncopy_path = \"ctrl-p\"\n\n[ui]\ncopy = 1\n");
+        assert_eq!(
+            out,
+            "[keybindings]\ncopy_path = \"ctrl-p\"\n\n[ui]\ncopy = 1\n"
+        );
         assert_eq!(without_value(&out, "keybindings", "copy"), out);
     }
 
@@ -248,33 +309,54 @@ default_sort = \"name\"
 [explorer]
 ";
         let out = with_value(text, "ui", "show_hidden", "true");
-        assert_eq!(out, "[ui]
+        assert_eq!(
+            out,
+            "[ui]
 default_sort = \"name\"
 show_hidden = true
 
 [explorer]
-");
+"
+        );
         let out = with_value(&out, "theme", "mode", "\"light\"");
-        assert!(out.ends_with("[explorer]
+        assert!(out.ends_with(
+            "[explorer]
 
 [theme]
 mode = \"light\"
-"));
+"
+        ));
         // A `#` inside a value is not a comment.
-        let out = with_value("[theme]
+        let out = with_value(
+            "[theme]
 accent = \"#fff\" # hex
-", "theme", "accent", "\"#000\"");
-        assert_eq!(out, "[theme]
+",
+            "theme",
+            "accent",
+            "\"#000\"",
+        );
+        assert_eq!(
+            out,
+            "[theme]
 accent = \"#000\" # hex
-");
+"
+        );
         // A key that only shares a prefix is not the key.
-        let out = with_value("[ui]
+        let out = with_value(
+            "[ui]
 show_hidden_x = 1
-", "ui", "show_hidden", "true");
-        assert_eq!(out, "[ui]
+",
+            "ui",
+            "show_hidden",
+            "true",
+        );
+        assert_eq!(
+            out,
+            "[ui]
 show_hidden_x = 1
 show_hidden = true
-");
+"
+        );
     }
 
     #[test]

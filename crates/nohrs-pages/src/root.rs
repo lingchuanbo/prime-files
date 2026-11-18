@@ -422,7 +422,7 @@ impl RootView {
                         }
                         let update = this.update_in(&mut cx, |this, window, cx| {
                             let (mut config, diagnostics) =
-                                config::load_from_path(&this.config_path);
+                                config::load_from_files(&this.config_path, &config::paths::appearance_file(), &config::paths::search_file());
                             for over in &this.config_overrides {
                                 config.apply_override(over);
                             }

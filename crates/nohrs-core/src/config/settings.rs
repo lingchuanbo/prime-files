@@ -45,8 +45,10 @@ pub const SCHEMA_URL: &str =
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Config {
-    /// On-disk schema version. Must be [`CURRENT_SCHEMA_VERSION`] for this build.
+    /// On-disk schema version understood by this build.
     pub schema_version: u64,
+    /// Storage mode persisted with the selected configuration profile.
+    pub storage: Storage,
     /// Appearance settings.
     pub theme: Theme,
     /// Explorer / view settings.
@@ -80,6 +82,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
+            storage: Storage::default(),
             theme: Theme::default(),
             ui: Ui::default(),
             explorer: Explorer::default(),
@@ -95,6 +98,14 @@ impl Default for Config {
             space_map: SpaceMap::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(default)]
+/// Settings that control where configuration files are stored.
+pub struct Storage {
+    /// Stores settings beside the executable in `userdata`.
+    pub portable_mode: bool,
 }
 
 /// Space map (the treemap of what a folder weighs) settings.
@@ -961,6 +972,18 @@ impl Config {
             }
         }
 
+        if let Some(value) = table.get("storage") {
+            match value.as_table() {
+                Some(storage) => {
+                    if let Some(mode) = storage.get("portable_mode").and_then(toml::Value::as_bool) {
+                        config.storage.portable_mode = mode;
+                    } else if storage.contains_key("portable_mode") {
+                        diagnostics.push(Diagnostic::warn("[storage].portable_mode must be a boolean; ignoring"));
+                    }
+                }
+                None => diagnostics.push(Diagnostic::warn("[storage] is not a table; ignoring")),
+            }
+        }
         if let Some(theme) = table.get("theme") {
             match theme.as_table() {
                 Some(theme) => read_theme(theme, &mut config.theme, &mut diagnostics),
@@ -1048,6 +1071,7 @@ impl Config {
             table,
             &[
                 "schema_version",
+                "storage",
                 "theme",
                 "ui",
                 "explorer",
@@ -1080,7 +1104,9 @@ impl Config {
     pub fn default_toml_template() -> String {
         format!(
             "#:schema {SCHEMA_URL}\n\
-             schema_version = {CURRENT_SCHEMA_VERSION}\n\
+             \n\
+             [storage]\n\
+             portable_mode = false\n\
              \n\
              [theme]\n\
              mode = \"dark\"   # \"system\" | \"light\" | \"dark\"\n\
@@ -1943,6 +1969,66 @@ pub fn load_from_path(path: &Path) -> (Config, Vec<Diagnostic>) {
     }
 }
 
+/// Loads the main, appearance, and search files into one validated configuration.
+pub fn load_from_files(main: &Path, appearance: &Path, search: &Path) -> (Config, Vec<Diagnostic>) {
+    let mut diagnostics = Vec::new();
+    let mut table = read_config_table(main, &mut diagnostics);
+    let appearance_table = read_config_table(appearance, &mut diagnostics);
+    let search_table = read_config_table(search, &mut diagnostics);
+
+    for key in ["theme", "space_map"] {
+        if let Some(value) = appearance_table.get(key) {
+            merge_table_value(&mut table, key, value.clone());
+        }
+    }
+    if let Some(colors) = appearance_table.get("ui").and_then(|ui| ui.get("file_type_colors")) {
+        let ui = table.entry("ui").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let Some(ui) = ui.as_table_mut() {
+            ui.insert("file_type_colors".into(), colors.clone());
+        }
+    }
+    for key in ["indexing", "search"] {
+        if let Some(value) = search_table.get(key) {
+            merge_table_value(&mut table, key, value.clone());
+        }
+    }
+
+    let source = toml::to_string(&toml::Value::Table(table)).unwrap_or_default();
+    let (config, mut parse_diagnostics) = Config::from_toml_str(&source);
+    diagnostics.append(&mut parse_diagnostics);
+    (config, diagnostics)
+}
+
+fn read_config_table(path: &Path, diagnostics: &mut Vec<Diagnostic>) -> toml::Table {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => match contents.parse::<toml::Table>() {
+            Ok(table) => table,
+            Err(error) => {
+                diagnostics.push(Diagnostic::error(format!("failed to parse {}: {error}", path.display())));
+                toml::Table::new()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => {
+            diagnostics.push(Diagnostic::error(format!("could not read {}: {error}", path.display())));
+            toml::Table::new()
+        }
+    }
+}
+
+fn merge_table_value(table: &mut toml::Table, key: &str, value: toml::Value) {
+    match (table.get_mut(key), value) {
+        (Some(toml::Value::Table(current)), toml::Value::Table(incoming)) => {
+            for (key, value) in incoming {
+                merge_table_value(current, &key, value);
+            }
+        }
+        (_, value) => {
+            table.insert(key.to_string(), value);
+        }
+    }
+}
+
 /// Log all diagnostics and return the first error message (if any) so the caller
 /// can surface it in the UI. Warnings are logged but never returned.
 pub fn report_diagnostics(diagnostics: &[Diagnostic]) -> Option<String> {
@@ -1977,6 +2063,23 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn split_files_override_the_main_configuration_by_category() {
+        let directory = tempfile::tempdir().unwrap();
+        let main = directory.path().join("config.toml");
+        let appearance = directory.path().join("appearance.toml");
+        let search = directory.path().join("search.toml");
+        std::fs::write(&main, "[theme]\naccent = \"red\"\n[search]\nbackend = \"auto\"\n").unwrap();
+        std::fs::write(&appearance, "[theme]\naccent = \"blue\"\n[space_map]\ncolor = \"kind\"\n").unwrap();
+        std::fs::write(&search, "[search]\nbackend = \"ripgrep\"\n").unwrap();
+
+        let (config, diagnostics) = load_from_files(&main, &appearance, &search);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(config.theme.accent, "blue");
+        assert_eq!(config.space_map.color, SpaceMapColor::Kind);
+        assert_eq!(config.search.backend, SearchBackend::Ripgrep);
+    }
     #[test]
     fn defaults_match_spec() {
         let config = Config::default();

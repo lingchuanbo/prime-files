@@ -9,6 +9,7 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Could not copy files to the clipboard: {error}",
         "No se pudieron copiar los archivos al portapapeles: {error}",
     ),
+    ("Não foi possível alterar o armazenamento da configuração: {error}", "Could not change configuration storage: {error}", "No se pudo cambiar el almacenamiento de configuración: {error}"),
     ("Logs de execução", "Runtime logs", "Registros de ejecución"),
     (
         "Desativado por padrão. Reinicie para aplicar. Salva logs ao lado do aplicativo; podem conter caminhos de arquivos. Desativar não apaga logs existentes.",
@@ -1129,7 +1130,13 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ("Sem", "None", "Sin"),
     ("Sem data", "No date", "Sin fecha"),
     ("Sem limite", "No limit", "Sin límite"),
-    ("Sobre", "About", "Acerca de"),
+    ("Armazenamento", "Storage", "Almacenamiento"),
+    ("Configuração verde (portátil)", "Portable configuration", "Configuración portátil"),
+    ("Guarda as configurações em userdata ao lado do programa. Reinicie para aplicar.", "Stores settings in userdata beside the app. Restart to apply.", "Guarda la configuración en userdata junto a la aplicación. Reinicia para aplicar."),
+    ("As configurações gerais ficam aqui; aparência e busca usam arquivos separados. Alterações manuais são aplicadas na hora.", "General settings stay here; appearance and search use separate files. Manual edits apply immediately.", "La configuración general queda aquí; apariencia y búsqueda usan archivos separados. Los cambios manuales se aplican al instante."),    ("Cor do item", "Item color", "Color del elemento"),
+    ("Seguir a regra de cor do tipo de arquivo", "Follow the file type color rule", "Seguir la regla de color del tipo de archivo"),
+    ("删除", "Delete", "Eliminar"),
+    ("打开所在位置", "Open containing folder", "Abrir ubicación"),    ("Sobre", "About", "Acerca de"),
     ("Suave", "Smooth", "Suave"),
     (
         "Subir para a pasta de cima",

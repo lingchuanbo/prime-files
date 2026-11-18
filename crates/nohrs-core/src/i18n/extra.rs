@@ -3,7 +3,25 @@
 //! Simplified Chinese text, in that order. The tests in `i18n.rs` check
 //! that every key has a row here and that placeholders survive.
 
-pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
+pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
+        "Cor do item",
+        ["Couleur de l’élément", "Elementfarbe", "Colore elemento", "Цвет элемента", "項目の色", "项目颜色"],
+    ),
+    (
+        "Seguir a regra de cor do tipo de arquivo",
+        ["Suivre la règle de couleur du type de fichier", "Farbregel des Dateityps folgen", "Segui la regola colore del tipo di file", "Следовать правилу цвета типа файла", "ファイル種類の色ルールに従う", "遵循文件类型颜色规则"],
+    ),
+    (
+        "删除",
+        ["Supprimer", "Löschen", "Elimina", "Удалить", "削除", "删除"],
+    ),
+    (
+        "打开所在位置",
+        ["Ouvrir l’emplacement", "Speicherort öffnen", "Apri percorso", "Открыть расположение", "保存場所を開く", "打开所在位置"],
+    ),    (
+        "Não foi possível alterar o armazenamento da configuração: {error}",
+        ["Impossible de modifier le stockage de la configuration : {error}", "Konfigurationsspeicher konnte nicht geändert werden: {error}", "Impossibile modificare la posizione della configurazione: {error}", "Не удалось изменить место хранения настроек: {error}", "設定の保存先を変更できませんでした: {error}", "无法更改配置存储位置：{error}"],
+    ),
     (
         "Não foi possível copiar arquivos para a área de transferência: {error}",
         [
@@ -14,6 +32,22 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "ファイルをクリップボードにコピーできませんでした: {error}",
             "无法将文件复制到系统剪贴板：{error}",
         ],
+    ),
+    (
+        "Armazenamento",
+        ["Stockage", "Speicher", "Archiviazione", "Хранилище", "保存先", "存储"],
+    ),
+    (
+        "Configuração verde (portátil)",
+        ["Configuration portable", "Portable Konfiguration", "Configurazione portatile", "Портативная конфигурация", "ポータブル設定", "绿色配置模式"],
+    ),
+    (
+        "Guarda as configurações em userdata ao lado do programa. Reinicie para aplicar.",
+        ["Enregistre les paramètres dans userdata à côté de l’application. Redémarrez pour appliquer.", "Speichert Einstellungen in userdata neben der Anwendung. Neustart erforderlich.", "Salva le impostazioni in userdata accanto all’app. Riavvia per applicare.", "Сохраняет настройки в userdata рядом с приложением. Перезапустите для применения.", "アプリと同じ場所の userdata に設定を保存します。反映には再起動が必要です。", "将设置保存在软件同级的 userdata 文件夹中，重启后生效。"],
+    ),
+    (
+        "As configurações gerais ficam aqui; aparência e busca usam arquivos separados. Alterações manuais são aplicadas na hora.",
+        ["Les paramètres généraux restent ici ; l’apparence et la recherche utilisent des fichiers séparés. Les modifications manuelles s’appliquent immédiatement.", "Allgemeine Einstellungen bleiben hier; Darstellung und Suche verwenden eigene Dateien. Manuelle Änderungen gelten sofort.", "Le impostazioni generali restano qui; aspetto e ricerca usano file separati. Le modifiche manuali si applicano subito.", "Общие настройки остаются здесь; оформление и поиск используют отдельные файлы. Ручные изменения применяются сразу.", "一般設定はここに保存され、外観と検索は別ファイルを使います。手動編集はすぐ反映されます。", "常规设置保存在此文件；外观和搜索分别使用独立文件。手动修改会立即生效。"],
     ),
     (
         "Logs de execução",

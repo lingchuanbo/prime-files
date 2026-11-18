@@ -8,6 +8,9 @@
 //! used only to locate the home directory for the fallback.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static ACTIVE_CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Application directory name used under each XDG base directory.
 const APP_DIR: &str = "nohrs";
@@ -54,30 +57,84 @@ pub fn config_dir() -> PathBuf {
     config_home().join(APP_DIR)
 }
 
-/// The nohrs data directory (`.../nohrs`).
-pub fn data_dir() -> PathBuf {
-    data_home().join(APP_DIR)
+/// Returns the `userdata` folder beside the executable.
+pub fn portable_config_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .join("userdata")
 }
 
+/// Returns the active configuration directory, honoring the saved mode.
+pub fn active_config_dir() -> PathBuf {
+    ACTIVE_CONFIG_DIR.get_or_init(resolve_config_dir).clone()
+}
+
+/// Freezes the selected directory for this process and returns it.
+pub fn freeze_active_config_dir() -> PathBuf {
+    ACTIVE_CONFIG_DIR.get_or_init(resolve_config_dir).clone()
+}
+
+fn resolve_config_dir() -> PathBuf {
+    if portable_mode_enabled() {
+        portable_config_dir()
+    } else {
+        config_dir()
+    }
+}
+
+fn portable_mode_from_configs(default: &std::path::Path, portable: &std::path::Path) -> bool {
+    read_portable_mode(portable)
+        .or_else(|| read_portable_mode(default))
+        .unwrap_or(false)
+}
+
+fn read_portable_mode(path: &std::path::Path) -> Option<bool> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&contents).ok()?;
+    value.get("storage")?.get("portable_mode")?.as_bool()
+}
+
+/// The nohrs data directory (`.../nohrs`).
+pub fn data_dir() -> PathBuf {
+    if portable_mode_enabled() {
+        portable_config_dir().join("data")
+    } else {
+        data_home().join(APP_DIR)
+    }
+}
+
+/// Whether the saved profile selects portable storage.
+pub fn portable_mode_enabled() -> bool {
+    portable_mode_from_configs(
+        &config_dir().join("config.toml"),
+        &portable_config_dir().join("config.toml"),
+    )
+}
 /// The nohrs cache directory (`.../nohrs`).
 pub fn cache_dir() -> PathBuf {
-    cache_home().join(APP_DIR)
+    if portable_mode_enabled() {
+        portable_config_dir().join("cache")
+    } else {
+        cache_home().join(APP_DIR)
+    }
 }
 
 /// The nohrs state directory (`.../nohrs`).
-///
-/// State is what a user would keep across restarts but would not miss if it
-/// were lost, and would not want backed up: logs go here rather than in
-/// [`data_dir`] beside the databases, or [`cache_dir`], which a cleaner may
-/// empty at any moment.
 pub fn state_dir() -> PathBuf {
-    state_home().join(APP_DIR)
+    if portable_mode_enabled() {
+        portable_config_dir().join("state")
+    } else {
+        state_home().join(APP_DIR)
+    }
 }
 
-/// Directory holding rolling logs: beside the executable on Windows,
-/// otherwise under the state directory. Falls back to state if the executable
-/// directory cannot be resolved.
+/// Directory holding rolling logs.
 pub fn log_dir() -> PathBuf {
+    if portable_mode_enabled() {
+        return portable_config_dir().join("logs");
+    }
     #[cfg(windows)]
     if let Ok(executable) = std::env::current_exe()
         && let Some(directory) = executable.parent()
@@ -87,9 +144,47 @@ pub fn log_dir() -> PathBuf {
     state_dir().join("logs")
 }
 
+/// Directory for per-run coordination files such as the IPC endpoint.
+pub fn runtime_dir() -> PathBuf {
+    if portable_mode_enabled() {
+        return portable_config_dir().join("runtime");
+    }
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local).join(APP_DIR);
+    }
+    state_dir().join("runtime")
+}
+
+/// Migrates existing platform data into the selected profile before services open it.
+pub fn prepare_storage() -> std::io::Result<()> {
+    super::storage::prepare_storage()
+}
 /// Full path to `config.toml`.
 pub fn config_file() -> PathBuf {
-    config_dir().join("config.toml")
+    active_config_dir().join("config.toml")
+}
+
+/// Returns the file containing appearance and color settings.
+pub fn appearance_file() -> PathBuf {
+    active_config_dir().join("appearance.toml")
+}
+
+/// Returns the file containing search settings.
+pub fn search_file() -> PathBuf {
+    active_config_dir().join("search.toml")
+}
+
+/// Selects the split configuration file for a section and key.
+pub fn config_file_for(section: &str, key: &str) -> PathBuf {
+    let directory = active_config_dir();
+    match (section, key) {
+        ("theme", _) | ("space_map", _) | ("ui", "file_type_colors") => {
+            directory.join("appearance.toml")
+        }
+        ("indexing", _) | ("search", _) => directory.join("search.toml"),
+        _ => directory.join("config.toml"),
+    }
 }
 
 #[cfg(test)]
@@ -101,13 +196,28 @@ mod tests {
     use crate::config::test_env::env_lock;
 
     #[test]
-    fn config_file_lives_under_config_home() {
-        // Reads `XDG_CONFIG_HOME`, so it must serialize with the mutating tests.
-        let _guard = env_lock();
-        let file = config_file();
-        assert!(file.ends_with("nohrs/config.toml"));
+    fn portable_profile_is_detected_without_system_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let system_config = directory.path().join("system/config.toml");
+        let portable_config = directory.path().join("userdata/config.toml");
+        std::fs::create_dir_all(portable_config.parent().unwrap()).unwrap();
+        std::fs::write(&portable_config, "[storage]\nportable_mode = true\n").unwrap();
+        std::fs::create_dir_all(system_config.parent().unwrap()).unwrap();
+        std::fs::write(&system_config, "[storage]\nportable_mode = false\n").unwrap();
+
+        assert!(portable_mode_from_configs(&system_config, &portable_config));
+        std::fs::write(&portable_config, "[storage]\nportable_mode = false\n").unwrap();
+        assert!(!portable_mode_from_configs(
+            &system_config,
+            &portable_config
+        ));
     }
 
+    #[test]
+    fn config_file_lives_under_active_config_dir() {
+        let _guard = env_lock();
+        assert_eq!(config_file(), active_config_dir().join("config.toml"));
+    }
     #[test]
     fn absolute_xdg_var_is_honoured() {
         let _guard = env_lock();
@@ -167,28 +277,43 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn logs_live_under_the_state_directory() {
-        // Not under `data_dir` (backed up beside the databases) and not under
-        // `cache_dir` (a cleaner may empty it while nohrs is running).
         let _guard = env_lock();
-        let logs = log_dir();
-        assert!(logs.ends_with("nohrs/logs"), "{}", logs.display());
-        assert!(logs.starts_with(state_home()), "{}", logs.display());
+        if portable_mode_enabled() {
+            assert_eq!(log_dir(), portable_config_dir().join("logs"));
+        } else {
+            assert_eq!(log_dir(), state_home().join("nohrs/logs"));
+        }
     }
 
     #[test]
     #[cfg(windows)]
-    fn logs_live_beside_the_executable() {
-        let executable = std::env::current_exe().expect("test executable");
-        assert_eq!(executable.parent().expect("executable directory"), log_dir());
+    fn logs_follow_the_selected_profile() {
+        let executable_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let expected = if portable_mode_enabled() {
+            executable_dir.join("userdata/logs")
+        } else {
+            executable_dir
+        };
+        assert_eq!(expected, log_dir());
     }
-
     #[test]
-    fn app_dirs_append_app_name_and_config_file_is_under_config_dir() {
-        // Reads the XDG-derived dirs, so serialize with the mutating tests.
+    fn app_dirs_follow_the_selected_profile() {
         let _guard = env_lock();
         assert!(config_dir().ends_with("nohrs"));
-        assert!(data_dir().ends_with("nohrs"));
-        assert!(cache_dir().ends_with("nohrs"));
-        assert_eq!(config_file(), config_dir().join("config.toml"));
+        if portable_mode_enabled() {
+            let root = portable_config_dir();
+            assert_eq!(config_file(), root.join("config.toml"));
+            assert_eq!(data_dir(), root.join("data"));
+            assert_eq!(cache_dir(), root.join("cache"));
+            assert_eq!(state_dir(), root.join("state"));
+        } else {
+            assert!(data_dir().ends_with("nohrs"));
+            assert!(cache_dir().ends_with("nohrs"));
+            assert_eq!(config_file(), config_dir().join("config.toml"));
+        }
     }
 }

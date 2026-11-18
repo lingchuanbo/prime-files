@@ -4,7 +4,7 @@
 //! and telling Nohrs where to go.
 //!
 //! A TCP socket on 127.0.0.1 with a random port, described in
-//! `%LOCALAPPDATA%\nohrs\ipc.json` together with a token generated per run.
+//! `userdata/runtime/ipc.json` in portable mode, otherwise `%LOCALAPPDATA%\nohrs\ipc.json`, together with a token generated per run.
 //! The token is what keeps another local user, or a web page poking at
 //! localhost, from driving the explorer: only someone who can read the file in
 //! this user's profile has it. Each connection carries one JSON request line
@@ -63,10 +63,13 @@ struct Envelope {
 }
 
 fn endpoint_file() -> Option<PathBuf> {
+    Some(nohrs_core::config::paths::runtime_dir().join("ipc.json"))
+}
+
+fn legacy_endpoint_file() -> Option<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")?;
     Some(PathBuf::from(local).join("nohrs").join("ipc.json"))
 }
-
 /// The native handle of `window`, for Win32 calls that need an owner.
 pub(crate) fn window_hwnd(window: &Window) -> Option<i64> {
     platform::window_handle(window)
@@ -77,7 +80,12 @@ pub(crate) fn window_hwnd(window: &Window) -> Option<i64> {
 // before any UI exists, so there is no frame to stall.
 #[allow(clippy::disallowed_methods)]
 pub fn read_endpoint() -> Option<Endpoint> {
-    let text = std::fs::read_to_string(endpoint_file()?).ok()?;
+    let active_file = endpoint_file()?;
+    let text = std::fs::read_to_string(&active_file).ok().or_else(|| {
+        legacy_endpoint_file()
+            .filter(|legacy| legacy != &active_file)
+            .and_then(|legacy| std::fs::read_to_string(legacy).ok())
+    })?;
     serde_json::from_str(&text).ok()
 }
 
@@ -231,7 +239,10 @@ fn answer(
     let reply = match serde_json::from_str::<Envelope>(&line) {
         Ok(envelope) if envelope.token == token => {
             let (reply_sender, reply) = async_channel::bounded(1);
-            if sender.send_blocking((envelope.request, reply_sender)).is_err() {
+            if sender
+                .send_blocking((envelope.request, reply_sender))
+                .is_err()
+            {
                 json!({ "ok": false, "error": "shutting down" })
             } else {
                 reply
@@ -283,7 +294,12 @@ impl RootView {
         }
     }
 
-    fn handle_ipc(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) -> Value {
+    fn handle_ipc(
+        &mut self,
+        request: Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Value {
         let explorer = self.explorer_entity();
         match request {
             Request::Ping => json!({ "ok": true }),
@@ -302,8 +318,9 @@ impl RootView {
             },
             Request::Navigate { tab, path } => match folder_and_selection(Path::new(&path)) {
                 Some((folder, select)) => {
-                    let found = explorer
-                        .update(cx, |page, cx| page.navigate_tab(tab, folder, select, window, cx));
+                    let found = explorer.update(cx, |page, cx| {
+                        page.navigate_tab(tab, folder, select, window, cx)
+                    });
                     json!({ "ok": found })
                 }
                 None => json!({ "ok": false, "error": "no such path" }),
@@ -372,7 +389,8 @@ mod tests {
         assert_eq!(envelope.token, "t");
         assert!(matches!(envelope.request, Request::Open { path } if path == r"C:\x"));
         let envelope: Envelope =
-            serde_json::from_str(r#"{"token":"t","cmd":"navigate","tab":7,"path":"D:\\"}"#).unwrap();
+            serde_json::from_str(r#"{"token":"t","cmd":"navigate","tab":7,"path":"D:\\"}"#)
+                .unwrap();
         assert!(matches!(envelope.request, Request::Navigate { tab: 7, .. }));
         assert!(serde_json::from_str::<Envelope>(r#"{"token":"t","cmd":"format_c"}"#).is_err());
     }
@@ -384,7 +402,10 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let (folder, select) = folder_and_selection(&file).unwrap();
         assert!(!folder.starts_with(r"\\?\"));
-        assert!(crate::explorer::same_path(&folder, &strip_verbatim(&std::fs::canonicalize(dir.path()).unwrap()).to_string_lossy()));
+        assert!(crate::explorer::same_path(
+            &folder,
+            &strip_verbatim(&std::fs::canonicalize(dir.path()).unwrap()).to_string_lossy()
+        ));
         assert!(select.unwrap().to_lowercase().ends_with("a.txt"));
         let (folder, select) = folder_and_selection(dir.path()).unwrap();
         assert!(select.is_none());

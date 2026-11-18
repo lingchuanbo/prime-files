@@ -29,7 +29,11 @@ impl ConfigWatcher {
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<Event>| match result {
                 Ok(event) => {
-                    if is_relevant(&event) && event.paths.iter().any(|path| path == &target) {
+                    if is_relevant(&event) && event.paths.iter().any(|path| {
+                        path == &target
+                            || (path.parent() == target.parent()
+                                && matches!(path.file_name().and_then(|name| name.to_str()), Some("appearance.toml" | "search.toml")))
+                    }) {
                         on_change();
                     }
                 }

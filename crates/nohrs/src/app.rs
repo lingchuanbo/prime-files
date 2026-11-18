@@ -33,9 +33,13 @@ impl NohrsApp {
         // CLI (config.md §3). A missing file is created with defaults so users
         // have something to edit and the watcher has a target. Parse failures are
         // non-fatal — we fall back to defaults and surface the error in the UI.
-        let config_path = config::paths::config_file();
+        let config_path = config::paths::freeze_active_config_dir().join("config.toml");
         let config_creation = config::ensure_exists(&config_path);
-        let (mut config, diagnostics) = config::load_from_path(&config_path);
+        let (mut config, diagnostics) = config::load_from_files(
+            &config_path,
+            &config::paths::appearance_file(),
+            &config::paths::search_file(),
+        );
         let config_overrides = vec![ConfigOverride::from_env(), cli.overrides()];
         for over in &config_overrides {
             config.apply_override(over);

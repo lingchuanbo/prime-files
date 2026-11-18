@@ -479,6 +479,17 @@
         }
       ]
     },
+    "Storage": {
+      "description": "Settings that control where configuration files are stored.",
+      "properties": {
+        "portable_mode": {
+          "default": false,
+          "description": "Stores settings beside the executable in `userdata`.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "Theme": {
       "description": "Appearance settings.",
       "properties": {
@@ -715,7 +726,7 @@
     },
     "schema_version": {
       "default": 1,
-      "description": "On-disk schema version. Must be [`CURRENT_SCHEMA_VERSION`] for this build.",
+      "description": "On-disk schema version understood by this build.",
       "minimum": 0,
       "type": "integer"
     },
@@ -743,6 +754,13 @@
         ]
       },
       "description": "The space map (the treemap of what a folder weighs)."
+    },
+    "storage": {
+      "$ref": "#/$defs/Storage",
+      "default": {
+        "portable_mode": false
+      },
+      "description": "Storage mode persisted with the selected configuration profile."
     },
     "theme": {
       "$ref": "#/$defs/Theme",

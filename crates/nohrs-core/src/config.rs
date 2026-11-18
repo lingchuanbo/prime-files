@@ -14,14 +14,16 @@ use std::time::Duration;
 pub mod loader;
 pub mod paths;
 pub mod settings;
+/// Portable-profile data migration and directory preparation.
+pub mod storage;
 pub mod watcher;
 
-pub use loader::{backup, ensure_exists, needs_migration, remove_value, reset, set_value, write_default};
+pub use loader::{backup, ensure_exists, needs_migration, remove_value, reset, set_portable_mode, set_value, set_value_sparse, write_default};
 pub use settings::{
     CURRENT_SCHEMA_VERSION, Compact, Config, ConfigOverride, Diagnostic, DiagnosticLevel, Diagnostics, DockSide, Layout,
     DiagnosticsStore, Explorer, FileTypeColorRule, IndexSource, Indexing, IndexingExclude, IndexingMode, Keybindings, Launcher,
-    Plugins, SCHEMA_URL, Search, SearchBackend, SortOrder, SpaceMap, SpaceMapColor, SplitDirection, Theme, ThemeMode, Ui, Updates,
-    json_schema_string, load_from_path, report_diagnostics,
+    Plugins, SCHEMA_URL, Search, SearchBackend, SortOrder, SpaceMap, SpaceMapColor, SplitDirection, Storage, Theme, ThemeMode, Ui, Updates,
+    json_schema_string, load_from_files, load_from_path, report_diagnostics,
 };
 pub use watcher::ConfigWatcher;
 

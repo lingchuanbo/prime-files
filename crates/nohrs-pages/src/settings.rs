@@ -895,8 +895,28 @@ impl SettingsPage {
 
     // Writes one value; the watcher brings it back through `set_config`.
     fn write(&mut self, section: &'static str, key: &'static str, value: String, cx: &mut Context<Self>) {
-        let path = config::paths::config_file();
-        let write = cx.background_spawn(async move { config::set_value(&path, section, key, &value) });
+        if section == "storage" && key == "portable_mode" {
+            let enabled = value == "true";
+            let task = cx.background_spawn(async move { config::set_portable_mode(enabled) });
+            cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+                if let Err(error) = task.await {
+                    this.update(cx, |page, cx| {
+                        page.status = Some((tf!("Não foi possível alterar o armazenamento da configuração: {error}", error = error), true));
+                        cx.notify();
+                    }).log_err();
+                }
+            }).detach();
+            return;
+        }
+        let path = config::paths::config_file_for(section, key);
+        let sparse = path != config::paths::config_file();
+        let write = cx.background_spawn(async move {
+            if sparse {
+                config::set_value_sparse(&path, section, key, &value)
+            } else {
+                config::set_value(&path, section, key, &value)
+            }
+        });
         cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             if let Err(error) = write.await {
                 this.update(cx, |page, cx| {
@@ -2200,6 +2220,19 @@ impl SettingsPage {
         let path = config::paths::config_file();
         vec![
             Group::titled(
+                t!("Armazenamento"),
+                vec![Row::hint(
+                    t!("Configuração verde (portátil)"),
+                    t!("Guarda as configurações em userdata ao lado do programa. Reinicie para aplicar."),
+                    self.switch(
+                        "portable-config",
+                        self.config.storage.portable_mode,
+                        ("storage", "portable_mode"),
+                        cx,
+                    ),
+                )],
+            ),
+            Group::titled(
                 t!("Logs de execução"),
                 vec![Row::hint(
                     t!("Logs de execução"),
@@ -2245,7 +2278,7 @@ impl SettingsPage {
                 vec![
                     Row::hint(
                         "config.toml",
-                        t!("Tudo desta página fica nele, e editá-lo à mão vale na hora."),
+                        t!("As configurações gerais ficam aqui; aparência e busca usam arquivos separados. Alterações manuais são aplicadas na hora."),
                         div()
                             .flex()
                             .flex_col()

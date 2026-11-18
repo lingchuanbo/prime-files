@@ -59,6 +59,30 @@ fn overlapping_roots_are_deduplicated_and_results_are_stable() {
 }
 
 #[test]
+fn directory_scan_orders_numeric_names_naturally() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["11.txt", "2.txt", "1.txt", "10.txt", "3.txt"] {
+        fs::write(directory.path().join(name), "safe").unwrap();
+    }
+
+    let result = scan(
+        &directory.path().to_string_lossy(),
+        false,
+        "",
+        &Progress::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        vec!["1.txt", "2.txt", "3.txt", "10.txt", "11.txt"],
+        result
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+#[test]
 fn invalid_format_and_missing_roots_are_not_silently_treated_as_all_files() {
     let directory = fixture();
     for format in [";", "png,jpg", "../png", "*.png;;*.jpg", "*png"] {

@@ -5,6 +5,9 @@ expression: parsed
 (
     Config {
         schema_version: 1,
+        storage: Storage {
+            portable_mode: false,
+        },
         theme: Theme {
             mode: Dark,
             accent: "teal",

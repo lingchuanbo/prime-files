@@ -16,10 +16,12 @@ fn main() {
     // Before parsing: clap prints help, version and argument errors itself.
     // Only for these text commands: opening a folder from a terminal must not
     // pour the app's log into it.
-    if std::env::args()
-        .nth(1)
-        .is_some_and(|first| matches!(first.as_str(), "config" | "help" | "-h" | "--help" | "-V" | "--version"))
-    {
+    if std::env::args().nth(1).is_some_and(|first| {
+        matches!(
+            first.as_str(),
+            "config" | "help" | "-h" | "--help" | "-V" | "--version"
+        )
+    }) {
         attach_parent_console();
     }
     let cli = cli::Cli::parse();
@@ -55,6 +57,10 @@ fn main() {
         if handed_over {
             return;
         }
+    }
+
+    if let Err(error) = nohrs_core::config::paths::prepare_storage() {
+        eprintln!("could not prepare application storage: {error}");
     }
 
     app::NohrsApp::run(&cli);

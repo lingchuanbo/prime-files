@@ -73,13 +73,18 @@ pub(super) fn scan(
         )?;
     }
     cancelled(progress)?;
-    result.entries.sort_by_cached_key(|entry| {
-        let path = Path::new(&entry.path);
-        (
-            path.parent().map(path_key).unwrap_or_default(),
-            entry.name.to_lowercase(),
-            entry.path.clone(),
-        )
+    result.entries.sort_by(|left, right| {
+        let left_parent = Path::new(&left.path)
+            .parent()
+            .map(path_key)
+            .unwrap_or_default();
+        let right_parent = Path::new(&right.path)
+            .parent()
+            .map(path_key)
+            .unwrap_or_default();
+        natural_cmp(&left_parent, &right_parent)
+            .then_with(|| natural_cmp(&left.name, &right.name))
+            .then_with(|| natural_cmp(&left.path, &right.path))
     });
     result.roots.sort_by_key(|root| root.components().count());
     Ok(result)
@@ -96,6 +101,53 @@ fn validate_root(path: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
+fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let left = left.to_lowercase();
+    let right = right.to_lowercase();
+    let mut left_index = 0;
+    let mut right_index = 0;
+    while left_index < left.len() && right_index < right.len() {
+        let left_bytes = left.as_bytes();
+        let right_bytes = right.as_bytes();
+        let left_digit = left_bytes[left_index].is_ascii_digit();
+        let right_digit = right_bytes[right_index].is_ascii_digit();
+        if left_digit && right_digit {
+            let left_end = digit_end(left_bytes, left_index);
+            let right_end = digit_end(right_bytes, right_index);
+            let left_run = &left[left_index..left_end];
+            let right_run = &right[right_index..right_end];
+            let left_significant = left_run.trim_start_matches('0');
+            let right_significant = right_run.trim_start_matches('0');
+            let order = left_significant
+                .len()
+                .cmp(&right_significant.len())
+                .then_with(|| left_significant.cmp(right_significant))
+                .then_with(|| left_run.len().cmp(&right_run.len()));
+            if order != Ordering::Equal {
+                return order;
+            }
+            left_index = left_end;
+            right_index = right_end;
+            continue;
+        }
+        let order = left_bytes[left_index].cmp(&right_bytes[right_index]);
+        if order != Ordering::Equal {
+            return order;
+        }
+        left_index += 1;
+        right_index += 1;
+    }
+    left.len().cmp(&right.len())
+}
+
+fn digit_end(bytes: &[u8], start: usize) -> usize {
+    bytes[start..]
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .map_or(bytes.len(), |offset| start + offset)
+}
 pub(super) fn path_key(path: &Path) -> String {
     let text = path_text(path);
     if cfg!(windows) {

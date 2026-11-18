@@ -24,6 +24,11 @@ XDG 環境変数 `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` / `$XDG_CACHE_HOME` を�
 
 ---
 
+### Configuration file groups
+
+The main `config.toml` keeps general, explorer, and layout settings. Appearance and color settings are stored in `appearance.toml`; indexing and search settings are stored in `search.toml`. Missing split files are normal. At load time, values in the split files override matching categories from `config.toml`, so existing installations remain compatible.
+
+Settings > About > Storage can enable portable mode on Windows. The portable profile is also detected from `userdata/config.toml` when moved to a computer without the original system config. With it enabled, all application-owned files are under `userdata` beside the executable: configuration files at the root, persistent databases in `data`, Everything index/cache in `cache`, batch-rename session state in `state`, rolling/panic logs in `logs`, and IPC endpoint files in `runtime`. On first launch after switching profiles, missing files are copied from the previous profile before stores are opened; existing destination files are never overwritten. This does not relocate user files, Windows Quick Access data, or third-party application settings such as Listary preferences.
 ## 2. P1 最小スキーマ
 
 ```toml
