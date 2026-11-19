@@ -5876,4 +5876,44 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
             "请输入三个递减的 GB 大小和四个 #rrggbb 颜色。",
         ],
     ),
+    (
+        "Largura, numeração e comportamento das abas.",
+        ["Largeur, numérotation et comportement des onglets.","Tabbreite, Nummerierung und Verhalten.","Larghezza, numerazione e comportamento delle schede.","Ширина, нумерация и поведение вкладок.","タブの幅、番号、動作。","标签宽度、编号和行为。"],
+    ),
+    (
+        "Abas horizontais",
+        ["Onglets horizontaux","Horizontale Tabs","Schede orizzontali","Горизонтальные вкладки","横タブ","水平标签页"],
+    ),
+    (
+        "Largura das abas",
+        ["Largeur des onglets","Tabbreite","Larghezza delle schede","Ширина вкладок","タブ幅","标签页宽度"],
+    ),
+    (
+        "Ajuste automático distribui o espaço; largura fixa mantém todas previsíveis.",
+        ["Le réglage automatique répartit l’espace ; la largeur fixe garde des onglets prévisibles.","Die automatische Anpassung verteilt den Platz; eine feste Breite hält Tabs berechenbar.","La regolazione automatica distribuisce lo spazio; la larghezza fissa mantiene le schede prevedibili.","Автоподбор распределяет пространство; фиксированная ширина делает вкладки предсказуемыми.","自動調整は幅を均等に配分し、固定幅では各タブの幅を一定に保ちます。","自动分配空间；固定宽度让每个标签页宽度一致。"],
+    ),
+    (
+        "Ajuste automático",
+        ["Ajustement automatique","Automatische Anpassung","Regolazione automatica","Автоподбор","自動調整","自动调整"],
+    ),
+    (
+        "Largura fixa",
+        ["Largeur fixe","Feste Breite","Larghezza fissa","Фиксированная ширина","固定幅","固定宽度"],
+    ),
+    (
+        "Escolha a largura em pixels de cada aba horizontal.",
+        ["Choisissez la largeur en pixels de chaque onglet horizontal.","Wählen Sie die Breite jedes horizontalen Tabs in Pixeln.","Scegli la larghezza in pixel di ogni scheda orizzontale.","Выберите ширину каждой горизонтальной вкладки в пикселях.","各横タブの幅をピクセル単位で選択します。","设置每个水平标签页的像素宽度。"],
+    ),
+    (
+        "Mostrar numeração rápida",
+        ["Afficher la numérotation rapide","Schnellnummerierung anzeigen","Mostra numerazione rapida","Показывать номера для быстрого перехода","クイック番号を表示","显示快捷编号"],
+    ),
+    (
+        "Mostra números nas dez primeiras abas; use Alt+número para alternar.",
+        ["Affiche un numéro sur les dix premiers onglets ; utilisez Alt+numéro pour basculer.","Zeigt Nummern auf den ersten zehn Tabs; mit Alt+Zahl wechseln.","Mostra i numeri sulle prime dieci schede; usa Alt+numero per passare.","Показывает номера первых десяти вкладок; переключайтесь сочетанием Alt+цифра.","最初の10個のタブに番号を表示し、Alt+数字で切り替えます。","在前十个标签页前显示数字，可用 Alt+数字快速切换。"],
+    ),
+    (
+        "Data de modificação sem grupos",
+        ["Date de modification (sans groupes)","Änderungsdatum (ohne Gruppen)","Data di modifica (senza gruppi)","Дата изменения (без групп)","更新日時（グループなし）","修改时间（不分组）"],
+    ),
 ];

@@ -1,7 +1,7 @@
 use nohrs_core::t;
 use crate::theme::theme;
 use gpui::{
-    Action, Context, IntoElement, Pixels, Render, Window, WindowControlArea, actions, div, prelude::*,
+    Action, App, Context, IntoElement, Pixels, Render, Window, WindowControlArea, div, prelude::*,
     px, rgb,
 };
 use gpui_component::{
@@ -13,14 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
-actions!(
-    unified_toolbar,
-    [
-        /// Open the whole-computer search window.
-        OpenSearch
-    ]
-);
-
 /// Fixed height of the unified toolbar.
 pub const UNIFIED_TOOLBAR_HEIGHT: Pixels = px(36.0);
 const ACCOUNT_BUTTON_ID: &str = "unified-toolbar-account-button";
@@ -28,11 +20,12 @@ const SEARCH_BUTTON_ID: &str = "unified-toolbar-search-button";
 
 /// Build the unified toolbar element: a draggable window region plus the
 /// settings button with its menu.
-pub fn unified_toolbar<V: Render>(
+pub fn unified_toolbar<V: Render, F: Fn(&mut App) + 'static>(
     window: &Window,
     app_name: &str,
     _cx: &mut Context<V>,
-) -> impl IntoElement + use<V> {
+    on_open_search: F,
+) -> impl IntoElement + use<V, F> {
     let drag_region = div()
         .id("unified-toolbar-drag-region")
         .flex_1()
@@ -62,14 +55,18 @@ pub fn unified_toolbar<V: Render>(
         .border_b_1()
         .border_color(rgb(theme::border()))
         .child(drag_region)
-        .child(title_bar_controls(window))
+        .child(title_bar_controls(window, on_open_search))
 }
 
 /// The right end of the title bar: the settings button with its menu and,
 /// on Windows, minimize, maximize and close. Drawn by the toolbar above and,
 /// when the explorer has one pane, at the end of its tab row, which then is
 /// the title bar, as in the Explorer of Windows 11.
-pub fn title_bar_controls(window: &Window) -> impl IntoElement + use<> {
+pub fn title_bar_controls<F: Fn(&mut App) + 'static>(
+    window: &Window,
+    on_open_search: F,
+) -> impl IntoElement + use<F> {
+    let on_open_search = std::rc::Rc::new(on_open_search);
     let search_button = Button::new(SEARCH_BUTTON_ID)
         .icon(
             Icon::new(IconName::Search)
@@ -84,8 +81,8 @@ pub fn title_bar_controls(window: &Window) -> impl IntoElement + use<> {
             "{}  (Ctrl+Shift+F)",
             t!("Buscar em todo o computador")
         ))
-        .on_click(|_, window, cx| {
-            window.dispatch_action(Box::new(OpenSearch), cx);
+        .on_click(move |_, _, cx| {
+            on_open_search(cx);
         });
 
     let account_button = Button::new(ACCOUNT_BUTTON_ID)
@@ -318,7 +315,7 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             self.renders += 1;
-            unified_toolbar(window, "LumaFiles", cx)
+            unified_toolbar(window, "LumaFiles", cx, |_| {})
         }
     }
 

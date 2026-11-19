@@ -22,7 +22,7 @@ use std::time::Instant;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{Icon, IconName};
-use nohrs_core::config::{Compact, DockSide, SplitDirection};
+use nohrs_core::config::{Compact, DockSide, SplitDirection, TabWidthMode};
 use nohrs_ui::theme::theme;
 
 use crate::compact::{self, Edge, Reveal};
@@ -113,6 +113,12 @@ pub struct TabMetadata {
     #[serde(default)]
     /// Optional RGB icon color.
     pub color: Option<u32>,
+    #[serde(default)]
+    /// Protects the tab from ordinary close commands.
+    pub locked: bool,
+    #[serde(default)]
+    /// Opens activated directories in a new tab.
+    pub open_folders_in_new_tab: bool,
 }
 
 /// One pane: an ordered, non-empty list of tabs with one active.
@@ -258,6 +264,12 @@ pub struct PaneGroup<T: PaneItem> {
     title_bar_allowed: bool,
     /// Product name shown when the tab row itself is the window title bar.
     app_name: String,
+    /// Width policy for horizontal tabs.
+    tab_width_mode: TabWidthMode,
+    /// Width used by fixed horizontal tabs.
+    tab_width: f32,
+    /// Whether horizontal tabs show their Alt+number prefix.
+    show_tab_numbers: bool,
 }
 
 impl<T: PaneItem> PaneGroup<T> {
@@ -280,6 +292,9 @@ impl<T: PaneItem> PaneGroup<T> {
             vertical_tabs_side: DockSide::Left,
             title_bar_allowed: true,
             app_name: nohrs_ui::window::APP_NAME.to_string(),
+            tab_width_mode: TabWidthMode::Adaptive,
+            tab_width: 160.0,
+            show_tab_numbers: true,
         };
         (group, first)
     }
@@ -355,6 +370,13 @@ impl<T: PaneItem> PaneGroup<T> {
         } else {
             app_name.trim().to_string()
         };
+    }
+
+    /// Applies the horizontal tab sizing and shortcut-number preferences.
+    pub fn set_tab_layout(&mut self, mode: TabWidthMode, width: u32, show_numbers: bool) {
+        self.tab_width_mode = mode;
+        self.tab_width = width.clamp(80, 400) as f32;
+        self.show_tab_numbers = show_numbers;
     }
 
     /// Starts one of the group's drags.
@@ -1094,7 +1116,14 @@ impl<T: PaneItem> PaneGroup<T> {
                             .top_0()
                             .right_0()
                             .h(px(40.0))
-                            .child(nohrs_ui::components::layout::unified_toolbar::title_bar_controls(window)),
+                            .child(nohrs_ui::components::layout::unified_toolbar::title_bar_controls(
+                                window,
+                                |cx| {
+                                    if let Err(error) = crate::search_window::toggle(cx) {
+                                        tracing::error!(%error, "failed to open whole-computer search window");
+                                    }
+                                },
+                            )),
                     )
             })
     }
@@ -1138,7 +1167,7 @@ impl<T: PaneItem> PaneGroup<T> {
                 let drag_title = SharedString::from(title.clone());
                 let tooltip_title = title.clone();
                 let group = SharedString::from(format!("vtab-group-{pane_index}-{tab_index}"));
-                let show_close = tab_count > 1 && !metadata.pinned && !metadata.resident;
+                let show_close = tab_count > 1 && !metadata.pinned && !metadata.resident && !metadata.locked;
                 let row = div()
                     .id(SharedString::from(format!("vtab-{pane_index}-{tab_index}")))
                     .group(group.clone())
@@ -1388,7 +1417,7 @@ impl<T: PaneItem> PaneGroup<T> {
     {
         let on_context = callbacks.on_tab_context.clone();
         let metadata = self.tab(pane_index, tab_index).map(|tab| self.tab_metadata(tab.entity_id())).unwrap_or_default();
-        let show_close = show_close && !metadata.pinned && !metadata.resident;
+        let show_close = show_close && !metadata.pinned && !metadata.resident && !metadata.locked;
         let on_activate_tab = callbacks.on_activate_tab.clone();
         let on_close_tab = callbacks.on_close_tab.clone();
         let on_reorder_tab = callbacks.on_reorder_tab.clone();
@@ -1404,10 +1433,14 @@ impl<T: PaneItem> PaneGroup<T> {
             .items_center()
             .gap(px(8.0))
             .h(px(32.0))
-            // A fixed band of widths, as browsers do: many tabs shrink
-            // together, and a long folder name cannot push the rest away.
-            .min_w(px(110.0))
-            .max_w(px(220.0))
+            // Adaptive tabs use a comfortable band; fixed tabs use the
+            // configured width so the strip remains predictable.
+            .when(self.tab_width_mode == TabWidthMode::Fixed, |this| {
+                this.w(px(self.tab_width)).min_w(px(self.tab_width)).max_w(px(self.tab_width))
+            })
+            .when(self.tab_width_mode == TabWidthMode::Adaptive, |this| {
+                this.min_w(px(110.0)).max_w(px(220.0))
+            })
             .flex_shrink()
             .pl(px(12.0))
             .pr(px(6.0))
@@ -1474,7 +1507,7 @@ impl<T: PaneItem> PaneGroup<T> {
                     on_reorder_tab(this, pane_index, drag.tab, tab_index, window, cx);
                 }
             }))
-            .when(tab_index < 10, |this| {
+            .when(self.show_tab_numbers && tab_index < 10, |this| {
                 this.child(
                     div()
                         .flex_shrink_0()

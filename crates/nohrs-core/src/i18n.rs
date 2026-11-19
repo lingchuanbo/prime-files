@@ -43,9 +43,13 @@ pub enum Lang {
 }
 
 impl Lang {
-    /// Every language, in the order the settings page lists them.
+    /// Every language, in stable order for persisted language identifiers.
     pub const ALL: [Lang; 9] =
         [Lang::Pt, Lang::En, Lang::Es, Lang::Fr, Lang::De, Lang::It, Lang::Ru, Lang::Ja, Lang::Zh];
+
+    /// The order shown in the settings language picker.
+    pub const SETTINGS_ORDER: [Lang; 9] =
+        [Lang::Zh, Lang::En, Lang::Pt, Lang::Es, Lang::Fr, Lang::De, Lang::It, Lang::Ru, Lang::Ja];
 
     /// The value `ui.language` stores for this language.
     pub fn code(self) -> &'static str {
@@ -396,6 +400,8 @@ mod tests {
 
     #[test]
     fn languages_round_trip_through_their_stored_number() {
+        assert_eq!(&Lang::SETTINGS_ORDER[..2], &[Lang::Zh, Lang::En]);
+        assert_eq!(tr_in(Lang::Zh, "Data de modificação sem grupos"), "修改时间（不分组）");
         for lang in Lang::ALL {
             assert_eq!(Lang::from_u8(lang.as_u8()), lang);
             assert_eq!(Lang::parse(lang.code()), Some(lang));

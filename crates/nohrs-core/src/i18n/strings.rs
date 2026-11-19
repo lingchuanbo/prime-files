@@ -1914,4 +1914,54 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Type three descending sizes in GB and four #rrggbb colours.",
         "Escribe tres tamaños decrecientes en GB y cuatro colores #rrggbb.",
     ),
+    (
+        "Largura, numeração e comportamento das abas.",
+        "Tab width, numbering, and behavior.",
+        "Ancho, numeración y comportamiento de las pestañas.",
+    ),
+    (
+        "Abas horizontais",
+        "Horizontal tabs",
+        "Pestañas horizontales",
+    ),
+    (
+        "Largura das abas",
+        "Tab width",
+        "Ancho de las pestañas",
+    ),
+    (
+        "Ajuste automático distribui o espaço; largura fixa mantém todas previsíveis.",
+        "Automatic sizing distributes the space; fixed width keeps tabs predictable.",
+        "El ajuste automático distribuye el espacio; el ancho fijo mantiene todas predecibles.",
+    ),
+    (
+        "Ajuste automático",
+        "Automatic",
+        "Ajuste automático",
+    ),
+    (
+        "Largura fixa",
+        "Fixed width",
+        "Ancho fijo",
+    ),
+    (
+        "Escolha a largura em pixels de cada aba horizontal.",
+        "Choose the width in pixels for each horizontal tab.",
+        "Elige el ancho en píxeles de cada pestaña horizontal.",
+    ),
+    (
+        "Mostrar numeração rápida",
+        "Show quick numbering",
+        "Mostrar numeración rápida",
+    ),
+    (
+        "Mostra números nas dez primeiras abas; use Alt+número para alternar.",
+        "Show numbers on the first ten tabs; use Alt+number to switch.",
+        "Muestra números en las diez primeras pestañas; usa Alt+número para cambiar.",
+    ),
+    (
+        "Data de modificação sem grupos",
+        "Modification date (no groups)",
+        "Fecha de modificación (sin grupos)",
+    ),
 ];

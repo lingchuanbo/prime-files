@@ -39,6 +39,7 @@ enum Command {
     GroupNone,
     GroupKind,
     GroupModified,
+    GroupModifiedFlat,
     GroupSize,
     FitColumn,
     FitAllColumns,
@@ -78,7 +79,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 57] = [
+    const ALL: [Command; 58] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
@@ -101,6 +102,7 @@ impl Command {
         Command::GroupNone,
         Command::GroupKind,
         Command::GroupModified,
+        Command::GroupModifiedFlat,
         Command::GroupSize,
         Command::FitColumn,
         Command::FitAllColumns,
@@ -1320,24 +1322,30 @@ impl ExplorerPane {
                         t!("Decrescente"),
                         !self.sort_asc,
                     ),
+                    Entry::Separator,
+                    Entry::submenu(
+                        t!("Agrupar por"),
+                        vec![
+                            group(Command::GroupNone, t!("Nenhum"), GroupBy::None),
+                            Entry::Separator,
+                            group(Command::GroupKind, t!("Tipo"), GroupBy::Kind),
+                            group(
+                                Command::GroupModified,
+                                t!("Data de modificação"),
+                                GroupBy::Modified,
+                            ),
+                            group(
+                                Command::GroupModifiedFlat,
+                                t!("Data de modificação sem grupos"),
+                                GroupBy::ModifiedFlat,
+                            ),
+                            group(Command::GroupSize, t!("Tamanho"), GroupBy::Size),
+                        ],
+                    )
+                    .with_icon("icons/layers.svg"),
                 ],
             )
             .with_icon("icons/arrow-up-down.svg"),
-            Entry::submenu(
-                t!("Agrupar por"),
-                vec![
-                    group(Command::GroupNone, t!("Nenhum"), GroupBy::None),
-                    Entry::Separator,
-                    group(Command::GroupKind, t!("Tipo"), GroupBy::Kind),
-                    group(
-                        Command::GroupModified,
-                        t!("Data de modificação"),
-                        GroupBy::Modified,
-                    ),
-                    group(Command::GroupSize, t!("Tamanho"), GroupBy::Size),
-                ],
-            )
-            .with_icon("icons/layers.svg"),
             Entry::command(Command::Refresh as u32, t!("Atualizar"))
                 .with_icon("icons/refresh-cw.svg")
                 .with_shortcut(keys_of(Action::Refresh)),
@@ -1467,6 +1475,7 @@ impl ExplorerPane {
             Command::GroupNone => self.set_group_by(GroupBy::None),
             Command::GroupKind => self.set_group_by(GroupBy::Kind),
             Command::GroupModified => self.set_group_by(GroupBy::Modified),
+            Command::GroupModifiedFlat => self.set_group_by(GroupBy::ModifiedFlat),
             Command::GroupSize => self.set_group_by(GroupBy::Size),
             Command::Cut => self.cut_selection(cx),
             Command::Copy => self.copy_selection(cx),

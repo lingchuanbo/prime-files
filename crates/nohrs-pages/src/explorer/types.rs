@@ -95,6 +95,7 @@ pub struct StatusMessage {
 pub enum PaneEvent {
     /// The pane navigated to a new directory (carries the new absolute path).
     Navigated(String),
+    OpenFolderInNewTab(String),
     /// Its `side` edge was dragged out to `fraction` of the way across: open a
     /// second pane there, taking that much of the room.
     SplitRequested {

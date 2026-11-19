@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
-use nohrs_core::config::{self, Config, DockSide, FileTypeColorRule, IndexSource, SortOrder, SplitDirection, ThemeMode};
+use nohrs_core::config::{self, Config, DockSide, FileTypeColorRule, IndexSource, SortOrder, SplitDirection, TabWidthMode, ThemeMode};
 use nohrs_core::i18n::{self, Lang, tr};
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::shortcuts::{self, Action, Chord};
@@ -36,6 +36,8 @@ use crate::explorer::everything::{self, Source};
 pub enum SettingsSection {
     /// Language, tabs and panes.
     General,
+    /// Horizontal tab width and numbering.
+    Tabs,
     /// Theme, accent colour and how the listing moves.
     Appearance,
     /// Compact mode: hiding the bars.
@@ -55,8 +57,9 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::General,
+        Self::Tabs,
         Self::Appearance,
         Self::Compact,
         Self::Files,
@@ -70,6 +73,7 @@ impl SettingsSection {
     fn label(self) -> &'static str {
         match self {
             Self::General => t!("Geral"),
+            Self::Tabs => t!("Abas"),
             Self::Appearance => t!("Aparência"),
             Self::Compact => t!("Modo compacto"),
             Self::Files => t!("Arquivos e pastas"),
@@ -84,6 +88,7 @@ impl SettingsSection {
     fn description(self) -> &'static str {
         match self {
             Self::General => t!("Idioma, abas e painéis."),
+            Self::Tabs => t!("Largura, numeração e comportamento das abas."),
             Self::Appearance => t!("Tema, cores e como a lista se move."),
             Self::Compact => t!("Esconda as barras e deixe só os arquivos na tela."),
             Self::Files => t!("O que aparece em cada pasta e em que ordem."),
@@ -100,6 +105,7 @@ impl SettingsSection {
     fn icon(self) -> &'static str {
         match self {
             Self::General => "icons/settings.svg",
+            Self::Tabs => "icons/folder.svg",
             Self::Appearance => "icons/palette.svg",
             Self::Compact => "icons/layout-dashboard.svg",
             Self::Files => "icons/folder-open.svg",
@@ -227,6 +233,7 @@ pub struct SettingsPage {
     wheel: Option<Wheel>,
     // The font list, made on the first render (it needs a `Window`).
     font_select: Option<Entity<SelectState<SearchableVec<SharedString>>>>,
+    tab_width_select: Option<Entity<SelectState<SearchableVec<SharedString>>>>,
     /// Editable filename-colour rules and their input controls.
     file_type_color_draft: Vec<FileTypeColorRule>,
     file_type_color_inputs: Vec<(Entity<InputState>, Entity<InputState>)>,
@@ -294,6 +301,7 @@ impl SettingsPage {
             _app_name_subscription: None,
             wheel: None,
             font_select: None,
+            tab_width_select: None,
             file_type_color_draft: Vec::new(),
             file_type_color_inputs: Vec::new(),
             space_map_bands: Vec::new(),
@@ -993,6 +1001,7 @@ impl SettingsPage {
     fn groups(&self, section: SettingsSection, cx: &mut Context<Self>) -> Vec<Group> {
         match section {
             SettingsSection::General => self.general(cx),
+            SettingsSection::Tabs => self.tabs(cx),
             SettingsSection::Appearance => self.appearance(cx),
             SettingsSection::Compact => self.compact(cx),
             SettingsSection::Files => self.files(cx),
@@ -1002,6 +1011,40 @@ impl SettingsPage {
             SettingsSection::Shortcuts => self.shortcuts(cx),
             SettingsSection::About => self.about(cx),
         }
+    }
+
+    fn tabs(&self, cx: &mut Context<Self>) -> Vec<Group> {
+        let layout = &self.config.layout;
+        vec![Group::titled(
+            t!("Abas horizontais"),
+            vec![
+                Row::hint(
+                    t!("Largura das abas"),
+                    t!("Ajuste automático distribui o espaço; largura fixa mantém todas previsíveis."),
+                    self.config_choice(
+                        "tab-width-mode",
+                        &[
+                            (t!("Ajuste automático"), layout.tab_width_mode == TabWidthMode::Adaptive, "\"adaptive\""),
+                            (t!("Largura fixa"), layout.tab_width_mode == TabWidthMode::Fixed, "\"fixed\""),
+                        ],
+                        ("layout", "tab_width_mode"),
+                        cx,
+                    ),
+                ).reset(("layout", "tab_width_mode"), layout.tab_width_mode == TabWidthMode::Adaptive, "\"adaptive\""),
+                Row::hint(
+                    t!("Largura fixa"),
+                    t!("Escolha a largura em pixels de cada aba horizontal."),
+                    self.tab_width_select(),
+                )
+                .wide()
+                .reset(("layout", "tab_width"), layout.tab_width == 160, "160"),
+                Row::hint(
+                    t!("Mostrar numeração rápida"),
+                    t!("Mostra números nas dez primeiras abas; use Alt+número para alternar."),
+                    self.switch("tab-numbers", layout.show_tab_numbers, ("layout", "show_tab_numbers"), cx),
+                ).reset(("layout", "show_tab_numbers"), layout.show_tab_numbers, "true"),
+            ],
+        )]
     }
 
     fn general(&self, cx: &mut Context<Self>) -> Vec<Group> {
@@ -1179,6 +1222,43 @@ impl SettingsPage {
             self.font_select
                 .clone()
                 .map(|state| Select::new(&state).w(px(240.0)).placeholder(shown)),
+        )
+    }
+
+    fn ensure_tab_width_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_width_select.is_some() {
+            return;
+        }
+        let widths = [120_u32, 140, 160, 180, 200, 240, 280];
+        let options: Vec<SharedString> = widths
+            .iter()
+            .map(|width| SharedString::from(format!("{width} px")))
+            .collect();
+        let state = cx.new(|cx| SelectState::new(SearchableVec::new(options), None, window, cx));
+        cx.subscribe_in(
+            &state,
+            window,
+            |page, _state, event: &SelectEvent<SearchableVec<SharedString>>, _window, cx| {
+                let SelectEvent::Confirm(value) = event;
+                let Some(width) = value
+                    .clone()
+                    .and_then(|value| value.to_string().strip_suffix(" px")?.parse::<u32>().ok())
+                else {
+                    return;
+                };
+                page.write("layout", "tab_width", width.to_string(), cx);
+            },
+        )
+        .detach();
+        self.tab_width_select = Some(state);
+    }
+
+    fn tab_width_select(&self) -> Div {
+        let shown = format!("{} px", self.config.layout.tab_width);
+        div().flex().items_center().children(
+            self.tab_width_select
+                .clone()
+                .map(|state| Select::new(&state).w(px(128.0)).placeholder(shown)),
         )
     }
 
@@ -1426,7 +1506,7 @@ impl SettingsPage {
         let chosen = Lang::parse(&self.config.ui.language);
         let mut options: Vec<(&'static str, bool, SharedString)> =
             vec![(t!("Automático"), chosen.is_none(), SharedString::from("\"auto\""))];
-        for lang in Lang::ALL {
+        for lang in Lang::SETTINGS_ORDER {
             options.push((lang.native_name(), chosen == Some(lang), SharedString::from(format!("\"{}\"", lang.code()))));
         }
         let options: Vec<_> = options
@@ -2944,6 +3024,7 @@ impl Render for SettingsPage {
         self.ensure_space_map_inputs(window, cx);
         // The font list needs the window's text system, so it is made here.
         self.ensure_font_select(window, cx);
+        self.ensure_tab_width_select(window, cx);
         let query = input.read(cx).value().to_string();
         let searching = !query.trim().is_empty();
         let width = f32::from(window.viewport_size().width);

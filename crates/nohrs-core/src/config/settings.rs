@@ -479,6 +479,12 @@ pub struct Layout {
     /// Whether the preview panel is shown. Written whenever the preview is
     /// toggled, so a window closed with it hidden opens that way again.
     pub preview_visible: bool,
+    /// Width policy for horizontal tabs.
+    pub tab_width_mode: TabWidthMode,
+    /// Width in pixels when horizontal tabs use fixed sizing.
+    pub tab_width: u32,
+    /// Whether horizontal tabs show their Alt+number shortcut prefix.
+    pub show_tab_numbers: bool,
 }
 
 impl Default for Layout {
@@ -491,7 +497,26 @@ impl Default for Layout {
             vertical_tabs_side: DockSide::Left,
             move_grips: false,
             preview_visible: true,
+            tab_width_mode: TabWidthMode::Adaptive,
+            tab_width: 160,
+            show_tab_numbers: true,
         }
+    }
+}
+
+/// Width policy used by the horizontal tab strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TabWidthMode {
+    /// Let the strip distribute tabs within a comfortable min/max band.
+    Adaptive,
+    /// Give every tab the configured [`Layout::tab_width`].
+    Fixed,
+}
+
+impl Default for TabWidthMode {
+    fn default() -> Self {
+        Self::Adaptive
     }
 }
 
@@ -1579,6 +1604,7 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
         ("vertical_tabs", &mut layout.vertical_tabs),
         ("move_grips", &mut layout.move_grips),
         ("preview_visible", &mut layout.preview_visible),
+        ("show_tab_numbers", &mut layout.show_tab_numbers),
     ] {
         if let Some(value) = table.get(key) {
             match value.as_bool() {
@@ -1589,10 +1615,33 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
     }
     warn_unknown_keys(
         table,
-        &["sidebar", "preview", "terminal", "vertical_tabs", "vertical_tabs_side", "move_grips", "preview_visible"],
+        &["sidebar", "preview", "terminal", "vertical_tabs", "vertical_tabs_side", "move_grips", "preview_visible", "tab_width_mode", "tab_width", "show_tab_numbers"],
         "layout.",
         diagnostics,
     );
+
+    if let Some(value) = table.get("tab_width_mode") {
+        match value.as_str().and_then(|value| match value {
+            "adaptive" => Some(TabWidthMode::Adaptive),
+            "fixed" => Some(TabWidthMode::Fixed),
+            _ => None,
+        }) {
+            Some(mode) => layout.tab_width_mode = mode,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid layout.tab_width_mode {value}; using {:?}",
+                layout.tab_width_mode
+            ))),
+        }
+    }
+    if let Some(value) = table.get("tab_width") {
+        match value.as_integer().and_then(|value| u32::try_from(value).ok()).filter(|value| (80..=400).contains(value)) {
+            Some(width) => layout.tab_width = width,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid layout.tab_width {value}; using {}",
+                layout.tab_width
+            ))),
+        }
+    }
 }
 
 fn read_keybindings(
@@ -2638,6 +2687,14 @@ mod tests {
         assert!(!config.layout.preview_visible);
         // And the template offers the key, so it is found when looked for.
         assert!(Config::default_toml_template().contains("preview_visible = true"));
+    }
+
+    #[test]
+    fn tab_layout_preferences_are_read_from_config() {
+        let config = Config::from_toml_str("[layout]\ntab_width_mode = \"fixed\"\ntab_width = 240\nshow_tab_numbers = false\n").0;
+        assert_eq!(TabWidthMode::Fixed, config.layout.tab_width_mode);
+        assert_eq!(240, config.layout.tab_width);
+        assert!(!config.layout.show_tab_numbers);
     }
 
     #[test]

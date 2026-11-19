@@ -30,6 +30,8 @@ pub(crate) struct NewFolderDialogState {
 pub struct ExplorerPane {
     /// Absolute path of the currently displayed directory.
     pub cwd: String,
+    /// Whether activating a folder opens it in a new tab.
+    pub open_folders_in_new_tab: bool,
     /// Navigation history of visited directories for back/forward.
     pub history: Vec<String>,
     /// Index of the current position within `history`.
@@ -516,6 +518,7 @@ impl ExplorerPane {
         focus_handle: FocusHandle,
     ) -> Self {
         Self {
+            open_folders_in_new_tab: false,
             cwd: std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".into()),

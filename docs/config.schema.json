@@ -307,10 +307,26 @@
           "description": "Whether the preview panel is shown. Written whenever the preview is\ntoggled, so a window closed with it hidden opens that way again.",
           "type": "boolean"
         },
+        "show_tab_numbers": {
+          "default": true,
+          "description": "Whether horizontal tabs show their Alt+number shortcut prefix.",
+          "type": "boolean"
+        },
         "sidebar": {
           "$ref": "#/$defs/DockSide",
           "default": "left",
           "description": "The side the sidebar with the places docks to."
+        },
+        "tab_width": {
+          "default": 160,
+          "description": "Width in pixels when horizontal tabs use fixed sizing.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tab_width_mode": {
+          "$ref": "#/$defs/TabWidthMode",
+          "default": "adaptive",
+          "description": "Width policy for horizontal tabs."
         },
         "terminal": {
           "$ref": "#/$defs/DockSide",
@@ -489,6 +505,21 @@
         }
       },
       "type": "object"
+    },
+    "TabWidthMode": {
+      "description": "Width policy used by the horizontal tab strip.",
+      "oneOf": [
+        {
+          "const": "adaptive",
+          "description": "Let the strip distribute tabs within a comfortable min/max band.",
+          "type": "string"
+        },
+        {
+          "const": "fixed",
+          "description": "Give every tab the configured [`Layout::tab_width`].",
+          "type": "string"
+        }
+      ]
     },
     "Theme": {
       "description": "Appearance settings.",
@@ -709,7 +740,10 @@
         "move_grips": false,
         "preview": "right",
         "preview_visible": true,
+        "show_tab_numbers": true,
         "sidebar": "left",
+        "tab_width": 160,
+        "tab_width_mode": "adaptive",
         "terminal": "bottom",
         "vertical_tabs": false,
         "vertical_tabs_side": "left"

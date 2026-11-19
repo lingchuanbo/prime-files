@@ -592,7 +592,9 @@ impl ExplorerPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if item.kind == "dir" {
+        if item.kind == "dir" && self.open_folders_in_new_tab {
+            cx.emit(PaneEvent::OpenFolderInNewTab(item.path));
+        } else if item.kind == "dir" {
             self.change_dir(item.path, window, cx);
         } else if super::archive::is_archive_file(&item.path) {
             // An archive opens like a folder: its entries are listed here.

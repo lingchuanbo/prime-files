@@ -23,6 +23,8 @@ pub enum GroupBy {
     Kind,
     /// Today, yesterday, this week… newest first.
     Modified,
+    /// Exact modification time, newest first, without section headers.
+    ModifiedFlat,
     /// Empty, tiny, small… smallest first.
     Size,
 }
@@ -77,6 +79,10 @@ impl Clock {
 /// leaves the entries alone and returns no groups.
 pub fn group_entries(entries: &mut [FileEntryDto], by: GroupBy, clock: &Clock) -> Vec<Group> {
     if by == GroupBy::None {
+        return Vec::new();
+    }
+    if by == GroupBy::ModifiedFlat {
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.modified));
         return Vec::new();
     }
     // A stable sort by the group's rank: within a group, the order the
@@ -144,6 +150,7 @@ fn group_of(entry: &FileEntryDto, by: GroupBy, clock: &Clock) -> (u8, &'static s
             }
         }
         // Explorer's own size bands.
+        GroupBy::ModifiedFlat => (0, ""),
         GroupBy::Size => match entry.size {
             _ if is_dir => (0, t!("Pastas")),
             0 => (1, t!("Vazios")),
@@ -291,6 +298,24 @@ mod tests {
             ]
         );
         assert_eq!(names(&entries)[..3], ["today", "yesterday", "monday"]);
+    }
+
+    #[test]
+    fn modified_flat_sorts_newest_first_without_group_headers() {
+        let mut entries = vec![
+            entry("older", "file", 1, 10),
+            entry("newest", "file", 1, 30),
+            entry("middle", "file", 1, 20),
+        ];
+
+        let groups = group_entries(
+            &mut entries,
+            GroupBy::ModifiedFlat,
+            &Clock::at(date!(2026 - 11 - 05)),
+        );
+
+        assert_eq!(names(&entries), ["newest", "middle", "older"]);
+        assert!(groups.is_empty());
     }
 
     #[test]
