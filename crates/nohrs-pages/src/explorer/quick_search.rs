@@ -36,7 +36,13 @@ pub struct DeepSearch {
 impl DeepSearch {
     /// A search for `query` whose hits `task` is delivering.
     pub(crate) fn new(query: String, task: Task<()>) -> Self {
-        Self { query, found: 0, running: true, detail: String::new(), _task: task }
+        Self {
+            query,
+            found: 0,
+            running: true,
+            detail: String::new(),
+            _task: task,
+        }
     }
 }
 
@@ -46,7 +52,9 @@ impl ExplorerPane {
     /// highlights `.png`). Empty when nothing is being looked for.
     pub(crate) fn highlight_query(&self) -> String {
         let query = match &self.deep_search {
-            Some(search) if self.everything_on() => return super::everything::highlight_term(&search.query),
+            Some(search) if self.everything_on() => {
+                return super::everything::highlight_term(&search.query);
+            }
             Some(search) => search.query.as_str(),
             None if !self.name_filter.trim().is_empty() => self.name_filter.as_str(),
             None => self.search_query.as_str(),
@@ -67,7 +75,11 @@ impl ExplorerPane {
     /// Starts (or restarts) the subfolder search for `query` from the folder
     /// on screen. An empty query ends it and brings the folder back.
     pub(crate) fn search_subfolders(&mut self, query: String, cx: &mut Context<Self>) {
-        if self.deep_search.as_ref().is_some_and(|search| search.query == query) {
+        if self
+            .deep_search
+            .as_ref()
+            .is_some_and(|search| search.query == query)
+        {
             return;
         }
         if query.trim().is_empty() {

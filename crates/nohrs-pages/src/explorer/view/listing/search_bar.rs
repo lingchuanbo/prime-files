@@ -1,4 +1,3 @@
-use nohrs_core::{t, tf};
 use crate::explorer::ExplorerPane;
 use crate::explorer::types::SearchType;
 use gpui::prelude::*;
@@ -6,6 +5,7 @@ use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, IconName};
+use nohrs_core::{t, tf};
 use nohrs_services::search::SearchScope;
 use nohrs_ui::theme::theme;
 
@@ -82,7 +82,12 @@ pub fn render(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> impl I
                         .gap_2()
                         .items_center()
                         .child(t!("Onde:"))
-                        .child(render_scope_button(page, SearchScope::Home, t!("Pasta pessoal"), cx))
+                        .child(render_scope_button(
+                            page,
+                            SearchScope::Home,
+                            t!("Pasta pessoal"),
+                            cx,
+                        ))
                         .child(render_scope_button(page, SearchScope::Root, t!("Raiz"), cx)),
                 )
                 .child(
@@ -98,7 +103,12 @@ pub fn render(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> impl I
                             t!("Nome"),
                             cx,
                         ))
-                        .child(render_type_button(page, SearchType::Content, t!("Conteúdo"), cx)),
+                        .child(render_type_button(
+                            page,
+                            SearchType::Content,
+                            t!("Conteúdo"),
+                            cx,
+                        )),
                 ),
         )
         .child(

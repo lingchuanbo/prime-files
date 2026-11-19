@@ -18,6 +18,9 @@ use std::sync::Arc;
 
 pub(super) struct RenameWindow {
     pub inputs: Vec<Entity<InputState>>,
+    pub list_input: Entity<InputState>,
+    pub list_mode: bool,
+    pub list_apply: plan::ListApply,
     pub rows: Arc<Vec<plan::Preview>>,
     pub entries: Vec<FileEntryDto>,
     pub case: CaseMode,
@@ -45,6 +48,7 @@ impl RenameWindow {
         let saved = SessionStore::current(cx);
         let scope = Scope::new(saved.scope, &entries, window, cx);
         let inputs = create_inputs(saved.values, window, cx);
+        let list_input = cx.new(|cx| InputState::new(window, cx).multi_line(true));
         let mut subscriptions: Vec<_> = inputs
             .iter()
             .map(|input| {
@@ -55,6 +59,13 @@ impl RenameWindow {
                 })
             })
             .collect();
+        subscriptions.push(
+            cx.subscribe(&list_input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) && !this.busy {
+                    this.schedule_preview(cx);
+                }
+            }),
+        );
         subscriptions.extend(scope.subscriptions(cx));
         subscriptions.push(session::install_hooks(window, cx));
         let focus = inputs[0].clone();
@@ -62,6 +73,9 @@ impl RenameWindow {
             .on_next_frame(move |window, cx| focus.update(cx, |input, cx| input.focus(window, cx)));
         Self {
             inputs,
+            list_input,
+            list_mode: false,
+            list_apply: plan::ListApply::FullName,
             scope,
             rows: Arc::new(Vec::new()),
             entries,
@@ -78,6 +92,66 @@ impl RenameWindow {
             _subscriptions: subscriptions,
             preview_task: None,
         }
+    }
+
+    pub(super) fn fill_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self
+            .entries
+            .iter()
+            .map(|entry| match self.list_apply {
+                plan::ListApply::Name if entry.kind != "dir" => std::path::Path::new(&entry.name)
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&entry.name),
+                plan::ListApply::Extension => std::path::Path::new(&entry.name)
+                    .extension()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(""),
+                _ => entry.name.as_str(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.list_input
+            .update(cx, |input, cx| input.set_value(value, window, cx));
+        self.schedule_preview(cx);
+    }
+
+    pub(super) fn load_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = nohrs_core::config::paths::state_dir().join("batch-rename-list.txt");
+        match std::fs::read_to_string(&path) {
+            Ok(value) if value.len() <= 4 * 1024 * 1024 => {
+                self.list_input
+                    .update(cx, |input, cx| input.set_value(value, window, cx));
+                self.status = format!("已加载列表：{}", path.display());
+                self.schedule_preview(cx);
+            }
+            Ok(_) => self.status = "列表文件超过 4 MiB，未加载".into(),
+            Err(error) => self.status = format!("加载列表失败：{error}"),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn save_list(&mut self, cx: &mut Context<Self>) {
+        let path = nohrs_core::config::paths::state_dir().join("batch-rename-list.txt");
+        let value = self.list_input.read(cx).value().to_string();
+        let result = path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| std::fs::write(&path, value));
+        self.status = match result {
+            Ok(()) => format!("列表已保存：{}", path.display()),
+            Err(error) => format!("保存列表失败：{error}"),
+        };
+        cx.notify();
+    }
+    pub(super) fn list_lines(&self, cx: &App) -> Vec<String> {
+        self.list_input
+            .read(cx)
+            .value()
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+            .collect()
     }
 
     pub(super) fn rules(&self, cx: &App) -> Result<Rules, String> {
@@ -152,7 +226,7 @@ pub(super) fn open(
             cx,
         ))),
         titlebar: Some(TitlebarOptions {
-            title: Some("Prime Files · 批量重命名".into()),
+            title: Some("轻寻文件 · 批量重命名".into()),
             ..Default::default()
         }),
         window_min_size: Some(size(px(1020.0), px(660.0))),

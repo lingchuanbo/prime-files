@@ -3,7 +3,7 @@
 //! The icon has to be resource 1: gpui loads that one for the window class,
 //! so the same icon shows on the window, the taskbar, Alt+Tab, the shortcuts
 //! and in the list of installed apps. The version block is what File
-//! Explorer's Properties and Task Manager read the name "Prime Files" from,
+//! Explorer's Properties and Task Manager read the name "LumaFiles" from,
 //! instead of the file name.
 //!
 //! The `.rc` is written here, into `OUT_DIR`, rather than kept in the tree,
@@ -42,12 +42,12 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "CompanyName", "Prime Files"
-      VALUE "FileDescription", "Prime Files"
-      VALUE "ProductName", "Prime Files"
+      VALUE "CompanyName", "LumaFiles"
+      VALUE "FileDescription", "LumaFiles"
+      VALUE "ProductName", "LumaFiles"
       VALUE "FileVersion", "{version}"
       VALUE "ProductVersion", "{version}"
-      VALUE "OriginalFilename", "PrimeFiles.exe"
+      VALUE "OriginalFilename", "LumaFiles.exe"
       VALUE "LegalCopyright", "MIT License"
     END
   END

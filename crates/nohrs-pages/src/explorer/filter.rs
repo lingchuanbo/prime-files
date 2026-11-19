@@ -73,8 +73,9 @@ impl KindFilter {
             "mp3" | "wav" | "flac" | "aac" | "ogg" | "opus" | "m4a" | "wma" | "aiff" | "aif"
             | "mid" | "midi" => Self::Audio,
             "txt" | "md" | "pdf" | "doc" | "docx" | "xls" | "xlsx" | "csv" | "ppt" | "pptx"
-            | "odt" | "ods" | "odp" | "rtf" | "json" | "xml" | "html" | "htm" | "log"
-            | "epub" => Self::Documents,
+            | "odt" | "ods" | "odp" | "rtf" | "json" | "xml" | "html" | "htm" | "log" | "epub" => {
+                Self::Documents
+            }
             "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "iso" | "cab" => {
                 Self::Archives
             }
@@ -135,7 +136,10 @@ impl NameMatcher {
     pub fn new(pattern: &str) -> Self {
         let pattern = pattern.trim().to_lowercase();
         if pattern.is_empty() {
-            return Self { pattern: None, pinyin: false };
+            return Self {
+                pattern: None,
+                pinyin: false,
+            };
         }
         let wildcards = pattern
             .contains(['*', '?'])
@@ -158,8 +162,10 @@ impl NameMatcher {
             None => {
                 name.contains(pattern.as_str())
                     || (self.pinyin
-                        && (super::pinyin::initials(&name).is_some_and(|initials| initials.contains(pattern.as_str()))
-                            || super::pinyin::full(&name).is_some_and(|full| full.contains(pattern.as_str()))))
+                        && (super::pinyin::initials(&name)
+                            .is_some_and(|initials| initials.contains(pattern.as_str()))
+                            || super::pinyin::full(&name)
+                                .is_some_and(|full| full.contains(pattern.as_str()))))
             }
             Some(pattern) => wildcard(pattern, &name.chars().collect::<Vec<_>>()),
         }
@@ -249,7 +255,10 @@ mod tests {
         assert!(name_matches("bg", "工作报告.docx"));
         // Letters around the Han characters still have to line up.
         assert!(name_matches("xmabg", "项目A报告"));
-        assert!(!name_matches("wjz", "文件.txt"), "only what the name is typed as counts");
+        assert!(
+            !name_matches("wjz", "文件.txt"),
+            "only what the name is typed as counts"
+        );
         assert!(!name_matches("zzz", "文件夹"));
         // A name with no Han characters is matched as it always was.
         assert!(name_matches("report", "q3-report.pdf"));

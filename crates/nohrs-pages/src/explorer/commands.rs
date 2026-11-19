@@ -29,7 +29,12 @@ impl ExplorerPane {
     /// Runs the command a shortcut stands for. Returns false for the ones
     /// the page answers through gpui's actions (tabs, panes), so the key
     /// goes on to them.
-    pub(crate) fn run_shortcut(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn run_shortcut(
+        &mut self,
+        action: Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         match action {
             Action::Copy => self.copy_selection(cx),
             Action::Cut => self.cut_selection(cx),
@@ -56,7 +61,11 @@ impl ExplorerPane {
             // next start (the header's button does the same).
             Action::TogglePreview => {
                 self.preview_visible = !self.preview_visible;
-                super::view::panels::save_layout("preview_visible", self.preview_visible.to_string(), cx);
+                super::view::panels::save_layout(
+                    "preview_visible",
+                    self.preview_visible.to_string(),
+                    cx,
+                );
                 cx.notify();
             }
             Action::SelectAll => {
@@ -86,6 +95,13 @@ impl ExplorerPane {
             Action::OpenCommandPrompt => self.open_in(OpenIn::CommandPrompt, cx),
             Action::OpenPowerShell => self.open_in(OpenIn::PowerShell, cx),
             Action::OpenFileExplorer => self.open_in(OpenIn::FileExplorer, cx),
+            Action::Compress7z => self.compress_active(super::archive_ops::Format::SevenZip, cx),
+            Action::CompressZipFast => {
+                self.compress_active(super::archive_ops::Format::ZipFast, cx)
+            }
+            Action::CompressZipMax => self.compress_active(super::archive_ops::Format::ZipMax, cx),
+            Action::CompressSelection7z => self.compress_selection(cx),
+            Action::ExtractArchive => self.extract_active_and_navigate(window, cx),
             Action::NewTab
             | Action::CloseTab
             | Action::SplitVertical
@@ -112,7 +128,9 @@ impl ExplorerPane {
         // Replacing the task drops the previous timer: the menu stays while
         // the wheel keeps turning.
         self.zoom_menu_flash = Some(cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
-            cx.background_executor().timer(Duration::from_millis(1300)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(1300))
+                .await;
             this.update(cx, |pane, cx| {
                 if pane.zoom_menu_hovered || pane.zoom_dragging {
                     // Taken over by the mouse: it closes like a clicked menu.
@@ -151,18 +169,30 @@ impl ExplorerPane {
                 } else {
                     folder.as_os_str().to_owned()
                 };
-                std::process::Command::new("explorer.exe").arg(target).spawn().map(drop)
+                std::process::Command::new("explorer.exe")
+                    .arg(target)
+                    .spawn()
+                    .map(drop)
             }
-            OpenIn::CommandPrompt => console(std::process::Command::new("cmd.exe").arg("/K"), &folder),
+            OpenIn::CommandPrompt => {
+                console(std::process::Command::new("cmd.exe").arg("/K"), &folder)
+            }
             OpenIn::PowerShell => {
                 let mut command = std::process::Command::new(powershell());
                 command.args(["-NoExit", "-NoLogo"]);
                 console(&mut command, &folder)
             }
-            OpenIn::WindowsTerminal => std::process::Command::new("wt.exe").arg("-d").arg(&folder).spawn().map(drop),
+            OpenIn::WindowsTerminal => std::process::Command::new("wt.exe")
+                .arg("-d")
+                .arg(&folder)
+                .spawn()
+                .map(drop),
         };
         if let Err(error) = outcome {
-            self.set_status(StatusLevel::Error, tf!("Não foi possível abrir o programa: {error}", error = error));
+            self.set_status(
+                StatusLevel::Error,
+                tf!("Não foi possível abrir o programa: {error}", error = error),
+            );
         }
         cx.notify();
     }
@@ -185,7 +215,12 @@ fn console(command: &mut std::process::Command, folder: &std::path::Path) -> std
 /// terminal panel picks.
 fn powershell() -> PathBuf {
     let installed = std::env::var_os("ProgramFiles")
-        .map(|folder| PathBuf::from(folder).join("PowerShell").join("7").join("pwsh.exe"))
+        .map(|folder| {
+            PathBuf::from(folder)
+                .join("PowerShell")
+                .join("7")
+                .join("pwsh.exe")
+        })
         .filter(|path| path.is_file());
     installed.unwrap_or_else(|| PathBuf::from("powershell.exe"))
 }
@@ -195,7 +230,9 @@ fn powershell() -> PathBuf {
 /// labels and key names, however often the menus open.
 pub(crate) fn interned(text: String) -> &'static str {
     static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(kept) = seen.iter().find(|kept| **kept == text) {
         return kept;
     }
@@ -214,7 +251,12 @@ pub(crate) fn has_windows_terminal() -> bool {
     static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FOUND.get_or_init(|| {
         std::env::var_os("LOCALAPPDATA")
-            .map(|folder| PathBuf::from(folder).join("Microsoft").join("WindowsApps").join("wt.exe"))
+            .map(|folder| {
+                PathBuf::from(folder)
+                    .join("Microsoft")
+                    .join("WindowsApps")
+                    .join("wt.exe")
+            })
             .is_some_and(|path| path.exists())
     })
 }

@@ -54,6 +54,51 @@ fn selected_files_drive_continuous_or_per_directory_counters_and_undo() {
 }
 
 #[test]
+fn list_rename_maps_lines_in_order_and_preserves_extensions() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["a.png", "b.jpg"] {
+        fs::write(root.path().join(name), "safe").unwrap();
+    }
+    let entries = scan::scan(
+        &root.path().to_string_lossy(),
+        false,
+        "",
+        &Progress::default(),
+    )
+    .unwrap()
+    .entries;
+    let rows = plan::preview_list(
+        &entries,
+        &["first".into(), "second".into()],
+        plan::ListApply::Name,
+        &HashSet::new(),
+    );
+    assert_eq!("first.png", rows[0].name);
+    assert_eq!("second.jpg", rows[1].name);
+    assert!(rows.iter().all(|row| row.error.is_none()));
+}
+
+#[test]
+fn list_rename_rejects_mismatched_line_counts() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("a.txt"), "safe").unwrap();
+    let entries = scan::scan(
+        &root.path().to_string_lossy(),
+        false,
+        "",
+        &Progress::default(),
+    )
+    .unwrap()
+    .entries;
+    let rows = plan::preview_list(
+        &entries,
+        &["one".into(), "extra".into()],
+        plan::ListApply::FullName,
+        &HashSet::new(),
+    );
+    assert!(rows[0].error.as_deref().unwrap().contains("数量必须一致"));
+}
+#[test]
 fn deselecting_conflicting_rows_releases_conflicts_but_existing_files_still_block() {
     let root = tempfile::tempdir().unwrap();
     for name in ["a.png", "b.png"] {

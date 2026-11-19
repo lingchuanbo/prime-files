@@ -441,7 +441,7 @@ impl SearchWindow {
         cx.notify();
     }
 
-    /// Opens the result the way a double-click does: a folder in Prime Files,
+    /// Opens the result the way a double-click does: a folder in LumaFiles,
     /// a file with the program Windows associates with it.
     fn open_result(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(result) = self.results.get(index) else {
@@ -455,7 +455,7 @@ impl SearchWindow {
         if !crate::explorer_link::request(path.clone()) {
             // No Explorer window to show it in (launcher-only run); the system
             // handler is the only thing left that can open a folder.
-            self.status = "没有可用的 Prime Files 窗口，改为在资源管理器中打开".to_string();
+            self.status = "没有可用的 轻寻文件 窗口，改为在资源管理器中打开".to_string();
             cx.open_with_system(&path);
             cx.notify();
         }
@@ -1576,7 +1576,7 @@ pub fn toggle(cx: &mut App) -> anyhow::Result<()> {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(gpui::TitlebarOptions {
-            title: Some(SharedString::from("Prime Files 搜索")),
+            title: Some(SharedString::from("轻寻文件 搜索")),
             appears_transparent: false,
             traffic_light_position: None,
         }),

@@ -68,13 +68,18 @@ const NAMESPACE: &str = "waveform";
 // as a new one (§6.1).
 const FORMAT: u8 = 1;
 
-const AUDIO_EXTENSIONS: [&str; 11] = ["wav", "mp3", "m4a", "aac", "flac", "wma", "aif", "aiff", "ogg", "opus", "mka"];
+const AUDIO_EXTENSIONS: [&str; 11] = [
+    "wav", "mp3", "m4a", "aac", "flac", "wma", "aif", "aiff", "ogg", "opus", "mka",
+];
 
 /// Whether the icons view draws a waveform for `path`.
 pub(crate) fn is_audio(path: &str) -> bool {
     let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
-    name.rsplit_once('.')
-        .is_some_and(|(_, extension)| AUDIO_EXTENSIONS.iter().any(|known| extension.eq_ignore_ascii_case(known)))
+    name.rsplit_once('.').is_some_and(|(_, extension)| {
+        AUDIO_EXTENSIONS
+            .iter()
+            .any(|known| extension.eq_ignore_ascii_case(known))
+    })
 }
 
 enum Entry {
@@ -118,8 +123,9 @@ impl Waveforms {
         let frame = self.frame;
         if self.loading > 0 {
             let before = self.entries.len();
-            self.entries
-                .retain(|_, slot| !(matches!(slot.entry, Entry::Loading(_)) && slot.last_seen + 1 < frame));
+            self.entries.retain(|_, slot| {
+                !(matches!(slot.entry, Entry::Loading(_)) && slot.last_seen + 1 < frame)
+            });
             self.loading -= before - self.entries.len();
         }
         if self.entries.len() > KEPT_IN_MEMORY {
@@ -127,14 +133,21 @@ impl Waveforms {
             let keep_from = seen.len() - KEPT_IN_MEMORY / 4 * 3;
             let (_, threshold, _) = seen.select_nth_unstable(keep_from);
             let threshold = *threshold;
-            self.entries
-                .retain(|_, slot| matches!(slot.entry, Entry::Loading(_)) || slot.last_seen >= threshold);
+            self.entries.retain(|_, slot| {
+                matches!(slot.entry, Entry::Loading(_)) || slot.last_seen >= threshold
+            });
         }
     }
 
     /// The bars of `path`, or `None` while they are on their way or when the
     /// file cannot be decoded; the tile shows the icon meanwhile.
-    pub fn get(&mut self, path: &str, size: u64, modified: u64, cx: &mut Context<ExplorerPane>) -> Option<Arc<[u8]>> {
+    pub fn get(
+        &mut self,
+        path: &str,
+        size: u64,
+        modified: u64,
+        cx: &mut Context<ExplorerPane>,
+    ) -> Option<Arc<[u8]>> {
         let frame = self.frame;
         if let Some(slot) = self.entries.get_mut(path) {
             if slot.size == size && slot.modified == modified {
@@ -150,8 +163,15 @@ impl Waveforms {
             }
         }
         let task = request(path, size, modified, cx);
-        self.entries
-            .insert(path.to_string(), Slot { entry: Entry::Loading(task), size, modified, last_seen: frame });
+        self.entries.insert(
+            path.to_string(),
+            Slot {
+                entry: Entry::Loading(task),
+                size,
+                modified,
+                last_seen: frame,
+            },
+        );
         self.loading += 1;
         None
     }
@@ -170,7 +190,12 @@ impl Waveforms {
 
 fn request(path: &str, size: u64, modified: u64, cx: &mut Context<ExplorerPane>) -> Task<()> {
     let (reply, answer) = async_channel::bounded(1);
-    service().ask(Job { path: path.to_string(), size, modified, reply });
+    service().ask(Job {
+        path: path.to_string(),
+        size,
+        modified,
+        reply,
+    });
     let path = path.to_string();
     cx.spawn(async move |this, cx| {
         // A closed channel: the worker dropped the job, which counts as no
@@ -242,7 +267,10 @@ fn service() -> &'static Arc<Service> {
         }
         for (name, work) in threads {
             let service = service.clone();
-            if let Err(error) = std::thread::Builder::new().name(name).spawn(move || work(&service)) {
+            if let Err(error) = std::thread::Builder::new()
+                .name(name)
+                .spawn(move || work(&service))
+            {
                 tracing::error!("could not start a waveform thread: {error}");
             }
         }
@@ -259,7 +287,9 @@ pub(crate) fn install_store(store: Option<Arc<dyn KvStore>>) {
     if service().store.set(store.clone()).is_err() {
         return;
     }
-    let spawned = std::thread::Builder::new().name("nohrs-waveforms-trim".into()).spawn(move || trim(store.as_ref()));
+    let spawned = std::thread::Builder::new()
+        .name("nohrs-waveforms-trim".into())
+        .spawn(move || trim(store.as_ref()));
     if let Err(error) = spawned {
         tracing::error!("could not start the waveform trim: {error}");
     }
@@ -273,11 +303,17 @@ fn trim(store: &dyn KvStore) {
     if stored.len() <= STORED_CAP {
         return;
     }
-    let mut dated: Vec<(u64, KvKey)> =
-        stored.into_iter().map(|(key, value)| (decode_value(&value).map_or(0, |value| value.written), key)).collect();
+    let mut dated: Vec<(u64, KvKey)> = stored
+        .into_iter()
+        .map(|(key, value)| (decode_value(&value).map_or(0, |value| value.written), key))
+        .collect();
     dated.sort_unstable_by_key(|(written, _)| *written);
     let excess = dated.len() - STORED_CAP / 10 * 9;
-    let deletes = dated.into_iter().take(excess).map(|(_, key)| KvOp::Delete { key }).collect();
+    let deletes = dated
+        .into_iter()
+        .take(excess)
+        .map(|(_, key)| KvOp::Delete { key })
+        .collect();
     store.batch(deletes).log_err();
 }
 
@@ -298,7 +334,9 @@ impl Service {
                 continue;
             };
             let key = cache_key(&job.path, job.size, job.modified);
-            let stored = key.as_ref().and_then(|key| store.get(key).log_err().flatten());
+            let stored = key
+                .as_ref()
+                .and_then(|key| store.get(key).log_err().flatten());
             match stored.as_deref().and_then(decode_value) {
                 Some(value) => {
                     if now_seconds().saturating_sub(value.written) > TOUCH_AFTER.as_secs()
@@ -427,14 +465,19 @@ fn cache_key(path: &str, size: u64, modified: u64) -> Option<KvKey> {
 }
 
 fn now_seconds() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// Peaks per bucket, scaled so the loudest is 255.
 fn normalize(peaks: &[f32]) -> Vec<u8> {
     let loudest = peaks.iter().fold(0.0f32, |max, &peak| max.max(peak));
     let scale = if loudest > 0.0 { 255.0 / loudest } else { 0.0 };
-    peaks.iter().map(|&peak| (peak * scale).round().clamp(0.0, 255.0) as u8).collect()
+    peaks
+        .iter()
+        .map(|&peak| (peak * scale).round().clamp(0.0, 255.0) as u8)
+        .collect()
 }
 
 /// `BARS` buckets from any number of block peaks, each the loudest of its
@@ -446,8 +489,12 @@ fn bucket(blocks: &[f32]) -> Vec<f32> {
     (0..BARS)
         .map(|bar| {
             let start = bar * blocks.len() / BARS;
-            let end = ((bar + 1) * blocks.len() / BARS).max(start + 1).min(blocks.len());
-            blocks.get(start..end).map_or(0.0, |stretch| stretch.iter().fold(0.0f32, |max, &peak| max.max(peak)))
+            let end = ((bar + 1) * blocks.len() / BARS)
+                .max(start + 1)
+                .min(blocks.len());
+            blocks.get(start..end).map_or(0.0, |stretch| {
+                stretch.iter().fold(0.0f32, |max, &peak| max.max(peak))
+            })
         })
         .collect()
 }
@@ -461,8 +508,12 @@ pub(crate) fn fit(bars: &[u8], count: usize) -> Vec<u8> {
     (0..count)
         .map(|index| {
             let start = index * bars.len() / count;
-            let end = ((index + 1) * bars.len() / count).max(start + 1).min(bars.len());
-            bars.get(start..end).and_then(|stretch| stretch.iter().copied().max()).unwrap_or(0)
+            let end = ((index + 1) * bars.len() / count)
+                .max(start + 1)
+                .min(bars.len());
+            bars.get(start..end)
+                .and_then(|stretch| stretch.iter().copied().max())
+                .unwrap_or(0)
         })
         .collect()
 }
@@ -476,13 +527,23 @@ const WAVEFORM_GAP: f32 = 1.0;
 /// screen of tiles adds no element per bar to the layout.
 /// `played` (0..=1), when the sound is playing under the mouse, paints the
 /// bars already heard in the accent colour, as the preview's timeline does.
-pub(crate) fn canvas(bars: Arc<[u8]>, icon: f32, selected: bool, played: Option<f32>) -> gpui::AnyElement {
+pub(crate) fn canvas(
+    bars: Arc<[u8]>,
+    icon: f32,
+    selected: bool,
+    played: Option<f32>,
+) -> gpui::AnyElement {
     use gpui::{Bounds, Hsla, IntoElement as _, Styled as _, fill, point, px, rgb, size};
     use nohrs_ui::theme::theme;
     let (color, heard): (Hsla, Hsla) = match played {
         Some(_) => (rgb(theme::muted()).into(), rgb(theme::accent()).into()),
         None => {
-            let color: Hsla = rgb(if selected { theme::accent() } else { theme::fg_secondary() }).into();
+            let color: Hsla = rgb(if selected {
+                theme::accent()
+            } else {
+                theme::fg_secondary()
+            })
+            .into();
             (color, color)
         }
     };
@@ -492,7 +553,9 @@ pub(crate) fn canvas(bars: Arc<[u8]>, icon: f32, selected: bool, played: Option<
         move |bounds, (), window, _cx| {
             let width = f32::from(bounds.size.width) * 0.9;
             let height = f32::from(bounds.size.height) * 0.55;
-            let count = ((width + WAVEFORM_GAP) / (WAVEFORM_BAR + WAVEFORM_GAP)).floor().max(1.0) as usize;
+            let count = ((width + WAVEFORM_GAP) / (WAVEFORM_BAR + WAVEFORM_GAP))
+                .floor()
+                .max(1.0) as usize;
             let fitted = fit(&bars, count);
             let drawn = count as f32 * (WAVEFORM_BAR + WAVEFORM_GAP) - WAVEFORM_GAP;
             let left = f32::from(bounds.origin.x) + (f32::from(bounds.size.width) - drawn) / 2.0;
@@ -503,7 +566,10 @@ pub(crate) fn canvas(bars: Arc<[u8]>, icon: f32, selected: bool, played: Option<
                 let x = left + index as f32 * (WAVEFORM_BAR + WAVEFORM_GAP);
                 let done = (index as f32 + 0.5) / count as f32 <= played;
                 window.paint_quad(fill(
-                    Bounds::new(point(px(x), px(middle - bar_height / 2.0)), size(px(WAVEFORM_BAR), px(bar_height))),
+                    Bounds::new(
+                        point(px(x), px(middle - bar_height / 2.0)),
+                        size(px(WAVEFORM_BAR), px(bar_height)),
+                    ),
                     if done { heard } else { color },
                 ));
             }
@@ -538,7 +604,10 @@ mod platform {
     }
 
     /// The file's `BARS` heights, or `None` when `cancelled` said stop.
-    pub fn peaks(path: &str, cancelled: &dyn Fn() -> bool) -> windows::core::Result<Option<Vec<u8>>> {
+    pub fn peaks(
+        path: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> windows::core::Result<Option<Vec<u8>>> {
         peaks_read(path, cancelled, None)
     }
 
@@ -661,7 +730,9 @@ mod platform {
         loop {
             let mut flags = 0u32;
             let mut sample: Option<IMFSample> = None;
-            unsafe { reader.ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))? };
+            unsafe {
+                reader.ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))?
+            };
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 return Ok(false);
             }
@@ -671,7 +742,9 @@ mod platform {
             unsafe { buffer.Lock(&mut data, None, Some(&mut length))? };
             if !data.is_null() {
                 // Float PCM, as asked; valid until the Unlock below.
-                take(unsafe { std::slice::from_raw_parts(data as *const f32, length as usize / 4) });
+                take(unsafe {
+                    std::slice::from_raw_parts(data as *const f32, length as usize / 4)
+                });
             }
             unsafe { buffer.Unlock()? };
             return Ok(true);
@@ -684,7 +757,9 @@ mod platform {
     pub fn init_thread() {}
 
     pub fn peaks(_path: &str, _cancelled: &dyn Fn() -> bool) -> std::io::Result<Option<Vec<u8>>> {
-        Err(std::io::Error::other("waveforms are only decoded on Windows"))
+        Err(std::io::Error::other(
+            "waveforms are only decoded on Windows",
+        ))
     }
 }
 
@@ -699,11 +774,20 @@ mod tests {
         let stored = decode_value(&value).expect("readable");
         assert_eq!(stored.bars.as_deref(), Some(bars.as_slice()));
         let failed = decode_value(&encode_value(None)).expect("readable");
-        assert!(failed.bars.is_none(), "an undecodable file is remembered as such");
+        assert!(
+            failed.bars.is_none(),
+            "an undecodable file is remembered as such"
+        );
         let mut other = value.clone();
         other[0] = FORMAT + 1;
-        assert!(decode_value(&other).is_none(), "another format is never read as this one");
-        assert!(decode_value(&value[..20]).is_none(), "a truncated value is not read");
+        assert!(
+            decode_value(&other).is_none(),
+            "another format is never read as this one"
+        );
+        assert!(
+            decode_value(&value[..20]).is_none(),
+            "a truncated value is not read"
+        );
     }
 
     #[test]
@@ -712,7 +796,10 @@ mod tests {
         assert_eq!(key, cache_key(r"c:\sons\A.WAV", 10, 20));
         assert_ne!(key, cache_key(r"C:\Sons\a.wav", 11, 20));
         assert_ne!(key, cache_key(r"C:\Sons\a.wav", 10, 21));
-        assert_eq!(key.map(|key| key.namespace().to_string()), Some(NAMESPACE.to_string()));
+        assert_eq!(
+            key.map(|key| key.namespace().to_string()),
+            Some(NAMESPACE.to_string())
+        );
     }
 
     #[test]
@@ -727,11 +814,17 @@ mod tests {
 
     #[test]
     fn buckets_cover_every_block_and_normalize_to_full_scale() {
-        let blocks: Vec<f32> = (0..1000).map(|index| if index == 999 { 0.5 } else { 0.1 }).collect();
+        let blocks: Vec<f32> = (0..1000)
+            .map(|index| if index == 999 { 0.5 } else { 0.1 })
+            .collect();
         let buckets = bucket(&blocks);
         assert_eq!(buckets.len(), BARS);
         let heights = normalize(&buckets);
-        assert_eq!(heights[BARS - 1], 255, "the last block lands in the last bar");
+        assert_eq!(
+            heights[BARS - 1],
+            255,
+            "the last block lands in the last bar"
+        );
         assert_eq!(heights[0], 51);
         assert_eq!(normalize(&[0.0, 0.0]), vec![0, 0], "silence stays flat");
     }
@@ -752,7 +845,11 @@ mod tests {
                 for whole in [true, false] {
                     let started = Instant::now();
                     let result = platform::peaks_read(path, &never, Some(whole));
-                    let bars = result.as_ref().ok().and_then(|bars| bars.as_ref()).map_or(0, Vec::len);
+                    let bars = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|bars| bars.as_ref())
+                        .map_or(0, Vec::len);
                     println!(
                         "{path}	round {round}	{}	{:?}	{bars} bars",
                         if whole { "whole" } else { "sampled" },

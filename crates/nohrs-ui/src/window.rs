@@ -25,4 +25,4 @@ pub fn unified_window_options(
 }
 
 /// The product's name, as people see it.
-pub const APP_NAME: &str = "Prime Files";
+pub const APP_NAME: &str = "轻寻文件 · LumaFiles";

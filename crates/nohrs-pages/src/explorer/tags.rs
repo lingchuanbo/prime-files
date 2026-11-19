@@ -13,12 +13,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::workspace_icons::WorkspaceIcon;
 use gpui::{App, AppContext as _, BorrowAppContext, Global, Task};
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::fs::listing::FileEntryDto;
 use nohrs_store::{KvKey, KvStore, kv_key};
 use serde::{Deserialize, Serialize};
-use super::workspace_icons::WorkspaceIcon;
 mod batch_rename;
 
 const TAGS_KEY: KvKey = kv_key!("explorer.tags");
@@ -54,7 +54,8 @@ pub(crate) struct Tag {
 
 impl Tag {
     pub(crate) fn icon(&self) -> WorkspaceIcon {
-        self.icon.unwrap_or_else(|| WorkspaceIcon::for_legacy_id(self.id))
+        self.icon
+            .unwrap_or_else(|| WorkspaceIcon::for_legacy_id(self.id))
     }
 }
 
@@ -111,7 +112,9 @@ impl Tags {
         let affected: Vec<(u32, u32)> = self
             .card_colors
             .iter()
-            .filter_map(|((workspace, path), color)| (path == &from_key).then_some((*workspace, *color)))
+            .filter_map(|((workspace, path), color)| {
+                (path == &from_key).then_some((*workspace, *color))
+            })
             .collect();
         self.card_colors.retain(|(_, path), _| path != &from_key);
         for (workspace, color) in affected {
@@ -129,7 +132,9 @@ static TAGGED: Mutex<Option<HashMap<u32, Vec<String>>>> = Mutex::new(None);
 
 /// The same item however its path was spelled.
 fn item_key(path: &str) -> String {
-    path.trim_end_matches(['\\', '/']).replace('/', "\\").to_lowercase()
+    path.trim_end_matches(['\\', '/'])
+        .replace('/', "\\")
+        .to_lowercase()
 }
 
 /// The tag a pane's address names, if it is a tag's.
@@ -219,7 +224,12 @@ impl Tags {
     fn push_tag(&mut self, name: String, color: u32) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        self.tags.push(Tag { id, name, color, icon: None });
+        self.tags.push(Tag {
+            id,
+            name,
+            color,
+            icon: None,
+        });
         id
     }
 
@@ -233,12 +243,18 @@ impl Tags {
                 fresh.entry(*id).or_default().push(path.clone());
             }
         }
-        let previous: HashMap<u32, Vec<String>> =
-            TAGGED.lock().ok().and_then(|slot| slot.clone()).unwrap_or_default();
+        let previous: HashMap<u32, Vec<String>> = TAGGED
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_default();
         let mut tagged: HashMap<u32, Vec<String>> = HashMap::new();
         for (id, paths) in fresh {
             let mut arranged: Vec<String> = Vec::with_capacity(paths.len());
-            for source in [previous.get(&id), self.orders.get(&id)].into_iter().flatten() {
+            for source in [previous.get(&id), self.orders.get(&id)]
+                .into_iter()
+                .flatten()
+            {
                 for key in source {
                     let key = item_key(key);
                     if let Some(kept) = paths.iter().find(|path| item_key(path) == key)
@@ -267,12 +283,18 @@ impl Tags {
 
     /// Every tag, in the order they were made.
     pub(crate) fn all(cx: &App) -> Vec<Tag> {
-        cx.try_global::<Self>().map(|tags| tags.tags.clone()).unwrap_or_default()
+        cx.try_global::<Self>()
+            .map(|tags| tags.tags.clone())
+            .unwrap_or_default()
     }
 
     /// The tag `id`, if it exists.
     pub(crate) fn get(id: u32, cx: &App) -> Option<Tag> {
-        cx.try_global::<Self>()?.tags.iter().find(|tag| tag.id == id).cloned()
+        cx.try_global::<Self>()?
+            .tags
+            .iter()
+            .find(|tag| tag.id == id)
+            .cloned()
     }
 
     /// The colours of the tags on `path`, for the dots beside its name.
@@ -288,7 +310,12 @@ impl Tags {
             return Vec::new();
         };
         ids.iter()
-            .filter_map(|id| tags.tags.iter().find(|tag| tag.id == *id).map(|tag| tag.color))
+            .filter_map(|id| {
+                tags.tags
+                    .iter()
+                    .find(|tag| tag.id == *id)
+                    .map(|tag| tag.color)
+            })
             .collect()
     }
 
@@ -311,9 +338,11 @@ impl Tags {
             return false;
         };
         !paths.is_empty()
-            && paths
-                .iter()
-                .all(|path| tags.items.get(&item_key(path)).is_some_and(|(_, ids)| ids.contains(&id)))
+            && paths.iter().all(|path| {
+                tags.items
+                    .get(&item_key(path))
+                    .is_some_and(|(_, ids)| ids.contains(&id))
+            })
     }
 
     /// Puts tag `id` on every one of `paths`, or takes it off all of them
@@ -331,7 +360,10 @@ impl Tags {
                         }
                     }
                 } else {
-                    let (_, ids) = tags.items.entry(key).or_insert_with(|| (path.clone(), Vec::new()));
+                    let (_, ids) = tags
+                        .items
+                        .entry(key)
+                        .or_insert_with(|| (path.clone(), Vec::new()));
                     if !ids.contains(&id) {
                         ids.push(id);
                     }
@@ -346,7 +378,10 @@ impl Tags {
         Self::change(cx, |tags| {
             for path in paths {
                 let key = item_key(path);
-                let (_, ids) = tags.items.entry(key).or_insert_with(|| (path.clone(), Vec::new()));
+                let (_, ids) = tags
+                    .items
+                    .entry(key)
+                    .or_insert_with(|| (path.clone(), Vec::new()));
                 if !ids.contains(&id) {
                     ids.push(id);
                 }
@@ -425,7 +460,8 @@ impl Tags {
     pub(crate) fn delete(id: u32, cx: &mut App) {
         Self::change(cx, |tags| {
             tags.tags.retain(|tag| tag.id != id);
-            tags.card_colors.retain(|(workspace, _), _| *workspace != id);
+            tags.card_colors
+                .retain(|(workspace, _), _| *workspace != id);
             tags.items.retain(|_, (_, ids)| {
                 ids.retain(|tag| *tag != id);
                 !ids.is_empty()
@@ -536,27 +572,40 @@ mod tests {
         assert_eq!(None, stored.tags[0].icon);
         assert_eq!(vec![("D:/work".to_string(), vec![1])], stored.items);
         assert!(stored.orders.is_empty());
-        let unknown: Tag = serde_json::from_str(
-            r#"{"id":1,"name":"Work","color":4096477,"icon":"future-icon"}"#,
-        ).expect("unknown icon falls back without losing workspace");
+        let unknown: Tag =
+            serde_json::from_str(r#"{"id":1,"name":"Work","color":4096477,"icon":"future-icon"}"#)
+                .expect("unknown icon falls back without losing workspace");
         assert_eq!(WorkspaceIcon::Tag, unknown.icon());
     }
 
     #[test]
     fn every_workspace_icon_round_trips() {
         for icon in WorkspaceIcon::ALL {
-            let tag = Tag { id: 7, name: "Design".into(), color: 0x14B8A6, icon: Some(icon) };
+            let tag = Tag {
+                id: 7,
+                name: "Design".into(),
+                color: 0x14B8A6,
+                icon: Some(icon),
+            };
             let bytes = serde_json::to_vec(&tag).expect("encode workspace");
-            assert_eq!(tag, serde_json::from_slice::<Tag>(&bytes).expect("decode workspace"));
-            assert!(nohrs_ui::assets::Assets::get(icon.path()).is_some(), "missing {}", icon.path());
+            assert_eq!(
+                tag,
+                serde_json::from_slice::<Tag>(&bytes).expect("decode workspace")
+            );
+            assert!(
+                nohrs_ui::assets::Assets::get(icon.path()).is_some(),
+                "missing {}",
+                icon.path()
+            );
         }
     }
 
     #[gpui::test]
     async fn changing_workspace_icon_survives_reload(cx: &mut gpui::TestAppContext) {
-        let store: Arc<dyn KvStore> = Arc::new(nohrs_store::RedbKvStore::open_in_memory(
-            &nohrs_store::StoreLogConfig::default(),
-        ).expect("in-memory store"));
+        let store: Arc<dyn KvStore> = Arc::new(
+            nohrs_store::RedbKvStore::open_in_memory(&nohrs_store::StoreLogConfig::default())
+                .expect("in-memory store"),
+        );
         let original = cx.update(|cx| {
             Tags::install(Some(store.clone()), cx);
             Tags::toggle(&["D:/work".into()], 1, cx);
@@ -591,7 +640,8 @@ mod tests {
         cx.update(|cx| {
             Tags::install(None, cx);
             let id = Tags::create("Trabalho".into(), &paths, cx);
-            let names = || -> Vec<String> { read_items(id).into_iter().map(|entry| entry.name).collect() };
+            let names =
+                || -> Vec<String> { read_items(id).into_iter().map(|entry| entry.name).collect() };
             assert_eq!(names(), vec!["pasta0", "pasta1", "pasta2"]);
             // Dragged to the front.
             Tags::reorder(id, &paths[2], None, cx);
@@ -627,11 +677,15 @@ mod tests {
         let two = folder.path().join("Two");
         std::fs::write(&one, "1").expect("write");
         std::fs::create_dir(&two).expect("folder");
-        let (one, two) = (one.to_string_lossy().into_owned(), two.to_string_lossy().into_owned());
+        let (one, two) = (
+            one.to_string_lossy().into_owned(),
+            two.to_string_lossy().into_owned(),
+        );
         cx.update(|cx| {
             Tags::install(None, cx);
             let id = Tags::create("Edição".into(), &[one.clone(), two.clone()], cx);
-            let mut names: Vec<String> = read_items(id).into_iter().map(|entry| entry.name).collect();
+            let mut names: Vec<String> =
+                read_items(id).into_iter().map(|entry| entry.name).collect();
             names.sort();
             assert_eq!(names, ["Two", "one.txt"]);
             // Another spelling of the same path is the same item.
@@ -640,7 +694,11 @@ mod tests {
             Tags::toggle(&[one.clone(), two.clone()], id, cx);
             assert!(read_items(id).is_empty());
             Tags::toggle(&[one.clone()], id, cx);
-            let renamed = folder.path().join("renamed.txt").to_string_lossy().into_owned();
+            let renamed = folder
+                .path()
+                .join("renamed.txt")
+                .to_string_lossy()
+                .into_owned();
             std::fs::rename(&one, &renamed).expect("rename");
             Tags::moved(&one, &renamed, cx);
             let names: Vec<String> = read_items(id).into_iter().map(|entry| entry.name).collect();

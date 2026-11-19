@@ -55,7 +55,8 @@ impl PreviewEditor {
 
     /// Puts the keyboard in the editor.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
-        self.editor_state.update(cx, |state, cx| state.focus(window, cx));
+        self.editor_state
+            .update(cx, |state, cx| state.focus(window, cx));
     }
 
     /// Replaces the editor's contents with `text`.

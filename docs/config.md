@@ -148,7 +148,7 @@ let merged = defaults
 
 ```bash
 # GUI バイナリ経由 (macOS):
-cargo run --bin nohrs -- config schema > docs/config.schema.json
+cargo run --bin LumaFiles -- config schema > docs/config.schema.json
 
 # GUI 非依存 (Linux/CI、上と同一バイト列を出力):
 cargo run -p nohrs-core --example schema > docs/config.schema.json

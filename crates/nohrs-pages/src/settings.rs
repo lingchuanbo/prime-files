@@ -89,7 +89,7 @@ impl SettingsSection {
             Self::Files => t!("O que aparece em cada pasta e em que ordem."),
             Self::Media => t!("Áudio e vídeo: ouvir passando o mouse, tocar no visualizador e ver a forma de onda."),
             Self::Search => t!("Encontrar qualquer arquivo do computador pelo nome."),
-            Self::Integrations => t!("Abrir no Prime Files as pastas do Windows e de outros programas."),
+            Self::Integrations => t!("Abrir no LumaFiles as pastas do Windows e de outros programas."),
             Self::Shortcuts => t!("Mude as teclas de cada comando do explorador."),
             Self::About => t!("Versão, atualizações e o arquivo de configuração."),
         }
@@ -145,7 +145,7 @@ enum Pick {
     ResetShortcut(Action),
     // Gives every command its built-in keys back.
     ResetAllShortcuts,
-    // Starts Prime Files minimized at sign-in, or stops it.
+    // Starts LumaFiles minimized at sign-in, or stops it.
     StartWithWindows(bool),
 }
 
@@ -212,7 +212,7 @@ pub struct SettingsPage {
     confirm_reset: bool,
     // Whether folders open in Nohrs; `None` until the registry has answered.
     default_explorer: Option<bool>,
-    // Whether Prime Files starts at sign-in; `None` until the registry answered.
+    // Whether LumaFiles starts at sign-in; `None` until the registry answered.
     starts_with_windows: Option<bool>,
     // What Listary opens folders with; `None` until its file has been read.
     listary: Option<crate::listary::State>,
@@ -346,7 +346,7 @@ impl SettingsPage {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.status = Some((tf!("Não foi possível achar o executável do Prime Files: {error}", error = error), true));
+                self.status = Some((tf!("Não foi possível achar o executável do LumaFiles: {error}", error = error), true));
                 cx.notify();
                 return;
             }
@@ -362,7 +362,7 @@ impl SettingsPage {
             let outcome = change.await;
             this.update(cx, |page, cx| {
                 page.status = Some(match outcome {
-                    Ok(()) if enable => (t!("Pastas, drives e Win+E agora abrem no Prime Files.").to_string(), false),
+                    Ok(()) if enable => (t!("Pastas, drives e Win+E agora abrem no LumaFiles.").to_string(), false),
                     Ok(()) => (t!("Pastas voltaram a abrir no Explorador do Windows.").to_string(), false),
                     Err(error) => (tf!("Não foi possível mudar o registro: {error}", error = error), true),
                 });
@@ -377,7 +377,7 @@ impl SettingsPage {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.status = Some((tf!("Não foi possível achar o executável do Prime Files: {error}", error = error), true));
+                self.status = Some((tf!("Não foi possível achar o executável do LumaFiles: {error}", error = error), true));
                 cx.notify();
                 return;
             }
@@ -413,7 +413,7 @@ impl SettingsPage {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.status = Some((tf!("Não foi possível achar o executável do Prime Files: {error}", error = error), true));
+                self.status = Some((tf!("Não foi possível achar o executável do LumaFiles: {error}", error = error), true));
                 cx.notify();
                 return;
             }
@@ -432,7 +432,7 @@ impl SettingsPage {
             let outcome = change.await;
             this.update(cx, |page, cx| {
                 page.status = Some(match outcome {
-                    Ok(()) if enable => (t!("O Listary agora abre pastas no Prime Files.").to_string(), false),
+                    Ok(()) if enable => (t!("O Listary agora abre pastas no LumaFiles.").to_string(), false),
                     Ok(()) => (t!("O Listary voltou a abrir pastas no Explorador.").to_string(), false),
                     Err(error) => (tf!("Não foi possível mudar o Listary: {error}", error = error), true),
                 });
@@ -1029,7 +1029,7 @@ impl SettingsPage {
                 vec![
                     Row::hint(
                         t!("Reabrir as abas ao iniciar"),
-                        t!("Volta com as abas da última vez. Vale na próxima vez que o Prime Files abrir."),
+                        t!("Volta com as abas da última vez. Vale na próxima vez que o LumaFiles abrir."),
                         self.switch("restore-tabs", explorer.restore_tabs, ("explorer", "restore_tabs"), cx),
                     )
                     .reset(("explorer", "restore_tabs"), explorer.restore_tabs, "true"),
@@ -2068,7 +2068,7 @@ impl SettingsPage {
         vec![Group::new(vec![
             Row::hint(
                 t!("\"Mostrar na pasta\" abre aqui"),
-                t!("Premiere (Revelar no Explorador), Chrome, Edge e Firefox (Mostrar na pasta, depois de baixar) e o menu Iniciar (Abrir local do arquivo) abrem a pasta no Prime Files, com o arquivo selecionado e piscando em destaque."),
+                t!("Premiere (Revelar no Explorador), Chrome, Edge e Firefox (Mostrar na pasta, depois de baixar) e o menu Iniciar (Abrir local do arquivo) abrem a pasta no LumaFiles, com o arquivo selecionado e piscando em destaque."),
                 self.switch("reveal-from-other-apps", reveal, ("explorer", "reveal_from_other_apps"), cx),
             )
             .reset(("explorer", "reveal_from_other_apps"), reveal, "true"),
@@ -2082,7 +2082,7 @@ impl SettingsPage {
             ),
             Row::hint(
                 t!("Explorador padrão do Windows"),
-                t!("Pastas, drives, Win+E e o ícone do Explorador na barra de tarefas abrem no Prime Files. Só neste usuário do Windows; desligar devolve tudo ao Explorador."),
+                t!("Pastas, drives, Win+E e o ícone do Explorador na barra de tarefas abrem no LumaFiles. Só neste usuário do Windows; desligar devolve tudo ao Explorador."),
                 match self.default_explorer {
                     Some(is_default) => {
                         self.switch_pick("default-explorer", is_default, Pick::DefaultExplorer(!is_default), cx).into_any_element()
@@ -2092,7 +2092,7 @@ impl SettingsPage {
             ),
             Row::hint(
                 "Listary",
-                t!("Pastas abertas pelo Listary abrem no Prime Files. O Listary é reiniciado ao mudar."),
+                t!("Pastas abertas pelo Listary abrem no LumaFiles. O Listary é reiniciado ao mudar."),
                 match self.listary {
                     None => checking().into_any_element(),
                     Some(crate::listary::State::NotInstalled) => div()
@@ -2257,7 +2257,7 @@ impl SettingsPage {
                     self.updates_row(cx),
                     Row::hint(
                         t!("Atualizar automaticamente"),
-                        t!("Procura uma versão nova ao abrir, baixa em segundo plano e instala quando você fecha o Prime Files."),
+                        t!("Procura uma versão nova ao abrir, baixa em segundo plano e instala quando você fecha o LumaFiles."),
                         self.switch("updates-automatic", self.config.updates.automatic, ("updates", "automatic"), cx),
                     )
                     .reset(("updates", "automatic"), self.config.updates.automatic, "true"),
@@ -2329,7 +2329,7 @@ impl SettingsPage {
         let ready = matches!(status, Status::Ready { .. });
         Row::hint(
             t!("Procurar versão nova"),
-            t!("Vêm das releases do Prime Files no GitHub; cada instalador é conferido pelo SHA256SUMS.txt antes de rodar."),
+            t!("Vêm das releases do LumaFiles no GitHub; cada instalador é conferido pelo SHA256SUMS.txt antes de rodar."),
             div()
                 .flex()
                 .flex_col()

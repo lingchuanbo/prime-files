@@ -24,7 +24,12 @@ use std::path::Path;
 pub(crate) enum Creative {
     /// An image, already in the BGRA the preview draws, with a line about
     /// the document (its size, its layers).
-    Picture { width: u32, height: u32, bgra: Vec<u8>, caption: String },
+    Picture {
+        width: u32,
+        height: u32,
+        bgra: Vec<u8>,
+        caption: String,
+    },
     /// A PDF the PDF reader can show (an Illustrator file).
     Pdf,
     /// A project's summary, in Markdown.
@@ -68,24 +73,33 @@ fn open(path: &str) -> Result<std::io::BufReader<std::fs::File>, String> {
 
 fn read_u16(reader: &mut impl Read) -> Result<u16, String> {
     let mut bytes = [0; 2];
-    reader.read_exact(&mut bytes).map_err(|error| error.to_string())?;
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| error.to_string())?;
     Ok(u16::from_be_bytes(bytes))
 }
 
 fn read_u32(reader: &mut impl Read) -> Result<u32, String> {
     let mut bytes = [0; 4];
-    reader.read_exact(&mut bytes).map_err(|error| error.to_string())?;
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| error.to_string())?;
     Ok(u32::from_be_bytes(bytes))
 }
 
 fn read_u64(reader: &mut impl Read) -> Result<u64, String> {
     let mut bytes = [0; 8];
-    reader.read_exact(&mut bytes).map_err(|error| error.to_string())?;
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| error.to_string())?;
     Ok(u64::from_be_bytes(bytes))
 }
 
 fn skip(reader: &mut (impl Read + Seek), length: u64) -> Result<(), String> {
-    reader.seek(SeekFrom::Current(length as i64)).map(|_| ()).map_err(|error| error.to_string())
+    reader
+        .seek(SeekFrom::Current(length as i64))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// A fitted size for `width` x `height` within `edge`, and the step between
@@ -102,7 +116,8 @@ fn fit(width: u32, height: u32, edge: u32) -> (u32, u32, u32) {
 fn psd(path: &str, edge: u32) -> Result<Creative, String> {
     let mut file = open(path)?;
     let mut signature = [0; 4];
-    file.read_exact(&mut signature).map_err(|error| error.to_string())?;
+    file.read_exact(&mut signature)
+        .map_err(|error| error.to_string())?;
     if &signature != b"8BPS" {
         return Err("not a Photoshop file".into());
     }
@@ -122,7 +137,11 @@ fn psd(path: &str, edge: u32) -> Result<Creative, String> {
     skip(&mut file, color_data)?;
     let resources = read_u32(&mut file)? as u64;
     skip(&mut file, resources)?;
-    let layers = if big { read_u64(&mut file)? } else { read_u32(&mut file)? as u64 };
+    let layers = if big {
+        read_u64(&mut file)?
+    } else {
+        read_u32(&mut file)? as u64
+    };
     skip(&mut file, layers)?;
     let compression = read_u16(&mut file)?;
     let bytes_per_sample: usize = match depth {
@@ -142,12 +161,17 @@ fn psd(path: &str, edge: u32) -> Result<Creative, String> {
     };
     let wanted = colour_channels.min(channels);
     let has_alpha = channels > colour_channels && mode != 4;
-    let mut planes: Vec<Vec<u8>> = vec![vec![0; (out_width * out_height) as usize]; wanted + usize::from(has_alpha)];
+    let mut planes: Vec<Vec<u8>> =
+        vec![vec![0; (out_width * out_height) as usize]; wanted + usize::from(has_alpha)];
     let total_rows = height as usize * channels;
     let row_lengths: Vec<usize> = if compression == 1 {
         let mut lengths = Vec::with_capacity(total_rows);
         for _ in 0..total_rows {
-            lengths.push(if big { read_u32(&mut file)? as usize } else { read_u16(&mut file)? as usize });
+            lengths.push(if big {
+                read_u32(&mut file)? as usize
+            } else {
+                read_u16(&mut file)? as usize
+            });
         }
         lengths
     } else if compression == 0 {
@@ -174,16 +198,19 @@ fn psd(path: &str, edge: u32) -> Result<Creative, String> {
             }
             if compression == 1 {
                 packed.resize(length, 0);
-                file.read_exact(&mut packed).map_err(|error| error.to_string())?;
+                file.read_exact(&mut packed)
+                    .map_err(|error| error.to_string())?;
                 unpack_bits(&packed, &mut row);
             } else {
-                file.read_exact(&mut row).map_err(|error| error.to_string())?;
+                file.read_exact(&mut row)
+                    .map_err(|error| error.to_string())?;
             }
             let Some(plane) = plane else {
                 continue;
             };
             let out_y = (y as u32 / step) as usize;
-            let target = &mut planes[plane][out_y * out_width as usize..(out_y + 1) * out_width as usize];
+            let target =
+                &mut planes[plane][out_y * out_width as usize..(out_y + 1) * out_width as usize];
             for (out_x, value) in target.iter_mut().enumerate() {
                 let x = out_x * step as usize;
                 // The high byte of a 16-bit sample; a 32-bit one is a float
@@ -211,12 +238,20 @@ fn psd(path: &str, edge: u32) -> Result<Creative, String> {
                     planes[2][index] as u32,
                     planes[3][index] as u32,
                 );
-                ((cyan * black / 255) as u8, (magenta * black / 255) as u8, (yellow * black / 255) as u8)
+                (
+                    (cyan * black / 255) as u8,
+                    (magenta * black / 255) as u8,
+                    (yellow * black / 255) as u8,
+                )
             }
             (_, 3..) => (planes[0][index], planes[1][index], planes[2][index]),
             _ => (planes[0][index], planes[0][index], planes[0][index]),
         };
-        let alpha = if has_alpha { planes[wanted][index] } else { 255 };
+        let alpha = if has_alpha {
+            planes[wanted][index]
+        } else {
+            255
+        };
         let premultiply = |channel: u8| ((channel as u16 * alpha as u16 + 127) / 255) as u8;
         bgra[index * 4] = premultiply(blue);
         bgra[index * 4 + 1] = premultiply(green);
@@ -262,7 +297,8 @@ fn unpack_bits(packed: &[u8], row: &mut [u8]) {
 fn illustrator(path: &str, edge: u32) -> Result<Creative, String> {
     let mut head = [0u8; 5];
     let mut file = open(path)?;
-    file.read_exact(&mut head).map_err(|error| error.to_string())?;
+    file.read_exact(&mut head)
+        .map_err(|error| error.to_string())?;
     if &head == b"%PDF-" {
         return Ok(Creative::Pdf);
     }
@@ -274,8 +310,15 @@ fn illustrator(path: &str, edge: u32) -> Result<Creative, String> {
         .map_err(|error| error.to_string())?;
     let text = String::from_utf8_lossy(&bytes);
     let start = text.find("<xmpGImg:image>").ok_or("no thumbnail")? + "<xmpGImg:image>".len();
-    let end = text[start..].find("</xmpGImg:image>").ok_or("no thumbnail")? + start;
-    let encoded: String = text[start..end].replace("&#xA;", "").chars().filter(|c| !c.is_whitespace()).collect();
+    let end = text[start..]
+        .find("</xmpGImg:image>")
+        .ok_or("no thumbnail")?
+        + start;
+    let encoded: String = text[start..end]
+        .replace("&#xA;", "")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     let jpeg = decode_base64(&encoded).ok_or("bad thumbnail")?;
     picture(&jpeg, edge, String::new())
 }
@@ -312,7 +355,11 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
 /// An encoded image (PNG, JPEG), decoded and fitted in `edge`.
 fn picture(encoded: &[u8], edge: u32, caption: String) -> Result<Creative, String> {
     let decoded = image::load_from_memory(encoded).map_err(|error| error.to_string())?;
-    let decoded = if decoded.width().max(decoded.height()) > edge { decoded.thumbnail(edge, edge) } else { decoded };
+    let decoded = if decoded.width().max(decoded.height()) > edge {
+        decoded.thumbnail(edge, edge)
+    } else {
+        decoded
+    };
     let rgba = decoded.into_rgba8();
     let (width, height) = rgba.dimensions();
     let mut bgra = rgba.into_raw();
@@ -324,7 +371,12 @@ fn picture(encoded: &[u8], edge: u32, caption: String) -> Result<Creative, Strin
         pixel[1] = premultiply(green);
         pixel[2] = premultiply(red);
     }
-    Ok(Creative::Picture { width, height, bgra, caption })
+    Ok(Creative::Picture {
+        width,
+        height,
+        bgra,
+        caption,
+    })
 }
 
 /// The PNG thumbnail inside an Affinity document, the largest if there are
@@ -343,7 +395,12 @@ fn affinity(path: &str, edge: u32) -> Result<Creative, String> {
         let mut cursor = at + SIGNATURE.len();
         let mut end = None;
         while cursor + 8 <= bytes.len() {
-            let length = u32::from_be_bytes([bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3]]) as usize;
+            let length = u32::from_be_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]) as usize;
             let kind = &bytes[cursor + 4..cursor + 8];
             cursor = cursor.saturating_add(12).saturating_add(length);
             if kind == b"IEND" {
@@ -363,7 +420,9 @@ fn affinity(path: &str, edge: u32) -> Result<Creative, String> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Most media files listed in a project's summary.
@@ -381,7 +440,11 @@ fn premiere(path: &str) -> Result<Creative, String> {
     let version = xml
         .find("<Project ObjectID")
         .and_then(|at| xml[at..].find("Version=\"").map(|v| at + v + 9))
-        .and_then(|start| xml[start..].find('"').map(|end| xml[start..start + end].to_string()));
+        .and_then(|start| {
+            xml[start..]
+                .find('"')
+                .map(|end| xml[start..start + end].to_string())
+        });
     let mut sequences = Vec::new();
     let mut rest = xml.as_str();
     while let Some(at) = rest.find("<Sequence ObjectUID=") {
@@ -465,13 +528,23 @@ fn all_tag_texts(xml: &str, tag: &str) -> Vec<String> {
 }
 
 fn unescape_xml(text: &str) -> String {
-    text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// A project's summary: what made it, its sequences, and its media files,
 /// the missing ones first and marked, so a moved drive shows at a glance.
 #[allow(clippy::disallowed_methods)]
-fn project_summary(title: &str, detail: Option<String>, sequences_title: &str, sequences: &[String], mut media: Vec<String>) -> String {
+fn project_summary(
+    title: &str,
+    detail: Option<String>,
+    sequences_title: &str,
+    sequences: &[String],
+    mut media: Vec<String>,
+) -> String {
     media.sort_by_key(|path| path.to_lowercase());
     media.dedup_by_key(|path| path.to_lowercase());
     let total = media.len();
@@ -493,7 +566,10 @@ fn project_summary(title: &str, detail: Option<String>, sequences_title: &str, s
         }
         out.push('\n');
     }
-    out.push_str(&format!("## {} ({total})\n\n", nohrs_core::t!("Mídia usada")));
+    out.push_str(&format!(
+        "## {} ({total})\n\n",
+        nohrs_core::t!("Mídia usada")
+    ));
     if missing > 0 {
         let line = nohrs_core::i18n::plural(
             missing,
@@ -503,14 +579,24 @@ fn project_summary(title: &str, detail: Option<String>, sequences_title: &str, s
         out.push_str(&format!("**{line}**\n\n"));
     }
     for (present, path) in rows {
-        let name = Path::new(&path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or(path.clone());
+        let name = Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or(path.clone());
         let mark = if present { "" } else { "⚠ " };
         // Name, then where it is, on one line: the preview's Markdown keeps
         // neither a line break inside an item nor inline code apart.
-        out.push_str(&format!("- {mark}**{}** — {}\n", name.replace('*', "\\*"), path.replace('*', "\\*")));
+        out.push_str(&format!(
+            "- {mark}**{}** — {}\n",
+            name.replace('*', "\\*"),
+            path.replace('*', "\\*")
+        ));
     }
     if total > MAX_MEDIA {
-        out.push_str(&format!("\n{}\n", nohrs_core::tf!("… e mais {n}", n = total - MAX_MEDIA)));
+        out.push_str(&format!(
+            "\n{}\n",
+            nohrs_core::tf!("… e mais {n}", n = total - MAX_MEDIA)
+        ));
     }
     out
 }
@@ -549,13 +635,21 @@ mod tests {
         let folder = tempfile::tempdir().expect("temp folder");
         let path = folder.path().join("a.psd");
         std::fs::write(&path, tiny_psd()).expect("write");
-        let Creative::Picture { width, height, bgra, .. } = read(&path.to_string_lossy(), 512).expect("read") else {
+        let Creative::Picture {
+            width,
+            height,
+            bgra,
+            ..
+        } = read(&path.to_string_lossy(), 512).expect("read")
+        else {
             panic!("not a picture");
         };
         assert_eq!((width, height), (4, 2));
         // Red 200, green 10, blue 50, opaque, as BGRA.
         assert_eq!(&bgra[..4], &[50, 10, 200, 255]);
-        let Creative::Picture { width, height, .. } = read(&path.to_string_lossy(), 2).expect("read") else {
+        let Creative::Picture { width, height, .. } =
+            read(&path.to_string_lossy(), 2).expect("read")
+        else {
             panic!("not a picture");
         };
         assert_eq!((width, height), (2, 1));
@@ -579,7 +673,10 @@ mod tests {
             present.display()
         );
         let path = folder.path().join("a.prproj");
-        let mut encoder = flate2::write::GzEncoder::new(std::fs::File::create(&path).expect("create"), flate2::Compression::fast());
+        let mut encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&path).expect("create"),
+            flate2::Compression::fast(),
+        );
         std::io::Write::write_all(&mut encoder, xml.as_bytes()).expect("write");
         encoder.finish().expect("finish");
         let Creative::Summary(text) = read(&path.to_string_lossy(), 512).expect("read") else {

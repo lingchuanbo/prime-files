@@ -6,8 +6,8 @@
 //! the size of the pane, redrawn on a worker thread split into bands, keeps
 //! up with a drag on models of a few hundred thousand triangles.
 
-use nohrs_core::t;
 use gpui::{Context, RenderImage, Task};
+use nohrs_core::t;
 use std::sync::Arc;
 
 use super::ExplorerPane;
@@ -157,17 +157,29 @@ impl ExplorerPane {
         // Drawn smaller than the view when the pane is large, and shown
         // stretched: a drag matters more than the last bit of sharpness.
         let scale = (MAX_SIDE / width.max(height) as f32).min(1.0);
-        let (draw_w, draw_h) = (((width as f32) * scale) as u32, ((height as f32) * scale) as u32);
+        let (draw_w, draw_h) = (
+            ((width as f32) * scale) as u32,
+            ((height as f32) * scale) as u32,
+        );
         let (yaw, pitch) = (model.yaw, model.pitch);
         model.drawing = true;
         // Off the shared pool for the reason the read is (see
         // `open_model_preview`); `rasterize` spreads over its own threads.
         let (sender, receiver) = async_channel::bounded(1);
-        let spawned = std::thread::Builder::new().name("nohrs-model-draw".into()).spawn(move || {
-            sender
-                .send_blocking(rasterize(&mesh, yaw, pitch, zoom, draw_w.max(1), draw_h.max(1)))
-                .ok();
-        });
+        let spawned = std::thread::Builder::new()
+            .name("nohrs-model-draw".into())
+            .spawn(move || {
+                sender
+                    .send_blocking(rasterize(
+                        &mesh,
+                        yaw,
+                        pitch,
+                        zoom,
+                        draw_w.max(1),
+                        draw_h.max(1),
+                    ))
+                    .ok();
+            });
         if let Err(error) = spawned {
             tracing::error!("could not start drawing the model: {error}");
             model.drawing = false;
@@ -224,14 +236,24 @@ fn to_byte(channel: f32) -> u8 {
 }
 
 fn load_obj(path: &str) -> Result<Mesh, String> {
-    let options = tobj::LoadOptions { triangulate: true, single_index: true, ignore_points: true, ignore_lines: true };
+    let options = tobj::LoadOptions {
+        triangulate: true,
+        single_index: true,
+        ignore_points: true,
+        ignore_lines: true,
+    };
     let (models, materials) = tobj::load_obj(path, &options).map_err(|error| error.to_string())?;
     // A missing or broken .mtl only costs the colours.
     let materials = materials.unwrap_or_default();
-    let mut mesh = Mesh { positions: Vec::new(), triangles: Vec::new(), colors: Vec::new() };
+    let mut mesh = Mesh {
+        positions: Vec::new(),
+        triangles: Vec::new(),
+        colors: Vec::new(),
+    };
     for model in models {
         let base = mesh.positions.len() as u32;
-        mesh.positions.extend(model.mesh.positions.as_chunks::<3>().0.iter().copied());
+        mesh.positions
+            .extend(model.mesh.positions.as_chunks::<3>().0.iter().copied());
         let color = model
             .mesh
             .material_id
@@ -239,7 +261,8 @@ fn load_obj(path: &str) -> Result<Mesh, String> {
             .and_then(|material| material.diffuse)
             .map_or(PLAIN, |[r, g, b]| [to_byte(r), to_byte(g), to_byte(b)]);
         for triangle in model.mesh.indices.as_chunks::<3>().0 {
-            mesh.triangles.push([base + triangle[0], base + triangle[1], base + triangle[2]]);
+            mesh.triangles
+                .push([base + triangle[0], base + triangle[1], base + triangle[2]]);
             mesh.colors.push(color);
         }
     }
@@ -248,16 +271,31 @@ fn load_obj(path: &str) -> Result<Mesh, String> {
 
 #[allow(clippy::disallowed_methods)]
 fn load_stl(path: &str) -> Result<Mesh, String> {
-    let mut file = std::io::BufReader::new(std::fs::File::open(path).map_err(|error| error.to_string())?);
+    let mut file =
+        std::io::BufReader::new(std::fs::File::open(path).map_err(|error| error.to_string())?);
     let stl = stl_io::read_stl(&mut file).map_err(|error| error.to_string())?;
-    let positions = stl.vertices.iter().map(|vertex| [vertex[0], vertex[1], vertex[2]]).collect();
+    let positions = stl
+        .vertices
+        .iter()
+        .map(|vertex| [vertex[0], vertex[1], vertex[2]])
+        .collect();
     let triangles: Vec<[u32; 3]> = stl
         .faces
         .iter()
-        .map(|face| [face.vertices[0] as u32, face.vertices[1] as u32, face.vertices[2] as u32])
+        .map(|face| {
+            [
+                face.vertices[0] as u32,
+                face.vertices[1] as u32,
+                face.vertices[2] as u32,
+            ]
+        })
         .collect();
     let colors = vec![PLAIN; triangles.len()];
-    Ok(Mesh { positions, triangles, colors })
+    Ok(Mesh {
+        positions,
+        triangles,
+        colors,
+    })
 }
 
 /// A glTF's default scene, every mesh placed by its node's transform. Only
@@ -266,14 +304,28 @@ fn load_stl(path: &str) -> Result<Mesh, String> {
 fn load_gltf(path: &str) -> Result<Mesh, String> {
     let gltf = gltf::Gltf::open(path).map_err(|error| error.to_string())?;
     let base = std::path::Path::new(path).parent();
-    let buffers = gltf::import_buffers(&gltf.document, base, gltf.blob.clone()).map_err(|error| error.to_string())?;
-    let mut mesh = Mesh { positions: Vec::new(), triangles: Vec::new(), colors: Vec::new() };
-    let scene = gltf.document.default_scene().or_else(|| gltf.document.scenes().next());
+    let buffers = gltf::import_buffers(&gltf.document, base, gltf.blob.clone())
+        .map_err(|error| error.to_string())?;
+    let mut mesh = Mesh {
+        positions: Vec::new(),
+        triangles: Vec::new(),
+        colors: Vec::new(),
+    };
+    let scene = gltf
+        .document
+        .default_scene()
+        .or_else(|| gltf.document.scenes().next());
     let Some(scene) = scene else {
         return Ok(mesh);
     };
-    let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
-    let mut stack: Vec<(gltf::Node, [[f32; 4]; 4])> = scene.nodes().map(|node| (node, identity)).collect();
+    let identity = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let mut stack: Vec<(gltf::Node, [[f32; 4]; 4])> =
+        scene.nodes().map(|node| (node, identity)).collect();
     while let Some((node, parent)) = stack.pop() {
         let transform = multiply(&parent, &node.transform().matrix());
         if let Some(node_mesh) = node.mesh() {
@@ -281,14 +333,19 @@ fn load_gltf(path: &str) -> Result<Mesh, String> {
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
                     continue;
                 }
-                let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
+                let reader =
+                    primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
                 let Some(points) = reader.read_positions() else {
                     continue;
                 };
                 let start = mesh.positions.len() as u32;
-                mesh.positions.extend(points.map(|point| apply(&transform, point)));
+                mesh.positions
+                    .extend(points.map(|point| apply(&transform, point)));
                 let count = mesh.positions.len() as u32 - start;
-                let [r, g, b, _] = primitive.material().pbr_metallic_roughness().base_color_factor();
+                let [r, g, b, _] = primitive
+                    .material()
+                    .pbr_metallic_roughness()
+                    .base_color_factor();
                 let color = [to_byte(r), to_byte(g), to_byte(b)];
                 let indices: Vec<u32> = match reader.read_indices() {
                     Some(indices) => indices.into_u32().collect(),
@@ -296,7 +353,11 @@ fn load_gltf(path: &str) -> Result<Mesh, String> {
                 };
                 for triangle in indices.as_chunks::<3>().0 {
                     if triangle.iter().all(|&index| index < count) {
-                        mesh.triangles.push([start + triangle[0], start + triangle[1], start + triangle[2]]);
+                        mesh.triangles.push([
+                            start + triangle[0],
+                            start + triangle[1],
+                            start + triangle[2],
+                        ]);
                         mesh.colors.push(color);
                     }
                 }
@@ -321,7 +382,9 @@ fn load_fbx(path: &str) -> Result<Mesh, String> {
     let tree = match AnyTree::from_seekable_reader(std::io::BufReader::new(file)) {
         Ok(AnyTree::V7400(_, tree, _)) => tree,
         Ok(_) => return Err(t!("Versão de FBX não suportada").to_string()),
-        Err(_) => return Err(t!("Só FBX binário é suportado (este parece ser FBX em texto)").to_string()),
+        Err(_) => {
+            return Err(t!("Só FBX binário é suportado (este parece ser FBX em texto)").to_string());
+        }
     };
     let root = tree.root();
     let number = |value: &AttributeValue| match value {
@@ -331,14 +394,21 @@ fn load_fbx(path: &str) -> Result<Mesh, String> {
         AttributeValue::I64(v) => Some(*v as f64),
         _ => None,
     };
-    let id_of = |node: &fbxcel::tree::v7400::NodeHandle<'_>| node.attributes().first().and_then(|value| value.get_i64());
+    let id_of = |node: &fbxcel::tree::v7400::NodeHandle<'_>| {
+        node.attributes().first().and_then(|value| value.get_i64())
+    };
     // `P` lines of a `Properties70`: name, type, label, flags, then values.
     let property = |node: &fbxcel::tree::v7400::NodeHandle<'_>, name: &str| -> Option<[f64; 3]> {
         let properties = node.first_child_by_name("Properties70")?;
         let line = properties
             .children_by_name("P")
             .find(|p| p.attributes().first().and_then(|v| v.get_string()) == Some(name))?;
-        let values: Vec<f64> = line.attributes().iter().skip(4).filter_map(number).collect();
+        let values: Vec<f64> = line
+            .attributes()
+            .iter()
+            .skip(4)
+            .filter_map(number)
+            .collect();
         (values.len() >= 3).then(|| [values[0], values[1], values[2]])
     };
 
@@ -352,13 +422,24 @@ fn load_fbx(path: &str) -> Result<Mesh, String> {
             let Some(id) = id_of(&object) else { continue };
             match object.name() {
                 "Geometry" => {
-                    let vertices = object
-                        .first_child_by_name("Vertices")
-                        .and_then(|node| node.attributes().first().and_then(|v| v.get_arr_f64()).map(<[f64]>::to_vec));
-                    let indices = object
-                        .first_child_by_name("PolygonVertexIndex")
-                        .and_then(|node| node.attributes().first().and_then(|v| v.get_arr_i32()).map(<[i32]>::to_vec));
-                    let (Some(vertices), Some(indices)) = (vertices, indices) else { continue };
+                    let vertices = object.first_child_by_name("Vertices").and_then(|node| {
+                        node.attributes()
+                            .first()
+                            .and_then(|v| v.get_arr_f64())
+                            .map(<[f64]>::to_vec)
+                    });
+                    let indices =
+                        object
+                            .first_child_by_name("PolygonVertexIndex")
+                            .and_then(|node| {
+                                node.attributes()
+                                    .first()
+                                    .and_then(|v| v.get_arr_i32())
+                                    .map(<[i32]>::to_vec)
+                            });
+                    let (Some(vertices), Some(indices)) = (vertices, indices) else {
+                        continue;
+                    };
                     let positions: Vec<[f32; 3]> = vertices
                         .as_chunks::<3>()
                         .0
@@ -374,13 +455,21 @@ fn load_fbx(path: &str) -> Result<Mesh, String> {
                     let scaling = property(&object, "Lcl Scaling").unwrap_or([1.0; 3]);
                     let local = multiply(
                         &translate(translation),
-                        &multiply(&multiply(&euler_xyz(pre_rotation), &euler_xyz(rotation)), &scale(scaling)),
+                        &multiply(
+                            &multiply(&euler_xyz(pre_rotation), &euler_xyz(rotation)),
+                            &scale(scaling),
+                        ),
                     );
                     models.insert(id, local);
                 }
                 "Material" => {
-                    if let Some([r, g, b]) = property(&object, "DiffuseColor").or_else(|| property(&object, "Diffuse")) {
-                        materials.insert(id, [to_byte(r as f32), to_byte(g as f32), to_byte(b as f32)]);
+                    if let Some([r, g, b]) =
+                        property(&object, "DiffuseColor").or_else(|| property(&object, "Diffuse"))
+                    {
+                        materials.insert(
+                            id,
+                            [to_byte(r as f32), to_byte(g as f32), to_byte(b as f32)],
+                        );
                     }
                 }
                 _ => {}
@@ -399,9 +488,10 @@ fn load_fbx(path: &str) -> Result<Mesh, String> {
             if attributes.first().and_then(|v| v.get_string()) != Some("OO") {
                 continue;
             }
-            let (Some(child), Some(parent)) =
-                (attributes.get(1).and_then(|v| v.get_i64()), attributes.get(2).and_then(|v| v.get_i64()))
-            else {
+            let (Some(child), Some(parent)) = (
+                attributes.get(1).and_then(|v| v.get_i64()),
+                attributes.get(2).and_then(|v| v.get_i64()),
+            ) else {
                 continue;
             };
             if geometries.contains_key(&child) && models.contains_key(&parent) {
@@ -420,26 +510,41 @@ fn load_fbx(path: &str) -> Result<Mesh, String> {
         let mut at = model;
         // Bounded: a malformed file could connect models in a loop.
         for _ in 0..64 {
-            let Some(&parent) = parent_of.get(&at) else { break };
+            let Some(&parent) = parent_of.get(&at) else {
+                break;
+            };
             matrix = multiply(&models[&parent], &matrix);
             at = parent;
         }
         matrix
     };
 
-    let mut mesh = Mesh { positions: Vec::new(), triangles: Vec::new(), colors: Vec::new() };
+    let mut mesh = Mesh {
+        positions: Vec::new(),
+        triangles: Vec::new(),
+        colors: Vec::new(),
+    };
     // A geometry no model places is drawn where it is.
     let placed: Vec<(i64, Option<i64>)> = if geometry_models.is_empty() {
         geometries.keys().map(|&id| (id, None)).collect()
     } else {
-        geometry_models.iter().map(|&(geometry, model)| (geometry, Some(model))).collect()
+        geometry_models
+            .iter()
+            .map(|&(geometry, model)| (geometry, Some(model)))
+            .collect()
     };
     for (geometry, model) in placed {
         let (positions, triangles) = &geometries[&geometry];
         let start = mesh.positions.len() as u32;
         let matrix = model.map(world);
-        mesh.positions.extend(positions.iter().map(|&p| matrix.as_ref().map_or(p, |m| apply(m, p))));
-        let color = model.and_then(|model| model_color.get(&model).copied()).unwrap_or(PLAIN);
+        mesh.positions.extend(
+            positions
+                .iter()
+                .map(|&p| matrix.as_ref().map_or(p, |m| apply(m, p))),
+        );
+        let color = model
+            .and_then(|model| model_color.get(&model).copied())
+            .unwrap_or(PLAIN);
         let count = positions.len() as u32;
         for triangle in triangles {
             if triangle.iter().all(|&index| index < count) {
@@ -470,11 +575,21 @@ fn fan_triangulate(indices: &[i32]) -> Vec<[u32; 3]> {
 }
 
 fn translate([x, y, z]: [f64; 3]) -> [[f32; 4]; 4] {
-    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [x as f32, y as f32, z as f32, 1.0]]
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [x as f32, y as f32, z as f32, 1.0],
+    ]
 }
 
 fn scale([x, y, z]: [f64; 3]) -> [[f32; 4]; 4] {
-    [[x as f32, 0.0, 0.0, 0.0], [0.0, y as f32, 0.0, 0.0], [0.0, 0.0, z as f32, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    [
+        [x as f32, 0.0, 0.0, 0.0],
+        [0.0, y as f32, 0.0, 0.0],
+        [0.0, 0.0, z as f32, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
 }
 
 /// FBX's default rotation order, degrees: X first, then Y, then Z.
@@ -482,9 +597,24 @@ fn euler_xyz([x, y, z]: [f64; 3]) -> [[f32; 4]; 4] {
     let (sx, cx) = (x.to_radians() as f32).sin_cos();
     let (sy, cy) = (y.to_radians() as f32).sin_cos();
     let (sz, cz) = (z.to_radians() as f32).sin_cos();
-    let rx = [[1.0, 0.0, 0.0, 0.0], [0.0, cx, sx, 0.0], [0.0, -sx, cx, 0.0], [0.0, 0.0, 0.0, 1.0]];
-    let ry = [[cy, 0.0, -sy, 0.0], [0.0, 1.0, 0.0, 0.0], [sy, 0.0, cy, 0.0], [0.0, 0.0, 0.0, 1.0]];
-    let rz = [[cz, sz, 0.0, 0.0], [-sz, cz, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    let rx = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, cx, sx, 0.0],
+        [0.0, -sx, cx, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let ry = [
+        [cy, 0.0, -sy, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [sy, 0.0, cy, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let rz = [
+        [cz, sz, 0.0, 0.0],
+        [-sz, cz, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
     multiply(&rz, &multiply(&ry, &rx))
 }
 
@@ -514,10 +644,17 @@ fn normalize(positions: &mut [[f32; 3]]) {
             max[axis] = max[axis].max(point[axis]);
         }
     }
-    let center = [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0, (min[2] + max[2]) / 2.0];
+    let center = [
+        (min[0] + max[0]) / 2.0,
+        (min[1] + max[1]) / 2.0,
+        (min[2] + max[2]) / 2.0,
+    ];
     let radius = positions
         .iter()
-        .map(|p| ((p[0] - center[0]).powi(2) + (p[1] - center[1]).powi(2) + (p[2] - center[2]).powi(2)).sqrt())
+        .map(|p| {
+            ((p[0] - center[0]).powi(2) + (p[1] - center[1]).powi(2) + (p[2] - center[2]).powi(2))
+                .sqrt()
+        })
         .fold(0.0f32, f32::max);
     let scale = if radius > 0.0 { 1.0 / radius } else { 1.0 };
     for point in positions.iter_mut() {
@@ -533,7 +670,14 @@ const CAMERA: f32 = 3.0;
 
 /// Draws `mesh` turned by `yaw` and `pitch` into a `width` x `height` BGRA
 /// image, background transparent so the pane's backdrop shows through.
-pub(crate) fn rasterize(mesh: &Mesh, yaw: f32, pitch: f32, zoom: f32, width: u32, height: u32) -> Option<RenderImage> {
+pub(crate) fn rasterize(
+    mesh: &Mesh,
+    yaw: f32,
+    pitch: f32,
+    zoom: f32,
+    width: u32,
+    height: u32,
+) -> Option<RenderImage> {
     let (w, h) = (width as usize, height as usize);
     let (sy, cy) = yaw.sin_cos();
     let (sp, cp) = pitch.sin_cos();
@@ -555,7 +699,11 @@ pub(crate) fn rasterize(mesh: &Mesh, yaw: f32, pitch: f32, zoom: f32, width: u32
         .iter()
         .map(|&[x, y, z]| {
             let depth = CAMERA - z;
-            [half_w + x * focal / depth, half_h - y * focal / depth, depth]
+            [
+                half_w + x * focal / depth,
+                half_h - y * focal / depth,
+                depth,
+            ]
         })
         .collect();
     let light = {
@@ -572,7 +720,11 @@ pub(crate) fn rasterize(mesh: &Mesh, yaw: f32, pitch: f32, zoom: f32, width: u32
             let (pa, pb, pc) = (view[a as usize], view[b as usize], view[c as usize]);
             let u = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
             let v = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
             let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             if length == 0.0 {
                 return None;
@@ -581,15 +733,32 @@ pub(crate) fn rasterize(mesh: &Mesh, yaw: f32, pitch: f32, zoom: f32, width: u32
             let lambert = ((n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / length).abs();
             let shade = 0.28 + 0.72 * lambert;
             let tint = color.map(|channel| (channel as f32 * shade).min(255.0) as u8);
-            let ys = [screen[a as usize][1], screen[b as usize][1], screen[c as usize][1]];
-            let top = ys.iter().copied().fold(f32::INFINITY, f32::min).floor().max(0.0) as usize;
-            let bottom = (ys.iter().copied().fold(f32::NEG_INFINITY, f32::max).ceil().max(0.0) as usize).min(h);
+            let ys = [
+                screen[a as usize][1],
+                screen[b as usize][1],
+                screen[c as usize][1],
+            ];
+            let top = ys
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, f32::min)
+                .floor()
+                .max(0.0) as usize;
+            let bottom = (ys
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max)
+                .ceil()
+                .max(0.0) as usize)
+                .min(h);
             (top < bottom).then_some((tint, top, bottom))
         })
         .collect();
 
     let mut pixels = vec![0u8; w * h * 4];
-    let bands = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let bands = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 8);
     let band_rows = h.div_ceil(bands);
     std::thread::scope(|scope| {
         for (band, chunk) in pixels.chunks_mut(band_rows * w * 4).enumerate() {
@@ -599,7 +768,9 @@ pub(crate) fn rasterize(mesh: &Mesh, yaw: f32, pitch: f32, zoom: f32, width: u32
                 let rows = chunk.len() / (w * 4);
                 let mut depth = vec![f32::INFINITY; rows * w];
                 for (triangle, info) in triangles.iter().zip(shaded) {
-                    let Some((tint, top, bottom)) = *info else { continue };
+                    let Some((tint, top, bottom)) = *info else {
+                        continue;
+                    };
                     let (top, bottom) = (top.max(first), bottom.min(first + rows));
                     if top >= bottom {
                         continue;
@@ -657,7 +828,11 @@ mod tests {
         std::fs::write(&path, cube_stl()).unwrap();
         let mesh = load(path.to_str().unwrap()).unwrap();
         assert_eq!(mesh.triangles.len(), 3);
-        let radius = mesh.positions.iter().map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()).fold(0.0, f32::max);
+        let radius = mesh
+            .positions
+            .iter()
+            .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
+            .fold(0.0, f32::max);
         assert!((radius - 1.0).abs() < 1e-4);
     }
 
@@ -666,7 +841,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("m.mtl"), "newmtl red\nKd 1 0 0\n").unwrap();
         let path = dir.path().join("t.obj");
-        std::fs::write(&path, "mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nusemtl red\nf 1 2 3 4\n").unwrap();
+        std::fs::write(
+            &path,
+            "mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nusemtl red\nf 1 2 3 4\n",
+        )
+        .unwrap();
         let mesh = load(path.to_str().unwrap()).unwrap();
         // The quad, triangulated.
         assert_eq!(mesh.triangles.len(), 2);
@@ -689,7 +868,10 @@ mod tests {
     #[test]
     fn fbx_polygons_close_on_a_negative_index() {
         // A quad (0 1 2 ~3) and a triangle (3 4 ~5).
-        assert_eq!(fan_triangulate(&[0, 1, 2, !3, 3, 4, !5]), [[0, 1, 2], [0, 2, 3], [3, 4, 5]]);
+        assert_eq!(
+            fan_triangulate(&[0, 1, 2, !3, 3, 4, !5]),
+            [[0, 1, 2], [0, 2, 3], [3, 4, 5]]
+        );
     }
 
     #[test]
@@ -706,7 +888,10 @@ mod tests {
         assert!(!mesh.triangles.is_empty());
         let pixels = rasterize_pixels(&mesh, -0.6, 0.35, 1.0, 320, 240);
         let covered = pixels.chunks_exact(4).filter(|p| p[3] == 255).count();
-        eprintln!("{} triangles, {covered} pixels covered", mesh.triangles.len());
+        eprintln!(
+            "{} triangles, {covered} pixels covered",
+            mesh.triangles.len()
+        );
         assert!(covered > 1000);
     }
 

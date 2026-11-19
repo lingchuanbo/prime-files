@@ -1,8 +1,8 @@
-use nohrs_core::t;
 use crate::theme::theme;
 use gpui::{ParentElement, Styled, Window, div, px, rgb};
 use gpui_component::list::{ListDelegate, ListItem, ListState};
 use gpui_component::{Icon, IconName, IndexPath};
+use nohrs_core::t;
 use nohrs_models::file_entry::FileEntryDto;
 use std::sync::Arc;
 
@@ -218,12 +218,12 @@ pub fn human_bytes(size: u64) -> String {
     }
 }
 
-/// Format a Unix timestamp (seconds) as a `year/month/day` date, or `-` if invalid.
+/// Format a Unix timestamp (seconds) as a `year/month/day hour:minute` date, or `-` if invalid.
 pub fn format_date(timestamp: &u64) -> String {
     use time::OffsetDateTime;
     use time::macros::format_description;
 
-    let format = format_description!("[year]/[month]/[day]");
+    let format = format_description!("[year]/[month]/[day] [hour]:[minute]");
     match OffsetDateTime::from_unix_timestamp(*timestamp as i64) {
         Ok(datetime) => datetime.format(&format).unwrap_or_else(|_| "-".to_string()),
         Err(_) => "-".to_string(),
@@ -322,7 +322,12 @@ mod tests {
 
     #[test]
     fn format_date_is_stable_for_the_epoch() {
-        assert_eq!(format_date(&0), "1970/01/01");
+        assert_eq!(format_date(&0), "1970/01/01 00:00");
+    }
+
+    #[test]
+    fn format_date_shows_minutes_without_seconds() {
+        assert_eq!(format_date(&3661), "1970/01/01 01:01");
     }
 
     proptest! {

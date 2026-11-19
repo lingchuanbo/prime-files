@@ -1,7 +1,7 @@
-use nohrs_core::{t, tf};
 use super::ExplorerPane;
 use super::types::{SearchFileResult, SearchMatch, StatusLevel};
 use gpui::{AppContext, AsyncApp, Context, Window};
+use nohrs_core::{t, tf};
 use nohrs_services::fs::listing::FileEntryDto;
 use nohrs_services::search::SearchResult;
 use std::collections::HashMap;

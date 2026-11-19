@@ -318,7 +318,7 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             self.renders += 1;
-            unified_toolbar(window, "Prime Files", cx)
+            unified_toolbar(window, "LumaFiles", cx)
         }
     }
 

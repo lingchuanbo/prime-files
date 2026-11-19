@@ -64,10 +64,10 @@ GUI は `gui` フィーチャー付きの `nohrs` バイナリ。手順 1 の sy
 `RUSTFLAGS` でリンカに渡す。
 
 ```bash
-RUSTFLAGS="-L $HOME/.local/devlibs" cargo build --features gui --bin nohrs
+RUSTFLAGS="-L $HOME/.local/devlibs" cargo build --features gui --bin LumaFiles
 ```
 
-成功すると `target/debug/nohrs` が生成される。
+成功すると `target/debug/LumaFiles` が生成される。
 
 ---
 
@@ -82,7 +82,7 @@ ps aux | grep -i Xvnc | grep -v grep   # 例: "Xvnc :108 ..." の :108 が表示
 そのディスプレイを指定して起動する。
 
 ```bash
-DISPLAY=:108 target/debug/nohrs
+DISPLAY=:108 target/debug/LumaFiles
 ```
 
 GPU が無い環境では llvmpipe で描画するため、**起動直後の数秒はウィンドウが黒いまま**
@@ -165,7 +165,7 @@ if __name__ == "__main__":
 取得手順（起動・描画待ち・キャプチャを 1 コマンドで完結させる）:
 
 ```bash
-DISPLAY=:108 setsid target/debug/nohrs > /tmp/nohrs.log 2>&1 < /dev/null &
+DISPLAY=:108 setsid target/debug/LumaFiles > /tmp/nohrs.log 2>&1 < /dev/null &
 # 描画開始までログ上のマーカーを待つ
 timeout 20 bash -c 'until grep -q "Refreshing every" /tmp/nohrs.log; do :; done'
 perl -e 'select(undef,undef,undef,4)'   # UI 描画の落ち着き待ち（sleep 代替）
@@ -181,7 +181,7 @@ python3 xwd2png.py /tmp/nohrs.xwd /tmp/nohrs.png
 | --- | --- |
 | `unable to find library -lxcb` 等 | 手順 1 の symlink、または `lib*-dev` パッケージが不足。`RUSTFLAGS="-L ..."` を付けたか確認 |
 | ウィンドウが黒いまま | llvmpipe での初回描画が遅いだけ。数秒待つ。ログに `'atlas'` / `Refreshing every 16ms` が出れば描画中 |
-| `pkill -f target/debug/nohrs` で操作中シェルごと落ちる | `-f` がそのパス文字列を含む自分のシェルにマッチするため。**`pkill -x nohrs`（プロセス名で厳密一致）を使う** |
+| `pkill -f target/debug/LumaFiles` で操作中シェルごと落ちる | `-f` がそのパス文字列を含む自分のシェルにマッチするため。**`pkill -x LumaFiles`（プロセス名で厳密一致）を使う** |
 | `Found no xinput mouse pointers`（ERROR ログ） | 仮想ディスプレイにポインタが無いだけで、描画・起動には影響しない |
 | GUI が無反応 / 重い | GPU 無し（ソフトウェア Vulkan）のため。描画は遅いが動作はする |
 

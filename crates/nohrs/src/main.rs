@@ -19,12 +19,32 @@ fn main() {
     if std::env::args().nth(1).is_some_and(|first| {
         matches!(
             first.as_str(),
-            "config" | "help" | "-h" | "--help" | "-V" | "--version"
+            "config" | "open" | "current-path" | "help" | "-h" | "--help" | "-V" | "--version"
         )
     }) {
         attach_parent_console();
     }
-    let cli = cli::Cli::parse();
+    let mut cli = cli::Cli::parse();
+
+    if matches!(cli.command, Some(cli::Command::CurrentPath)) {
+        match nohrs_pages::ipc::current_path() {
+            Ok(path) => println!("{path}"),
+            Err(error) => {
+                eprintln!("LumaFiles: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if let Some(cli::Command::Open { path }) = &cli.command {
+        if !path.exists() {
+            eprintln!("LumaFiles: path does not exist: {}", path.display());
+            std::process::exit(1);
+        }
+        cli.path = Some(path.clone());
+        cli.command = None;
+    }
 
     // `config` subcommands run headless and exit without opening a window.
     if let Some(cli::Command::Config { action }) = &cli.command {

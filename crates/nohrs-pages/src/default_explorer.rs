@@ -64,7 +64,7 @@ pub fn enable(exe: &Path) -> io::Result<()> {
     for class in FOLDER_CLASSES {
         let shell = format!(r"HKCU\Software\Classes\{class}\shell");
         let verb = format!(r"{shell}\{VERB}");
-        reg_ok(&["add", &verb, "/ve", "/d", t!("Abrir no Prime Files"), "/f"])?;
+        reg_ok(&["add", &verb, "/ve", "/d", t!("Abrir no LumaFiles"), "/f"])?;
         reg_ok(&["add", &verb, "/v", "Icon", "/d", &quoted, "/f"])?;
         reg_ok(&["add", &format!(r"{verb}\command"), "/ve", "/d", &format!("{quoted} \"%1\""), "/f"])?;
         reg_ok(&["add", &shell, "/ve", "/d", VERB, "/f"])?;
@@ -95,7 +95,7 @@ pub fn disable() -> io::Result<()> {
 
 // Whether the default value of `key` points at this app, so a value some
 // other program set is left alone. The verb's name says "nohrs"; a command
-// names the executable, which the installer calls PrimeFiles.exe.
+// names the executable, which the installer calls LumaFiles.exe.
 fn is_ours(key: &str) -> bool {
     let exe_name = std::env::current_exe()
         .ok()
@@ -115,7 +115,7 @@ fn is_ours(key: &str) -> bool {
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Prime Files";
 
-/// Whether Prime Files starts, minimized, when this user signs in.
+/// Whether LumaFiles starts, minimized, when this user signs in.
 pub fn starts_with_windows() -> bool {
     reg(&["query", RUN_KEY, "/v", RUN_VALUE]).is_ok_and(|output| output.status.success())
 }

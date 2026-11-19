@@ -18,8 +18,15 @@ pub(crate) enum WorkspaceIcon {
 
 impl WorkspaceIcon {
     pub(crate) const ALL: [Self; 9] = [
-        Self::Bookmark, Self::Briefcase, Self::User, Self::Layers, Self::Palette,
-        Self::Swords, Self::Code, Self::Kanban, Self::Tag,
+        Self::Bookmark,
+        Self::Briefcase,
+        Self::User,
+        Self::Layers,
+        Self::Palette,
+        Self::Swords,
+        Self::Code,
+        Self::Kanban,
+        Self::Tag,
     ];
 
     pub(crate) fn path(self) -> &'static str {

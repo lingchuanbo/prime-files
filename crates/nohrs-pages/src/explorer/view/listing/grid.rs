@@ -35,7 +35,9 @@ pub fn render(
     let tile_width = icon + TILE_PADDING * 2.0;
     // The tile's inner width: its padding and the 1px border on each side.
     let name_width = tile_width - TILE_PADDING * 2.0 - 2.0;
-    let tile_height = move |lines: usize| icon + TILE_PADDING * 2.0 + TILE_ROW_GAP + NAME_LINE_HEIGHT * lines as f32;
+    let tile_height = move |lines: usize| {
+        icon + TILE_PADDING * 2.0 + TILE_ROW_GAP + NAME_LINE_HEIGHT * lines as f32
+    };
     let usable = (page.grid_width - GRID_PADDING_X * 2.0).max(tile_width);
     let columns = (((usable + TILE_GAP) / (tile_width + TILE_GAP)).floor() as usize).max(1);
     page.grid_columns = columns;
@@ -130,7 +132,6 @@ pub fn render(
             )
             .track_scroll(&page.grid_scroll_handle),
         )
-
         .child(
             // Measures the width rows are laid out against. A change is only
             // known after layout, so it takes effect on the next frame.
@@ -264,7 +265,13 @@ fn render_grid_item(
     cx: &mut Context<ExplorerPane>,
 ) -> AnyElement {
     let name_width = tile.width - 2.0 * TILE_PADDING - 2.0;
-    let name_lines = wrap_name(&mut page.name_layouts, &item.name, name_width, page.name_lines, window);
+    let name_lines = wrap_name(
+        &mut page.name_layouts,
+        &item.name,
+        name_width,
+        page.name_lines,
+        window,
+    );
     let query = page.highlight_query();
 
     let rename_input = page
@@ -288,8 +295,9 @@ fn render_grid_item(
     // arrives or if it cannot be had, the type's icon: one image shared by
     // every file of the extension, where the thumbnail would have the Shell
     // read each file for an icon that is about to be covered.
-    let waveform_wanted =
-        page.audio_waveforms && item.kind == "file" && crate::explorer::waveforms::is_audio(&item.path);
+    let waveform_wanted = page.audio_waveforms
+        && item.kind == "file"
+        && crate::explorer::waveforms::is_audio(&item.path);
     let waveform = waveform_wanted
         .then(|| page.waveforms.get(&item.path, item.size, item.modified, cx))
         .flatten();
@@ -438,10 +446,14 @@ fn render_grid_item(
         })
         // Without a waveform to colour, a line along the tile's foot follows
         // the sound playing under the mouse.
-        .when(!waveform_shown, |this| this.children(crate::explorer::hover_audio::progress_strip(&item.path)))
+        .when(!waveform_shown, |this| {
+            this.children(crate::explorer::hover_audio::progress_strip(&item.path))
+        })
         .children(page.reveal_glow(&item.path))
         .map(|this| page.track_hit(this, ix))
-        .when(is_dir, |this| crate::explorer::drag::drop_into(this, &item.path, cx))
+        .when(is_dir, |this| {
+            crate::explorer::drag::drop_into(this, &item.path, cx)
+        })
         .into_any_element()
 }
 
@@ -503,9 +515,10 @@ fn name_layout(
     let style = window.text_style();
     // `text_xs`, which the label is drawn in.
     let font_size = rems(0.75).to_pixels(window.rem_size());
-    let layout = window
-        .text_system()
-        .layout_line(name, font_size, &[style.to_run(name.len())], None);
+    let layout =
+        window
+            .text_system()
+            .layout_line(name, font_size, &[style.to_run(name.len())], None);
     layouts.insert(name.to_string(), layout.clone());
     layout
 }
@@ -542,7 +555,11 @@ mod tests {
 
     #[test]
     fn a_cap_keeps_the_first_lines_and_ends_with_an_ellipsis() {
-        let mut lines = vec!["um nome ".to_string(), "bem longo".to_string(), "demais".to_string()];
+        let mut lines = vec![
+            "um nome ".to_string(),
+            "bem longo".to_string(),
+            "demais".to_string(),
+        ];
         cap_lines(&mut lines, 2);
         assert_eq!(lines, ["um nome ", "bem lon…"]);
         assert_eq!(limit_lines(3, 2), 2);

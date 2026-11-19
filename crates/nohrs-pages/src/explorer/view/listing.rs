@@ -6,14 +6,14 @@ use gpui::*;
 pub mod compact;
 /// Grid-mode rendering of the listing.
 pub mod grid;
+/// This PC overview and recent folders.
+mod home;
 /// List-mode rendering of the listing.
 pub mod list;
 /// Rendering of a single listing row.
 pub mod row;
 /// The full-text search bar shown above the listing.
 pub mod search_bar;
-/// This PC overview and recent folders.
-mod home;
 
 /// Renders the file listing in the active view mode, with the search bar when
 /// search is visible.
@@ -39,13 +39,22 @@ pub fn render(
     let file_list = with_wheel_zoom(page, file_list, listing_scrollbar(page), cx);
 
     // 首页以卡片呈现磁盘；筛选和搜索时仍使用完整列表。
-    let overview = page.cwd.eq_ignore_ascii_case(crate::explorer::places::THIS_PC)
-        && !page.is_filtering() && page.search_results.is_none() && !page.search_visible
+    let overview = page
+        .cwd
+        .eq_ignore_ascii_case(crate::explorer::places::THIS_PC)
+        && !page.is_filtering()
+        && page.search_results.is_none()
+        && !page.search_visible
         && !page.entries.is_empty()
-        && page.entries.iter().all(|entry| crate::explorer::drives::drive_root(&entry.path).is_some());
+        && page
+            .entries
+            .iter()
+            .all(|entry| crate::explorer::drives::drive_root(&entry.path).is_some());
     let file_list = if overview {
         home::render(page, cx).unwrap_or(file_list)
-    } else { file_list };
+    } else {
+        file_list
+    };
 
     if page.search_visible {
         div()
@@ -67,7 +76,11 @@ pub(crate) fn usage_bar(space: Option<crate::explorer::drives::Space>, height: f
     let (fraction, color) = match space {
         Some(space) => (
             space.used_fraction().clamp(0.0, 1.0),
-            if space.nearly_full() { theme::danger() } else { theme::accent() },
+            if space.nearly_full() {
+                theme::danger()
+            } else {
+                theme::accent()
+            },
         ),
         None => (0.0, theme::accent()),
     };
@@ -285,7 +298,11 @@ pub(crate) fn extent(sizes: &[Size<Pixels>], horizontal: bool) -> Size<Pixels> {
         .iter()
         .map(|item| f32::from(if horizontal { item.height } else { item.width }))
         .fold(0.0, f32::max);
-    if horizontal { size(px(along), px(across)) } else { size(px(across), px(along)) }
+    if horizontal {
+        size(px(along), px(across))
+    } else {
+        size(px(across), px(along))
+    }
 }
 
 // The listing's scrollbar, always shown, as Explorer's. Drawn over the

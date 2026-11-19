@@ -2,7 +2,7 @@
 //! computer's fixed drives as you type, the way voidtools' Everything does.
 //!
 //! Everything reads the NTFS master file table, which needs administrator
-//! rights; Prime Files installs per user, so it walks the drives instead and
+//! rights; LumaFiles installs per user, so it walks the drives instead and
 //! keeps what it found as a flat table of names in memory. A search is then a
 //! scan of that table on every core — a few tens of milliseconds for a
 //! million names — and never touches the disk except to fill in size and date
@@ -2334,7 +2334,7 @@ pub(crate) mod remote {
                 tracing::warn!("could not register the Everything IPC window: {error}");
                 return None;
             }
-            let title = wide("Prime Files");
+            let title = wide("LumaFiles");
             // SAFETY: the class is registered above, the instance is this
             // process's, and the window is never shown.
             match unsafe {

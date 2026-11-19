@@ -24,6 +24,95 @@ impl Preview {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ListApply {
+    Name,
+    Extension,
+    #[default]
+    FullName,
+}
+
+pub(super) fn preview_list(
+    entries: &[FileEntryDto],
+    lines: &[String],
+    apply: ListApply,
+    excluded: &HashSet<String>,
+) -> Vec<Preview> {
+    let count_matches = entries.len() == lines.len();
+    let mut rows = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let selected = !excluded.contains(&entry.path);
+        if !selected {
+            rows.push(Preview {
+                entry: entry.clone(),
+                name: entry.name.clone(),
+                error: None,
+                selected: false,
+            });
+            continue;
+        }
+        let target = lines.get(index).map(|line| match apply {
+            ListApply::Name if entry.kind == "dir" => line.clone(),
+            ListApply::Name => match Path::new(&entry.name)
+                .extension()
+                .and_then(|value| value.to_str())
+            {
+                Some(extension) => format!("{line}.{extension}"),
+                None => line.clone(),
+            },
+            ListApply::Extension if entry.kind == "dir" => entry.name.clone(),
+            ListApply::Extension => {
+                let stem = Path::new(&entry.name)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&entry.name);
+                let extension = line.trim_start_matches('.');
+                if extension.is_empty() {
+                    stem.to_owned()
+                } else {
+                    format!("{stem}.{extension}")
+                }
+            }
+            ListApply::FullName => line.clone(),
+        });
+        let (name, error) = match target {
+            Some(name) if count_matches => match validate_name(&name) {
+                Ok(()) => (name, None),
+                Err(error) => (String::new(), Some(error)),
+            },
+            Some(_) => (
+                String::new(),
+                Some(format!(
+                    "列表有 {} 行，当前有 {} 个项目，数量必须一致",
+                    lines.len(),
+                    entries.len()
+                )),
+            ),
+            None => (
+                String::new(),
+                Some(format!("列表缺少第 {} 行目标名称", index + 1)),
+            ),
+        };
+        rows.push(Preview {
+            entry: entry.clone(),
+            name,
+            error,
+            selected,
+        });
+    }
+    let changes: Vec<_> = rows
+        .iter()
+        .filter(|row| row.error.is_none() && row.changed())
+        .map(Preview::change)
+        .collect();
+    let errors = check(&changes);
+    for row in &mut rows {
+        if row.error.is_none() && row.changed() {
+            row.error = errors.get(&key(Path::new(&row.entry.path))).cloned();
+        }
+    }
+    rows
+}
 #[cfg(test)]
 pub(super) fn preview(entries: &[FileEntryDto], rules: &Rules) -> Vec<Preview> {
     preview_selected(entries, rules, &HashSet::new(), false)

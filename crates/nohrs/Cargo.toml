@@ -13,7 +13,7 @@ homepage.workspace     = true
 authors.workspace      = true
 
 [[bin]]
-name = "nohrs"
+name = "LumaFiles"
 path = "src/main.rs"
 
 [dependencies]

@@ -156,7 +156,7 @@ impl RootView {
             {
                 announced = true;
                 let message = if updater.read(cx).automatic {
-                    tf!("A versão {version} foi baixada e será instalada quando você fechar o Prime Files.", version = version)
+                    tf!("A versão {version} foi baixada e será instalada quando você fechar o LumaFiles.", version = version)
                 } else {
                     tf!("A versão {version} foi baixada. Instale em Configurações › Sobre.", version = version)
                 };

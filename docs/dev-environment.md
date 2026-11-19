@@ -60,7 +60,7 @@ sudo pacman -S --needed base-devel pkgconf \
 ### 起動
 
 ```bash
-cargo run --features gui --bin nohrs
+cargo run --features gui --bin LumaFiles
 ```
 
 スクリーンショット / ヘッドレス確認は [`docs/agent-ui-verification.md`](./agent-ui-verification.md) 参照。

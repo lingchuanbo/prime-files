@@ -125,8 +125,7 @@ fn opens_with_us(preferences: &Value) -> bool {
         .is_some_and(is_ours)
 }
 
-// The installed program is PrimeFiles.exe; a build run from the source tree
-// is nohrs.exe. Either counts, so a leftover from development is cleaned up.
+// Keep recognizing older installed names while using LumaFiles.exe going forward.
 fn is_ours(opener: &str) -> bool {
     let name = Path::new(opener)
         .file_name()
@@ -135,7 +134,10 @@ fn is_ours(opener: &str) -> bool {
     let running = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.file_name().map(|name| name.to_string_lossy().to_ascii_lowercase()));
-    name == "primefiles.exe" || name == "nohrs.exe" || running.is_some_and(|running| running == name)
+    name == "lumafiles.exe"
+        || name == "primefiles.exe"
+        || name == "nohrs.exe"
+        || running.is_some_and(|running| running == name)
 }
 
 fn set_opener(preferences: &mut Value, exe: &Path) -> io::Result<bool> {
@@ -326,6 +328,7 @@ mod tests {
     fn a_development_build_counts_as_ours() {
         assert!(is_ours(r"C:\src\nohrs\target\release\nohrs.exe"));
         assert!(is_ours(r"C:\Programs\Prime Files\PrimeFiles.exe"));
+        assert!(is_ours(r"C:\Programs\LumaFiles\LumaFiles.exe"));
         assert!(!is_ours(r"C:\Windows\explorer.exe"));
     }
 }

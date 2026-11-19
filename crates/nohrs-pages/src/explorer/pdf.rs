@@ -111,7 +111,9 @@ mod platform {
         // exactly that and took the app down).
         let joined = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
         if let Err(error) = pages(path, sender) {
-            sender.send_blocking(Update::Failed(error.message().to_string())).ok();
+            sender
+                .send_blocking(Update::Failed(error.message().to_string()))
+                .ok();
         }
         if joined {
             unsafe { CoUninitialize() };
@@ -130,7 +132,8 @@ mod platform {
             let options = PdfPageRenderOptions::new()?;
             options.SetDestinationWidth(PAGE_WIDTH)?;
             let stream = InMemoryRandomAccessStream::new()?;
-            page.RenderWithOptionsToStreamAsync(&stream, &options)?.get()?;
+            page.RenderWithOptionsToStreamAsync(&stream, &options)?
+                .get()?;
             let length = u32::try_from(stream.Size()?).unwrap_or(u32::MAX);
             let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0)?)?;
             reader.LoadAsync(length)?.get()?;
@@ -154,7 +157,9 @@ mod platform {
 
     pub fn render(_path: &str, sender: &async_channel::Sender<Update>) {
         sender
-            .send_blocking(Update::Failed("PDF preview is only available on Windows".into()))
+            .send_blocking(Update::Failed(
+                "PDF preview is only available on Windows".into(),
+            ))
             .ok();
     }
 }

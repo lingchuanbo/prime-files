@@ -1,9 +1,10 @@
-use super::{history, rules::CaseMode, window::RenameWindow};
+use super::{history, plan, rules::CaseMode, window::RenameWindow};
 use gpui::{prelude::*, *};
 use gpui_component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
+    input::Input,
 };
 use nohrs_ui::theme::theme;
 
@@ -29,10 +30,14 @@ pub(super) fn render(
                 .flex_col()
                 .gap_5()
                 .child(super::scope_controls::render(view, window, cx))
-                .child(naming(view, window, cx))
-                .child(replacement(view, window, cx))
-                .child(counter(view, window, cx))
-                .child(case_options(view, cx)),
+                .when(view.list_mode, |_| list_editor(view, cx))
+                .when(!view.list_mode, |panel| {
+                    panel
+                        .child(naming(view, window, cx))
+                        .child(replacement(view, window, cx))
+                        .child(counter(view, window, cx))
+                        .child(case_options(view, cx))
+                }),
         )
 }
 
@@ -52,6 +57,73 @@ pub(super) fn section(title: &'static str, description: &'static str) -> Div {
     )
 }
 
+fn list_editor(view: &RenameWindow, cx: &mut Context<RenameWindow>) -> Div {
+    section("列表重命名", "每行对应一个文件，顺序与右侧预览一致。")
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    Button::new("rename-list-fill")
+                        .small()
+                        .label("填充列表")
+                        .tooltip("按当前文件顺序填入原名称")
+                        .disabled(view.busy || view.entries.is_empty())
+                        .on_click(cx.listener(|view, _, window, cx| view.fill_list(window, cx))),
+                )
+                .child(
+                    Button::new("rename-list-load")
+                        .small()
+                        .label("加载列表")
+                        .tooltip("从应用数据目录加载 batch-rename-list.txt")
+                        .disabled(view.busy)
+                        .on_click(cx.listener(|view, _, window, cx| view.load_list(window, cx))),
+                )
+                .child(
+                    Button::new("rename-list-save")
+                        .small()
+                        .label("保存列表")
+                        .tooltip("保存到应用数据目录的 batch-rename-list.txt")
+                        .disabled(view.busy)
+                        .on_click(cx.listener(|view, _, _, cx| view.save_list(cx))),
+                )
+                .child(
+                    Button::new("rename-list-clear")
+                        .small()
+                        .label("清空")
+                        .disabled(view.busy)
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.list_input
+                                .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+                            view.schedule_preview(cx);
+                        })),
+                ),
+        )
+        .child(
+            div().flex().gap_1().children(
+                [
+                    (plan::ListApply::Name, "仅文件名"),
+                    (plan::ListApply::Extension, "扩展名"),
+                    (plan::ListApply::FullName, "文件名与扩展名"),
+                ]
+                .into_iter()
+                .map(|(apply, label)| {
+                    Button::new(label)
+                        .small()
+                        .flex_1()
+                        .label(label)
+                        .when(view.list_apply == apply, |button| button.primary())
+                        .disabled(view.busy)
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.list_apply = apply;
+                            view.schedule_preview(cx);
+                        }))
+                }),
+            ),
+        )
+        .child(Input::new(&view.list_input).h(px(280.0)))
+        .child(hint("列表行数必须与文件数一致；扩展名模式不需要输入句点。"))
+}
 fn hint(text: &'static str) -> Div {
     div()
         .text_xs()

@@ -1,5 +1,5 @@
 //! The local channel other programs reach a running Nohrs through: a second
-//! `nohrs.exe <path>` handing its path over instead of opening another window,
+//! `LumaFiles.exe <path>` handing its path over instead of opening another window,
 //! and the Listary plugin (`integrations/listary`) asking which folder is open
 //! and telling Nohrs where to go.
 //!
@@ -126,6 +126,17 @@ pub fn request_open(path: &Path) -> bool {
 /// none.
 pub fn request_show() -> bool {
     send(json!({ "cmd": "show" })).is_some_and(|reply| reply["ok"] == true)
+}
+
+/// Returns the active explorer tab's folder from the running instance.
+pub fn current_path() -> Result<String, String> {
+    let reply = send(json!({ "cmd": "current" }))
+        .ok_or_else(|| "no running LumaFiles window responded".to_string())?;
+    if reply["ok"] != true {
+        return Err(reply["error"].as_str().unwrap_or("no active explorer tab").to_string());
+    }
+    reply["folder"].as_str().map(str::to_owned)
+        .ok_or_else(|| "invalid response from LumaFiles".to_string())
 }
 
 /// Whether a Prime Files window answers on the channel, whatever it says
@@ -392,6 +403,8 @@ mod tests {
             serde_json::from_str(r#"{"token":"t","cmd":"navigate","tab":7,"path":"D:\\"}"#)
                 .unwrap();
         assert!(matches!(envelope.request, Request::Navigate { tab: 7, .. }));
+        let envelope: Envelope = serde_json::from_str(r#"{"token":"t","cmd":"current"}"#).unwrap();
+        assert!(matches!(envelope.request, Request::Current));
         assert!(serde_json::from_str::<Envelope>(r#"{"token":"t","cmd":"format_c"}"#).is_err());
     }
 

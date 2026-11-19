@@ -81,7 +81,10 @@ pub fn open_in_explorer(parsing_name: &str) {
     } else {
         parsing_name.to_string()
     };
-    if let Err(error) = std::process::Command::new("explorer.exe").arg(target).spawn() {
+    if let Err(error) = std::process::Command::new("explorer.exe")
+        .arg(target)
+        .spawn()
+    {
         tracing::warn!("could not open {parsing_name} in Explorer: {error}");
     }
 }
@@ -171,7 +174,9 @@ impl ExplorerPane {
     /// Reads the places when they were never read or are stale.
     pub(crate) fn ensure_places(&mut self, cx: &mut Context<Self>) {
         let state = &mut self.sidebar;
-        let fresh = state.loaded_at.is_some_and(|at| at.elapsed() < REFRESH_AFTER);
+        let fresh = state
+            .loaded_at
+            .is_some_and(|at| at.elapsed() < REFRESH_AFTER);
         if state.loading || fresh {
             return;
         }
@@ -226,7 +231,12 @@ impl ExplorerPane {
 
     /// Goes to a place: its folder here, This PC here as a list of its
     /// drives and folders, or Explorer for another virtual one.
-    pub(crate) fn open_place(&mut self, place: &Place, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_place(
+        &mut self,
+        place: &Place,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match &place.path {
             Some(path) => self.change_dir(path.clone(), window, cx),
             None if place.parsing_name.eq_ignore_ascii_case(THIS_PC) => {
@@ -235,7 +245,10 @@ impl ExplorerPane {
             // Network opens here too: its computers, mapped drives and the
             // places added by hand (`network.rs`). Until 05/11/2026 it opened
             // Explorer, and shares were out of reach.
-            None if place.parsing_name.eq_ignore_ascii_case(super::network::NETWORK) => {
+            None if place
+                .parsing_name
+                .eq_ignore_ascii_case(super::network::NETWORK) =>
+            {
                 self.change_dir(super::network::NETWORK.to_string(), window, cx)
             }
             // A server or a share found on the network.
@@ -259,7 +272,9 @@ impl ExplorerPane {
         let input = cx.new(|cx| {
             let state = InputState::new(window, cx);
             match purpose {
-                SidebarInputPurpose::NetworkPlace => state.placeholder(nohrs_core::t!("\\\\servidor\\pasta ou smb://servidor/pasta")),
+                SidebarInputPurpose::NetworkPlace => state.placeholder(nohrs_core::t!(
+                    "\\\\servidor\\pasta ou smb://servidor/pasta"
+                )),
                 SidebarInputPurpose::RenameTag(_) | SidebarInputPurpose::RenameFavorite(_) => state,
             }
         });
@@ -269,12 +284,20 @@ impl ExplorerPane {
             state.unmark_text(window, cx);
             state.focus(window, cx);
         });
-        let subscription = cx.subscribe_in(&input, window, |this, _input, event: &InputEvent, window, cx| match event {
-            InputEvent::PressEnter { .. } => this.commit_sidebar_input(window, cx),
-            InputEvent::Blur => this.cancel_sidebar_input(window, cx),
-            _ => {}
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, _input, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_sidebar_input(window, cx),
+                InputEvent::Blur => this.cancel_sidebar_input(window, cx),
+                _ => {}
+            },
+        );
+        self.sidebar.input = Some(SidebarInput {
+            purpose,
+            input,
+            _subscription: subscription,
         });
-        self.sidebar.input = Some(SidebarInput { purpose, input, _subscription: subscription });
         cx.notify();
     }
 
@@ -304,13 +327,18 @@ impl ExplorerPane {
                     None => {
                         self.set_status(
                             super::types::StatusLevel::Error,
-                            nohrs_core::tf!("Não é um endereço de rede: {address}", address = text.trim()),
+                            nohrs_core::tf!(
+                                "Não é um endereço de rede: {address}",
+                                address = text.trim()
+                            ),
                         );
                     }
                 }
             }
             SidebarInputPurpose::RenameTag(id) => super::tags::Tags::rename(id, text, cx),
-            SidebarInputPurpose::RenameFavorite(id) => super::favorites::Favorites::rename(id, text, cx),
+            SidebarInputPurpose::RenameFavorite(id) => {
+                super::favorites::Favorites::rename(id, text, cx)
+            }
         }
         cx.notify();
     }
@@ -327,20 +355,37 @@ impl ExplorerPane {
                 .sidebar
                 .places
                 .as_ref()
-                .and_then(|places| places.other.iter().find(|place| place.parsing_name.eq_ignore_ascii_case(super::network::NETWORK)))
+                .and_then(|places| {
+                    places.other.iter().find(|place| {
+                        place
+                            .parsing_name
+                            .eq_ignore_ascii_case(super::network::NETWORK)
+                    })
+                })
                 .map(|place| place.name.clone());
-            return Some(shell_name.unwrap_or_else(|| nohrs_core::i18n::tr(super::network::NETWORK_NAME).to_string()));
+            return Some(shell_name.unwrap_or_else(|| {
+                nohrs_core::i18n::tr(super::network::NETWORK_NAME).to_string()
+            }));
         }
         if super::network::is_server(&self.cwd) {
             return super::network::server_of(&self.cwd).map(str::to_string);
         }
         if let Some(id) = super::tags::tag_of_location(&self.cwd) {
-            return Some(super::tags::Tags::get(id, cx).map(|tag| tag.name).unwrap_or_else(|| self.cwd.clone()));
+            return Some(
+                super::tags::Tags::get(id, cx)
+                    .map(|tag| tag.name)
+                    .unwrap_or_else(|| self.cwd.clone()),
+            );
         }
         if !self.cwd.eq_ignore_ascii_case(THIS_PC) {
             return None;
         }
-        let shell_name = self.sidebar.places.as_ref().and_then(|places| places.this_pc.as_ref()).map(|place| place.name.clone());
+        let shell_name = self
+            .sidebar
+            .places
+            .as_ref()
+            .and_then(|places| places.this_pc.as_ref())
+            .map(|place| place.name.clone());
         Some(shell_name.unwrap_or_else(|| nohrs_core::i18n::tr(THIS_PC_NAME).to_string()))
     }
 }
@@ -379,7 +424,12 @@ mod platform {
         let drives = children(THIS_PC)
             .into_iter()
             .filter_map(|item| place(&item))
-            .filter(|place| place.path.as_deref().is_some_and(|path| path.ends_with(":\\")))
+            .filter(|place| {
+                place
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with(":\\"))
+            })
             .collect();
         let mut other = Vec::new();
         if let Some(network) = item(NETWORK).and_then(|item| place(&item)) {
@@ -401,14 +451,20 @@ mod platform {
         if let Err(error) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
             tracing::debug!("CoInitializeEx: {error}");
         }
-        children(THIS_PC).into_iter().filter_map(|item| place(&item)).collect()
+        children(THIS_PC)
+            .into_iter()
+            .filter_map(|item| place(&item))
+            .collect()
     }
 
     pub fn network_children() -> Vec<Place> {
         if let Err(error) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
             tracing::debug!("CoInitializeEx: {error}");
         }
-        children(NETWORK).into_iter().filter_map(|item| place(&item)).collect()
+        children(NETWORK)
+            .into_iter()
+            .filter_map(|item| place(&item))
+            .collect()
     }
 
     fn item(parsing_name: &str) -> Option<IShellItem> {
@@ -500,7 +556,12 @@ mod tests {
     #[ignore]
     fn print_places() {
         let places = super::load();
-        for place in places.quick_access.iter().chain(&places.drives).chain(&places.other) {
+        for place in places
+            .quick_access
+            .iter()
+            .chain(&places.drives)
+            .chain(&places.other)
+        {
             println!("{place:?}");
         }
     }

@@ -14,7 +14,7 @@ pub(crate) mod explorer_link;
 pub mod git;
 /// Picking files for a browser's "Open" dialog from Nohrs.
 pub mod file_dialog;
-/// The local channel other programs (a second `nohrs.exe`, the Listary
+/// The local channel other programs (a second `LumaFiles.exe`, the Listary
 /// plugin) reach the running instance through.
 pub mod ipc;
 pub mod listary;

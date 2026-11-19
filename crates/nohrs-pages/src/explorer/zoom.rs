@@ -2,8 +2,8 @@
 //! through ever larger icon tiles, the way File Pilot and Explorer's
 //! Ctrl+wheel do, instead of two fixed modes.
 
-use nohrs_core::k;
 use super::types::ViewMode;
+use nohrs_core::k;
 
 /// Zoom at or below which the listing is the list table rather than tiles.
 pub const LIST_MAX: f32 = 0.1;

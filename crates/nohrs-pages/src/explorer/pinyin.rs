@@ -10,8 +10,8 @@
 //! character in a lock-free table: a folder is filtered on every keystroke,
 //! and each Han character should cost the comparison once.
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use pinyin::ToPinyin;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// First and last Han character the table covers: the CJK Unified Ideographs
 /// block, which is where a file name's characters come from.
@@ -21,7 +21,8 @@ const LAST: u32 = 0x9FFF;
 /// The initial of each Han character from `FIRST` to `LAST`, as a letter
 /// number plus one; 0 means "not worked out yet". Atomic, so the filter and
 /// the subfolder search can fill it from different threads without a lock.
-static INITIALS: [AtomicU8; (LAST - FIRST + 1) as usize] = [const { AtomicU8::new(0) }; (LAST - FIRST + 1) as usize];
+static INITIALS: [AtomicU8; (LAST - FIRST + 1) as usize] =
+    [const { AtomicU8::new(0) }; (LAST - FIRST + 1) as usize];
 
 /// Whether `ch` is a Han character the table has an initial for.
 pub(crate) fn is_han(ch: char) -> bool {

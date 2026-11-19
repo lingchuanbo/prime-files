@@ -11,8 +11,8 @@
 //! scrolled out of view during the drag still count.
 
 use gpui::{
-    Bounds, Context, IntoElement, Modifiers, ParentElement, Pixels, Point, Styled, Window, canvas, div,
-    point, px, rgba,
+    Bounds, Context, IntoElement, Modifiers, ParentElement, Pixels, Point, Styled, Window, canvas,
+    div, point, px, rgba,
 };
 use nohrs_ui::theme::theme;
 use std::cell::RefCell;
@@ -178,7 +178,11 @@ impl ExplorerPane {
         } else {
             Mode::Replace
         };
-        let base = if mode == Mode::Replace { HashSet::new() } else { self.selection.clone() };
+        let base = if mode == Mode::Replace {
+            HashSet::new()
+        } else {
+            self.selection.clone()
+        };
         // A click on empty space clears the selection at once, as in
         // Explorer; on a row's blank part it stays that row's click until the
         // pointer moves.
@@ -206,7 +210,12 @@ impl ExplorerPane {
 
     /// Follows the pointer. `pressed` is whether the left button is still
     /// down: a release that never reached us ends the rectangle here.
-    pub(crate) fn marquee_moved(&mut self, position: Point<Pixels>, pressed: bool, cx: &mut Context<Self>) {
+    pub(crate) fn marquee_moved(
+        &mut self,
+        position: Point<Pixels>,
+        pressed: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(marquee) = self.marquee.as_mut() else {
             return;
         };
@@ -217,7 +226,9 @@ impl ExplorerPane {
         marquee.pointer = position;
         if !marquee.moved {
             let moved = position - marquee.press;
-            if f32::from(moved.x).abs() < START_THRESHOLD && f32::from(moved.y).abs() < START_THRESHOLD {
+            if f32::from(moved.x).abs() < START_THRESHOLD
+                && f32::from(moved.y).abs() < START_THRESHOLD
+            {
                 return;
             }
             marquee.moved = true;
@@ -239,8 +250,14 @@ impl ExplorerPane {
     fn marquee_rect(&self, marquee: &Marquee) -> Bounds<Pixels> {
         let current = marquee.pointer - self.listing_scroll().offset();
         Bounds::from_corners(
-            point(marquee.origin.x.min(current.x), marquee.origin.y.min(current.y)),
-            point(marquee.origin.x.max(current.x), marquee.origin.y.max(current.y)),
+            point(
+                marquee.origin.x.min(current.x),
+                marquee.origin.y.min(current.y),
+            ),
+            point(
+                marquee.origin.x.max(current.x),
+                marquee.origin.y.max(current.y),
+            ),
         )
     }
 
@@ -262,7 +279,11 @@ impl ExplorerPane {
         hits.sort_unstable();
         let hit_paths: Vec<String> = hits
             .iter()
-            .filter_map(|&ix| self.filtered_entries.get(ix).map(|entry| entry.path.clone()))
+            .filter_map(|&ix| {
+                self.filtered_entries
+                    .get(ix)
+                    .map(|entry| entry.path.clone())
+            })
             .collect();
         let mut selection = marquee.base.clone();
         for path in &hit_paths {

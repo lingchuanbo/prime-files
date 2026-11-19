@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{AppContext, ClipboardItem, Entity, TestAppContext, WindowHandle, point, px};
-use gpui_component::{Root, WindowExt};
 use gpui_component::input::InputState;
 use gpui_component::resizable::ResizableState;
+use gpui_component::{Root, WindowExt};
 use nohrs_core::config;
 use nohrs_services::fs::listing::FileEntryDto;
 use nohrs_services::fs::ops::ConflictResolution;
@@ -173,7 +173,11 @@ async fn grouping_counts_headers_when_scrolling_to_an_entry(cx: &mut TestAppCont
                 file("a.png", "file", 1),
             ];
             page.set_group_by(super::grouping::GroupBy::Kind);
-            let names: Vec<&str> = page.filtered_entries.iter().map(|e| e.name.as_str()).collect();
+            let names: Vec<&str> = page
+                .filtered_entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect();
             assert_eq!(names, ["docs", "a.png", "b.png"]);
             assert_eq!(page.groups().len(), 2);
             // List: column header, "Pastas", docs, "Imagens", a.png, b.png.
@@ -329,7 +333,10 @@ async fn the_preview_follows_the_arrow_keys_once_they_stop(cx: &mut TestAppConte
     cx.run_until_parked();
     window
         .update(cx, |pane, window, cx| {
-            assert_eq!(pane.preview_path, None, "nothing is read while the keys are moving");
+            assert_eq!(
+                pane.preview_path, None,
+                "nothing is read while the keys are moving"
+            );
             pane.move_active_following(1, false, window, cx);
         })
         .unwrap();
@@ -337,10 +344,14 @@ async fn the_preview_follows_the_arrow_keys_once_they_stop(cx: &mut TestAppConte
     cx.run_until_parked();
     window
         .read_with(cx, |pane, _cx| {
-            assert_eq!(pane.preview_path, None, "each key press starts the wait over");
+            assert_eq!(
+                pane.preview_path, None,
+                "each key press starts the wait over"
+            );
         })
         .unwrap();
-    cx.executor().advance_clock(super::preview::PREVIEW_FOLLOW_DELAY);
+    cx.executor()
+        .advance_clock(super::preview::PREVIEW_FOLLOW_DELAY);
     cx.run_until_parked();
     window
         .read_with(cx, |pane, _cx| {
@@ -366,20 +377,33 @@ async fn a_press_on_a_preview_item_becomes_a_drag_past_the_threshold(cx: &mut Te
         .update(cx, |pane, _window, _cx| {
             let photo = r"C:\pasta\foto.jpg";
             pane.press_preview_item(photo, gpui::point(gpui::px(100.0), gpui::px(100.0)));
-            assert!(pane.preview_drag_ready(&moved(103.0, 102.0, true)).is_none(), "a tremble is not a drag");
+            assert!(
+                pane.preview_drag_ready(&moved(103.0, 102.0, true))
+                    .is_none(),
+                "a tremble is not a drag"
+            );
             assert!(pane.preview_drag.is_some(), "and the press is still there");
-            let dragged = pane.preview_drag_ready(&moved(100.0, 110.0, true)).expect("past the threshold");
+            let dragged = pane
+                .preview_drag_ready(&moved(100.0, 110.0, true))
+                .expect("past the threshold");
             assert_eq!(dragged.path(), std::path::Path::new(photo));
             assert!(pane.preview_drag.is_none(), "a drag starts once");
 
             // The button came up somewhere the release was not seen.
             pane.press_preview_item(photo, gpui::point(gpui::px(100.0), gpui::px(100.0)));
-            assert!(pane.preview_drag_ready(&moved(130.0, 100.0, false)).is_none());
+            assert!(
+                pane.preview_drag_ready(&moved(130.0, 100.0, false))
+                    .is_none()
+            );
             assert!(pane.preview_drag.is_none());
 
             pane.press_preview_item(photo, gpui::point(gpui::px(100.0), gpui::px(100.0)));
             pane.release_preview_item();
-            assert!(pane.preview_drag_ready(&moved(130.0, 100.0, true)).is_none(), "released: a click");
+            assert!(
+                pane.preview_drag_ready(&moved(130.0, 100.0, true))
+                    .is_none(),
+                "released: a click"
+            );
         })
         .unwrap();
 }
@@ -396,7 +420,9 @@ async fn the_preview_listing_is_read_again_after_a_drag(cx: &mut TestAppContext)
     let folder_path = folder.to_string_lossy().into_owned();
     let window = new_explorer(cx);
     window
-        .update(cx, |pane, window, cx| pane.open_preview(folder_path.clone(), window, cx))
+        .update(cx, |pane, window, cx| {
+            pane.open_preview(folder_path.clone(), window, cx)
+        })
         .unwrap();
     cx.run_until_parked();
     let names = |pane: &ExplorerPane| -> Vec<String> {
@@ -418,7 +444,11 @@ async fn the_preview_listing_is_read_again_after_a_drag(cx: &mut TestAppContext)
     window
         .read_with(cx, |pane, _cx| {
             assert_eq!(names(pane), ["b.jpg"]);
-            assert_eq!(pane.preview_path.as_deref(), Some(folder_path.as_str()), "the same folder, still previewed");
+            assert_eq!(
+                pane.preview_path.as_deref(),
+                Some(folder_path.as_str()),
+                "the same folder, still previewed"
+            );
         })
         .unwrap();
 }
@@ -434,9 +464,15 @@ async fn a_fitted_image_is_not_decoded_whole(cx: &mut TestAppContext) {
     window
         .update(cx, |page, window, cx| {
             let photo = r"C:\nao-existe\foto.jpg";
-            assert!(fitted_picture(page, photo, window, cx).is_some(), "fitted: the Shell's picture");
+            assert!(
+                fitted_picture(page, photo, window, cx).is_some(),
+                "fitted: the Shell's picture"
+            );
             page.preview_zoom = 2.0;
-            assert!(fitted_picture(page, photo, window, cx).is_none(), "zoomed in: the whole file");
+            assert!(
+                fitted_picture(page, photo, window, cx).is_none(),
+                "zoomed in: the whole file"
+            );
             page.preview_zoom = 1.0;
             assert!(
                 fitted_picture(page, r"C:\nao-existe\anima.gif", window, cx).is_none(),
@@ -470,7 +506,8 @@ async fn a_hidden_preview_does_not_follow_the_arrow_keys(cx: &mut TestAppContext
             pane.move_active_following(1, false, window, cx);
         })
         .unwrap();
-    cx.executor().advance_clock(super::preview::PREVIEW_FOLLOW_DELAY * 2);
+    cx.executor()
+        .advance_clock(super::preview::PREVIEW_FOLLOW_DELAY * 2);
     cx.run_until_parked();
     window
         .read_with(cx, |pane, _cx| assert_eq!(pane.preview_path, None))
@@ -496,7 +533,8 @@ async fn a_click_during_the_wait_is_not_undone_by_it(cx: &mut TestAppContext) {
             pane.open_preview(a.clone(), window, cx);
         })
         .unwrap();
-    cx.executor().advance_clock(super::preview::PREVIEW_FOLLOW_DELAY * 2);
+    cx.executor()
+        .advance_clock(super::preview::PREVIEW_FOLLOW_DELAY * 2);
     cx.run_until_parked();
     window
         .read_with(cx, |pane, _cx| {
@@ -581,8 +619,8 @@ async fn activate_entry_routes_by_kind(cx: &mut TestAppContext) {
             page.activate_entry(doc.clone(), window, cx);
             // A file opens in its default program, as in Explorer; the preview
             // is for selection, not activation.
-            let opened = super::navigation::OPENED_WITH_DEFAULT_APP
-                .with(|opened| opened.borrow().clone());
+            let opened =
+                super::navigation::OPENED_WITH_DEFAULT_APP.with(|opened| opened.borrow().clone());
             assert_eq!(opened, vec![doc.path.clone()]);
             assert_eq!(page.cwd, folder.path, "activating a file does not navigate");
         })
@@ -624,8 +662,12 @@ async fn activating_an_archive_opens_it_as_a_folder(cx: &mut TestAppContext) {
                 super::archive::location(&archive, ""),
                 "an archive opens like a folder instead of in another program"
             );
-            let opened_for_program = super::navigation::OPENED_WITH_DEFAULT_APP.with(|opened| opened.borrow().clone());
-            assert!(opened_for_program.is_empty(), "nothing was handed to another program");
+            let opened_for_program =
+                super::navigation::OPENED_WITH_DEFAULT_APP.with(|opened| opened.borrow().clone());
+            assert!(
+                opened_for_program.is_empty(),
+                "nothing was handed to another program"
+            );
         })
         .unwrap();
     cx.run_until_parked();
@@ -633,7 +675,11 @@ async fn activating_an_archive_opens_it_as_a_folder(cx: &mut TestAppContext) {
     // The listing then shows what is inside it, folders first.
     window
         .read_with(cx, |page, _cx| {
-            let names: Vec<String> = page.filtered_entries.iter().map(|entry| entry.name.clone()).collect();
+            let names: Vec<String> = page
+                .filtered_entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect();
             assert_eq!(names, ["docs", "leiame.txt"], "{names:?}");
         })
         .unwrap();
@@ -834,7 +880,10 @@ async fn the_preview_key_hides_and_shows_the_preview(cx: &mut TestAppContext) {
     window
         .update(cx, |pane, window, cx| {
             assert!(pane.preview_visible, "open to begin with");
-            assert!(pane.run_shortcut(Action::TogglePreview, window, cx), "the pane handles the key itself");
+            assert!(
+                pane.run_shortcut(Action::TogglePreview, window, cx),
+                "the pane handles the key itself"
+            );
             assert!(!pane.preview_visible, "the key hides the preview");
             pane.run_shortcut(Action::TogglePreview, window, cx);
             assert!(pane.preview_visible, "and shows it again");
@@ -843,7 +892,8 @@ async fn the_preview_key_hides_and_shows_the_preview(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn close_pane_keeps_at_least_one(cx: &mut TestAppContext) {    let window = new_explorer_page(cx);
+async fn close_pane_keeps_at_least_one(cx: &mut TestAppContext) {
+    let window = new_explorer_page(cx);
     window
         .update(cx, |page, window, cx| {
             page.split(SplitDirection::Vertical, window, cx);
@@ -1028,7 +1078,10 @@ async fn a_window_opens_with_the_preview_it_was_left_with(cx: &mut TestAppContex
     let window = new_explorer_page(cx);
     window
         .update(cx, |page, _window, cx| {
-            assert!(page.pane(0).read(cx).preview_visible, "shown until a config says otherwise");
+            assert!(
+                page.pane(0).read(cx).preview_visible,
+                "shown until a config says otherwise"
+            );
             // What the last run wrote into `[layout]` when the preview was
             // closed before the window was.
             let mut layout = config::Layout::default();
@@ -1065,7 +1118,10 @@ async fn root_pane_shows_sidebar_but_split_pane_hides_it(cx: &mut TestAppContext
                 !page.pane(1).read(cx).preview_visible,
                 "and with its preview closed"
             );
-            assert!(page.pane(0).read(cx).preview_visible, "the original pane keeps its preview");
+            assert!(
+                page.pane(0).read(cx).preview_visible,
+                "the original pane keeps its preview"
+            );
             assert!(
                 page.pane(0).read(cx).sidebar_visible,
                 "splitting does not disturb the original pane's sidebar"
@@ -1157,7 +1213,10 @@ async fn new_tab_appends_and_activates(cx: &mut TestAppContext) {
             // A new tab defaults to home (§4).
             let home = super::page::home_dir();
             assert_eq!(page.tab_cwd(0, 1, cx).as_deref(), Some(home.as_str()));
-            assert!(std::path::Path::new(&home).is_dir(), "home is a real folder");
+            assert!(
+                std::path::Path::new(&home).is_dir(),
+                "home is a real folder"
+            );
 
             // Switching back to the first tab makes it active again.
             page.test_activate_tab(0, 0, window, cx);
@@ -1466,7 +1525,10 @@ async fn quick_search_finds_chinese_names_by_pinyin_initials(cx: &mut TestAppCon
                 file("readme.txt", "file", 3),
             ];
             let shown = |page: &ExplorerPane| -> Vec<String> {
-                page.filtered_entries.iter().map(|entry| entry.name.clone()).collect()
+                page.filtered_entries
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect()
             };
 
             page.search_query = "wjj".to_string();
@@ -1493,7 +1555,8 @@ async fn quick_search_finds_chinese_names_by_pinyin_initials(cx: &mut TestAppCon
 // Opens a pane rooted at a real directory and loads its listing, so the file
 // operation tests can act on actual files. Mirrors how `reload` is driven
 // elsewhere, but anchored at a temp dir instead of the cwd.
-fn open_pane_at(cx: &mut TestAppContext, root: &std::path::Path) -> WindowHandle<ExplorerPane> {    let window = new_explorer(cx);
+fn open_pane_at(cx: &mut TestAppContext, root: &std::path::Path) -> WindowHandle<ExplorerPane> {
+    let window = new_explorer(cx);
     window
         .update(cx, |pane, _window, cx| {
             pane.cwd = root.to_string_lossy().to_string();
@@ -2239,7 +2302,10 @@ async fn a_rename_runs_off_the_ui_thread(cx: &mut TestAppContext) {
             input.update(cx, |state, cx| state.set_value("b.txt", window, cx));
             pane.commit_rename(window, cx);
             // The test executor runs background work only when it is let to.
-            assert!(dir.path().join("a.txt").exists(), "nothing touched the disk on the UI thread");
+            assert!(
+                dir.path().join("a.txt").exists(),
+                "nothing touched the disk on the UI thread"
+            );
             assert!(pane.renaming.is_none(), "the field closes at once");
         })
         .unwrap();
@@ -2284,12 +2350,20 @@ async fn new_folder_dialog_opens_after_event_cycle(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-fn new_explorer_with_dialog_layer(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<ExplorerPane>) {
-    use gpui::{IntoElement, ParentElement, Render, AppContext, div};
+fn new_explorer_with_dialog_layer(
+    cx: &mut TestAppContext,
+) -> (WindowHandle<Root>, Entity<ExplorerPane>) {
+    use gpui::{AppContext, IntoElement, ParentElement, Render, div};
     struct DialogHost(Entity<ExplorerPane>);
     impl Render for DialogHost {
-        fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-            div().child(self.0.clone()).children(Root::render_dialog_layer(window, cx))
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div()
+                .child(self.0.clone())
+                .children(Root::render_dialog_layer(window, cx))
         }
     }
     cx.update(gpui_component::init);
@@ -2297,9 +2371,15 @@ fn new_explorer_with_dialog_layer(cx: &mut TestAppContext) -> (WindowHandle<Root
     let window = cx.add_window(|window, cx| {
         let resizable = cx.new(|_| ResizableState::default());
         let search_input = cx.new(|cx| InputState::new(window, cx));
-        let entity = cx.new(|cx| ExplorerPane::new(
-            resizable, search_input, None, TrashLedger::KeptByOs, cx.focus_handle(),
-        ));
+        let entity = cx.new(|cx| {
+            ExplorerPane::new(
+                resizable,
+                search_input,
+                None,
+                TrashLedger::KeptByOs,
+                cx.focus_handle(),
+            )
+        });
         pane = Some(entity.clone());
         let host = cx.new(|_| DialogHost(entity));
         Root::new(host, window, cx)
@@ -2309,83 +2389,116 @@ fn new_explorer_with_dialog_layer(cx: &mut TestAppContext) -> (WindowHandle<Root
 
 #[gpui::test]
 async fn new_folder_history_keyboard_opens_selects_and_cancels(cx: &mut TestAppContext) {
-    use gpui::Focusable;
     use super::view::new_folder::FolderNameHistory;
+    use gpui::Focusable;
 
     let (window, pane) = new_explorer_with_dialog_layer(cx);
     cx.update_window(window.into(), |_, window, cx| {
         FolderNameHistory::remember("历史目录".into(), cx);
         pane.update(cx, |pane, cx| pane.open_new_folder_dialog(window, cx));
-    }).unwrap();
+    })
+    .unwrap();
     cx.run_until_parked();
-    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
     cx.run_until_parked();
     let input = pane.read_with(cx, |pane, _| {
         pane.new_folder_dialog.as_ref().unwrap().input.clone()
     });
     cx.simulate_keystrokes(window.into(), "down");
-    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
     cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| {
-        assert!(!input.focus_handle(cx).is_focused(window), "history receives keyboard focus");
-    }).unwrap();
+        assert!(
+            !input.focus_handle(cx).is_focused(window),
+            "history receives keyboard focus"
+        );
+    })
+    .unwrap();
     cx.simulate_keystrokes(window.into(), "down enter");
-    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
     cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| {
-        assert!(window.has_active_dialog(cx), "selecting history must not submit the dialog");
+        assert!(
+            window.has_active_dialog(cx),
+            "selecting history must not submit the dialog"
+        );
         assert_eq!("历史目录", input.read(cx).value().as_str());
         assert!(input.focus_handle(cx).is_focused(window));
-    }).unwrap();
+    })
+    .unwrap();
     cx.simulate_keystrokes(window.into(), "down");
-    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
     cx.run_until_parked();
     cx.simulate_keystrokes(window.into(), "escape");
-    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()).unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
     cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| {
-        assert!(window.has_active_dialog(cx), "Escape closes only the history menu");
+        assert!(
+            window.has_active_dialog(cx),
+            "Escape closes only the history menu"
+        );
         assert!(input.focus_handle(cx).is_focused(window));
         assert_eq!("历史目录", input.read(cx).value().as_str());
-    }).unwrap();
+    })
+    .unwrap();
 }
 
 #[gpui::test]
 async fn new_folder_prefill_uses_active_selected_name(cx: &mut TestAppContext) {
     let window = new_explorer(cx);
-    window.update(cx, |pane, _window, _cx| {
-        pane.filtered_entries = vec![
-            file("新建文本文档.jpg", "file", 0),
-            file("项目.v2", "dir", 0),
-            file("archive.tar.gz", "file", 0),
-            file(".gitignore", "file", 0),
-        ];
-        assert_eq!(nohrs_core::t!("Nova pasta"), pane.new_folder_default_name());
-        for (index, expected) in [(0, "新建文本文档"), (1, "项目.v2"), (2, "archive.tar"), (3, ".gitignore")] {
-            pane.select_single(index);
-            assert_eq!(expected, pane.new_folder_default_name());
-        }
-        pane.select_all();
-        pane.active_path = Some(pane.filtered_entries[1].path.clone());
-        assert_eq!("项目.v2", pane.new_folder_default_name());
-        pane.selection.remove(&pane.filtered_entries[1].path);
-        assert_eq!("新建文本文档", pane.new_folder_default_name());
-    }).unwrap();
+    window
+        .update(cx, |pane, _window, _cx| {
+            pane.filtered_entries = vec![
+                file("新建文本文档.jpg", "file", 0),
+                file("项目.v2", "dir", 0),
+                file("archive.tar.gz", "file", 0),
+                file(".gitignore", "file", 0),
+            ];
+            assert_eq!(nohrs_core::t!("Nova pasta"), pane.new_folder_default_name());
+            for (index, expected) in [
+                (0, "新建文本文档"),
+                (1, "项目.v2"),
+                (2, "archive.tar"),
+                (3, ".gitignore"),
+            ] {
+                pane.select_single(index);
+                assert_eq!(expected, pane.new_folder_default_name());
+            }
+            pane.select_all();
+            pane.active_path = Some(pane.filtered_entries[1].path.clone());
+            assert_eq!("项目.v2", pane.new_folder_default_name());
+            pane.selection.remove(&pane.filtered_entries[1].path);
+            assert_eq!("新建文本文档", pane.new_folder_default_name());
+        })
+        .unwrap();
 }
 
 #[gpui::test]
 async fn new_folder_history_only_records_successful_creation(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let window = new_explorer(cx);
-    window.update(cx, |pane, _window, cx| {
-        pane.cwd = dir.path().to_string_lossy().into_owned();
-        assert!(pane.create_folder_named("资料\\图片".into(), cx));
-        assert!(!pane.create_folder_named("资料\\图片".into(), cx));
-        assert!(!pane.create_folder_named("不合法?".into(), cx));
-        assert_eq!(vec!["资料\\图片"], super::view::new_folder::FolderNameHistory::all(cx));
-        assert!(pane.create_folder_named("项目".into(), cx));
-        assert_eq!(vec!["项目", "资料\\图片"], super::view::new_folder::FolderNameHistory::all(cx));
-    }).unwrap();
+    window
+        .update(cx, |pane, _window, cx| {
+            pane.cwd = dir.path().to_string_lossy().into_owned();
+            assert!(pane.create_folder_named("资料\\图片".into(), cx));
+            assert!(!pane.create_folder_named("资料\\图片".into(), cx));
+            assert!(!pane.create_folder_named("不合法?".into(), cx));
+            assert_eq!(
+                vec!["资料\\图片"],
+                super::view::new_folder::FolderNameHistory::all(cx)
+            );
+            assert!(pane.create_folder_named("项目".into(), cx));
+            assert_eq!(
+                vec!["项目", "资料\\图片"],
+                super::view::new_folder::FolderNameHistory::all(cx)
+            );
+        })
+        .unwrap();
 }
 
 #[gpui::test]
@@ -2677,7 +2790,11 @@ async fn the_tree_view_splices_an_open_folder_under_it(cx: &mut TestAppContext) 
             );
             page.tree.expanded.insert(docs.clone());
             page.apply_filter();
-            let names: Vec<&str> = page.filtered_entries.iter().map(|e| e.name.as_str()).collect();
+            let names: Vec<&str> = page
+                .filtered_entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect();
             assert_eq!(names, ["docs", "a.txt", "b.txt", "z.txt"]);
             assert_eq!(page.tree_depth(&page.filtered_entries[1].path.clone()), 1);
             assert_eq!(page.tree_depth(&docs), 0);
@@ -2746,16 +2863,27 @@ async fn path_field_shows_the_path_and_goes_where_it_is_told(cx: &mut TestAppCon
         .update(cx, |pane, window, cx| {
             pane.begin_path_edit(window, cx);
             let input = pane.path_edit.as_ref().unwrap().input.clone();
-            assert_eq!(input.read(cx).value().to_string(), pane.cwd, "the field starts with the folder's path");
+            assert_eq!(
+                input.read(cx).value().to_string(),
+                pane.cwd,
+                "the field starts with the folder's path"
+            );
 
             // A path that does not exist keeps the field open to fix it.
-            input.update(cx, |state, cx| state.set_value(r"Z:\nao\existe", window, cx));
+            input.update(cx, |state, cx| {
+                state.set_value(r"Z:\nao\existe", window, cx)
+            });
             pane.commit_path_edit(window, cx);
             assert!(pane.path_edit.is_some());
 
-            input.update(cx, |state, cx| state.set_value(sub.to_string_lossy().to_string(), window, cx));
+            input.update(cx, |state, cx| {
+                state.set_value(sub.to_string_lossy().to_string(), window, cx)
+            });
             pane.commit_path_edit(window, cx);
-            assert!(pane.path_edit.is_none(), "Enter on a real folder closes the field");
+            assert!(
+                pane.path_edit.is_none(),
+                "Enter on a real folder closes the field"
+            );
             assert_eq!(pane.cwd, sub.to_string_lossy());
 
             pane.begin_path_edit(window, cx);
@@ -2781,7 +2909,10 @@ async fn dropping_files_on_a_folder_moves_them_on_the_same_drive(cx: &mut TestAp
         .unwrap();
     cx.run_until_parked();
     assert_eq!(std::fs::read_to_string(target.join("a.txt")).unwrap(), "a");
-    assert!(!root.join("a.txt").exists(), "a drop on the same drive is a move");
+    assert!(
+        !root.join("a.txt").exists(),
+        "a drop on the same drive is a move"
+    );
 }
 
 #[gpui::test]
@@ -2824,7 +2955,10 @@ async fn a_slow_folder_is_read_in_the_background_and_an_overtaken_read_is_droppe
             pane.reload(cx);
             pane.cwd = second.path().to_string_lossy().into_owned();
             pane.reload(cx);
-            assert!(pane.listing_pending, "nothing waited, so the read must still be on its way");
+            assert!(
+                pane.listing_pending,
+                "nothing waited, so the read must still be on its way"
+            );
         })
         .unwrap();
 
@@ -2833,8 +2967,11 @@ async fn a_slow_folder_is_read_in_the_background_and_an_overtaken_read_is_droppe
         cx.run_until_parked();
         let (pending, listed) = window
             .update(cx, |pane, _window, _cx| {
-                let listed: Vec<String> =
-                    pane.filtered_entries.iter().map(|entry| entry.name.clone()).collect();
+                let listed: Vec<String> = pane
+                    .filtered_entries
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect();
                 (pane.listing_pending, listed)
             })
             .unwrap();
@@ -2861,7 +2998,10 @@ async fn a_refresh_keeps_tree_folders_open_and_reads_them_again(cx: &mut TestApp
     std::fs::write(dir.path().join("z.txt"), "z").unwrap();
     let window = open_pane_at(cx, dir.path());
     let names = |pane: &ExplorerPane| -> Vec<String> {
-        pane.filtered_entries.iter().map(|entry| entry.name.clone()).collect()
+        pane.filtered_entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect()
     };
     window
         .update(cx, |pane, _window, cx| {
@@ -2882,7 +3022,11 @@ async fn a_refresh_keeps_tree_folders_open_and_reads_them_again(cx: &mut TestApp
     window
         .update(cx, |pane, _window, cx| {
             pane.reload(cx);
-            assert_eq!(names(pane), ["docs", "a.txt", "z.txt"], "still open, and read again");
+            assert_eq!(
+                names(pane),
+                ["docs", "a.txt", "z.txt"],
+                "still open, and read again"
+            );
         })
         .unwrap();
 
@@ -2924,7 +3068,10 @@ async fn a_refresh_forgets_the_picture_of_a_file_that_changed(cx: &mut TestAppCo
     window
         .update(cx, |pane, _window, cx| {
             pane.reload(cx);
-            assert!(!pane.thumbnails.holds(&changed_path), "changed: asked for again");
+            assert!(
+                !pane.thumbnails.holds(&changed_path),
+                "changed: asked for again"
+            );
             assert!(pane.thumbnails.holds(&kept_path), "unchanged: kept");
         })
         .unwrap();
@@ -3058,11 +3205,17 @@ async fn each_folder_opens_with_the_zoom_and_sort_it_was_left_with(cx: &mut Test
             page.set_zoom(0.6, cx);
             page.set_sort(SortKey::Size, true, cx);
             page.reload(cx);
-            assert!(page.sort_key == SortKey::Size && page.sort_asc, "a refresh keeps it");
+            assert!(
+                page.sort_key == SortKey::Size && page.sort_asc,
+                "a refresh keeps it"
+            );
 
             page.change_dir(music_path.clone(), window, cx);
             assert!(page.sort_key == SortKey::Name && !page.sort_asc);
-            assert_eq!(page.zoom, 0.6, "a folder never changed keeps the tab's zoom");
+            assert_eq!(
+                page.zoom, 0.6,
+                "a folder never changed keeps the tab's zoom"
+            );
             page.set_zoom(0.0, cx);
 
             page.change_dir(photos_path.clone(), window, cx);
@@ -3088,7 +3241,12 @@ async fn the_folder_on_screen_follows_what_other_programs_do(cx: &mut TestAppCon
     let window = open_pane_at(cx, dir.path());
     let names = |cx: &mut TestAppContext| -> Vec<String> {
         window
-            .read_with(cx, |pane, _cx| pane.filtered_entries.iter().map(|entry| entry.name.clone()).collect())
+            .read_with(cx, |pane, _cx| {
+                pane.filtered_entries
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect()
+            })
             .unwrap()
     };
     let wait_for = |cx: &mut TestAppContext, wanted: &[&str]| {
@@ -3102,13 +3260,25 @@ async fn the_folder_on_screen_follows_what_other_programs_do(cx: &mut TestAppCon
         }
         false
     };
-    assert!(wait_for(cx, &["a.txt"]), "the first listing: {:?}", names(cx));
+    assert!(
+        wait_for(cx, &["a.txt"]),
+        "the first listing: {:?}",
+        names(cx)
+    );
 
     std::fs::write(dir.path().join("b.txt"), "saved by someone else").unwrap();
-    assert!(wait_for(cx, &["a.txt", "b.txt"]), "after a save elsewhere: {:?}", names(cx));
+    assert!(
+        wait_for(cx, &["a.txt", "b.txt"]),
+        "after a save elsewhere: {:?}",
+        names(cx)
+    );
 
     std::fs::remove_file(dir.path().join("a.txt")).unwrap();
-    assert!(wait_for(cx, &["b.txt"]), "after a delete elsewhere: {:?}", names(cx));
+    assert!(
+        wait_for(cx, &["b.txt"]),
+        "after a delete elsewhere: {:?}",
+        names(cx)
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3129,7 +3299,8 @@ async fn backspace_goes_to_parent_instead_of_previous_directory(cx: &mut TestApp
             window.focus(&pane.focus_handle);
         });
         window.draw(cx).clear();
-    }).unwrap();
+    })
+    .unwrap();
     cx.simulate_keystrokes(window.into(), "backspace");
     pane.read_with(cx, |pane, _| assert_eq!(first, pane.cwd));
     cx.update_window(window.into(), |_, window, cx| {
@@ -3138,11 +3309,20 @@ async fn backspace_goes_to_parent_instead_of_previous_directory(cx: &mut TestApp
             pane.focus_quick_input(Some("ab"), window, cx);
         });
         window.draw(cx).clear();
-    }).unwrap();
+    })
+    .unwrap();
     cx.simulate_keystrokes(window.into(), "backspace");
     pane.read_with(cx, |pane, cx| {
         assert_eq!(second, pane.cwd);
-        assert_eq!("a", pane.name_filter_input.as_ref().unwrap().read(cx).value().as_str());
+        assert_eq!(
+            "a",
+            pane.name_filter_input
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .value()
+                .as_str()
+        );
     });
 }
 
@@ -3203,7 +3383,11 @@ async fn the_space_map_measures_the_folder_and_draws_its_tiles(cx: &mut TestAppC
                 .expect("the folder was measured");
             assert_eq!(tree.bytes, 5000);
             // Bigger first: the mosaic draws the largest children first.
-            let names: Vec<&str> = tree.children.iter().map(|child| child.name.as_str()).collect();
+            let names: Vec<&str> = tree
+                .children
+                .iter()
+                .map(|child| child.name.as_str())
+                .collect();
             assert_eq!(names, ["big.bin", "nested"]);
         })
         .unwrap();
@@ -3260,9 +3444,14 @@ async fn the_space_map_measures_the_folder_and_draws_its_tiles(cx: &mut TestAppC
                 "selecting a folder does not enter it"
             );
             pane.space_click(nested.clone(), _window, cx);
-            assert_eq!(pane.space.as_ref().map(|map| map.focus.clone()), Some(nested));
+            assert_eq!(
+                pane.space.as_ref().map(|map| map.focus.clone()),
+                Some(nested)
+            );
             assert!(
-                pane.space.as_ref().is_some_and(|map| map.selection.is_none()),
+                pane.space
+                    .as_ref()
+                    .is_some_and(|map| map.selection.is_none()),
                 "entering a folder clears the prior tile selection"
             );
             // Escape takes it down, back to the listing.

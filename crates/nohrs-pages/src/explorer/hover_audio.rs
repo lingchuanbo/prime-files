@@ -86,7 +86,10 @@ fn set_progress(progress: Option<(String, f32)>) {
 /// How far the sound playing under the mouse is, 0..=1, if `path` is it.
 pub(crate) fn progress_of(path: &str) -> Option<f32> {
     let current = PROGRESS.lock().ok()?;
-    current.as_ref().filter(|(playing, _)| playing == path).map(|(_, fraction)| *fraction)
+    current
+        .as_ref()
+        .filter(|(playing, _)| playing == path)
+        .map(|(_, fraction)| *fraction)
 }
 
 /// Whether a sound started by the mouse is playing, so the listing keeps
@@ -107,16 +110,30 @@ pub(crate) fn progress_strip(path: &str) -> Option<gpui::AnyElement> {
             .right_0()
             .bottom_0()
             .h(px(2.0))
-            .child(div().h_full().w(relative(fraction.clamp(0.0, 1.0))).bg(rgb(nohrs_ui::theme::theme::accent())))
+            .child(
+                div()
+                    .h_full()
+                    .w(relative(fraction.clamp(0.0, 1.0)))
+                    .bg(rgb(nohrs_ui::theme::theme::accent())),
+            )
             .into_any_element(),
     )
 }
 
 impl ExplorerPane {
     /// The mouse entered (`hovered`) or left the entry for `path`.
-    pub(crate) fn hover_audio_changed(&mut self, path: String, hovered: bool, cx: &mut Context<Self>) {
+    pub(crate) fn hover_audio_changed(
+        &mut self,
+        path: String,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
         if hovered {
-            if self.hover_audio.as_ref().is_some_and(|hover| hover.path == path) {
+            if self
+                .hover_audio
+                .as_ref()
+                .is_some_and(|hover| hover.path == path)
+            {
                 return;
             }
             // Leaving one sound for another stops the first at once, even if
@@ -128,13 +145,21 @@ impl ExplorerPane {
                 return;
             }
             let delay = Duration::from_millis(u64::from(self.hover_audio_delay_ms));
-            let volume = if self.media_muted { 0.0 } else { self.media_volume };
+            let volume = if self.media_muted {
+                0.0
+            } else {
+                self.media_volume
+            };
             let task = cx.spawn({
                 let path = path.clone();
                 async move |this: WeakEntity<Self>, cx| {
                     cx.background_executor().timer(delay).await;
                     this.update(cx, |pane, _cx| {
-                        if pane.hover_audio.as_ref().is_some_and(|hover| hover.path == path) {
+                        if pane
+                            .hover_audio
+                            .as_ref()
+                            .is_some_and(|hover| hover.path == path)
+                        {
                             PLAYED.store(true, std::sync::atomic::Ordering::Relaxed);
                             send(Command::Play(path, volume));
                         }
@@ -143,7 +168,11 @@ impl ExplorerPane {
                 }
             });
             self.hover_audio = Some(HoverAudio { path, _task: task });
-        } else if self.hover_audio.as_ref().is_some_and(|hover| hover.path == path) {
+        } else if self
+            .hover_audio
+            .as_ref()
+            .is_some_and(|hover| hover.path == path)
+        {
             self.end_hover_audio();
         }
     }
@@ -164,7 +193,10 @@ impl ExplorerPane {
         item: &nohrs_services::fs::listing::FileEntryDto,
         cx: &mut Context<Self>,
     ) -> E {
-        if !self.hover_audio_enabled || item.kind == "dir" || !super::waveforms::is_audio(&item.path) {
+        if !self.hover_audio_enabled
+            || item.kind == "dir"
+            || !super::waveforms::is_audio(&item.path)
+        {
             return element;
         }
         let path = item.path.clone();
@@ -184,8 +216,8 @@ mod platform {
     use std::time::Duration;
     use windows::Win32::Media::MediaFoundation::{
         CLSID_MFMediaEngineClassFactory, IMFAttributes, IMFMediaEngine, IMFMediaEngineClassFactory,
-        IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, MF_MEDIA_ENGINE_AUDIOONLY, MF_MEDIA_ENGINE_CALLBACK,
-        MF_VERSION, MFCreateAttributes, MFSTARTUP_FULL, MFStartup,
+        IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, MF_MEDIA_ENGINE_AUDIOONLY,
+        MF_MEDIA_ENGINE_CALLBACK, MF_VERSION, MFCreateAttributes, MFSTARTUP_FULL, MFStartup,
     };
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
@@ -196,13 +228,20 @@ mod platform {
     struct Listener;
 
     impl IMFMediaEngineNotify_Impl for Listener_Impl {
-        fn EventNotify(&self, _event: u32, _param1: usize, _param2: u32) -> windows::core::Result<()> {
+        fn EventNotify(
+            &self,
+            _event: u32,
+            _param1: usize,
+            _param2: u32,
+        ) -> windows::core::Result<()> {
             Ok(())
         }
     }
 
     pub fn run(commands: &mpsc::Receiver<Command>) {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().ok();
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+            .ok()
+            .ok();
         if let Err(error) = unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) } {
             tracing::error!("hover player: Media Foundation did not start: {error}");
             return;
@@ -233,13 +272,21 @@ mod platform {
             };
             let Some(mut command) = received else {
                 if let Some(path) = &current {
-                    let (position, duration, ended) =
-                        unsafe { (engine.GetCurrentTime(), engine.GetDuration(), engine.IsEnded().as_bool()) };
+                    let (position, duration, ended) = unsafe {
+                        (
+                            engine.GetCurrentTime(),
+                            engine.GetDuration(),
+                            engine.IsEnded().as_bool(),
+                        )
+                    };
                     if ended {
                         set_progress(None);
                         current = None;
                     } else if duration.is_finite() && duration > 0.0 {
-                        set_progress(Some((path.clone(), (position / duration).clamp(0.0, 1.0) as f32)));
+                        set_progress(Some((
+                            path.clone(),
+                            (position / duration).clamp(0.0, 1.0) as f32,
+                        )));
                     }
                 }
                 continue;

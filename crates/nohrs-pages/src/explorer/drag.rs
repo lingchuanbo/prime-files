@@ -7,8 +7,10 @@
 //! from Explorer: gpui's drop target, as `ExternalPaths`. The drop side then
 //! only has to handle that.
 
+use gpui::{
+    Context, ExternalPaths, InteractiveElement, MouseMoveEvent, Pixels, Point, Styled, Window, rgb,
+};
 use nohrs_core::{t, tf};
-use gpui::{Context, ExternalPaths, InteractiveElement, MouseMoveEvent, Pixels, Point, Styled, Window, rgb};
 use nohrs_ui::theme::theme;
 use std::path::{Path, PathBuf};
 
@@ -74,7 +76,12 @@ impl ExplorerPane {
     /// moved far enough, the same Windows drag the listing starts: dropped on
     /// Premiere it imports, on Explorer it copies or moves, on Nohrs it lands
     /// like any drop.
-    pub(crate) fn preview_drag_moved(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn preview_drag_moved(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(candidate) = self.preview_drag_ready(event) else {
             return;
         };
@@ -83,7 +90,10 @@ impl ExplorerPane {
 
     // The pressed preview item, once the press has moved past the threshold
     // with the button held; a press whose button came up is forgotten.
-    pub(crate) fn preview_drag_ready(&mut self, event: &MouseMoveEvent) -> Option<PreviewDragCandidate> {
+    pub(crate) fn preview_drag_ready(
+        &mut self,
+        event: &MouseMoveEvent,
+    ) -> Option<PreviewDragCandidate> {
         let candidate = self.preview_drag.as_ref()?;
         if event.pressed_button != Some(gpui::MouseButton::Left) {
             self.preview_drag = None;
@@ -120,7 +130,12 @@ impl ExplorerPane {
     }
 
     /// Starts a drag once a press has moved far enough.
-    pub(crate) fn drag_moved(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn drag_moved(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(candidate) = &self.drag_candidate else {
             return;
         };
@@ -143,14 +158,23 @@ impl ExplorerPane {
         };
         // The selection if the press was on part of it, else just that entry.
         let paths: Vec<PathBuf> = if self.selection.contains(&entry.path) {
-            self.selected_paths().into_iter().map(PathBuf::from).collect()
+            self.selected_paths()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
         } else {
             vec![PathBuf::from(&entry.path)]
         };
         self.start_drag_out(paths, DragFrom::Listing, window, cx);
     }
 
-    fn start_drag_out(&mut self, paths: Vec<PathBuf>, from: DragFrom, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_drag_out(
+        &mut self,
+        paths: Vec<PathBuf>,
+        from: DragFrom,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(hwnd) = crate::ipc::window_hwnd(window) else {
             return;
         };
@@ -162,7 +186,10 @@ impl ExplorerPane {
             let outcome = platform::drag(hwnd, &paths);
             this.update(cx, |pane, cx| {
                 if let Err(error) = outcome {
-                    pane.set_status(StatusLevel::Error, tf!("Não foi possível arrastar: {error}", error = error));
+                    pane.set_status(
+                        StatusLevel::Error,
+                        tf!("Não foi possível arrastar: {error}", error = error),
+                    );
                 }
                 // A move to another program takes the files out of this folder.
                 pane.reload(cx);
@@ -180,7 +207,13 @@ impl ExplorerPane {
     /// Copies or moves files dropped on the window into `dest`. Explorer's
     /// rules: Shift moves, Ctrl copies, and otherwise a drop on the same drive
     /// moves and one from another drive copies.
-    pub(crate) fn drop_paths(&mut self, paths: &[PathBuf], dest: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn drop_paths(
+        &mut self,
+        paths: &[PathBuf],
+        dest: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let modifiers = window.modifiers();
         let mode = if modifiers.shift {
             ClipMode::Cut
@@ -205,7 +238,10 @@ impl ExplorerPane {
             .cloned()
             .collect();
         if into_itself {
-            self.set_status(StatusLevel::Warning, t!("Uma pasta não pode ir para dentro dela mesma."));
+            self.set_status(
+                StatusLevel::Warning,
+                t!("Uma pasta não pode ir para dentro dela mesma."),
+            );
             cx.notify();
         }
         if sources.is_empty() {
@@ -228,7 +264,12 @@ pub(crate) fn drop_into<E: InteractiveElement + Styled>(
 ) -> E {
     let dest = PathBuf::from(folder);
     element
-        .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::accent_subtle())))
+        .drag_over::<ExternalPaths>(|style, _, _, _| {
+            style
+                .bg(rgb(theme::accent_subtle()))
+                .border_2()
+                .border_color(rgb(theme::accent()))
+        })
         .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
             this.drop_paths(paths.paths(), dest.clone(), window, cx);
         }))
@@ -257,10 +298,13 @@ mod platform {
     use std::path::PathBuf;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::IDataObject;
-    use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource};
+    use windows::Win32::System::Ole::{
+        DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource,
+    };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
-        BHID_DataObject, ILFree, SHCreateShellItemArrayFromIDLists, SHDoDragDrop, SHParseDisplayName,
+        BHID_DataObject, ILFree, SHCreateShellItemArrayFromIDLists, SHDoDragDrop,
+        SHParseDisplayName,
     };
     use windows::core::HSTRING;
 
@@ -269,10 +313,13 @@ mod platform {
         let result = (|| {
             for path in paths {
                 let mut pidl = std::ptr::null_mut();
-                unsafe { SHParseDisplayName(&HSTRING::from(path.as_os_str()), None, &mut pidl, 0, None)? };
+                unsafe {
+                    SHParseDisplayName(&HSTRING::from(path.as_os_str()), None, &mut pidl, 0, None)?
+                };
                 pidls.push(pidl);
             }
-            let items: Vec<*const ITEMIDLIST> = pidls.iter().map(|pidl| pidl.cast_const()).collect();
+            let items: Vec<*const ITEMIDLIST> =
+                pidls.iter().map(|pidl| pidl.cast_const()).collect();
             unsafe {
                 let array = SHCreateShellItemArrayFromIDLists(&items)?;
                 let data: IDataObject = array.BindToHandler(None, &BHID_DataObject)?;
@@ -312,6 +359,9 @@ mod tests {
     fn volumes_compare_by_drive_without_case() {
         assert!(same_volume(Path::new(r"C:\a\b.txt"), Path::new(r"c:\x")));
         assert!(!same_volume(Path::new(r"C:\a"), Path::new(r"D:\a")));
-        assert!(!same_volume(Path::new(r"I:\Meu Drive\a.mp4"), Path::new(r"C:\Users")));
+        assert!(!same_volume(
+            Path::new(r"I:\Meu Drive\a.mp4"),
+            Path::new(r"C:\Users")
+        ));
     }
 }

@@ -23,7 +23,11 @@ const MIN_WIDTH: f32 = 220.0;
 const MAX_WIDTH: f32 = 380.0;
 
 /// Draws the open menu, if any, over the whole window.
-pub fn render(page: &ExplorerPane, window: &mut Window, cx: &mut Context<ExplorerPane>) -> Option<AnyElement> {
+pub fn render(
+    page: &ExplorerPane,
+    window: &mut Window,
+    cx: &mut Context<ExplorerPane>,
+) -> Option<AnyElement> {
     let menu = page.context_menu.as_ref()?;
     let viewport = window.viewport_size();
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
@@ -39,8 +43,14 @@ pub fn render(page: &ExplorerPane, window: &mut Window, cx: &mut Context<Explore
             .w(px(vw))
             .h(px(vh))
             .occlude()
-            .on_mouse_down(MouseButton::Left, cx.listener(|page, _, _, cx| page.close_menu(cx)))
-            .on_mouse_down(MouseButton::Right, cx.listener(|page, _, _, cx| page.close_menu(cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|page, _, _, cx| page.close_menu(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|page, _, _, cx| page.close_menu(cx)),
+            )
             .into_any_element(),
     );
 
@@ -49,19 +59,32 @@ pub fn render(page: &ExplorerPane, window: &mut Window, cx: &mut Context<Explore
     let quick = !menu.quick.is_empty();
     let width = width_for(items);
     let height = height_for(items, quick);
-    let mut x = f32::from(menu.position.x).min(vw - width - MARGIN).max(MARGIN);
+    let mut x = f32::from(menu.position.x)
+        .min(vw - width - MARGIN)
+        .max(MARGIN);
     let mut y = f32::from(menu.position.y);
     if y + height > vh - MARGIN {
         y = (y - height).max(MARGIN);
     }
     let mut level_width = width;
-    layers.push(panel(menu, 0, items, x, y, width, height.min(vh - MARGIN * 2.0), quick, cx));
+    layers.push(panel(
+        menu,
+        0,
+        items,
+        x,
+        y,
+        width,
+        height.min(vh - MARGIN * 2.0),
+        quick,
+        cx,
+    ));
 
     for (level, &open) in menu.open_path.iter().enumerate() {
         let Some(ItemKind::Submenu(children)) = items.get(open).map(|item| &item.kind) else {
             break;
         };
-        let offset = PADDING + if level == 0 && quick { QUICK_ROW } else { 0.0 } + offset_of(items, open);
+        let offset =
+            PADDING + if level == 0 && quick { QUICK_ROW } else { 0.0 } + offset_of(items, open);
         let child_width = width_for(children);
         let child_height = height_for(children, false);
         let right = x + level_width - 2.0;
@@ -109,7 +132,10 @@ fn width_for(items: &[MenuItem]) -> f32 {
         .iter()
         .map(|item| {
             item.label.chars().count() as f32 * 7.4
-                + item.shortcut.as_ref().map_or(0.0, |keys| keys.chars().count() as f32 * 6.5 + 24.0)
+                + item
+                    .shortcut
+                    .as_ref()
+                    .map_or(0.0, |keys| keys.chars().count() as f32 * 6.5 + 24.0)
         })
         .fold(0.0, f32::max);
     (longest + 84.0).clamp(MIN_WIDTH, MAX_WIDTH)
@@ -124,7 +150,13 @@ fn offset_of(items: &[MenuItem], index: usize) -> f32 {
     items
         .iter()
         .take(index)
-        .map(|item| if matches!(item.kind, ItemKind::Separator) { SEPARATOR } else { ROW })
+        .map(|item| {
+            if matches!(item.kind, ItemKind::Separator) {
+                SEPARATOR
+            } else {
+                ROW
+            }
+        })
         .sum()
 }
 
@@ -159,9 +191,12 @@ fn panel(
         .shadow_xl()
         .occlude()
         .when(quick, |panel| panel.child(quick_row(menu, cx)))
-        .children(items.iter().enumerate().map(|(index, item)| {
-            entry(item, level, index, open == Some(index), cx)
-        }))
+        .children(
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| entry(item, level, index, open == Some(index), cx)),
+        )
         .into_any_element()
 }
 
@@ -190,10 +225,18 @@ fn quick_row(menu: &OpenMenu, cx: &mut Context<ExplorerPane>) -> impl IntoElemen
                 .cursor_pointer()
                 .text_color(rgb(theme::fg()))
                 .hover(|button| button.bg(rgb(theme::bg_hover())))
-                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip).build(window, cx)
+                })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |page, _, window, cx| page.choose_menu_item(id, window, cx)))
-                .child(Icon::new(Icon::empty()).path(SharedString::from(action.icon)).size_4())
+                .on_click(
+                    cx.listener(move |page, _, window, cx| page.choose_menu_item(id, window, cx)),
+                )
+                .child(
+                    Icon::new(Icon::empty())
+                        .path(SharedString::from(action.icon))
+                        .size_4(),
+                )
         }))
 }
 
@@ -261,9 +304,18 @@ fn entry(
         }))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .when(enabled && !submenu, |row| {
-            row.on_click(cx.listener(move |page, _, window, cx| page.choose_menu_item(id, window, cx)))
+            row.on_click(
+                cx.listener(move |page, _, window, cx| page.choose_menu_item(id, window, cx)),
+            )
         })
-        .child(div().w(px(16.0)).flex_shrink_0().flex().justify_center().child(icon))
+        .child(
+            div()
+                .w(px(16.0))
+                .flex_shrink_0()
+                .flex()
+                .justify_center()
+                .child(icon),
+        )
         .child(
             div()
                 .flex_1()
@@ -273,9 +325,10 @@ fn entry(
                 .whitespace_nowrap()
                 .when(item.bold, |label| label.font_weight(FontWeight::SEMIBOLD))
                 // A checked entry with its own icon still shows it is on.
-                .when(item.checked && !matches!(item.icon, MenuIcon::None), |label| {
-                    label.text_color(rgb(theme::accent()))
-                })
+                .when(
+                    item.checked && !matches!(item.icon, MenuIcon::None),
+                    |label| label.text_color(rgb(theme::accent())),
+                )
                 .child(item.label.clone()),
         )
         .when_some(item.shortcut.clone(), |row, keys| {

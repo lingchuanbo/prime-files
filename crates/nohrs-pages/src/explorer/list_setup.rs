@@ -1,5 +1,5 @@
-use nohrs_core::t;
 use nohrs_core::config;
+use nohrs_core::t;
 use nohrs_ui::components::file_list::FileListDelegate;
 
 use gpui::{AppContext, Context, Window};
@@ -105,7 +105,11 @@ impl ExplorerPane {
 
     /// Whether `column` is shown (Name always is).
     pub(crate) fn column_visible(&self, column: usize) -> bool {
-        column == 0 || self.hidden_column_widths.get(column).is_some_and(|width| *width == 0.0)
+        column == 0
+            || self
+                .hidden_column_widths
+                .get(column)
+                .is_some_and(|width| *width == 0.0)
     }
 
     /// Hides or shows `column`, keeping the width it had. Name stays.

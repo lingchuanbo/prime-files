@@ -17,13 +17,23 @@ pub(super) fn render(
     let everything = page.everything_on();
     let recursive = page.quick_recursive;
     let placeholder = if everything {
-        page.everything_status(cx).unwrap_or_else(|| t!("Buscar em todo o computador…").to_string())
+        page.everything_status(cx)
+            .unwrap_or_else(|| t!("Buscar em todo o computador…").to_string())
     } else if recursive {
         t!("Buscar nas subpastas…").to_string()
     } else {
-        tf!("Filtrar {files} arquivos…", files = page.entries.iter().filter(|entry| entry.kind != "dir").count())
+        tf!(
+            "Filtrar {files} arquivos…",
+            files = page
+                .entries
+                .iter()
+                .filter(|entry| entry.kind != "dir")
+                .count()
+        )
     };
-    input.update(cx, |state, cx| state.set_placeholder(placeholder, window, cx));
+    input.update(cx, |state, cx| {
+        state.set_placeholder(placeholder, window, cx)
+    });
     let typed = input.read(cx).value().to_string();
     if everything {
         page.search_everything(typed, cx);
@@ -38,13 +48,24 @@ pub(super) fn render(
         .w(px(if page.compact.enabled { 240.0 } else { 280.0 }))
         .min_w(px(120.0))
         .h(px(24.0))
-        .flex().items_center().gap_1().px(px(6.0))
-        .rounded(px(8.0)).bg(rgb(theme::bg_secondary()))
-        .border_1().border_color(rgb(theme::border()))
+        .flex()
+        .items_center()
+        .gap_1()
+        .px(px(6.0))
+        .rounded(px(8.0))
+        .bg(rgb(theme::bg_secondary()))
+        .border_1()
+        .border_color(rgb(theme::border()))
         .child(everything_button(everything, cx))
-        .child(div().flex_1().min_w(px(0.0)).child(
-            Input::new(&input).xsmall().appearance(false).cleanable(true).text_xs(),
-        ))
+        .child(
+            div().flex_1().min_w(px(0.0)).child(
+                Input::new(&input)
+                    .xsmall()
+                    .appearance(false)
+                    .cleanable(true)
+                    .text_xs(),
+            ),
+        )
         .child(recursive_button(recursive, cx))
 }
 
@@ -52,8 +73,10 @@ fn everything_button(on: bool, cx: &mut Context<ExplorerPane>) -> impl IntoEleme
     search_button("quick-bar-everything", on)
         .tooltip(|window, cx| {
             Tooltip::new(nohrs_core::shortcuts::with_keys(
-                t!("Buscar em todo o computador"), nohrs_core::shortcuts::Action::SearchEverything,
-            )).build(window, cx)
+                t!("Buscar em todo o computador"),
+                nohrs_core::shortcuts::Action::SearchEverything,
+            ))
+            .build(window, cx)
         })
         .on_click(cx.listener(|page, _, window, cx| {
             let on = !page.everything_on();
@@ -73,9 +96,20 @@ fn recursive_button(on: bool, cx: &mut Context<ExplorerPane>) -> impl IntoElemen
 }
 
 fn search_button(id: &'static str, on: bool) -> Stateful<Div> {
-    div().id(id).size(px(22.0)).flex().flex_shrink_0()
-        .items_center().justify_center().rounded(px(5.0)).cursor_pointer()
+    div()
+        .id(id)
+        .size(px(22.0))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .cursor_pointer()
         .text_color(rgb(if on { theme::accent() } else { theme::muted() }))
         .when(on, |style| style.bg(rgb(theme::accent_subtle())))
-        .hover(|style| style.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg())))
+        .hover(|style| {
+            style
+                .bg(rgb(theme::bg_hover()))
+                .text_color(rgb(theme::fg()))
+        })
 }

@@ -786,7 +786,13 @@ impl ExplorerPane {
         #[cfg(all(windows, not(test)))]
         if let Err(error) = super::file_clipboard::write(&paths, mode) {
             tracing::warn!(%error, "file clipboard write failed");
-            self.set_status(StatusLevel::Error, tf!("Não foi possível copiar arquivos para a área de transferência: {error}", error = error));
+            self.set_status(
+                StatusLevel::Error,
+                tf!(
+                    "Não foi possível copiar arquivos para a área de transferência: {error}",
+                    error = error
+                ),
+            );
             cx.notify();
             return;
         }

@@ -1,6 +1,6 @@
 use super::types::SortKey;
-use std::cmp::Ordering;
 use nohrs_services::fs::listing::FileEntryDto;
+use std::cmp::Ordering;
 
 /// Where folders go in a sorted listing (File Pilot's "Cycle Folders Sort
 /// Order").
@@ -279,7 +279,11 @@ mod tests {
         let names = |entries: &[FileEntryDto]| -> Vec<String> {
             entries.iter().map(|entry| entry.name.clone()).collect()
         };
-        let mut entries = vec![entry("b.txt", "file", 1), entry("a", "dir", 0), entry("c", "dir", 0)];
+        let mut entries = vec![
+            entry("b.txt", "file", 1),
+            entry("a", "dir", 0),
+            entry("c", "dir", 0),
+        ];
         sort_entries_with(&mut entries, SortKey::Name, true, FolderOrder::First);
         assert_eq!(names(&entries), ["a", "c", "b.txt"]);
         sort_entries_with(&mut entries, SortKey::Name, true, FolderOrder::Last);
@@ -339,24 +343,62 @@ mod tests {
     fn names_sort_as_strcmplogicalw_does() {
         use windows::Win32::UI::Shell::StrCmpLogicalW;
         use windows::core::HSTRING;
-        let logical = |a: &str, b: &str| unsafe { StrCmpLogicalW(&HSTRING::from(a), &HSTRING::from(b)) };
+        let logical =
+            |a: &str, b: &str| unsafe { StrCmpLogicalW(&HSTRING::from(a), &HSTRING::from(b)) };
 
         let mut names: Vec<String> = [
-            "a10", "a2", "A1", "a01", "a001", "b", "_x", "-y", "x 1", "x1", "x10", "ação", "acao",
-            "Acao", "Zebra", "zebra", "01", "1", "001", "é", "e", "file(2)", "file (10)", "file (2)",
-            "v1.10.txt", "v1.9.txt", "IMG_0010.JPG", "IMG_009.jpg", "~tmp", "#1", "Ünïcode", "日本",
-            "1.5", "1,5", "99999999999999999999", "100000000000000000000",
+            "a10",
+            "a2",
+            "A1",
+            "a01",
+            "a001",
+            "b",
+            "_x",
+            "-y",
+            "x 1",
+            "x1",
+            "x10",
+            "ação",
+            "acao",
+            "Acao",
+            "Zebra",
+            "zebra",
+            "01",
+            "1",
+            "001",
+            "é",
+            "e",
+            "file(2)",
+            "file (10)",
+            "file (2)",
+            "v1.10.txt",
+            "v1.9.txt",
+            "IMG_0010.JPG",
+            "IMG_009.jpg",
+            "~tmp",
+            "#1",
+            "Ünïcode",
+            "日本",
+            "1.5",
+            "1,5",
+            "99999999999999999999",
+            "100000000000000000000",
         ]
         .iter()
         .map(|name| name.to_string())
         .collect();
         for folder in [r"C:\Windows\System32", r"C:\Windows\WinSxS\Manifests"] {
             if let Ok(read) = std::fs::read_dir(folder) {
-                names.extend(read.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()));
+                names.extend(
+                    read.flatten()
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned()),
+                );
             }
         }
-        let mut keyed: Vec<(SortName, &str)> =
-            names.iter().map(|name| (SortName::new(name), name.as_str())).collect();
+        let mut keyed: Vec<(SortName, &str)> = names
+            .iter()
+            .map(|name| (SortName::new(name), name.as_str()))
+            .collect();
         keyed.sort_by(|a, b| a.0.cmp(&b.0));
         let disagreements: Vec<(&str, &str)> = keyed
             .windows(2)
@@ -364,7 +406,10 @@ mod tests {
             .map(|pair| (pair[0].1, pair[1].1))
             .take(10)
             .collect();
-        assert!(disagreements.is_empty(), "out of Explorer's order: {disagreements:?}");
+        assert!(
+            disagreements.is_empty(),
+            "out of Explorer's order: {disagreements:?}"
+        );
     }
 
     /// Times sorting a large folder by name against the sort as it was before
@@ -390,7 +435,11 @@ mod tests {
                 seed ^= seed >> 7;
                 seed ^= seed << 17;
                 let kind = if index % 10 == 0 { "dir" } else { "file" };
-                entry(&format!("Amd64_Microsoft-Windows-{seed:x}_{index}.manifest"), kind, 0)
+                entry(
+                    &format!("Amd64_Microsoft-Windows-{seed:x}_{index}.manifest"),
+                    kind,
+                    0,
+                )
             })
             .collect();
         let median = |run: &dyn Fn(&mut Vec<FileEntryDto>)| {
@@ -413,6 +462,8 @@ mod tests {
             entries.clone_from(&sorted);
             sort_entries(entries, SortKey::Name, true)
         });
-        println!("35,000 names: before {before:.1} ms, now {now:.1} ms, already sorted {again:.1} ms");
+        println!(
+            "35,000 names: before {before:.1} ms, now {now:.1} ms, already sorted {again:.1} ms"
+        );
     }
 }

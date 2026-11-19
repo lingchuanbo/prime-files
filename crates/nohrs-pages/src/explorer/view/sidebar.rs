@@ -1,12 +1,12 @@
-use nohrs_core::t;
+use super::navigation_icons;
 use crate::explorer::ExplorerPane;
 use crate::explorer::places::{Place, SidebarInputPurpose, THIS_PC};
 use crate::explorer::tags::Tags;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{Icon, IconName, Sizable as _};
+use nohrs_core::t;
 use nohrs_ui::theme::theme;
-use super::navigation_icons;
 
 const ROW_HEIGHT: f32 = 32.0;
 const ICON_SIZE: f32 = 16.0;
@@ -89,18 +89,27 @@ pub fn render(
         list = list.child(row(page, place, 0, None, icon_px, cx));
         // The network places added by hand go under Network, where a share
         // found by discovery would be.
-        if place.parsing_name.eq_ignore_ascii_case(crate::explorer::network::NETWORK) {
+        if place
+            .parsing_name
+            .eq_ignore_ascii_case(crate::explorer::network::NETWORK)
+        {
             list = network_rows(page, list, cx);
         }
     }
-    if !places.other.iter().any(|place| place.parsing_name.eq_ignore_ascii_case(crate::explorer::network::NETWORK)) {
+    if !places.other.iter().any(|place| {
+        place
+            .parsing_name
+            .eq_ignore_ascii_case(crate::explorer::network::NETWORK)
+    }) {
         list = network_rows(page, list, cx);
     }
 
     div()
         .id("sidebar")
         .size_full()
-        .when(!page.framed.sidebar, |this| this.bg(rgb(theme::toolbar_bg())))
+        .when(!page.framed.sidebar, |this| {
+            this.bg(rgb(theme::toolbar_bg()))
+        })
         .py(px(8.0))
         .overflow_y_scroll()
         .child(list)
@@ -108,8 +117,13 @@ pub fn render(
 }
 
 fn section_label(label: String) -> impl IntoElement {
-    div().px(px(8.0)).pb(px(6.0)).text_xs().font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(theme::muted())).child(label)
+    div()
+        .px(px(8.0))
+        .pb(px(6.0))
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(theme::muted()))
+        .child(label)
 }
 
 // The sidebar as a band: Quick access, the drives and the other places, each
@@ -152,8 +166,12 @@ fn render_band(
                     .border_color(rgb(theme::border()))
                     .cursor_pointer()
                     .when(active, |this| this.bg(rgb(theme::accent_subtle())))
-                    .when(!active, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
-                    .on_click(cx.listener(move |this, _, window, cx| this.change_dir(location.clone(), window, cx)))
+                    .when(!active, |this| {
+                        this.hover(|this| this.bg(rgb(theme::bg_hover())))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.change_dir(location.clone(), window, cx)
+                    }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, _, window, cx| {
@@ -162,7 +180,13 @@ fn render_band(
                         }),
                     )
                     .child(navigation_icons::workspace(&tag))
-                    .child(div().text_sm().whitespace_nowrap().text_color(rgb(theme::fg())).child(tag.name))
+                    .child(
+                        div()
+                            .text_sm()
+                            .whitespace_nowrap()
+                            .text_color(rgb(theme::fg()))
+                            .child(tag.name),
+                    )
                     .into_any_element()
             })
             .collect();
@@ -180,7 +204,15 @@ fn render_band(
                         .text_color(rgb(theme::muted()))
                         .child(t!("Espaços de trabalho")),
                 )
-                .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().gap(px(4.0)).children(chips)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(4.0))
+                        .children(chips),
+                ),
         );
     }
     for (index, (name, members)) in groups.into_iter().enumerate() {
@@ -208,7 +240,15 @@ fn render_band(
                         .whitespace_nowrap()
                         .child(name),
                 )
-                .child(div().flex_1().min_w(px(0.0)).flex().flex_wrap().gap(px(4.0)).children(chips)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(4.0))
+                        .children(chips),
+                ),
         );
     }
     // The favorites as chips, addable by dropping folders on the section.
@@ -241,7 +281,9 @@ fn render_band(
                         .flex()
                         .flex_wrap()
                         .gap(px(4.0))
-                        .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::accent_subtle())))
+                        .drag_over::<ExternalPaths>(|style, _, _, _| {
+                            style.bg(rgb(theme::accent_subtle()))
+                        })
                         .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
                             drop_as_favorites(this, None, paths, cx);
                         }))
@@ -275,7 +317,10 @@ fn chip(
     let opened = place.clone();
     let menu = place.clone();
     div()
-        .id(SharedString::from(format!("chip-{group}-{}", place.parsing_name)))
+        .id(SharedString::from(format!(
+            "chip-{group}-{}",
+            place.parsing_name
+        )))
         .h(px(ROW_HEIGHT))
         .max_w(px(220.0))
         .flex()
@@ -287,7 +332,9 @@ fn chip(
         .border_color(rgb(theme::border()))
         .cursor_pointer()
         .when(active, |this| this.bg(rgb(theme::accent_subtle())))
-        .when(!active, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
+        .when(!active, |this| {
+            this.hover(|this| this.bg(rgb(theme::bg_hover())))
+        })
         .on_click(cx.listener(move |this, _, window, cx| this.open_place(&opened, window, cx)))
         .on_mouse_down(
             MouseButton::Right,
@@ -323,7 +370,9 @@ fn network_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<Explore
                 active,
                 1,
             )
-            .on_click(cx.listener(move |this, _, window, cx| this.change_dir(opened.clone(), window, cx)))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.change_dir(opened.clone(), window, cx)),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, _, window, cx| {
@@ -344,14 +393,22 @@ fn network_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<Explore
         None => list.child(
             simple_row(
                 "network-add",
-                Icon::new(IconName::Plus).size_4().text_color(rgb(theme::muted())).into_any_element(),
+                Icon::new(IconName::Plus)
+                    .size_4()
+                    .text_color(rgb(theme::muted()))
+                    .into_any_element(),
                 t!("Adicionar local de rede").to_string(),
                 false,
                 1,
             )
             .text_color(rgb(theme::muted()))
             .on_click(cx.listener(|this, _, window, cx| {
-                this.begin_sidebar_input(SidebarInputPurpose::NetworkPlace, String::new(), window, cx)
+                this.begin_sidebar_input(
+                    SidebarInputPurpose::NetworkPlace,
+                    String::new(),
+                    window,
+                    cx,
+                )
             })),
         ),
     }
@@ -386,7 +443,12 @@ fn tag_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<ExplorerPan
                     .on_click(cx.listener(|this, _, window, cx| {
                         let name = t!("Novo espaço de trabalho").to_string();
                         let id = Tags::create(name.clone(), &[], cx);
-                        this.begin_sidebar_input(SidebarInputPurpose::RenameTag(id), name, window, cx);
+                        this.begin_sidebar_input(
+                            SidebarInputPurpose::RenameTag(id),
+                            name,
+                            window,
+                            cx,
+                        );
                     }))
                     .child(Icon::new(IconName::Plus).size_3()),
             ),
@@ -406,26 +468,35 @@ fn tag_rows(page: &mut ExplorerPane, mut list: Div, cx: &mut Context<ExplorerPan
         let active = page.cwd == location;
         let count = counts.get(&tag.id).copied().unwrap_or(0);
         let id = tag.id;
-        list = list.child(
-            simple_row(
-                SharedString::from(format!("tag-{}", tag.id)),
-                navigation_icons::workspace(&tag).into_any_element(),
-                tag.name.clone(),
-                active,
-                0,
-            )
-            .when(count > 0, |this| {
-                this.child(div().flex_shrink_0().text_xs().text_color(rgb(theme::muted())).child(count.to_string()))
-            })
-            .on_click(cx.listener(move |this, _, window, cx| this.change_dir(location.clone(), window, cx)))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.open_tag_menu(id, window, cx);
-                }),
-            ),
-        );
+        list =
+            list.child(
+                simple_row(
+                    SharedString::from(format!("tag-{}", tag.id)),
+                    navigation_icons::workspace(&tag).into_any_element(),
+                    tag.name.clone(),
+                    active,
+                    0,
+                )
+                .when(count > 0, |this| {
+                    this.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(rgb(theme::muted()))
+                            .child(count.to_string()),
+                    )
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.change_dir(location.clone(), window, cx)
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_tag_menu(id, window, cx);
+                    }),
+                ),
+            );
     }
     list
 }
@@ -450,7 +521,9 @@ fn simple_row(
         .rounded(px(4.0))
         .cursor_pointer()
         .when(active, |this| this.bg(rgb(theme::accent_subtle())))
-        .when(!active, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
+        .when(!active, |this| {
+            this.hover(|this| this.bg(rgb(theme::bg_hover())))
+        })
         .child(div().flex_shrink_0().child(icon))
         .child(
             div()
@@ -541,13 +614,22 @@ fn row(
                 )
                 .into_any_element()
         }
-        None => div().w(px(CHEVRON_WIDTH)).flex_shrink_0().into_any_element(),
+        None => div()
+            .w(px(CHEVRON_WIDTH))
+            .flex_shrink_0()
+            .into_any_element(),
     };
     let opened = place.clone();
     let menu = place.clone();
-    let drive_space = place.path.as_deref().and_then(|path| crate::explorer::drives::space(path, cx));
+    let drive_space = place
+        .path
+        .as_deref()
+        .and_then(|path| crate::explorer::drives::space(path, cx));
     div()
-        .id(SharedString::from(format!("place-{depth}-{}", place.parsing_name)))
+        .id(SharedString::from(format!(
+            "place-{depth}-{}",
+            place.parsing_name
+        )))
         .w_full()
         .h(px(ROW_HEIGHT))
         .flex()
@@ -558,7 +640,9 @@ fn row(
         .rounded(px(4.0))
         .cursor_pointer()
         .when(active, |this| this.bg(rgb(theme::accent_subtle())))
-        .when(!active, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
+        .when(!active, |this| {
+            this.hover(|this| this.bg(rgb(theme::bg_hover())))
+        })
         .on_click(cx.listener(move |this, _, window, cx| this.open_place(&opened, window, cx)))
         .on_mouse_down(
             MouseButton::Right,
@@ -585,7 +669,10 @@ fn row(
             // without opening This PC.
             this.child(
                 div()
-                    .id(SharedString::from(format!("drive-space-{}", place.parsing_name)))
+                    .id(SharedString::from(format!(
+                        "drive-space-{}",
+                        place.parsing_name
+                    )))
                     .w(px(34.0))
                     .flex_shrink_0()
                     .child(crate::explorer::view::listing::usage_bar(Some(space), 4.0))
@@ -609,7 +696,12 @@ fn row(
 // made up — the submenus are the list's own structure, not folders on disk.
 // Entries come from the header's buttons, the right-click menus, or by
 // dropping folders on the section; the folders themselves are never touched.
-fn favorite_rows(page: &mut ExplorerPane, list: Div, icon_px: u32, cx: &mut Context<ExplorerPane>) -> Div {
+fn favorite_rows(
+    page: &mut ExplorerPane,
+    list: Div,
+    icon_px: u32,
+    cx: &mut Context<ExplorerPane>,
+) -> Div {
     let favorites = crate::explorer::favorites::Favorites::all(cx);
     let mut section = div()
         .id("favorites")
@@ -657,11 +749,24 @@ fn favorite_rows(page: &mut ExplorerPane, list: Div, icon_px: u32, cx: &mut Cont
                             .hover(|style| style.bg(rgb(theme::bg_hover())))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let name = t!("Nova pasta").to_string();
-                                let id = crate::explorer::favorites::Favorites::add_submenu(None, name.clone(), cx);
-                                this.begin_sidebar_input(SidebarInputPurpose::RenameFavorite(id), name, window, cx);
+                                let id = crate::explorer::favorites::Favorites::add_submenu(
+                                    None,
+                                    name.clone(),
+                                    cx,
+                                );
+                                this.begin_sidebar_input(
+                                    SidebarInputPurpose::RenameFavorite(id),
+                                    name,
+                                    window,
+                                    cx,
+                                );
                             }))
-                            .child(Icon::new(Icon::empty()).path("icons/folder-plus.svg").size_3()),
-                    )
+                            .child(
+                                Icon::new(Icon::empty())
+                                    .path("icons/folder-plus.svg")
+                                    .size_3(),
+                            ),
+                    ),
             ),
     );
     for item in &favorites {
@@ -767,25 +872,24 @@ fn favorite_submenu_row(
         .hover(|this| this.bg(rgb(theme::bg_hover())))
         .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::accent_subtle())))
         .drag_over::<FavoriteDrag>(|style, _, _, _| style.bg(rgb(theme::accent_subtle())))
-        .on_drop(cx.listener(move |this, paths: &ExternalPaths, _window, cx| {
-            drop_as_favorites(this, Some(id), paths, cx);
-        }))
+        .on_drop(
+            cx.listener(move |this, paths: &ExternalPaths, _window, cx| {
+                drop_as_favorites(this, Some(id), paths, cx);
+            }),
+        )
         // A favorite dragged onto the row joins this submenu.
         .on_drop(cx.listener(move |_this, drag: &FavoriteDrag, _window, cx| {
             if crate::explorer::favorites::Favorites::move_item(drag.id, Some(id), cx) {
                 cx.notify();
             }
         }))
-        .on_drag(
-            FavoriteDrag { id },
-            {
-                let name = item.name.clone();
-                move |_drag, _offset, _window, cx| {
-                    let name = name.clone();
-                    cx.new(|_cx| FavoriteDragPreview { name: name.into() })
-                }
-            },
-        )
+        .on_drag(FavoriteDrag { id }, {
+            let name = item.name.clone();
+            move |_drag, _offset, _window, cx| {
+                let name = name.clone();
+                cx.new(|_cx| FavoriteDragPreview { name: name.into() })
+            }
+        })
         .on_click(cx.listener(move |this, _, _, cx| toggle_favorite_submenu(this, id, cx)))
         .on_mouse_down(
             MouseButton::Right,
@@ -835,17 +939,16 @@ fn favorite_link_row(
         .rounded(px(4.0))
         .cursor_pointer()
         .when(active, |this| this.bg(rgb(theme::accent_subtle())))
-        .when(!active, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
-        .on_drag(
-            FavoriteDrag { id },
-            {
-                let name = item.name.clone();
-                move |_drag, _offset, _window, cx| {
-                    let name = name.clone();
-                    cx.new(|_cx| FavoriteDragPreview { name: name.into() })
-                }
-            },
-        )
+        .when(!active, |this| {
+            this.hover(|this| this.bg(rgb(theme::bg_hover())))
+        })
+        .on_drag(FavoriteDrag { id }, {
+            let name = item.name.clone();
+            move |_drag, _offset, _window, cx| {
+                let name = name.clone();
+                cx.new(|_cx| FavoriteDragPreview { name: name.into() })
+            }
+        })
         .on_click(cx.listener(move |this, _, window, cx| this.change_dir(path.clone(), window, cx)))
         .on_mouse_down(
             MouseButton::Right,
@@ -893,7 +996,9 @@ fn favorite_chip(
         .border_color(rgb(theme::border()))
         .cursor_pointer()
         .when(active, |this| this.bg(rgb(theme::accent_subtle())))
-        .when(!active, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
+        .when(!active, |this| {
+            this.hover(|this| this.bg(rgb(theme::bg_hover())))
+        })
         .on_click(cx.listener(move |this, _, window, cx| this.change_dir(path.clone(), window, cx)))
         .on_mouse_down(
             MouseButton::Right,
@@ -918,7 +1023,12 @@ fn favorite_chip(
 // Adds every folder of a drop under `parent` (`None` = the top level).
 // Files and folders that are favorites already are left out, and the
 // folders themselves are not moved: only the shortcuts are kept.
-fn drop_as_favorites(_this: &mut ExplorerPane, parent: Option<u32>, paths: &ExternalPaths, cx: &mut Context<ExplorerPane>) {
+fn drop_as_favorites(
+    _this: &mut ExplorerPane,
+    parent: Option<u32>,
+    paths: &ExternalPaths,
+    cx: &mut Context<ExplorerPane>,
+) {
     for path in paths.paths() {
         crate::explorer::favorites::Favorites::add_link(parent, &path.to_string_lossy(), cx);
     }

@@ -1,8 +1,8 @@
 //! What the preview pane lists for a folder (its contents) and for a zip
 //! archive (the entries inside it), read off the UI thread.
 
-use nohrs_core::{k, t, tf};
 use nohrs_core::i18n;
+use nohrs_core::{k, t, tf};
 use std::path::Path;
 
 use super::entries::SortName;
@@ -107,7 +107,8 @@ pub(crate) fn archive_entries(path: &Path) -> Result<Vec<(String, bool, u64)>, S
 #[allow(clippy::disallowed_methods)]
 fn zip_entries(path: &Path) -> Result<Vec<(String, bool, u64)>, String> {
     let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|error| error.to_string())?;
+    let mut archive =
+        zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|error| error.to_string())?;
     let mut entries = Vec::with_capacity(archive.len());
     for index in 0..archive.len() {
         let Ok(entry) = archive.by_index_raw(index) else {
@@ -182,9 +183,15 @@ pub(crate) fn seven_zip() -> Option<std::path::PathBuf> {
         .filter_map(std::env::var_os)
         .map(|dir| Path::new(&dir).join("7-Zip").join("7z.exe"));
     let on_path = std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).map(|dir| dir.join("7z.exe")).collect::<Vec<_>>())
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join("7z.exe"))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
-    installed.chain(on_path).find(|candidate| candidate.is_file())
+    installed
+        .chain(on_path)
+        .find(|candidate| candidate.is_file())
 }
 
 // A console program run without flashing a console window over the app.
@@ -222,7 +229,10 @@ fn parse_seven_zip(text: &str) -> Vec<(String, bool, u64)> {
             ("Folder", Some(entry)) => entry.1 |= value == "+",
             // `D` among a RAR's or a 7z's attributes marks a folder.
             ("Attributes", Some(entry)) => {
-                entry.1 |= value.split_whitespace().next().is_some_and(|attrs| attrs.contains('D'));
+                entry.1 |= value
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|attrs| attrs.contains('D'));
             }
             _ => {}
         }
@@ -254,7 +264,9 @@ fn parse_tar_listing(text: &str) -> Vec<(String, bool, u64)> {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn ansi_to_string(bytes: &[u8]) -> String {
-    use windows::Win32::Globalization::{CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar};
+    use windows::Win32::Globalization::{
+        CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar,
+    };
     if bytes.is_empty() {
         return String::new();
     }
@@ -263,7 +275,12 @@ fn ansi_to_string(bytes: &[u8]) -> String {
     unsafe {
         let len = MultiByteToWideChar(CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None);
         let mut wide = vec![0u16; len.max(0) as usize];
-        MultiByteToWideChar(CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, Some(&mut wide));
+        MultiByteToWideChar(
+            CP_ACP,
+            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+            bytes,
+            Some(&mut wide),
+        );
         String::from_utf16_lossy(&wide)
     }
 }
@@ -276,7 +293,8 @@ fn ansi_to_string(bytes: &[u8]) -> String {
 /// An archive's entries (`path`, folder?, size) as a tree, folders first at
 /// every level and each entry indented under the folder it sits in.
 fn archive_tree(entries: Vec<(String, bool, u64)>) -> PreviewListing {
-    let mut paths: std::collections::BTreeMap<String, (bool, Option<u64>)> = std::collections::BTreeMap::new();
+    let mut paths: std::collections::BTreeMap<String, (bool, Option<u64>)> =
+        std::collections::BTreeMap::new();
     let mut total: u64 = 0;
     for (name, is_dir, size) in entries {
         let name = name.replace('\\', "/");
@@ -286,7 +304,14 @@ fn archive_tree(entries: Vec<(String, bool, u64)>) -> PreviewListing {
         }
         // Archives often list only files; their folders are implied.
         let mut parent = String::new();
-        for part in trimmed.split('/').collect::<Vec<_>>().iter().rev().skip(1).rev() {
+        for part in trimmed
+            .split('/')
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+            .skip(1)
+            .rev()
+        {
             if !parent.is_empty() {
                 parent.push('/');
             }
@@ -352,7 +377,11 @@ fn sort_key(
 fn cap(mut items: Vec<ListingItem>, summary: String) -> PreviewListing {
     let hidden = items.len().saturating_sub(MAX_ITEMS);
     items.truncate(MAX_ITEMS);
-    PreviewListing { items, summary, hidden }
+    PreviewListing {
+        items,
+        summary,
+        hidden,
+    }
 }
 
 // The order the listing sorts names in, Explorer's.
@@ -414,7 +443,11 @@ mod tests {
             std::fs::write(dir.path().join(name), "x").unwrap();
         }
         let listing = read_folder(dir.path(), false).unwrap();
-        let names: Vec<_> = listing.items.iter().map(|item| item.name.as_str()).collect();
+        let names: Vec<_> = listing
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect();
         assert_eq!(names, ["F1.txt", "f2.txt", "f10.txt"]);
     }
 
@@ -425,7 +458,11 @@ mod tests {
         std::fs::create_dir(dir.path().join("Zeta")).unwrap();
         std::fs::create_dir(dir.path().join("beta")).unwrap();
         let listing = read_folder(dir.path(), false).unwrap();
-        let names: Vec<_> = listing.items.iter().map(|item| item.name.as_str()).collect();
+        let names: Vec<_> = listing
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect();
         assert_eq!(names, ["beta", "Zeta", "a.txt"]);
         assert_eq!(listing.summary, "2 pastas · 1 arquivo");
     }
@@ -435,7 +472,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pack.zip");
         let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         writer.start_file("readme.txt", options).unwrap();
         writer.write_all(b"hi").unwrap();
         writer.start_file("src/main.rs", options).unwrap();
@@ -443,8 +481,19 @@ mod tests {
         writer.finish().unwrap();
 
         let listing = read_zip(&path).unwrap();
-        let lines: Vec<_> = listing.items.iter().map(|item| (item.depth, item.name.as_str(), item.is_dir)).collect();
-        assert_eq!(lines, [(0, "src", true), (1, "main.rs", false), (0, "readme.txt", false)]);
+        let lines: Vec<_> = listing
+            .items
+            .iter()
+            .map(|item| (item.depth, item.name.as_str(), item.is_dir))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (0, "src", true),
+                (1, "main.rs", false),
+                (0, "readme.txt", false)
+            ]
+        );
         assert!(listing.summary.starts_with("1 pasta · 2 arquivos"));
     }
 
@@ -452,9 +501,19 @@ mod tests {
     fn seven_zip_blocks_become_entries() {
         let text = "Listing archive: x.rar\n\n--\nPath = x.rar\nType = Rar5\n\n----------\nPath = docs\\a b.txt\nFolder = -\nSize = 12\nAttributes = A\n\nPath = docs\nFolder = +\nSize = 0\nAttributes = D\n\n";
         let entries = parse_seven_zip(text);
-        assert_eq!(entries, [("docs\\a b.txt".to_string(), false, 12), ("docs".to_string(), true, 0)]);
+        assert_eq!(
+            entries,
+            [
+                ("docs\\a b.txt".to_string(), false, 12),
+                ("docs".to_string(), true, 0)
+            ]
+        );
         let listing = archive_tree(entries);
-        let lines: Vec<_> = listing.items.iter().map(|item| (item.depth, item.name.as_str())).collect();
+        let lines: Vec<_> = listing
+            .items
+            .iter()
+            .map(|item| (item.depth, item.name.as_str()))
+            .collect();
         assert_eq!(lines, [(0, "docs"), (1, "a b.txt")]);
     }
 
@@ -463,7 +522,10 @@ mod tests {
         let text = "-rw-rw-rw-  0 0      0           3 nov  04 11:11 pasta/ação teste.txt\r\ndrwxr-xr-x  0 0      0           0 nov  04 11:11 pasta/\r\n";
         assert_eq!(
             parse_tar_listing(text),
-            [("pasta/ação teste.txt".to_string(), false, 3), ("pasta/".to_string(), true, 0)]
+            [
+                ("pasta/ação teste.txt".to_string(), false, 3),
+                ("pasta/".to_string(), true, 0)
+            ]
         );
     }
 }

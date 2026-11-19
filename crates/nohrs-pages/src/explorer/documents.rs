@@ -25,7 +25,22 @@ const MAX_TEXT: usize = 300_000;
 pub(crate) fn is_document(path: &str) -> bool {
     matches!(
         extension(path).as_str(),
-        "docx" | "docm" | "dotx" | "dotm" | "odt" | "ott" | "rtf" | "doc" | "dot" | "pptx" | "ppt" | "xlsx" | "xls" | "odp" | "ods" | "msg"
+        "docx"
+            | "docm"
+            | "dotx"
+            | "dotm"
+            | "odt"
+            | "ott"
+            | "rtf"
+            | "doc"
+            | "dot"
+            | "pptx"
+            | "ppt"
+            | "xlsx"
+            | "xls"
+            | "odp"
+            | "ods"
+            | "msg"
     )
 }
 
@@ -59,7 +74,9 @@ fn cap(mut text: String) -> String {
         }
         text.truncate(end);
         text.push_str("\n\n---\n\n");
-        text.push_str(nohrs_core::t!("*(O resto do documento não cabe na visualização.)*"));
+        text.push_str(nohrs_core::t!(
+            "*(O resto do documento não cabe na visualização.)*"
+        ));
     }
     text
 }
@@ -71,12 +88,19 @@ fn cap(mut text: String) -> String {
 fn zip_part(path: &str, name: &str) -> Result<String, String> {
     let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
-    let index = archive.index_for_name(name).ok_or_else(|| format!("{name} not found"))?;
-    let entry = archive.by_index_raw(index).map_err(|error| error.to_string())?;
+    let index = archive
+        .index_for_name(name)
+        .ok_or_else(|| format!("{name} not found"))?;
+    let entry = archive
+        .by_index_raw(index)
+        .map_err(|error| error.to_string())?;
     let stored = entry.compression() == zip::CompressionMethod::Stored;
     let mut bytes = Vec::new();
     if stored {
-        entry.take(MAX_XML).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+        entry
+            .take(MAX_XML)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
     } else {
         flate2::read::DeflateDecoder::new(entry)
             .take(MAX_XML)
@@ -90,7 +114,11 @@ fn zip_part(path: &str, name: &str) -> Result<String, String> {
 /// between tags, entities decoded.
 #[derive(Debug, PartialEq)]
 enum Token<'a> {
-    Open { name: &'a str, attributes: &'a str, empty: bool },
+    Open {
+        name: &'a str,
+        attributes: &'a str,
+        empty: bool,
+    },
     Close(&'a str),
     Text(String),
 }
@@ -100,36 +128,42 @@ enum Token<'a> {
 /// skipped, CDATA is text.
 fn tokens(xml: &str) -> impl Iterator<Item = Token<'_>> {
     let mut rest = xml;
-    std::iter::from_fn(move || loop {
-        if rest.is_empty() {
-            return None;
-        }
-        if let Some(after) = rest.strip_prefix('<') {
-            if let Some(cdata) = after.strip_prefix("![CDATA[") {
-                let end = cdata.find("]]>").unwrap_or(cdata.len());
-                let text = cdata[..end].to_string();
-                rest = cdata.get(end + 3..).unwrap_or("");
-                return Some(Token::Text(text));
+    std::iter::from_fn(move || {
+        loop {
+            if rest.is_empty() {
+                return None;
             }
-            let end = after.find('>').unwrap_or(after.len());
-            let tag = &after[..end];
-            rest = after.get(end + 1..).unwrap_or("");
-            if tag.starts_with('?') || tag.starts_with('!') {
-                continue;
+            if let Some(after) = rest.strip_prefix('<') {
+                if let Some(cdata) = after.strip_prefix("![CDATA[") {
+                    let end = cdata.find("]]>").unwrap_or(cdata.len());
+                    let text = cdata[..end].to_string();
+                    rest = cdata.get(end + 3..).unwrap_or("");
+                    return Some(Token::Text(text));
+                }
+                let end = after.find('>').unwrap_or(after.len());
+                let tag = &after[..end];
+                rest = after.get(end + 1..).unwrap_or("");
+                if tag.starts_with('?') || tag.starts_with('!') {
+                    continue;
+                }
+                if let Some(name) = tag.strip_prefix('/') {
+                    return Some(Token::Close(name.trim()));
+                }
+                let empty = tag.ends_with('/');
+                let tag = tag.trim_end_matches('/');
+                let (name, attributes) = tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
+                return Some(Token::Open {
+                    name,
+                    attributes,
+                    empty,
+                });
             }
-            if let Some(name) = tag.strip_prefix('/') {
-                return Some(Token::Close(name.trim()));
+            let end = rest.find('<').unwrap_or(rest.len());
+            let text = &rest[..end];
+            rest = &rest[end..];
+            if !text.is_empty() {
+                return Some(Token::Text(unescape(text)));
             }
-            let empty = tag.ends_with('/');
-            let tag = tag.trim_end_matches('/');
-            let (name, attributes) = tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
-            return Some(Token::Open { name, attributes, empty });
-        }
-        let end = rest.find('<').unwrap_or(rest.len());
-        let text = &rest[..end];
-        rest = &rest[end..];
-        if !text.is_empty() {
-            return Some(Token::Text(unescape(text)));
         }
     })
 }
@@ -175,7 +209,11 @@ fn unescape(text: &str) -> String {
             _ => entity
                 .strip_prefix("#x")
                 .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| entity.strip_prefix('#').and_then(|decimal| decimal.parse().ok()))
+                .or_else(|| {
+                    entity
+                        .strip_prefix('#')
+                        .and_then(|decimal| decimal.parse().ok())
+                })
                 .and_then(char::from_u32),
         };
         match decoded {
@@ -196,7 +234,10 @@ fn unescape(text: &str) -> String {
 fn escape_inline(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
-        if matches!(character, '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '|' | '\\') {
+        if matches!(
+            character,
+            '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '|' | '\\'
+        ) {
             out.push('\\');
         }
         out.push(character);
@@ -314,7 +355,11 @@ impl Writer {
         if cells.is_empty() {
             return;
         }
-        let line = cells.iter().map(|cell| cell.replace('|', "\\|")).collect::<Vec<_>>().join(" | ");
+        let line = cells
+            .iter()
+            .map(|cell| cell.replace('|', "\\|"))
+            .collect::<Vec<_>>()
+            .join(" | ");
         self.out.push_str("| ");
         self.out.push_str(&line);
         self.out.push_str(" |\n");
@@ -337,9 +382,17 @@ fn heading_level(style: &str) -> Option<usize> {
         return Some(1);
     }
     let digits: String = lower.chars().filter(char::is_ascii_digit).collect();
-    let named = ["heading", "ttulo", "titulo", "berschrift", "titre", "titolo", "kop"]
-        .iter()
-        .any(|name| lower.starts_with(name));
+    let named = [
+        "heading",
+        "ttulo",
+        "titulo",
+        "berschrift",
+        "titre",
+        "titolo",
+        "kop",
+    ]
+    .iter()
+    .any(|name| lower.starts_with(name));
     if named && !digits.is_empty() {
         return digits.parse().ok();
     }
@@ -354,10 +407,20 @@ fn docx(path: &str) -> Result<String, String> {
     let mut in_text = false;
     for token in tokens(&xml) {
         match token {
-            Token::Open { name, attributes, empty } => match name {
-                "w:pStyle" => writer.heading = attribute(attributes, "w:val").and_then(heading_level),
+            Token::Open {
+                name,
+                attributes,
+                empty,
+            } => match name {
+                "w:pStyle" => {
+                    writer.heading = attribute(attributes, "w:val").and_then(heading_level)
+                }
                 "w:ilvl" => {
-                    writer.list_depth = Some(attribute(attributes, "w:val").and_then(|level| level.parse().ok()).unwrap_or(0))
+                    writer.list_depth = Some(
+                        attribute(attributes, "w:val")
+                            .and_then(|level| level.parse().ok())
+                            .unwrap_or(0),
+                    )
                 }
                 "w:numPr" if writer.list_depth.is_none() => writer.list_depth = Some(0),
                 "w:r" => {
@@ -365,8 +428,12 @@ fn docx(path: &str) -> Result<String, String> {
                     italic = false;
                 }
                 "w:rPr" if !empty => in_run_properties = true,
-                "w:b" | "w:bCs" if in_run_properties => bold = !matches!(attribute(attributes, "w:val"), Some("0" | "false")),
-                "w:i" | "w:iCs" if in_run_properties => italic = !matches!(attribute(attributes, "w:val"), Some("0" | "false")),
+                "w:b" | "w:bCs" if in_run_properties => {
+                    bold = !matches!(attribute(attributes, "w:val"), Some("0" | "false"))
+                }
+                "w:i" | "w:iCs" if in_run_properties => {
+                    italic = !matches!(attribute(attributes, "w:val"), Some("0" | "false"))
+                }
                 "w:t" if !empty => in_text = true,
                 "w:tab" => writer.raw("\t"),
                 "w:br" | "w:cr" => writer.raw("  \n"),
@@ -400,10 +467,18 @@ fn odt(path: &str) -> Result<String, String> {
     let mut in_paragraph = 0usize;
     for token in tokens(&xml) {
         match token {
-            Token::Open { name, attributes, empty } => match name {
+            Token::Open {
+                name,
+                attributes,
+                empty,
+            } => match name {
                 "text:h" if !empty => {
                     in_paragraph += 1;
-                    writer.heading = Some(attribute(attributes, "text:outline-level").and_then(|level| level.parse().ok()).unwrap_or(1));
+                    writer.heading = Some(
+                        attribute(attributes, "text:outline-level")
+                            .and_then(|level| level.parse().ok())
+                            .unwrap_or(1),
+                    );
                 }
                 "text:p" if !empty => {
                     in_paragraph += 1;
@@ -415,7 +490,9 @@ fn odt(path: &str) -> Result<String, String> {
                 "text:tab" => writer.raw("\t"),
                 "text:line-break" => writer.raw("  \n"),
                 "text:s" => {
-                    let count = attribute(attributes, "text:c").and_then(|count| count.parse().ok()).unwrap_or(1usize);
+                    let count = attribute(attributes, "text:c")
+                        .and_then(|count| count.parse().ok())
+                        .unwrap_or(1usize);
                     writer.raw(&" ".repeat(count.min(64)));
                 }
                 "table:table" if !empty => writer.start_table(),
@@ -453,8 +530,18 @@ fn rtf(path: &str) -> Result<String, String> {
 /// character skipped). Groups that are no text (fonts, colours, styles,
 /// pictures, `\*` destinations) are skipped whole.
 fn rtf_text(bytes: &[u8]) -> String {
-    const SKIPPED: [&str; 10] =
-        ["fonttbl", "colortbl", "stylesheet", "info", "pict", "header", "footer", "themedata", "datastore", "listtable"];
+    const SKIPPED: [&str; 10] = [
+        "fonttbl",
+        "colortbl",
+        "stylesheet",
+        "info",
+        "pict",
+        "header",
+        "footer",
+        "themedata",
+        "datastore",
+        "listtable",
+    ];
     let mut out = String::new();
     // For each open group, whether its text is skipped.
     let mut skipping: Vec<bool> = vec![false];
@@ -480,7 +567,9 @@ fn rtf_text(bytes: &[u8]) -> String {
                     break;
                 };
                 if next == b'\'' {
-                    let hex = bytes.get(index + 1..index + 3).and_then(|hex| std::str::from_utf8(hex).ok());
+                    let hex = bytes
+                        .get(index + 1..index + 3)
+                        .and_then(|hex| std::str::from_utf8(hex).ok());
                     if let Some(code) = hex.and_then(|hex| u8::from_str_radix(hex, 16).ok())
                         && !skip
                     {
@@ -521,7 +610,9 @@ fn rtf_text(bytes: &[u8]) -> String {
                         index += 1;
                     }
                 }
-                let number: Option<i32> = std::str::from_utf8(&bytes[number_start..index]).ok().and_then(|n| n.parse().ok());
+                let number: Option<i32> = std::str::from_utf8(&bytes[number_start..index])
+                    .ok()
+                    .and_then(|n| n.parse().ok());
                 if index < bytes.len() && bytes[index] == b' ' {
                     index += 1;
                 }
@@ -570,8 +661,9 @@ fn rtf_text(bytes: &[u8]) -> String {
 /// are written in, outside `\u`).
 fn cp1252(byte: u8) -> char {
     const HIGH: [char; 32] = [
-        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}', '\u{90}', '‘', '’',
-        '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
+        'ž', 'Ÿ',
     ];
     match byte {
         0x80..=0x9F => HIGH[(byte - 0x80) as usize],
@@ -585,8 +677,9 @@ mod platform {
     //! Windows Search's filters have no safe binding.
 
     use windows::Win32::Storage::IndexServer::{
-        CHUNK_TEXT, FILTER_E_END_OF_CHUNKS, FILTER_E_NO_MORE_TEXT, IFILTER_INIT_APPLY_INDEX_ATTRIBUTES,
-        IFILTER_INIT_CANON_PARAGRAPHS, IFilter, LoadIFilter, STAT_CHUNK,
+        CHUNK_TEXT, FILTER_E_END_OF_CHUNKS, FILTER_E_NO_MORE_TEXT,
+        IFILTER_INIT_APPLY_INDEX_ATTRIBUTES, IFILTER_INIT_CANON_PARAGRAPHS, IFilter, LoadIFilter,
+        STAT_CHUNK,
     };
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
     use windows::core::{HSTRING, Interface, PWSTR};
@@ -617,15 +710,22 @@ mod platform {
 
     fn read(path: &str) -> Result<String, String> {
         let mut raw = std::ptr::null_mut();
-        unsafe { LoadIFilter(&HSTRING::from(path), None, &mut raw) }.map_err(|error| error.message().to_string())?;
+        unsafe { LoadIFilter(&HSTRING::from(path), None, &mut raw) }
+            .map_err(|error| error.message().to_string())?;
         if raw.is_null() {
             return Err("no filter".into());
         }
         let unknown = unsafe { windows::core::IUnknown::from_raw(raw) };
-        let filter: IFilter = unknown.cast().map_err(|error| error.message().to_string())?;
+        let filter: IFilter = unknown
+            .cast()
+            .map_err(|error| error.message().to_string())?;
         let mut flags = 0u32;
         let init = unsafe {
-            filter.Init((IFILTER_INIT_CANON_PARAGRAPHS.0 | IFILTER_INIT_APPLY_INDEX_ATTRIBUTES.0) as u32, &[], &mut flags)
+            filter.Init(
+                (IFILTER_INIT_CANON_PARAGRAPHS.0 | IFILTER_INIT_APPLY_INDEX_ATTRIBUTES.0) as u32,
+                &[],
+                &mut flags,
+            )
         };
         if init < 0 {
             return Err(format!("filter init {init:#x}"));
@@ -658,7 +758,9 @@ mod platform {
             }
         }
         // Filters mark paragraph breaks with carriage returns.
-        Ok(String::from_utf16_lossy(&units).replace("\r\n", "\n").replace('\r', "\n"))
+        Ok(String::from_utf16_lossy(&units)
+            .replace("\r\n", "\n")
+            .replace('\r', "\n"))
     }
 }
 
@@ -687,8 +789,12 @@ mod tests {
         {
             let file = std::fs::File::create(&path).expect("create");
             let mut zip = zip::ZipWriter::new(file);
-            zip.start_file("word/document.xml", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored))
-                .expect("entry");
+            zip.start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .expect("entry");
             std::io::Write::write_all(&mut zip, xml.as_bytes()).expect("write");
             zip.finish().expect("finish");
         }
@@ -696,7 +802,10 @@ mod tests {
         assert!(markdown.contains("# Roteiro & cortes"), "{markdown}");
         assert!(markdown.contains("Texto **forte** e fim\\*"), "{markdown}");
         assert!(markdown.contains("  - item"), "{markdown}");
-        assert!(markdown.contains("| A | B |\n| --- | --- |\n| 1 |  |"), "{markdown}");
+        assert!(
+            markdown.contains("| A | B |\n| --- | --- |\n| 1 |  |"),
+            "{markdown}"
+        );
     }
 
     #[test]
@@ -716,7 +825,10 @@ mod tests {
     #[test]
     fn attributes_are_matched_by_whole_name() {
         assert_eq!(attribute(r#"w:val="0" xml:val="x""#, "w:val"), Some("0"));
-        assert_eq!(attribute(r#"text:outline-level="2""#, "text:outline-level"), Some("2"));
+        assert_eq!(
+            attribute(r#"text:outline-level="2""#, "text:outline-level"),
+            Some("2")
+        );
         assert_eq!(attribute(r#"w:valx="1""#, "w:val"), None);
     }
 }

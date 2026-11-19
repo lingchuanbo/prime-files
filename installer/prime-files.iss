@@ -1,7 +1,7 @@
-; Prime Files installer (Inno Setup 6).
+; LumaFiles installer (Inno Setup 6).
 ;
 ; Built by .github/workflows/release.yml:
-;   ISCC /DAppVersion=0.1.0 /DExeSource=..\target\dist\nohrs.exe /DIndexerSource=..\target\dist\prime-files-indexer.exe installer\prime-files.iss
+;   ISCC /DAppVersion=0.1.0 /DExeSource=..\target\dist\LumaFiles.exe /DIndexerSource=..\target\dist\prime-files-indexer.exe installer\prime-files.iss
 ;
 ; Installs for the current user only (no administrator to install), the way
 ; per-user app installers do; only the dependencies that need it ask for
@@ -20,7 +20,7 @@
   #define AppVersion "0.0.0"
 #endif
 #ifndef ExeSource
-  #define ExeSource "..\target\dist\nohrs.exe"
+  #define ExeSource "..\target\dist\LumaFiles.exe"
 #endif
 #ifndef IndexerSource
   #define IndexerSource "..\target\dist\prime-files-indexer.exe"
@@ -32,8 +32,8 @@
   #define DllSource "..\target\dist\dll"
 #endif
 
-#define AppName "Prime Files"
-#define AppExe "PrimeFiles.exe"
+#define AppName "LumaFiles"
+#define AppExe "LumaFiles.exe"
 #define SevenZipUrl "https://www.7-zip.org/a/7z2409-x64.exe"
 #define VcRedistUrl "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
@@ -42,7 +42,7 @@ AppId={{6B1E4D2A-7C3F-4E8B-9A51-2F0D8C6E4B17}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
-AppPublisher=Prime Files
+AppPublisher=LumaFiles
 AppPublisherURL=https://github.com/CakeDev4k/prime-files
 AppSupportURL=https://github.com/CakeDev4k/prime-files/issues
 AppUpdatesURL=https://github.com/CakeDev4k/prime-files/releases
@@ -85,8 +85,8 @@ ptbr.InstallingMedia=Ativando o Media Feature Pack do Windows (pode demorar)...
 en.InstallingMedia=Turning on Windows' Media Feature Pack (this can take a while)...
 ptbr.DownloadFailed=Não foi possível baixar %1.%n%n%2%n%nVerifique a internet e tente de novo.
 en.DownloadFailed=Could not download %1.%n%n%2%n%nCheck the connection and try again.
-ptbr.MediaRestart=O Media Feature Pack foi ativado. Reinicie o Windows antes de abrir o Prime Files.
-en.MediaRestart=The Media Feature Pack was turned on. Restart Windows before opening Prime Files.
+ptbr.MediaRestart=O Media Feature Pack foi ativado. Reinicie o Windows antes de abrir o LumaFiles.
+en.MediaRestart=The Media Feature Pack was turned on. Restart Windows before opening LumaFiles.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -223,7 +223,7 @@ begin
   end;
 end;
 
-// Gives folders back to Explorer if Prime Files had been made the default
+// Gives folders back to Explorer if LumaFiles had been made the default
 // file manager (Settings > Explorer), the same entries its "No" removes, so
 // nothing is left pointing at a program that is gone.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

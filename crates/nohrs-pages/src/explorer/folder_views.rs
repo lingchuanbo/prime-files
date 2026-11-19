@@ -7,12 +7,12 @@
 //! folder and written, debounced, to the same redb store as the tabs.
 
 use gpui::{App, AppContext as _, BorrowAppContext, Global, Task};
+use nohrs_core::telemetry::LogErr;
 use nohrs_store::{KvKey, KvStore, kv_key};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use nohrs_core::telemetry::LogErr;
 
 use super::types::SortKey;
 

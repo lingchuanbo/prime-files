@@ -65,7 +65,12 @@ pub fn render(
                                 let Some(item) = page.filtered_entries.get(ix).cloned() else {
                                     continue;
                                 };
-                                let icon = page.thumbnails.icon(&item.path, item.kind == "dir", icon_px, cx);
+                                let icon = page.thumbnails.icon(
+                                    &item.path,
+                                    item.kind == "dir",
+                                    icon_px,
+                                    cx,
+                                );
                                 items = items.child(render_item(page, item, ix, icon, cx));
                             }
                             items
@@ -75,7 +80,6 @@ pub fn render(
             )
             .track_scroll(&page.compact_scroll_handle),
         )
-
         .child(
             // Measures the height columns are filled to. A change is only
             // known after layout, so it takes effect on the next frame.
@@ -105,7 +109,9 @@ pub fn render(
                         }
                         let delta = match event.delta {
                             ScrollDelta::Lines(lines) if lines.x == 0.0 => lines.y * WHEEL_STEP,
-                            ScrollDelta::Pixels(pixels) if pixels.x == px(0.0) => f32::from(pixels.y),
+                            ScrollDelta::Pixels(pixels) if pixels.x == px(0.0) => {
+                                f32::from(pixels.y)
+                            }
                             // A sideways gesture already scrolls the list.
                             _ => return,
                         };
@@ -161,7 +167,9 @@ fn render_item(
         .rounded(px(4.0))
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
-        .when(!selected, |this| this.hover(|this| this.bg(rgb(theme::bg_hover()))))
+        .when(!selected, |this| {
+            this.hover(|this| this.bg(rgb(theme::bg_hover())))
+        })
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -197,16 +205,26 @@ fn render_item(
                 .size(px(16.0))
                 .flex_shrink_0()
                 .into_any_element(),
-            None => Icon::new(if is_dir { IconName::Folder } else { IconName::File })
-                .size_4()
-                .text_color(rgb(theme::gray_500()))
-                .into_any_element(),
+            None => Icon::new(if is_dir {
+                IconName::Folder
+            } else {
+                IconName::File
+            })
+            .size_4()
+            .text_color(rgb(theme::gray_500()))
+            .into_any_element(),
         })
         .child(match rename_input {
             Some(input) => div()
                 .flex_1()
                 .min_w(px(0.0))
-                .child(Input::new(&input).small().appearance(false).px(px(0.0)).text_sm())
+                .child(
+                    Input::new(&input)
+                        .small()
+                        .appearance(false)
+                        .px(px(0.0))
+                        .text_sm(),
+                )
                 .into_any_element(),
             None => div()
                 .flex_1()
@@ -223,7 +241,9 @@ fn render_item(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(crate::explorer::view::highlighted_name(&item.name, &highlight)),
+                        .child(crate::explorer::view::highlighted_name(
+                            &item.name, &highlight,
+                        )),
                 )
                 .when_some(page.hit_folder(&item.path), |this, folder| {
                     this.child(crate::explorer::view::hit_folder_label(folder))
@@ -233,6 +253,8 @@ fn render_item(
         .children(crate::explorer::hover_audio::progress_strip(&item.path))
         .children(page.reveal_glow(&item.path))
         .map(|this| page.track_hit(this, ix))
-        .when(is_dir, |this| crate::explorer::drag::drop_into(this, &item.path, cx))
+        .when(is_dir, |this| {
+            crate::explorer::drag::drop_into(this, &item.path, cx)
+        })
         .into_any_element()
 }

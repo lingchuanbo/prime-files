@@ -82,7 +82,9 @@ pub(crate) fn space(path: &str, cx: &mut App) -> Option<Space> {
 
 fn refresh_if_stale(cx: &mut App) {
     let spaces = cx.default_global::<Spaces>();
-    let fresh = spaces.read_at.is_some_and(|at| at.elapsed() < REFRESH_AFTER);
+    let fresh = spaces
+        .read_at
+        .is_some_and(|at| at.elapsed() < REFRESH_AFTER);
     if fresh || spaces.reading {
         return;
     }
@@ -123,8 +125,15 @@ mod platform {
                 // The free space this user may fill (quotas count), as
                 // Explorer reports it. An empty card reader fails here and is
                 // left out.
-                unsafe { GetDiskFreeSpaceExW(&HSTRING::from(root.as_str()), Some(&mut free), Some(&mut total), None) }
-                    .ok()?;
+                unsafe {
+                    GetDiskFreeSpaceExW(
+                        &HSTRING::from(root.as_str()),
+                        Some(&mut free),
+                        Some(&mut total),
+                        None,
+                    )
+                }
+                .ok()?;
                 (total > 0).then_some((root, Space { free, total }))
             })
             .collect()
@@ -155,10 +164,19 @@ mod tests {
 
     #[test]
     fn the_bar_turns_red_past_ninety_percent() {
-        let space = Space { free: 50, total: 1000 };
+        let space = Space {
+            free: 50,
+            total: 1000,
+        };
         assert!(space.nearly_full());
         assert!((space.used_fraction() - 0.95).abs() < 1e-6);
-        assert!(!Space { free: 500, total: 1000 }.nearly_full());
+        assert!(
+            !Space {
+                free: 500,
+                total: 1000
+            }
+            .nearly_full()
+        );
         assert_eq!(Space { free: 0, total: 0 }.used_fraction(), 0.0);
     }
 }

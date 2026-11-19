@@ -6,8 +6,8 @@
 //! selection, keyboard movement, rename, activation — keeps working unchanged;
 //! only the views insert a header row before each run.
 
-use nohrs_core::{k, t};
 use nohrs_core::i18n;
+use nohrs_core::{k, t};
 use nohrs_services::fs::listing::FileEntryDto;
 use time::{Date, Duration, OffsetDateTime, UtcOffset};
 
@@ -116,14 +116,17 @@ fn group_of(entry: &FileEntryDto, by: GroupBy, clock: &Clock) -> (u8, &'static s
                 .iter()
                 .zip(0u8..)
                 .find(|((kind, _), _)| kind.matches(entry))
-                .map_or((KINDS.len() as u8, t!("Outros")), |((_, label), rank)| (rank, i18n::tr(label)))
+                .map_or((KINDS.len() as u8, t!("Outros")), |((_, label), rank)| {
+                    (rank, i18n::tr(label))
+                })
         }
         GroupBy::Modified => {
             let Some(date) = clock.date_of(entry.modified) else {
                 return (7, t!("Sem data"));
             };
             let today = clock.today;
-            let week_start = today - Duration::days(i64::from(today.weekday().number_days_from_monday()));
+            let week_start =
+                today - Duration::days(i64::from(today.weekday().number_days_from_monday()));
             if date >= today {
                 (0, t!("Hoje"))
             } else if Some(date) == today.previous_day() {
@@ -239,10 +242,24 @@ mod tests {
             entry("a.png", "file", 1, 0),
             entry("z.weird", "file", 1, 0),
         ];
-        let groups = group_entries(&mut entries, GroupBy::Kind, &Clock::at(date!(2026 - 11 - 03)));
-        assert_eq!(names(&entries), ["docs", "b.png", "a.png", "a.mp4", "z.weird"]);
+        let groups = group_entries(
+            &mut entries,
+            GroupBy::Kind,
+            &Clock::at(date!(2026 - 11 - 03)),
+        );
+        assert_eq!(
+            names(&entries),
+            ["docs", "b.png", "a.png", "a.mp4", "z.weird"]
+        );
         assert_eq!(labels(&groups), ["Pastas", "Imagens", "Vídeos", "Outros"]);
-        assert_eq!(groups[1], Group { label: "Imagens", start: 1, len: 2 });
+        assert_eq!(
+            groups[1],
+            Group {
+                label: "Imagens",
+                start: 1,
+                len: 2
+            }
+        );
     }
 
     #[test]
@@ -284,7 +301,11 @@ mod tests {
             entry("dir", "dir", 0, 0),
             entry("tiny", "file", 10, 0),
         ];
-        let groups = group_entries(&mut entries, GroupBy::Size, &Clock::at(date!(2026 - 11 - 03)));
+        let groups = group_entries(
+            &mut entries,
+            GroupBy::Size,
+            &Clock::at(date!(2026 - 11 - 03)),
+        );
         assert_eq!(names(&entries), ["dir", "empty", "tiny", "big"]);
         assert_eq!(groups.len(), 4);
     }
@@ -292,8 +313,16 @@ mod tests {
     #[test]
     fn rows_put_a_header_before_each_group() {
         let groups = vec![
-            Group { label: "A", start: 0, len: 3 },
-            Group { label: "B", start: 3, len: 1 },
+            Group {
+                label: "A",
+                start: 0,
+                len: 3,
+            },
+            Group {
+                label: "B",
+                start: 3,
+                len: 1,
+            },
         ];
         assert_eq!(
             list_rows(&groups, 4),

@@ -9,7 +9,7 @@ use std::process::Command as ProcessCommand;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "nohrs",
+    name = "LumaFiles",
     version,
     about = "Launcher × Explorer file workspace",
     // A path and a subcommand are two different invocations; without this a
@@ -41,6 +41,14 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Open a folder, or select a file in its parent folder.
+    Open {
+        /// Folder or file to open.
+        #[arg(value_parser = parse_path)]
+        path: std::path::PathBuf,
+    },
+    /// Print the active explorer tab's folder; requires a running window.
+    CurrentPath,
     /// Inspect or manage the user configuration.
     Config {
         #[command(subcommand)]
@@ -190,7 +198,7 @@ fn edit_config(path: &std::path::Path) -> i32 {
 
 /// Reads the `PATH` argument, repairing a quoted drive root.
 ///
-/// Windows hands a folder over as `nohrs.exe "%1"`, and for a drive that is
+/// Windows hands a folder over as `LumaFiles.exe "%1"`, and for a drive that is
 /// `"C:\"`: by the rules every program parses its command line with, the
 /// backslash escapes the closing quote, and the argument arrives as `C:"`.
 /// A quote can never be part of a Windows path, so a trailing one is that
@@ -212,5 +220,14 @@ mod tests {
         assert_eq!(cli.path, Some(std::path::PathBuf::from("C:\\")));
         let cli = Cli::parse_from(["nohrs", r"C:\Users"]);
         assert_eq!(cli.path, Some(std::path::PathBuf::from(r"C:\Users")));
+    }
+
+    #[test]
+    fn external_commands_parse_without_breaking_path_arguments() {
+        let cli = Cli::parse_from(["nohrs", "open", r"C:\My Files"]);
+        assert!(matches!(cli.command, Some(Command::Open { path }) if path == std::path::PathBuf::from(r"C:\My Files")));
+        let cli = Cli::parse_from(["nohrs", "current-path"]);
+        assert!(matches!(cli.command, Some(Command::CurrentPath)));
+        assert!(Cli::try_parse_from(["nohrs", "open"]).is_err());
     }
 }

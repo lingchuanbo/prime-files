@@ -1,7 +1,8 @@
+mod archive;
+mod archive_ops;
+mod batch_rename;
 pub(crate) mod commands;
 pub(crate) mod context_menu;
-mod archive;
-mod batch_rename;
 mod creative;
 mod documents;
 mod drag;
@@ -9,44 +10,44 @@ pub(crate) mod drives;
 mod entries;
 pub(crate) mod everything;
 pub(crate) mod favorites;
-pub(crate) mod folder_watch;
-pub(crate) mod file_ops;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod file_clipboard;
+pub(crate) mod file_ops;
 mod filter;
 mod folder_views;
+pub(crate) mod folder_watch;
 mod grouping;
 pub(crate) mod hover_audio;
 mod list_setup;
 mod marquee;
-mod navigation;
-pub(crate) mod network;
 /// The split-view container that owns one or more panes (`docs/explorer-essentials.md` §3).
 mod media;
 mod model3d;
-mod smooth_scroll;
+mod navigation;
+pub(crate) mod network;
 mod page;
+mod path_edit;
 mod pdf;
 mod picture;
 mod pinyin;
-mod path_edit;
 mod places;
 mod preview;
 pub(crate) mod preview_listing;
 mod quick_search;
 mod recent;
 mod search;
+mod smooth_scroll;
 pub(crate) mod space_map;
 mod state;
-pub(crate) mod thumbnails;
-pub(crate) mod waveforms;
 pub(crate) mod tags;
-mod workspace_icons;
+pub(crate) mod thumbnails;
 mod tree;
 mod types;
 /// Rendering of a single explorer pane: header, sidebar, listing, and preview.
 pub mod view;
+pub(crate) mod waveforms;
+mod workspace_icons;
 mod zoom;
 
 #[cfg(test)]
@@ -58,10 +59,10 @@ pub use state::ExplorerPane;
 // Part of `status_for_footer`'s signature, so it has to travel with it. The rest
 // of `types` stays internal.
 pub use types::StatusLevel;
-/// The name the footer shows for a listing zoom value.
-pub use zoom::label as zoom_label;
 /// The footer zoom menu's views.
 pub use zoom::PRESETS as ZOOM_PRESETS;
+/// The name the footer shows for a listing zoom value.
+pub use zoom::label as zoom_label;
 
 /// One result returned by the resident filename index.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,7 +91,7 @@ pub fn search_indexed(query: &str, limit: u32) -> Result<(Vec<IndexedSearchHit>,
     // reporting it unavailable even after the service starts. The query itself
     // is the authoritative availability check.
     let hits = everything::mft::search(&terms, limit)
-        .map_err(|error| format!("Prime Files 索引服务暂不可用：{error}"))?;
+        .map_err(|error| format!("轻寻文件 索引服务暂不可用：{error}"))?;
     let truncated = hits.len() >= limit as usize;
     Ok((
         hits.into_iter()

@@ -1415,11 +1415,11 @@ impl<T: PaneItem> PaneGroup<T> {
             .text_sm()
             .cursor_pointer()
             .when(is_active, |this| {
-                this.bg(rgb(theme::bg()))
+                this.bg(rgb(theme::accent_subtle()))
                     .text_color(rgb(theme::fg()))
                     .border_1()
                     .border_b_0()
-                    .border_color(rgb(theme::border()))
+                    .border_color(rgb(theme::accent()))
                     // Covers the bar's bottom border, joining the tab to the
                     // content beneath it.
                     .mb(px(-1.0))
@@ -1474,6 +1474,15 @@ impl<T: PaneItem> PaneGroup<T> {
                     on_reorder_tab(this, pane_index, drag.tab, tab_index, window, cx);
                 }
             }))
+            .when(tab_index < 10, |this| {
+                this.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(if is_active { theme::accent() } else { theme::muted() }))
+                        .child(if tab_index == 9 { "0".to_string() } else { (tab_index + 1).to_string() }),
+                )
+            })
             .when_some(icon.or(metadata.color.map(|_| IconName::Folder)), |this, icon| {
                 this.child(
                     Icon::new(icon)

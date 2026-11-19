@@ -15,7 +15,9 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::resizable::ResizableState;
-use nohrs_core::config::{Compact, DockSide, Explorer as ExplorerConfig, Layout, SpaceMap, SplitDirection, Ui};
+use nohrs_core::config::{
+    Compact, DockSide, Explorer as ExplorerConfig, Layout, SpaceMap, SplitDirection, Ui,
+};
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::fs::trash::Ledger as TrashLedger;
 use nohrs_services::search::SearchService;
@@ -97,6 +99,14 @@ actions!(
 
 static BIND_PANE_KEYS: Once = Once::new();
 
+fn tab_shortcut_index(key: &str) -> Option<usize> {
+    match key.as_bytes() {
+        [digit @ b'1'..=b'9'] => Some(usize::from(*digit - b'1')),
+        [b'0'] => Some(9),
+        _ => None,
+    }
+}
+
 fn bind_pane_keys(cx: &mut App) {
     BIND_PANE_KEYS.call_once(|| {
         cx.bind_keys(vec![
@@ -136,11 +146,17 @@ pub fn rebind_shortcuts(cx: &mut App) {
     ];
     let wanted: Vec<(String, Action)> = page_actions
         .into_iter()
-        .flat_map(|action| chords(action).into_iter().map(move |chord| (chord.to_config(), action)))
+        .flat_map(|action| {
+            chords(action)
+                .into_iter()
+                .map(move |chord| (chord.to_config(), action))
+        })
         // A key gpui cannot read would panic in `KeyBinding::new`.
         .filter(|(keys, _)| Keystroke::parse(keys).is_ok())
         .collect();
-    let mut bound = BOUND_SHORTCUTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut bound = BOUND_SHORTCUTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let context = Some(PANES_CONTEXT);
     let mut bindings: Vec<KeyBinding> = bound
         .iter()
@@ -313,11 +329,16 @@ impl ExplorerPage {
         if let Some(mut snapshot) = page.load_session() {
             if !restore_tabs {
                 for pane in &mut snapshot.panes {
-                    let retained: Vec<_> = pane.tabs.iter().cloned().enumerate()
+                    let retained: Vec<_> = pane
+                        .tabs
+                        .iter()
+                        .cloned()
+                        .enumerate()
                         .filter_map(|(index, cwd)| {
                             let meta = pane.tab_metadata.get(index).copied().unwrap_or_default();
                             (meta.pinned || meta.resident).then_some((cwd, meta))
-                        }).collect();
+                        })
+                        .collect();
                     pane.tabs = retained.iter().map(|(cwd, _)| cwd.clone()).collect();
                     pane.tab_metadata = retained.iter().map(|(_, meta)| *meta).collect();
                     pane.active_tab = 0;
@@ -381,11 +402,18 @@ impl ExplorerPage {
         }
 
         let mut resident_count = 0;
-        for (pane_index, pane) in snapshot.panes.iter().enumerate().take(self.group.pane_count()) {
+        for (pane_index, pane) in snapshot
+            .panes
+            .iter()
+            .enumerate()
+            .take(self.group.pane_count())
+        {
             for (tab_index, mut metadata) in pane.tab_metadata.iter().copied().enumerate() {
                 if metadata.resident {
                     resident_count += 1;
-                    if resident_count > 6 { metadata.resident = false; }
+                    if resident_count > 6 {
+                        metadata.resident = false;
+                    }
                 }
                 if let Some(tab) = self.group.tab(pane_index, tab_index) {
                     self.group.set_tab_metadata(tab.entity_id(), metadata);
@@ -477,7 +505,9 @@ impl ExplorerPage {
     ) {
         if let Some(tab) = self.group.tab(pane_index, tab_index) {
             let meta = self.group.tab_metadata(tab.entity_id());
-            if meta.pinned || meta.resident { return; }
+            if meta.pinned || meta.resident {
+                return;
+            }
         }
         let outcome = self.group.close_tab(pane_index, tab_index, window, cx);
         if outcome.removed.is_empty() {
@@ -579,7 +609,12 @@ impl ExplorerPage {
     /// The split key, as one key that turns the split on and off: with one
     /// pane it opens a second rooted at the pane in use; with two it closes
     /// the one nobody is working in, so focus stays where it was.
-    pub(crate) fn toggle_split(&mut self, direction: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_split(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.group.pane_count() >= 2 {
             let other = if self.group.active() == 0 { 1 } else { 0 };
             self.close_pane(other, window, cx);
@@ -601,7 +636,11 @@ impl ExplorerPage {
         let Some(window) = cx.windows().into_iter().next() else {
             return;
         };
-        let direction = if side.is_column() { SplitDirection::Vertical } else { SplitDirection::Horizontal };
+        let direction = if side.is_column() {
+            SplitDirection::Vertical
+        } else {
+            SplitDirection::Horizontal
+        };
         let first = matches!(side, DockSide::Left | DockSide::Top);
         let this = cx.entity().downgrade();
         // The event arrives inside the pane's update; the new pane is built
@@ -620,7 +659,8 @@ impl ExplorerPage {
                         page.configure_tab(&tab, Some(cwd), false, cx);
                         // Without its own preview, as `add_explorer_pane` opens one.
                         tab.update(cx, |pane, _| pane.preview_visible = false);
-                        page.group.set_ratio(if first { fraction } else { 1.0 - fraction });
+                        page.group
+                            .set_ratio(if first { fraction } else { 1.0 - fraction });
                         page.group.set_active(index, window, cx);
                         page.schedule_save(cx);
                         cx.notify();
@@ -668,9 +708,15 @@ impl ExplorerPage {
     /// Closes a whole pane (its × button), keeping at least one open (§3.1).
     /// No-op for the last pane.
     pub fn close_pane(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let protected = (0..self.group.tab_count(index)).filter_map(|i| self.group.tab(index, i))
-            .any(|tab| { let meta = self.group.tab_metadata(tab.entity_id()); meta.pinned || meta.resident });
-        if protected { return; }
+        let protected = (0..self.group.tab_count(index))
+            .filter_map(|i| self.group.tab(index, i))
+            .any(|tab| {
+                let meta = self.group.tab_metadata(tab.entity_id());
+                meta.pinned || meta.resident
+            });
+        if protected {
+            return;
+        }
         let removed = self.group.remove_pane(index, window, cx);
         if removed.is_empty() {
             return;
@@ -795,7 +841,11 @@ impl ExplorerPage {
     pub fn listing_counts(&self, cx: &App) -> (usize, usize, usize) {
         let pane = self.group.active_pane().read(cx);
         let is_file = |entry: &&nohrs_services::fs::listing::FileEntryDto| entry.kind != "dir";
-        let folders = pane.filtered_entries.iter().filter(|entry| entry.kind == "dir").count();
+        let folders = pane
+            .filtered_entries
+            .iter()
+            .filter(|entry| entry.kind == "dir")
+            .count();
         let shown = pane.filtered_entries.iter().filter(is_file).count();
         // Search results come from other folders too: compared with this
         // folder's files they read as "1121 of 272".
@@ -926,7 +976,8 @@ impl ExplorerPage {
                     active_tab: self.group.active_tab(pane_index),
                     tab_metadata: (0..self.group.tab_count(pane_index))
                         .filter_map(|index| self.group.tab(pane_index, index))
-                        .map(|tab| self.group.tab_metadata(tab.entity_id())).collect(),
+                        .map(|tab| self.group.tab_metadata(tab.entity_id()))
+                        .collect(),
                 }
             })
             .collect();
@@ -967,26 +1018,58 @@ impl ExplorerPage {
         }));
     }
 
-    fn perform_tab_menu(&mut self, id: EntityId, action: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn perform_tab_menu(
+        &mut self,
+        id: EntityId,
+        action: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tab_menu = None;
-        let Some((pane, index)) = self.group.locate_tab(id) else { cx.notify(); return; };
+        let Some((pane, index)) = self.group.locate_tab(id) else {
+            cx.notify();
+            return;
+        };
         let mut meta = self.group.tab_metadata(id);
         match action {
             0 => meta.pinned = !meta.pinned,
             1 => {
-                let count = self.group.all_tabs().iter().filter(|tab| self.group.tab_metadata(tab.entity_id()).resident).count();
-                if meta.resident || count < 6 { meta.resident = !meta.resident; }
+                let count = self
+                    .group
+                    .all_tabs()
+                    .iter()
+                    .filter(|tab| self.group.tab_metadata(tab.entity_id()).resident)
+                    .count();
+                if meta.resident || count < 6 {
+                    meta.resident = !meta.resident;
+                }
             }
             2 => {
-                let cwd = self.group.tab(pane, index).map(|tab| tab.read(cx).cwd.clone());
+                let cwd = self
+                    .group
+                    .tab(pane, index)
+                    .map(|tab| tab.read(cx).cwd.clone());
                 self.new_tab_in_pane(pane, window, cx);
-                if let (Some(cwd), Some(tab)) = (cwd, self.group.tab(pane, self.group.active_tab(pane))) {
-                    tab.update(cx, |tab, _| { tab.cwd = cwd; tab.loaded = false; });
+                if let (Some(cwd), Some(tab)) =
+                    (cwd, self.group.tab(pane, self.group.active_tab(pane)))
+                {
+                    tab.update(cx, |tab, _| {
+                        tab.cwd = cwd;
+                        tab.loaded = false;
+                    });
                 }
             }
             3 => self.new_tab_in_pane(pane, window, cx),
             4..=10 => {
-                const COLORS: [Option<u32>; 7] = [None, Some(0xe4ad5b), Some(0xeb6a6a), Some(0xe7a8d3), Some(0x9a8be8), Some(0x69aee9), Some(0x70c5a0)];
+                const COLORS: [Option<u32>; 7] = [
+                    None,
+                    Some(0xe4ad5b),
+                    Some(0xeb6a6a),
+                    Some(0xe7a8d3),
+                    Some(0x9a8be8),
+                    Some(0x69aee9),
+                    Some(0x70c5a0),
+                ];
                 meta.color = COLORS[action - 4];
             }
             _ => return,
@@ -1000,42 +1083,159 @@ impl ExplorerPage {
         let (id, position) = self.tab_menu?;
         self.group.locate_tab(id)?;
         let meta = self.group.tab_metadata(id);
-        let count = self.group.all_tabs().iter().filter(|tab| self.group.tab_metadata(tab.entity_id()).resident).count();
+        let count = self
+            .group
+            .all_tabs()
+            .iter()
+            .filter(|tab| self.group.tab_metadata(tab.entity_id()).resident)
+            .count();
         let viewport = window.viewport_size();
         let width = 220.0_f32;
         let height = 230.0_f32;
-        let x = f32::from(position.x).min((f32::from(viewport.width) - width - 8.0).max(0.0)).max(0.0);
-        let y = f32::from(position.y).min((f32::from(viewport.height) - height - 8.0).max(0.0)).max(0.0);
+        let x = f32::from(position.x)
+            .min((f32::from(viewport.width) - width - 8.0).max(0.0))
+            .max(0.0);
+        let y = f32::from(position.y)
+            .min((f32::from(viewport.height) - height - 8.0).max(0.0))
+            .max(0.0);
         let labels = [
-            if meta.pinned { "取消固定标签页".to_string() } else { "固定标签页".to_string() },
-            if meta.resident { format!("取消常驻标签 ({count}/6)") } else { format!("添加常驻标签 ({count}/6)") },
-            "添加克隆标签".to_string(), "新增标签".to_string(),
+            if meta.pinned {
+                "取消固定标签页".to_string()
+            } else {
+                "固定标签页".to_string()
+            },
+            if meta.resident {
+                format!("取消常驻标签 ({count}/6)")
+            } else {
+                format!("添加常驻标签 ({count}/6)")
+            },
+            "添加克隆标签".to_string(),
+            "新增标签".to_string(),
         ];
-        let rows = labels.into_iter().enumerate().map(|(action, label)| {
-            let disabled = action == 1 && !meta.resident && count >= 6;
-            div().id(("tab-menu-action", action)).h(px(32.0)).px(px(10.0)).flex().items_center()
-                .rounded(px(5.0)).text_sm().text_color(rgb(if disabled { theme::muted() } else { theme::fg() }))
-                .when(!disabled, |row| row.cursor_pointer().hover(|s| s.bg(rgb(theme::toolbar_hover())))
-                    .on_click(cx.listener(move |page, _, window, cx| page.perform_tab_menu(id, action, window, cx))))
-                .child(label)
-        }).collect::<Vec<_>>();
-        let colors = [theme::muted(), 0xe4ad5b, 0xeb6a6a, 0xe7a8d3, 0x9a8be8, 0x69aee9, 0x70c5a0];
-        let swatches = colors.into_iter().enumerate().map(|(index, color)| {
-            div().id(("tab-menu-color", index)).size(px(21.0)).rounded_full().bg(rgb(color))
-                .border_1().border_color(rgb(theme::border())).cursor_pointer()
-                .on_click(cx.listener(move |page, _, window, cx| page.perform_tab_menu(id, index + 4, window, cx)))
-        }).collect::<Vec<_>>();
-        Some(deferred(anchored().position_mode(AnchoredPositionMode::Window).position(point(px(0.0), px(0.0)))
-            .child(div().w(viewport.width).h(viewport.height)
-                .child(div().id("tab-menu-backdrop").absolute().w(viewport.width).h(viewport.height).occlude()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|page, _, _, cx| { page.tab_menu = None; cx.notify(); }))
-                    .on_mouse_down(MouseButton::Right, cx.listener(|page, _, _, cx| { page.tab_menu = None; cx.notify(); })))
-                .child(div().absolute().left(px(x)).top(px(y)).w(px(width)).p(px(5.0)).flex().flex_col()
-                    .rounded(px(8.0)).border_1().border_color(rgb(theme::border())).bg(rgb(theme::bg_secondary())).shadow_xl().occlude()
-                    .children(rows)
-                    .child(div().px(px(10.0)).pt(px(8.0)).pb(px(6.0)).text_sm().text_color(rgb(theme::muted())).child("标签颜色"))
-                    .child(div().px(px(10.0)).pb(px(8.0)).flex().gap(px(7.0)).children(swatches)))))
-            .with_priority(10).into_any_element())
+        let rows = labels
+            .into_iter()
+            .enumerate()
+            .map(|(action, label)| {
+                let disabled = action == 1 && !meta.resident && count >= 6;
+                div()
+                    .id(("tab-menu-action", action))
+                    .h(px(32.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.0))
+                    .text_sm()
+                    .text_color(rgb(if disabled {
+                        theme::muted()
+                    } else {
+                        theme::fg()
+                    }))
+                    .when(!disabled, |row| {
+                        row.cursor_pointer()
+                            .hover(|s| s.bg(rgb(theme::toolbar_hover())))
+                            .on_click(cx.listener(move |page, _, window, cx| {
+                                page.perform_tab_menu(id, action, window, cx)
+                            }))
+                    })
+                    .child(label)
+            })
+            .collect::<Vec<_>>();
+        let colors = [
+            theme::muted(),
+            0xe4ad5b,
+            0xeb6a6a,
+            0xe7a8d3,
+            0x9a8be8,
+            0x69aee9,
+            0x70c5a0,
+        ];
+        let swatches = colors
+            .into_iter()
+            .enumerate()
+            .map(|(index, color)| {
+                div()
+                    .id(("tab-menu-color", index))
+                    .size(px(21.0))
+                    .rounded_full()
+                    .bg(rgb(color))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |page, _, window, cx| {
+                        page.perform_tab_menu(id, index + 4, window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+        Some(
+            deferred(
+                anchored()
+                    .position_mode(AnchoredPositionMode::Window)
+                    .position(point(px(0.0), px(0.0)))
+                    .child(
+                        div()
+                            .w(viewport.width)
+                            .h(viewport.height)
+                            .child(
+                                div()
+                                    .id("tab-menu-backdrop")
+                                    .absolute()
+                                    .w(viewport.width)
+                                    .h(viewport.height)
+                                    .occlude()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|page, _, _, cx| {
+                                            page.tab_menu = None;
+                                            cx.notify();
+                                        }),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(|page, _, _, cx| {
+                                            page.tab_menu = None;
+                                            cx.notify();
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(x))
+                                    .top(px(y))
+                                    .w(px(width))
+                                    .p(px(5.0))
+                                    .flex()
+                                    .flex_col()
+                                    .rounded(px(8.0))
+                                    .border_1()
+                                    .border_color(rgb(theme::border()))
+                                    .bg(rgb(theme::bg_secondary()))
+                                    .shadow_xl()
+                                    .occlude()
+                                    .children(rows)
+                                    .child(
+                                        div()
+                                            .px(px(10.0))
+                                            .pt(px(8.0))
+                                            .pb(px(6.0))
+                                            .text_sm()
+                                            .text_color(rgb(theme::muted()))
+                                            .child("标签颜色"),
+                                    )
+                                    .child(
+                                        div()
+                                            .px(px(10.0))
+                                            .pb(px(8.0))
+                                            .flex()
+                                            .gap(px(7.0))
+                                            .children(swatches),
+                                    ),
+                            ),
+                    ),
+            )
+            .with_priority(10)
+            .into_any_element(),
+        )
     }
 
     // Builds the render callbacks routing every tab/pane interaction back here.
@@ -1084,11 +1284,16 @@ struct TerminalSet {
 
 impl TerminalSet {
     fn active(&self) -> Option<&Entity<TerminalView>> {
-        self.terminals.get(self.active).or(self.terminals.last()).map(|(terminal, _)| terminal)
+        self.terminals
+            .get(self.active)
+            .or(self.terminals.last())
+            .map(|(terminal, _)| terminal)
     }
 
     fn index_of(&self, id: EntityId) -> Option<usize> {
-        self.terminals.iter().position(|(terminal, _)| terminal.entity_id() == id)
+        self.terminals
+            .iter()
+            .position(|(terminal, _)| terminal.entity_id() == id)
     }
 }
 
@@ -1121,19 +1326,30 @@ impl ExplorerPage {
     // has none.
     fn focused_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
         let tab = self.group.active_pane().clone();
-        if let Some(terminal) = self.terminals.get(&tab.entity_id()).and_then(TerminalSet::active) {
+        if let Some(terminal) = self
+            .terminals
+            .get(&tab.entity_id())
+            .and_then(TerminalSet::active)
+        {
             return terminal.clone();
         }
         self.add_terminal(&tab, cx)
     }
 
     // A new terminal in the tab's folder, shown.
-    fn add_terminal(&mut self, tab: &Entity<ExplorerPane>, cx: &mut Context<Self>) -> Entity<TerminalView> {
+    fn add_terminal(
+        &mut self,
+        tab: &Entity<ExplorerPane>,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalView> {
         let (terminal, subscription) = self.spawn_terminal(tab, cx);
         let set = self
             .terminals
             .entry(tab.entity_id())
-            .or_insert_with(|| TerminalSet { terminals: Vec::new(), active: 0 });
+            .or_insert_with(|| TerminalSet {
+                terminals: Vec::new(),
+                active: 0,
+            });
         set.terminals.push((terminal.clone(), subscription));
         set.active = set.terminals.len() - 1;
         terminal
@@ -1147,23 +1363,48 @@ impl ExplorerPage {
         let directory = terminal_directory(&tab.read(cx).cwd);
         let terminal = cx.new(|cx| TerminalView::new(directory, cx));
         let tab_id = tab.entity_id();
-        let subscription = cx.subscribe(&terminal, move |page: &mut Self, terminal, event, cx| match event {
-            TerminalEvent::RestartRequested => page.replace_terminal(tab_id, terminal.entity_id(), true, cx),
-        });
+        let subscription =
+            cx.subscribe(
+                &terminal,
+                move |page: &mut Self, terminal, event, cx| match event {
+                    TerminalEvent::RestartRequested => {
+                        page.replace_terminal(tab_id, terminal.entity_id(), true, cx)
+                    }
+                },
+            );
         (terminal, subscription)
     }
 
     // A new shell in the folder the tab is in now, in place of `terminal_id`.
-    fn replace_terminal(&mut self, tab_id: EntityId, terminal_id: EntityId, take_focus: bool, cx: &mut Context<Self>) {
-        let Some(tab) = self.group.all_tabs().into_iter().find(|tab| tab.entity_id() == tab_id) else {
+    fn replace_terminal(
+        &mut self,
+        tab_id: EntityId,
+        terminal_id: EntityId,
+        take_focus: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self
+            .group
+            .all_tabs()
+            .into_iter()
+            .find(|tab| tab.entity_id() == tab_id)
+        else {
             return;
         };
-        let Some(index) = self.terminals.get(&tab_id).and_then(|set| set.index_of(terminal_id)) else {
+        let Some(index) = self
+            .terminals
+            .get(&tab_id)
+            .and_then(|set| set.index_of(terminal_id))
+        else {
             return;
         };
         let replacement = self.spawn_terminal(&tab, cx);
         let terminal = replacement.0.clone();
-        if let Some(slot) = self.terminals.get_mut(&tab_id).and_then(|set| set.terminals.get_mut(index)) {
+        if let Some(slot) = self
+            .terminals
+            .get_mut(&tab_id)
+            .and_then(|set| set.terminals.get_mut(index))
+        {
             // Dropping the old view ends its shell.
             *slot = replacement;
         }
@@ -1173,7 +1414,13 @@ impl ExplorerPage {
         cx.notify();
     }
 
-    fn close_terminal(&mut self, tab_id: EntityId, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_terminal(
+        &mut self,
+        tab_id: EntityId,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(set) = self.terminals.get_mut(&tab_id) else {
             return;
         };
@@ -1199,7 +1446,12 @@ impl ExplorerPage {
     // the tab is now in another folder, moves there: a fresh shell, after the
     // folder has stayed put a moment. Asked on every render of the panel, so
     // navigating, switching tabs and opening the panel all land here.
-    fn follow_tab_folder(&mut self, terminal: &Entity<TerminalView>, window: &Window, cx: &mut Context<Self>) {
+    fn follow_tab_folder(
+        &mut self,
+        terminal: &Entity<TerminalView>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let tab = self.group.active_pane().clone();
         let wanted = terminal_directory(&tab.read(cx).cwd);
         let view = terminal.read(cx);
@@ -1218,8 +1470,14 @@ impl ExplorerPage {
                 page.terminal_follow = None;
                 // Still the shown one, still unused: a key pressed during the
                 // wait keeps it.
-                let shown = page.terminals.get(&tab_id).and_then(TerminalSet::active).cloned();
-                if shown.is_some_and(|shown| shown.entity_id() == terminal_id && !shown.read(cx).is_used()) {
+                let shown = page
+                    .terminals
+                    .get(&tab_id)
+                    .and_then(TerminalSet::active)
+                    .cloned();
+                if shown.is_some_and(|shown| {
+                    shown.entity_id() == terminal_id && !shown.read(cx).is_used()
+                }) {
                     page.replace_terminal(tab_id, terminal_id, take_focus, cx);
                 }
             })
@@ -1270,9 +1528,12 @@ impl ExplorerPage {
                 .rounded(px(4.0))
                 .text_xs()
                 .cursor_pointer()
-                .when(shown, |tab| tab.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg())))
+                .when(shown, |tab| {
+                    tab.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg()))
+                })
                 .when(!shown, |tab| {
-                    tab.text_color(rgb(theme::fg_secondary())).hover(|tab| tab.bg(rgb(theme::bg_hover())))
+                    tab.text_color(rgb(theme::fg_secondary()))
+                        .hover(|tab| tab.bg(rgb(theme::bg_hover())))
                 })
                 .on_click(cx.listener(move |page, _, window, cx| {
                     if let Some(set) = page.terminals.get_mut(&tab_id) {
@@ -1283,7 +1544,14 @@ impl ExplorerPage {
                     }
                     cx.notify();
                 }))
-                .child(div().max_w(px(140.0)).whitespace_nowrap().text_ellipsis().overflow_hidden().child(name))
+                .child(
+                    div()
+                        .max_w(px(140.0))
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(name),
+                )
                 .child(
                     div()
                         .id(("terminal-tab-close", index))
@@ -1304,7 +1572,9 @@ impl ExplorerPage {
 
         let side = self.terminal_side;
         let size = self.fitted_terminal_size();
-        let carrying = self.terminal_drag.is_some_and(|drag| drag.gesture == Gesture::Move);
+        let carrying = self
+            .terminal_drag
+            .is_some_and(|drag| drag.gesture == Gesture::Move);
         let resizing = self
             .terminal_drag
             .is_some_and(|drag| matches!(drag.gesture, Gesture::Resize { .. }));
@@ -1397,7 +1667,9 @@ impl ExplorerPage {
                             .rounded(px(4.0))
                             .cursor_pointer()
                             .hover(|button| button.bg(rgb(theme::bg_hover())))
-                            .on_click(cx.listener(|page, _, window, cx| page.toggle_terminal(window, cx)))
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.toggle_terminal(window, cx)),
+                            )
                             .child(
                                 gpui_component::Icon::new(gpui_component::IconName::Close)
                                     .size_4()
@@ -1410,26 +1682,27 @@ impl ExplorerPage {
                 // The inner edge: drag to change the size (past half the
                 // smallest it closes), double click for the default. Last
                 // so it lies over the header.
-                dock::place_on_inner_edge(dock::strip("terminal-resize", side, resizing), side).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|page, event: &MouseDownEvent, _window, cx| {
-                        if event.click_count >= 2 {
-                            page.set_terminal_size(page.terminal_default_size());
-                            page.terminal_drag = None;
-                        } else {
-                            page.terminal_drag = Some(TerminalDrag {
-                                gesture: Gesture::Resize {
-                                    start: dock::along(page.terminal_side, event.position),
-                                    start_size: page.fitted_terminal_size(),
-                                },
-                                pointer: event.position,
-                                collapsing: false,
-                            });
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                ),
+                dock::place_on_inner_edge(dock::strip("terminal-resize", side, resizing), side)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|page, event: &MouseDownEvent, _window, cx| {
+                            if event.click_count >= 2 {
+                                page.set_terminal_size(page.terminal_default_size());
+                                page.terminal_drag = None;
+                            } else {
+                                page.terminal_drag = Some(TerminalDrag {
+                                    gesture: Gesture::Resize {
+                                        start: dock::along(page.terminal_side, event.position),
+                                        start_size: page.fitted_terminal_size(),
+                                    },
+                                    pointer: event.position,
+                                    collapsing: false,
+                                });
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
             )
             .into_any_element()
     }
@@ -1451,12 +1724,19 @@ impl ExplorerPage {
         if self.terminal_side.is_column() {
             (TERMINAL_MIN_WIDTH, f32::from(bounds.size.width) - PANES_MIN)
         } else {
-            (TERMINAL_MIN_HEIGHT, f32::from(bounds.size.height) - PANES_MIN.min(TERMINAL_MIN_HEIGHT * 2.0))
+            (
+                TERMINAL_MIN_HEIGHT,
+                f32::from(bounds.size.height) - PANES_MIN.min(TERMINAL_MIN_HEIGHT * 2.0),
+            )
         }
     }
 
     fn terminal_size(&self) -> f32 {
-        f32::from(if self.terminal_side.is_column() { self.terminal_width } else { self.terminal_height })
+        f32::from(if self.terminal_side.is_column() {
+            self.terminal_width
+        } else {
+            self.terminal_height
+        })
     }
 
     fn set_terminal_size(&mut self, size: f32) {
@@ -1468,7 +1748,11 @@ impl ExplorerPage {
     }
 
     fn terminal_default_size(&self) -> f32 {
-        if self.terminal_side.is_column() { TERMINAL_DEFAULT_WIDTH } else { TERMINAL_DEFAULT_HEIGHT }
+        if self.terminal_side.is_column() {
+            TERMINAL_DEFAULT_WIDTH
+        } else {
+            TERMINAL_DEFAULT_HEIGHT
+        }
     }
 
     // The size the terminal is drawn at: the one it was left at, within the
@@ -1476,7 +1760,11 @@ impl ExplorerPage {
     fn fitted_terminal_size(&self) -> f32 {
         let (min, max) = self.terminal_range();
         let size = self.terminal_size();
-        if self.page_bounds.get().size.width <= px(0.0) { size } else { size.clamp(min, max.max(min)) }
+        if self.page_bounds.get().size.width <= px(0.0) {
+            size
+        } else {
+            size.clamp(min, max.max(min))
+        }
     }
 
     // Follows a terminal drag. Returns whether one is under way.
@@ -1525,7 +1813,11 @@ impl ExplorerPage {
                     let target = dock::nearest_side(self.page_bounds.get(), drag.pointer);
                     if target != self.terminal_side {
                         self.terminal_side = target;
-                        super::view::panels::save_layout("terminal", format!("\"{}\"", target.as_str()), cx);
+                        super::view::panels::save_layout(
+                            "terminal",
+                            format!("\"{}\"", target.as_str()),
+                            cx,
+                        );
                     }
                 }
                 _ => {}
@@ -1536,13 +1828,23 @@ impl ExplorerPage {
 
     // While the terminal is carried, where it would land.
     fn render_terminal_landing(&self) -> Option<AnyElement> {
-        let drag = self.terminal_drag.filter(|drag| drag.gesture == Gesture::Move)?;
+        let drag = self
+            .terminal_drag
+            .filter(|drag| drag.gesture == Gesture::Move)?;
         let bounds = self.page_bounds.get();
         let target = dock::nearest_side(bounds, drag.pointer);
         let (room, size, min) = if target.is_column() {
-            (f32::from(bounds.size.width), f32::from(self.terminal_width), TERMINAL_MIN_WIDTH)
+            (
+                f32::from(bounds.size.width),
+                f32::from(self.terminal_width),
+                TERMINAL_MIN_WIDTH,
+            )
         } else {
-            (f32::from(bounds.size.height), f32::from(self.terminal_height), TERMINAL_MIN_HEIGHT)
+            (
+                f32::from(bounds.size.height),
+                f32::from(self.terminal_height),
+                TERMINAL_MIN_HEIGHT,
+            )
         };
         Some(dock::landing(target, size.min(room * 0.45).max(min.min(room))).into_any_element())
     }
@@ -1552,7 +1854,11 @@ impl ExplorerPage {
 // network have no folder a shell can start in.
 fn terminal_directory(cwd: &str) -> std::path::PathBuf {
     let path = std::path::PathBuf::from(cwd);
-    if path.is_dir() { path } else { std::path::PathBuf::from(home_dir()) }
+    if path.is_dir() {
+        path
+    } else {
+        std::path::PathBuf::from(home_dir())
+    }
 }
 
 impl Render for ExplorerPage {
@@ -1567,9 +1873,16 @@ impl Render for ExplorerPage {
         let body = self.group.render(window, cx, &callbacks);
         let tab_menu = self.render_tab_menu(window, cx);
         let collapsing = self.terminal_drag.is_some_and(|drag| drag.collapsing);
-        let terminal_panel = (self.terminal_open && !collapsing).then(|| self.render_terminal_panel(window, cx));
+        let terminal_panel =
+            (self.terminal_open && !collapsing).then(|| self.render_terminal_panel(window, cx));
         let side = self.terminal_side;
-        let panes = div().flex_1().min_h(px(0.0)).min_w(px(0.0)).flex().flex_col().child(body);
+        let panes = div()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .flex()
+            .flex_col()
+            .child(body);
         // The panes and the terminal on its side of them, first in the row
         // or column when it docks left or above.
         let (before, after) = if matches!(side, DockSide::Left | DockSide::Top) {
@@ -1598,10 +1911,21 @@ impl Render for ExplorerPage {
             .bg(rgb(theme::bg()))
             .key_context(PANES_CONTEXT)
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && this.tab_menu.take().is_some() {
                     cx.stop_propagation();
                     cx.notify();
+                    return;
+                }
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.alt && !modifiers.control && !modifiers.platform && !modifiers.shift
+                    && let Some(tab) = tab_shortcut_index(&event.keystroke.key)
+                {
+                    let pane = this.group.active();
+                    if tab < this.group.tab_count(pane) {
+                        this.activate_tab(pane, tab, window, cx);
+                    }
+                    cx.stop_propagation();
                 }
             }))
             .on_action(cx.listener(|this, _: &SplitVertical, window, cx| {
@@ -1634,30 +1958,37 @@ impl Render for ExplorerPage {
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal(window, cx);
             }))
-            .when(self.terminal_drag.is_some() || self.group.dragging(), |this| {
-                this.on_mouse_move(cx.listener(|page, event: &MouseMoveEvent, window, cx| {
-                    if event.pressed_button != Some(MouseButton::Left) {
-                        // The button came up outside the window.
-                        page.finish_page_drags(window, cx);
-                        return;
-                    }
-                    if page.group.drag_to(event.position) {
-                        cx.notify();
-                    }
-                    if page.update_terminal_drag(event.position) {
-                        cx.notify();
-                    }
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|page, _: &MouseUpEvent, window, cx| page.finish_page_drags(window, cx)),
-                )
-                // Let go over the title bar, which is the root's, not the page's.
-                .on_mouse_up_out(
-                    MouseButton::Left,
-                    cx.listener(|page, _: &MouseUpEvent, window, cx| page.finish_page_drags(window, cx)),
-                )
-            })
+            .when(
+                self.terminal_drag.is_some() || self.group.dragging(),
+                |this| {
+                    this.on_mouse_move(cx.listener(|page, event: &MouseMoveEvent, window, cx| {
+                        if event.pressed_button != Some(MouseButton::Left) {
+                            // The button came up outside the window.
+                            page.finish_page_drags(window, cx);
+                            return;
+                        }
+                        if page.group.drag_to(event.position) {
+                            cx.notify();
+                        }
+                        if page.update_terminal_drag(event.position) {
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|page, _: &MouseUpEvent, window, cx| {
+                            page.finish_page_drags(window, cx)
+                        }),
+                    )
+                    // Let go over the title bar, which is the root's, not the page's.
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|page, _: &MouseUpEvent, window, cx| {
+                            page.finish_page_drags(window, cx)
+                        }),
+                    )
+                },
+            )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
                 let pane = this.group.active();
                 let tab_index = this.group.active_tab(pane);
@@ -1787,8 +2118,17 @@ impl ExplorerPage {
 
 #[cfg(test)]
 mod tab_feature_tests {
-    use super::{ExplorerPage, PaneSnapshot, ResizableState, TrashLedger};
+    use super::{ExplorerPage, PaneSnapshot, ResizableState, TrashLedger, tab_shortcut_index};
     use gpui::{AppContext, TestAppContext};
+
+    #[::core::prelude::v1::test]
+    fn tab_shortcuts_map_digits_to_positions() {
+        for (digit, expected) in [("1", 0), ("9", 8), ("0", 9)] {
+            assert_eq!(Some(expected), tab_shortcut_index(digit));
+        }
+        assert_eq!(None, tab_shortcut_index("10"));
+        assert_eq!(None, tab_shortcut_index("a"));
+    }
 
     #[::core::prelude::v1::test]
     fn legacy_snapshot_accepts_missing_tab_metadata() {
@@ -1803,28 +2143,41 @@ mod tab_feature_tests {
             let state = cx.new(|_| ResizableState::default());
             ExplorerPage::new(state, None, None, TrashLedger::KeptByOs, false, window, cx)
         });
-        window.update(cx, |page, window, cx| {
-            let first = page.group.tab(0, 0).unwrap();
-            first.update(cx, |pane, _| pane.cwd = "C:\\example".to_string());
-            let id = first.entity_id();
-            page.perform_tab_menu(id, 2, window, cx);
-            assert_eq!(page.group.tab_count(0), 2);
-            assert_eq!(page.group.tab(0, 1).unwrap().read(cx).cwd, "C:\\example");
-            page.perform_tab_menu(id, 0, window, cx);
-            page.close_tab_in_pane(0, 0, window, cx);
-            assert_eq!(page.group.tab_count(0), 2);
-            page.perform_tab_menu(id, 0, window, cx);
-            for _ in 0..5 { page.new_tab_in_pane(0, window, cx); }
-            let tabs = page.group.all_tabs();
-            for tab in &tabs { page.perform_tab_menu(tab.entity_id(), 1, window, cx); }
-            assert_eq!(page.group.all_tabs().iter().filter(|tab| page.group.tab_metadata(tab.entity_id()).resident).count(), 6);
-            let colored = tabs[0].entity_id();
-            page.perform_tab_menu(colored, 5, window, cx);
-            page.group.reorder_tab(0, 0, 6);
-            assert_eq!(page.group.tab_metadata(colored).color, Some(0xe4ad5b));
-            let saved = page.session_snapshot(cx);
-            assert_eq!(saved.panes[0].tab_metadata[6].color, Some(0xe4ad5b));
-        }).unwrap();
+        window
+            .update(cx, |page, window, cx| {
+                let first = page.group.tab(0, 0).unwrap();
+                first.update(cx, |pane, _| pane.cwd = "C:\\example".to_string());
+                let id = first.entity_id();
+                page.perform_tab_menu(id, 2, window, cx);
+                assert_eq!(page.group.tab_count(0), 2);
+                assert_eq!(page.group.tab(0, 1).unwrap().read(cx).cwd, "C:\\example");
+                page.perform_tab_menu(id, 0, window, cx);
+                page.close_tab_in_pane(0, 0, window, cx);
+                assert_eq!(page.group.tab_count(0), 2);
+                page.perform_tab_menu(id, 0, window, cx);
+                for _ in 0..5 {
+                    page.new_tab_in_pane(0, window, cx);
+                }
+                let tabs = page.group.all_tabs();
+                for tab in &tabs {
+                    page.perform_tab_menu(tab.entity_id(), 1, window, cx);
+                }
+                assert_eq!(
+                    page.group
+                        .all_tabs()
+                        .iter()
+                        .filter(|tab| page.group.tab_metadata(tab.entity_id()).resident)
+                        .count(),
+                    6
+                );
+                let colored = tabs[0].entity_id();
+                page.perform_tab_menu(colored, 5, window, cx);
+                page.group.reorder_tab(0, 0, 6);
+                assert_eq!(page.group.tab_metadata(colored).color, Some(0xe4ad5b));
+                let saved = page.session_snapshot(cx);
+                assert_eq!(saved.panes[0].tab_metadata[6].color, Some(0xe4ad5b));
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -1834,24 +2187,26 @@ mod tab_feature_tests {
             let state = cx.new(|_| ResizableState::default());
             ExplorerPage::new(state, None, None, TrashLedger::KeptByOs, false, window, cx)
         });
-        let snapshot = source.update(cx, |page, window, cx| {
-            let id = page.group.tab(0, 0).unwrap().entity_id();
-            page.perform_tab_menu(id, 1, window, cx);
-            page.perform_tab_menu(id, 6, window, cx);
-            page.session_snapshot(cx)
-        }).unwrap();
+        let snapshot = source
+            .update(cx, |page, window, cx| {
+                let id = page.group.tab(0, 0).unwrap().entity_id();
+                page.perform_tab_menu(id, 1, window, cx);
+                page.perform_tab_menu(id, 6, window, cx);
+                page.session_snapshot(cx)
+            })
+            .unwrap();
         let target = cx.add_window(|window, cx| {
             let state = cx.new(|_| ResizableState::default());
             ExplorerPage::new(state, None, None, TrashLedger::KeptByOs, false, window, cx)
         });
-        target.update(cx, |page, window, cx| {
-            let first = page.group.tab(0, 0).unwrap();
-            page.restore_session(snapshot, &first, window, cx);
-            let meta = page.group.tab_metadata(first.entity_id());
-            assert!(meta.resident);
-            assert_eq!(meta.color, Some(0xeb6a6a));
-        }).unwrap();
+        target
+            .update(cx, |page, window, cx| {
+                let first = page.group.tab(0, 0).unwrap();
+                page.restore_session(snapshot, &first, window, cx);
+                let meta = page.group.tab_metadata(first.entity_id());
+                assert!(meta.resident);
+                assert_eq!(meta.color, Some(0xeb6a6a));
+            })
+            .unwrap();
     }
-
 }
-

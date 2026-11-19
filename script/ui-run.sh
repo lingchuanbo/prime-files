@@ -16,7 +16,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/target/debug/nohrs"
+BIN="$ROOT/target/debug/LumaFiles"
 LOG="${NOHRS_LOG:-/tmp/nohrs.log}"
 DEVLIBS="$HOME/.local/devlibs"
 LIBDIR="${LIBDIR:-/usr/lib/x86_64-linux-gnu}"

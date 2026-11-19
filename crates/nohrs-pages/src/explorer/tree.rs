@@ -101,7 +101,12 @@ impl ExplorerPane {
         self.filtered_entries = out;
     }
 
-    fn push_with_children(&mut self, entry: FileEntryDto, depth: usize, out: &mut Vec<FileEntryDto>) {
+    fn push_with_children(
+        &mut self,
+        entry: FileEntryDto,
+        depth: usize,
+        out: &mut Vec<FileEntryDto>,
+    ) {
         let open = entry.kind == "dir" && self.tree.expanded.contains(&entry.path);
         let path = entry.path.clone();
         if depth > 0 {
@@ -120,7 +125,12 @@ impl ExplorerPane {
             .filter(|child| show_hidden || !super::state::is_hidden(&child.name))
             .cloned()
             .collect();
-        super::entries::sort_entries_with(&mut children, self.sort_key, self.sort_asc, self.folder_order);
+        super::entries::sort_entries_with(
+            &mut children,
+            self.sort_key,
+            self.sort_asc,
+            self.folder_order,
+        );
         for child in children {
             self.push_with_children(child, depth + 1, out);
         }

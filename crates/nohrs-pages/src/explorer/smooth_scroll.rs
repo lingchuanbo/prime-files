@@ -31,7 +31,10 @@ fn time_constant(smoothness: u32) -> f32 {
 
 /// `offset` moved by `delta` and kept within the content.
 fn clamp_offset(offset: Point<Pixels>, max: gpui::Size<Pixels>) -> Point<Pixels> {
-    point(offset.x.clamp(-max.width, px(0.0)), offset.y.clamp(-max.height, px(0.0)))
+    point(
+        offset.x.clamp(-max.width, px(0.0)),
+        offset.y.clamp(-max.height, px(0.0)),
+    )
 }
 
 impl ExplorerPane {
@@ -60,14 +63,19 @@ impl ExplorerPane {
         let handle = self.listing_scroll().clone();
         let current = handle.offset();
         let from = match &self.smooth_scroll {
-            Some(glide) if glide.mode == self.view_mode && glide.last_set == current => glide.target,
+            Some(glide) if glide.mode == self.view_mode && glide.last_set == current => {
+                glide.target
+            }
             _ => current,
         };
         let target = clamp_offset(from + delta, handle.max_offset());
         self.smooth_scroll = Some(SmoothScroll {
             target,
             last_set: current,
-            last_tick: self.smooth_scroll.as_ref().and_then(|glide| glide.last_tick),
+            last_tick: self
+                .smooth_scroll
+                .as_ref()
+                .and_then(|glide| glide.last_tick),
             mode: self.view_mode,
         });
         cx.notify();
@@ -118,8 +126,14 @@ mod tests {
     #[test]
     fn the_target_stays_inside_the_content() {
         let max = size(px(0.0), px(500.0));
-        assert_eq!(clamp_offset(point(px(0.0), px(60.0)), max), point(px(0.0), px(0.0)));
-        assert_eq!(clamp_offset(point(px(0.0), px(-900.0)), max), point(px(0.0), px(-500.0)));
+        assert_eq!(
+            clamp_offset(point(px(0.0), px(60.0)), max),
+            point(px(0.0), px(0.0))
+        );
+        assert_eq!(
+            clamp_offset(point(px(0.0), px(-900.0)), max),
+            point(px(0.0), px(-500.0))
+        );
     }
 
     #[test]

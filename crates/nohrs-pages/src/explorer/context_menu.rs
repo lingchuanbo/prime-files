@@ -70,10 +70,15 @@ enum Command {
     SpaceOpenLocation,
     SpaceDelete,
     OpenSelection,
+    Compress7z,
+    CompressZipFast,
+    CompressZipMax,
+    CompressSelection7z,
+    ExtractArchive,
 }
 
 impl Command {
-    const ALL: [Command; 52] = [
+    const ALL: [Command; 57] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
@@ -126,6 +131,11 @@ impl Command {
         Command::SpaceOpenLocation,
         Command::SpaceDelete,
         Command::OpenSelection,
+        Command::Compress7z,
+        Command::CompressZipFast,
+        Command::CompressZipMax,
+        Command::CompressSelection7z,
+        Command::ExtractArchive,
     ];
 
     fn from_id(id: u32) -> Option<Self> {
@@ -334,7 +344,11 @@ impl ExplorerPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        tracing::info!(on_item = row.is_some(), extended, "context_menu right_click received");
+        tracing::info!(
+            on_item = row.is_some(),
+            extended,
+            "context_menu right_click received"
+        );
         if let Some(row) = row
             && !self.is_selected(row)
         {
@@ -478,6 +492,41 @@ impl ExplorerPane {
                     Entry::submenu(t!("Espaços de trabalho"), tags).with_icon("icons/tag.svg"),
                 );
                 entries.push(Entry::Separator);
+                if *one_folder {
+                    entries.push(
+                        Entry::command(Command::Compress7z as u32, "最大压缩为 7z")
+                            .with_icon("icons/archive.svg")
+                            .with_shortcut(keys_of(Action::Compress7z)),
+                    );
+                    entries.push(
+                        Entry::command(Command::CompressZipFast as u32, "快速压缩为 ZIP")
+                            .with_icon("icons/archive.svg")
+                            .with_shortcut(keys_of(Action::CompressZipFast)),
+                    );
+                    entries.push(
+                        Entry::command(Command::CompressZipMax as u32, "最大压缩为 ZIP")
+                            .with_icon("icons/archive.svg")
+                            .with_shortcut(keys_of(Action::CompressZipMax)),
+                    );
+                }
+                if paths.len() > 1 {
+                    entries.push(
+                        Entry::command(Command::CompressSelection7z as u32, "压缩所选项目为 7z")
+                            .with_icon("icons/archive.svg")
+                            .with_shortcut(keys_of(Action::CompressSelection7z)),
+                    );
+                }
+                if paths.len() == 1
+                    && self.filtered_entries.iter().any(|entry| {
+                        entry.path == paths[0] && super::archive::is_archive_file(&entry.path)
+                    })
+                {
+                    entries.push(
+                        Entry::command(Command::ExtractArchive as u32, "解压到同名文件夹")
+                            .with_icon("icons/archive.svg")
+                            .with_shortcut(keys_of(Action::ExtractArchive)),
+                    );
+                }
                 entries.push(more);
                 entries
             }
@@ -524,9 +573,7 @@ impl ExplorerPane {
                     | MenuPurpose::FavoriteSubmenu(_)
                     | MenuPurpose::FavoritesMenu
                     | MenuPurpose::WorkspaceCard { .. }
-                    | MenuPurpose::SpaceTile(_) => {
-                        (Target::None, true, Vec::new())
-                    }
+                    | MenuPurpose::SpaceTile(_) => (Target::None, true, Vec::new()),
                 };
                 let prepared = shell_menu::prepare(&Request {
                     hwnd: hwnd as isize,
@@ -1410,6 +1457,13 @@ impl ExplorerPane {
             Command::Paste => self.paste_into_cwd(window, cx),
             Command::NewFolder => self.create_new_folder(window, cx),
             Command::BatchRename => self.open_batch_rename(window, cx),
+            Command::Compress7z => self.compress_active(super::archive_ops::Format::SevenZip, cx),
+            Command::CompressZipFast => {
+                self.compress_active(super::archive_ops::Format::ZipFast, cx)
+            }
+            Command::CompressZipMax => self.compress_active(super::archive_ops::Format::ZipMax, cx),
+            Command::CompressSelection7z => self.compress_selection(cx),
+            Command::ExtractArchive => self.extract_active_and_navigate(window, cx),
             Command::GroupNone => self.set_group_by(GroupBy::None),
             Command::GroupKind => self.set_group_by(GroupBy::Kind),
             Command::GroupModified => self.set_group_by(GroupBy::Modified),

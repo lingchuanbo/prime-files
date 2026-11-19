@@ -1,4 +1,3 @@
-use nohrs_core::t;
 use super::row;
 use crate::explorer::ExplorerPane;
 use crate::explorer::grouping::{self, ListRow};
@@ -7,6 +6,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_virtual_list;
 use gpui_component::{Icon, IconName};
+use nohrs_core::t;
 use nohrs_ui::theme::theme;
 use std::rc::Rc;
 
@@ -72,27 +72,33 @@ fn render_table_with_header(
         page.filtered_entries.len(),
         table_width.to_bits(),
     );
-    let ListLayout { rows, all_sizes, .. } =
-        match page.list_layout.as_ref().filter(|layout| layout.key == key) {
-            Some(layout) => layout.clone(),
-            None => {
-                let rows = Rc::new(grouping::list_rows(page.groups(), page.filtered_entries.len()));
-                let mut all_sizes = vec![gpui::size(px(table_width), px(HEADER_HEIGHT))];
-                all_sizes.extend(rows.iter().map(|row| match row {
-                    ListRow::Group(_) => gpui::size(px(table_width), px(super::GROUP_HEADER_HEIGHT)),
-                    ListRow::Entry(index) => page.item_sizes.get(*index).copied().unwrap_or_else(|| {
+    let ListLayout {
+        rows, all_sizes, ..
+    } = match page.list_layout.as_ref().filter(|layout| layout.key == key) {
+        Some(layout) => layout.clone(),
+        None => {
+            let rows = Rc::new(grouping::list_rows(
+                page.groups(),
+                page.filtered_entries.len(),
+            ));
+            let mut all_sizes = vec![gpui::size(px(table_width), px(HEADER_HEIGHT))];
+            all_sizes.extend(rows.iter().map(|row| match row {
+                ListRow::Group(_) => gpui::size(px(table_width), px(super::GROUP_HEADER_HEIGHT)),
+                ListRow::Entry(index) => {
+                    page.item_sizes.get(*index).copied().unwrap_or_else(|| {
                         gpui::size(px(table_width), px(nohrs_core::config::BASE_ROW_HEIGHT))
-                    }),
-                }));
-                let layout = ListLayout {
-                    key,
-                    rows,
-                    all_sizes: Rc::new(all_sizes),
-                };
-                page.list_layout = Some(layout.clone());
-                layout
-            }
-        };
+                    })
+                }
+            }));
+            let layout = ListLayout {
+                key,
+                rows,
+                all_sizes: Rc::new(all_sizes),
+            };
+            page.list_layout = Some(layout.clone());
+            layout
+        }
+    };
     let scroll_handle = page.virtual_scroll_handle.clone();
     page.listing_extent = super::extent(&all_sizes, false);
 
@@ -125,15 +131,17 @@ fn render_table_with_header(
                             match rows.get(ix - 1)? {
                                 ListRow::Group(group) => {
                                     let group = view.groups().get(*group)?;
-                                    Some(
-                                        super::group_header(group, table_width)
-                                            .into_any_element(),
-                                    )
+                                    Some(super::group_header(group, table_width).into_any_element())
                                 }
                                 ListRow::Entry(data_ix) => {
                                     let data_ix = *data_ix;
                                     view.filtered_entries.get(data_ix).cloned().map(|item| {
-                                        let icon = view.thumbnails.icon(&item.path, item.kind == "dir", icon_px, cx);
+                                        let icon = view.thumbnails.icon(
+                                            &item.path,
+                                            item.kind == "dir",
+                                            icon_px,
+                                            cx,
+                                        );
                                         row::render(view, &item, data_ix, icon, cx)
                                             .into_any_element()
                                     })
@@ -378,9 +386,10 @@ fn render_column_header(
                             } else {
                                 rgb(theme::fg_secondary())
                             })
-                            .group_hover(SharedString::from(format!("sort-header-{key_idx}")), |style| {
-                                style.text_color(rgb(theme::fg()))
-                            })
+                            .group_hover(
+                                SharedString::from(format!("sort-header-{key_idx}")),
+                                |style| style.text_color(rgb(theme::fg())),
+                            )
                             .child(label_str),
                     )
                     .when(is_active, |this| {

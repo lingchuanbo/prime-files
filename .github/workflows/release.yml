@@ -57,7 +57,7 @@ jobs:
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
             "/DAppVersion=${{ steps.version.outputs.version }}" `
-            "/DExeSource=..\target\dist\nohrs.exe" `
+            "/DExeSource=..\target\dist\LumaFiles.exe" `
             "/DIndexerSource=..\target\dist\prime-files-indexer.exe" `
             installer\prime-files.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }

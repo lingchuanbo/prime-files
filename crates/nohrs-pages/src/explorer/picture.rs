@@ -49,15 +49,16 @@ mod platform {
 
     use windows::Win32::Foundation::GENERIC_READ;
     use windows::Win32::Graphics::Imaging::{
-        CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICBitmapSource, IWICImagingFactory,
-        WICBitmapDitherTypeNone, WICBitmapInterpolationModeHighQualityCubic, WICBitmapPaletteTypeMedianCut,
-        WICBitmapTransformFlipHorizontal, WICBitmapTransformOptions, WICBitmapTransformRotate0,
-        WICBitmapTransformRotate90, WICBitmapTransformRotate180, WICBitmapTransformRotate270,
-        WICDecodeMetadataCacheOnDemand,
+        CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICBitmapSource,
+        IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapInterpolationModeHighQualityCubic,
+        WICBitmapPaletteTypeMedianCut, WICBitmapTransformFlipHorizontal, WICBitmapTransformOptions,
+        WICBitmapTransformRotate0, WICBitmapTransformRotate90, WICBitmapTransformRotate180,
+        WICBitmapTransformRotate270, WICDecodeMetadataCacheOnDemand,
     };
     use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
     };
     use windows::core::{HSTRING, Interface, w};
 
@@ -72,9 +73,14 @@ mod platform {
 
     fn run(path: &str, edge: u32) -> windows::core::Result<(u32, u32, Vec<u8>)> {
         unsafe {
-            let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
-            let decoder =
-                factory.CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)?;
+            let factory: IWICImagingFactory =
+                CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+            let decoder = factory.CreateDecoderFromFilename(
+                &HSTRING::from(path),
+                None,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnDemand,
+            )?;
             let frame = decoder.GetFrame(0)?;
             let (mut width, mut height) = (0, 0);
             frame.GetSize(&mut width, &mut height)?;
@@ -85,7 +91,9 @@ mod platform {
                 .ok()
                 .and_then(|reader| {
                     let mut value = PROPVARIANT::default();
-                    reader.GetMetadataByName(w!("System.Photo.Orientation"), &mut value).ok()?;
+                    reader
+                        .GetMetadataByName(w!("System.Photo.Orientation"), &mut value)
+                        .ok()?;
                     u16::try_from(&value).ok()
                 })
                 .unwrap_or(1);
@@ -94,7 +102,12 @@ mod platform {
             let (fit_width, fit_height) = super::fitted(width, height, edge);
             if (fit_width, fit_height) != (width, height) {
                 let scaler = factory.CreateBitmapScaler()?;
-                scaler.Initialize(&source, fit_width, fit_height, WICBitmapInterpolationModeHighQualityCubic)?;
+                scaler.Initialize(
+                    &source,
+                    fit_width,
+                    fit_height,
+                    WICBitmapInterpolationModeHighQualityCubic,
+                )?;
                 source = scaler.cast()?;
             }
             let turn = transform(orientation);
@@ -163,7 +176,9 @@ mod tests {
         let folder = tempfile::tempdir().expect("temp folder");
         let path = folder.path().join("a.png");
         // 400 x 200, opaque red.
-        image::RgbaImage::from_pixel(400, 200, image::Rgba([255, 0, 0, 255])).save(&path).expect("save");
+        image::RgbaImage::from_pixel(400, 200, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .expect("save");
         let (width, height, pixels) = decode_fitted(&path.to_string_lossy(), 100).expect("decode");
         assert_eq!((width, height), (100, 50));
         assert_eq!(&pixels[..4], &[0, 0, 255, 255]);
@@ -176,7 +191,8 @@ mod tests {
     fn probe_picture() {
         let path = std::env::var("NOHRS_PICTURE").expect("NOHRS_PICTURE");
         let started = std::time::Instant::now();
-        let decoded = decode_fitted(&path, 1024).map(|(width, height, pixels)| (width, height, pixels.len()));
+        let decoded =
+            decode_fitted(&path, 1024).map(|(width, height, pixels)| (width, height, pixels.len()));
         eprintln!("{decoded:?} in {:?}", started.elapsed());
     }
 }

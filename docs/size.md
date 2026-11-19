@@ -1,6 +1,6 @@
 # O tamanho do executável
 
-Medido neste repositório, `cargo build -p nohrs`, Windows x64, `nohrs.exe`:
+Medido neste repositório, `cargo build -p nohrs`, Windows x64, `LumaFiles.exe`:
 
 | Perfil / opções | Tamanho |
 |---|---|

@@ -4,7 +4,6 @@
 //! window root) and are driven entirely by the operation state held on
 //! [`ExplorerPane`]; the filesystem logic lives in `super::super::file_ops`.
 
-use nohrs_core::{t, tf};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::WindowExt as _;
@@ -12,6 +11,7 @@ use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogButtonProps;
 use nohrs_core::telemetry::LogErr as _;
+use nohrs_core::{t, tf};
 use nohrs_services::fs::ops::ConflictResolution;
 
 use crate::explorer::ExplorerPane;
@@ -79,7 +79,11 @@ impl ExplorerPane {
             let checkbox_weak = weak.clone();
             let close_weak = weak.clone();
             dialog
-                .title(tf!("“{name}” já existe em “{folder}”", name = name, folder = dest_name))
+                .title(tf!(
+                    "“{name}” já existe em “{folder}”",
+                    name = name,
+                    folder = dest_name
+                ))
                 // Dismissing without choosing has to abandon the plan exactly as
                 // Cancel does, or the pending queue survives and the next paste
                 // resumes into this one.
@@ -130,7 +134,12 @@ impl ExplorerPane {
                         cancel_button(&weak),
                         overwrite_button(&weak),
                         conflict_button(&weak, "skip", t!("Pular"), ConflictResolution::Skip),
-                        conflict_button(&weak, "rename", t!("Renomear"), ConflictResolution::Rename),
+                        conflict_button(
+                            &weak,
+                            "rename",
+                            t!("Renomear"),
+                            ConflictResolution::Rename,
+                        ),
                     ]
                 })
         });

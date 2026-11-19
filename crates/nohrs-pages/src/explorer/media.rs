@@ -54,7 +54,12 @@ pub(crate) const PEAK_BLOCKS_PER_SECOND: usize = 100;
 
 enum Update {
     Frame(RenderImage),
-    State { position: f64, duration: f64, playing: bool, has_video: bool },
+    State {
+        position: f64,
+        duration: f64,
+        playing: bool,
+        has_video: bool,
+    },
     /// The next stretch of `MediaPreview::peaks`.
     Peaks(Vec<f32>),
     Failed(String),
@@ -81,7 +86,18 @@ pub(crate) fn is_media(path: &str) -> bool {
     is_audio(path)
         || matches!(
             extension(path).as_str(),
-            "mp4" | "m4v" | "mov" | "wmv" | "avi" | "mkv" | "webm" | "mpg" | "mpeg" | "3gp" | "ts" | "mts"
+            "mp4"
+                | "m4v"
+                | "mov"
+                | "wmv"
+                | "avi"
+                | "mkv"
+                | "webm"
+                | "mpg"
+                | "mpeg"
+                | "3gp"
+                | "ts"
+                | "mts"
         )
 }
 
@@ -105,7 +121,10 @@ impl ExplorerPane {
         let (sender, receiver) = async_channel::unbounded();
         // Queued before the engine exists; the player applies it as it starts.
         commands
-            .send(Command::Volume(effective_volume(self.media_volume, self.media_muted)))
+            .send(Command::Volume(effective_volume(
+                self.media_volume,
+                self.media_muted,
+            )))
             .ok();
         if is_audio(&path) {
             // Its own reader on its own thread: playback starts at once and
@@ -140,14 +159,20 @@ impl ExplorerPane {
                                 cx.drop_image(old, None);
                             }
                         }
-                        Update::State { position, duration, playing, has_video } => {
+                        Update::State {
+                            position,
+                            duration,
+                            playing,
+                            has_video,
+                        } => {
                             media.position = position;
                             media.duration = duration;
                             media.playing = playing;
                             media.has_video = has_video;
                         }
                         Update::Peaks(stretch) => {
-                            media.peak_max = stretch.iter().fold(media.peak_max, |max, &p| max.max(p));
+                            media.peak_max =
+                                stretch.iter().fold(media.peak_max, |max, &p| max.max(p));
                             Arc::make_mut(&mut media.peaks).extend(stretch);
                         }
                         Update::Failed(error) => media.error = Some(error),
@@ -177,7 +202,10 @@ impl ExplorerPane {
         if self.preview_autoplay {
             media.send(Command::Play);
         }
-        self.preview_media = Some(MediaPreview { playing: self.preview_autoplay, ..media });
+        self.preview_media = Some(MediaPreview {
+            playing: self.preview_autoplay,
+            ..media
+        });
         cx.notify();
     }
 
@@ -194,7 +222,11 @@ impl ExplorerPane {
     pub(crate) fn toggle_media(&mut self, cx: &mut Context<Self>) {
         if let Some(media) = self.preview_media.as_mut() {
             media.playing = !media.playing;
-            media.send(if media.playing { Command::Play } else { Command::Pause });
+            media.send(if media.playing {
+                Command::Play
+            } else {
+                Command::Pause
+            });
             cx.notify();
         }
     }
@@ -229,7 +261,10 @@ impl ExplorerPane {
 
     fn send_media_volume(&mut self, cx: &mut Context<Self>) {
         if let Some(media) = self.preview_media.as_ref() {
-            media.send(Command::Volume(effective_volume(self.media_volume, self.media_muted)));
+            media.send(Command::Volume(effective_volume(
+                self.media_volume,
+                self.media_muted,
+            )));
         }
         cx.notify();
     }
@@ -237,7 +272,12 @@ impl ExplorerPane {
 
 /// Heights (0..=1) of `bars` waveform bars spread over `duration` seconds,
 /// each the loudest peak in its stretch. `None` for a stretch not read yet.
-pub(crate) fn waveform_bars(peaks: &[f32], peak_max: f32, duration: f64, bars: usize) -> Vec<Option<f32>> {
+pub(crate) fn waveform_bars(
+    peaks: &[f32],
+    peak_max: f32,
+    duration: f64,
+    bars: usize,
+) -> Vec<Option<f32>> {
     // Until the engine knows the length, what has been read fills the width.
     let blocks = if duration > 0.0 {
         (duration * PEAK_BLOCKS_PER_SECOND as f64).ceil() as usize
@@ -252,7 +292,9 @@ pub(crate) fn waveform_bars(peaks: &[f32], peak_max: f32, duration: f64, bars: u
         .map(|bar| {
             let start = bar * blocks / bars;
             let end = ((bar + 1) * blocks / bars).max(start + 1);
-            let stretch = peaks.get(start..end.min(peaks.len())).filter(|s| !s.is_empty())?;
+            let stretch = peaks
+                .get(start..end.min(peaks.len()))
+                .filter(|s| !s.is_empty())?;
             Some((stretch.iter().fold(0.0f32, |max, &p| max.max(p)) * scale).min(1.0))
         })
         .collect()
@@ -286,11 +328,12 @@ mod platform {
     use windows::Win32::Media::MediaFoundation::{
         CLSID_MFMediaEngineClassFactory, IMFAttributes, IMFMediaEngine, IMFMediaEngineClassFactory,
         IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, IMFSample, MF_MEDIA_ENGINE_CALLBACK,
-        MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
-        MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ALL_STREAMS,
-        MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFARGB,
-        MFAudioFormat_Float, MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL,
-        MFMediaType_Audio, MFSTARTUP_FULL, MFShutdown, MFStartup,
+        MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_MT_AUDIO_NUM_CHANNELS,
+        MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+        MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+        MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFARGB, MFAudioFormat_Float, MFCreateAttributes,
+        MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio, MFSTARTUP_FULL,
+        MFShutdown, MFStartup,
     };
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
@@ -307,19 +350,34 @@ mod platform {
     struct Listener;
 
     impl IMFMediaEngineNotify_Impl for Listener_Impl {
-        fn EventNotify(&self, _event: u32, _param1: usize, _param2: u32) -> windows::core::Result<()> {
+        fn EventNotify(
+            &self,
+            _event: u32,
+            _param1: usize,
+            _param2: u32,
+        ) -> windows::core::Result<()> {
             Ok(())
         }
     }
 
-    pub fn run(path: &str, commands: &mpsc::Receiver<Command>, updates: &async_channel::Sender<Update>) {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().ok();
+    pub fn run(
+        path: &str,
+        commands: &mpsc::Receiver<Command>,
+        updates: &async_channel::Sender<Update>,
+    ) {
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+            .ok()
+            .ok();
         if let Err(error) = unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) } {
-            updates.send_blocking(Update::Failed(error.message().to_string())).ok();
+            updates
+                .send_blocking(Update::Failed(error.message().to_string()))
+                .ok();
             return;
         }
         if let Err(error) = play(path, commands, updates) {
-            updates.send_blocking(Update::Failed(error.message().to_string())).ok();
+            updates
+                .send_blocking(Update::Failed(error.message().to_string()))
+                .ok();
         }
         unsafe { MFShutdown() }.ok();
     }
@@ -358,8 +416,12 @@ mod platform {
                         engine.Play().ok();
                     },
                     Ok(Command::Pause) => unsafe { engine.Pause() }.unwrap_or(()),
-                    Ok(Command::Seek(seconds)) => unsafe { engine.SetCurrentTime(seconds) }.unwrap_or(()),
-                    Ok(Command::Volume(volume)) => unsafe { engine.SetVolume(volume) }.unwrap_or(()),
+                    Ok(Command::Seek(seconds)) => {
+                        unsafe { engine.SetCurrentTime(seconds) }.unwrap_or(())
+                    }
+                    Ok(Command::Volume(volume)) => {
+                        unsafe { engine.SetVolume(volume) }.unwrap_or(())
+                    }
                     Err(mpsc::TryRecvError::Empty) => break,
                     // The preview was closed.
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -413,7 +475,9 @@ mod platform {
     /// Reads `path`'s sound from start to end and sends its peaks, a stretch
     /// at a time, until the file ends or the preview is closed.
     pub fn waveform(path: &str, updates: &async_channel::Sender<Update>) {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().ok();
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+            .ok()
+            .ok();
         if unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.is_err() {
             return;
         }
@@ -424,7 +488,10 @@ mod platform {
         unsafe { MFShutdown() }.ok();
     }
 
-    fn read_peaks(path: &str, updates: &async_channel::Sender<Update>) -> windows::core::Result<()> {
+    fn read_peaks(
+        path: &str,
+        updates: &async_channel::Sender<Update>,
+    ) -> windows::core::Result<()> {
         let stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
         let reader = unsafe {
             let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path), None)?;
@@ -448,7 +515,9 @@ mod platform {
         loop {
             let mut flags = 0u32;
             let mut sample: Option<IMFSample> = None;
-            unsafe { reader.ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))? };
+            unsafe {
+                reader.ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))?
+            };
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 break;
             }
@@ -459,7 +528,8 @@ mod platform {
             if !data.is_null() {
                 // Float PCM, as asked; Media Foundation buffers are aligned
                 // for it. Valid until the `Unlock` below.
-                let samples = unsafe { std::slice::from_raw_parts(data as *const f32, length as usize / 4) };
+                let samples =
+                    unsafe { std::slice::from_raw_parts(data as *const f32, length as usize / 4) };
                 for &value in samples {
                     peak = peak.max(value.abs());
                     filled += 1;
@@ -474,7 +544,10 @@ mod platform {
             // without a message per decoded buffer.
             if last_sent.elapsed() >= Duration::from_millis(200) && !stretch.is_empty() {
                 last_sent = Instant::now();
-                if updates.send_blocking(Update::Peaks(std::mem::take(&mut stretch))).is_err() {
+                if updates
+                    .send_blocking(Update::Peaks(std::mem::take(&mut stretch)))
+                    .is_err()
+                {
                     return Ok(());
                 }
             }
@@ -498,22 +571,47 @@ mod platform {
         if width == 0 || height == 0 {
             return None;
         }
-        let scale = (MAX_FRAME.0 as f64 / width as f64).min(MAX_FRAME.1 as f64 / height as f64).min(1.0);
-        let (width, height) = (((width as f64 * scale) as u32).max(1), ((height as f64 * scale) as u32).max(1));
+        let scale = (MAX_FRAME.0 as f64 / width as f64)
+            .min(MAX_FRAME.1 as f64 / height as f64)
+            .min(1.0);
+        let (width, height) = (
+            ((width as f64 * scale) as u32).max(1),
+            ((height as f64 * scale) as u32).max(1),
+        );
         if !matches!(target, Some((_, w, h)) if *w == width && *h == height) {
             let bitmap = unsafe {
-                wic.CreateBitmap(width, height, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad)
+                wic.CreateBitmap(
+                    width,
+                    height,
+                    &GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapCacheOnLoad,
+                )
             }
             .ok()?;
             *target = Some((bitmap, width, height));
         }
         let (bitmap, _, _) = target.as_ref()?;
-        let rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
-        let black = MFARGB { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbAlpha: 255 };
+        let rect = RECT {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        };
+        let black = MFARGB {
+            rgbBlue: 0,
+            rgbGreen: 0,
+            rgbRed: 0,
+            rgbAlpha: 255,
+        };
         unsafe { engine.TransferVideoFrame(bitmap, None, &rect, Some(&black)) }.ok()?;
         let lock = unsafe {
             bitmap.Lock(
-                &WICRect { X: 0, Y: 0, Width: width as i32, Height: height as i32 },
+                &WICRect {
+                    X: 0,
+                    Y: 0,
+                    Width: width as i32,
+                    Height: height as i32,
+                },
                 WICBitmapLockRead.0 as u32,
             )
         }
@@ -540,8 +638,16 @@ mod platform {
     use super::{Command, Update};
     use std::sync::mpsc;
 
-    pub fn run(_path: &str, _commands: &mpsc::Receiver<Command>, updates: &async_channel::Sender<Update>) {
-        updates.send_blocking(Update::Failed("Playback is only available on Windows".into())).ok();
+    pub fn run(
+        _path: &str,
+        _commands: &mpsc::Receiver<Command>,
+        updates: &async_channel::Sender<Update>,
+    ) {
+        updates
+            .send_blocking(Update::Failed(
+                "Playback is only available on Windows".into(),
+            ))
+            .ok();
     }
 
     pub fn waveform(_path: &str, _updates: &async_channel::Sender<Update>) {}
@@ -549,7 +655,9 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::{PEAK_BLOCKS_PER_SECOND, clock, effective_volume, is_audio, is_media, waveform_bars};
+    use super::{
+        PEAK_BLOCKS_PER_SECOND, clock, effective_volume, is_audio, is_media, waveform_bars,
+    };
 
     #[test]
     fn bars_take_the_loudest_peak_of_their_stretch_scaled_to_the_file() {
@@ -559,7 +667,11 @@ mod tests {
         let bars = waveform_bars(&peaks, 0.5, 2.0, 4);
         assert_eq!(bars, [Some(1.0), Some(0.2), None, None]);
         // With no length yet, what has been read fills every bar.
-        assert!(waveform_bars(&peaks, 0.5, 0.0, 4).iter().all(Option::is_some));
+        assert!(
+            waveform_bars(&peaks, 0.5, 0.0, 4)
+                .iter()
+                .all(Option::is_some)
+        );
         assert!(waveform_bars(&[], 0.0, 0.0, 4).is_empty());
     }
 

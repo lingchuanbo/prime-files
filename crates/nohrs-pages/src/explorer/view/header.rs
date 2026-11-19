@@ -1,14 +1,14 @@
-use nohrs_core::{k, t};
-use nohrs_core::i18n;
 use super::super::types::ViewMode;
 use crate::explorer::ExplorerPane;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_component::Sizable;
+use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_component::input::Input;
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, IconName};
+use nohrs_core::i18n;
+use nohrs_core::{k, t};
 use nohrs_ui::theme::theme;
 
 /// Renders the explorer header with navigation buttons, the breadcrumb path
@@ -21,7 +21,11 @@ pub fn render(
     // This PC is an address, not a path: one crumb with its name. Under a
     // drive, a crumb for it comes first, as in Explorer, leading back to it.
     let location = page.location_name(cx);
-    let parts = if location.is_some() { Vec::new() } else { path_parts(&page.cwd) };
+    let parts = if location.is_some() {
+        Vec::new()
+    } else {
+        path_parts(&page.cwd)
+    };
     let under_this_pc = location.is_none() && starts_with_drive(&page.cwd);
     let this_pc_name = page
         .sidebar
@@ -43,22 +47,25 @@ pub fn render(
     let unc_server = crate::explorer::network::server_of(&page.cwd).map(str::to_string);
     if unc_server.is_some() {
         bc = bc.child(
-            BreadcrumbItem::new(i18n::tr(crate::explorer::network::NETWORK_NAME).to_string()).on_click(cx.listener(
-                |this, _, window, cx| this.change_dir(crate::explorer::network::NETWORK.to_string(), window, cx),
-            )),
+            BreadcrumbItem::new(i18n::tr(crate::explorer::network::NETWORK_NAME).to_string())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.change_dir(crate::explorer::network::NETWORK.to_string(), window, cx)
+                })),
         );
     }
     if let Some(name) = location {
         bc = bc.child(BreadcrumbItem::new(name));
     } else if under_this_pc {
-        bc = bc.child(BreadcrumbItem::new(this_pc_name).on_click(cx.listener(|this, _, window, cx| {
-            this.change_dir(crate::explorer::places::THIS_PC.to_string(), window, cx)
-        })));
+        bc = bc.child(BreadcrumbItem::new(this_pc_name).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.change_dir(crate::explorer::places::THIS_PC.to_string(), window, cx)
+            },
+        )));
     } else if let Some(server) = unc_server.clone() {
         let address = format!("\\\\{server}");
-        bc = bc.child(
-            BreadcrumbItem::new(server).on_click(cx.listener(move |this, _, window, cx| this.change_dir(address.clone(), window, cx))),
-        );
+        bc = bc.child(BreadcrumbItem::new(server).on_click(
+            cx.listener(move |this, _, window, cx| this.change_dir(address.clone(), window, cx)),
+        ));
     }
 
     if is_truncated {
@@ -73,7 +80,11 @@ pub fn render(
             String::from("/")
         } else if actual_i == 0 && unc_server.is_some() {
             // `\\nas\edicao\`: the server has its crumb already.
-            p.trim_end_matches('\\').rsplit('\\').next().unwrap_or(p).to_string()
+            p.trim_end_matches('\\')
+                .rsplit('\\')
+                .next()
+                .unwrap_or(p)
+                .to_string()
         } else {
             p.clone()
         };
@@ -222,74 +233,90 @@ pub fn render(
                 .child(bc)
                 .into_any_element(),
         });
-    let actions = div()
-        .flex().items_center().flex_shrink_0()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .flex_shrink_0()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme::fg_secondary()))
-                        .whitespace_nowrap()
-                        .mr(px(4.0))
-                        .child(i18n::plural(entry_count, k!("{n} item"), k!("{n} itens"))),
-                )
-                .child(render_recent(page, cx))
-                .child(render_open_in(page, cx))
-                .child(filter_button(page, cx))
-                .child(new_folder_button(cx))
-                .child(render_view_mode_toggle(page, cx))
-                .child(
-                    // The preview switch sits up here, beside the view modes,
-                    // where it is seen: the preview is one of the explorer's
-                    // most used parts. Filters share the same action row.
-                    ListItem::new("preview-toggle")
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.preview_visible = !view.preview_visible;
-                            // Kept for the next start, as the key does.
-                            super::panels::save_layout("preview_visible", view.preview_visible.to_string(), cx);
-                            cx.notify();
-                        }))
-                        .child(
-                            Icon::new(Icon::empty())
-                                .path("icons/panel-right.svg")
-                                .size_4()
-                                .text_color(if preview_visible {
-                                    rgb(theme::accent())
-                                } else {
-                                    rgb(theme::gray_600())
-                                }),
-                        ),
-                ),
-        );
-    navigation.flex_shrink_0()
+    let actions = div().flex().items_center().flex_shrink_0().child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::fg_secondary()))
+                    .whitespace_nowrap()
+                    .mr(px(4.0))
+                    .child(i18n::plural(entry_count, k!("{n} item"), k!("{n} itens"))),
+            )
+            .child(render_recent(page, cx))
+            .child(render_open_in(page, cx))
+            .child(filter_button(page, cx))
+            .child(new_folder_button(cx))
+            .child(render_view_mode_toggle(page, cx))
+            .child(
+                // The preview switch sits up here, beside the view modes,
+                // where it is seen: the preview is one of the explorer's
+                // most used parts. Filters share the same action row.
+                ListItem::new("preview-toggle")
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.preview_visible = !view.preview_visible;
+                        // Kept for the next start, as the key does.
+                        super::panels::save_layout(
+                            "preview_visible",
+                            view.preview_visible.to_string(),
+                            cx,
+                        );
+                        cx.notify();
+                    }))
+                    .child(
+                        Icon::new(Icon::empty())
+                            .path("icons/panel-right.svg")
+                            .size_4()
+                            .text_color(if preview_visible {
+                                rgb(theme::accent())
+                            } else {
+                                rgb(theme::gray_600())
+                            }),
+                    ),
+            ),
+    );
+    navigation
+        .flex_shrink_0()
         .when(!framed, |style| style.border_b_1())
         .child(actions)
 }
 
 fn new_folder_button(cx: &mut Context<ExplorerPane>) -> impl IntoElement + use<> {
     ListItem::new("toolbar-new-folder")
-        .px(px(10.0)).py(px(6.0)).rounded(px(6.0)).flex_shrink_0()
-        .bg(rgb(theme::accent_subtle())).text_color(rgb(theme::accent()))
+        .px(px(10.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .flex_shrink_0()
+        .bg(rgb(theme::accent_subtle()))
+        .text_color(rgb(theme::accent()))
         .on_click(cx.listener(|page, _, window, cx| page.create_new_folder(window, cx)))
-        .child(div().flex().items_center().gap_2()
-            .child(Icon::new(IconName::Plus).size_4())
-            .child(div().text_sm().whitespace_nowrap().child(t!("Nova pasta"))))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(IconName::Plus).size_4())
+                .child(div().text_sm().whitespace_nowrap().child(t!("Nova pasta"))),
+        )
 }
 
 fn filter_button(page: &ExplorerPane, cx: &mut Context<ExplorerPane>) -> impl IntoElement + use<> {
     ListItem::new("toolbar-filter")
-        .px(px(8.0)).py(px(6.0)).rounded(px(6.0))
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
         .text_color(rgb(if page.is_filtering() || page.filter_bar_visible {
             theme::accent()
-        } else { theme::fg_secondary() }))
+        } else {
+            theme::fg_secondary()
+        }))
         .on_click(cx.listener(|page, _, window, cx| page.open_filter_menu(window, cx)))
         .child(Icon::new(Icon::empty()).path("icons/funnel.svg").size_4())
 }
@@ -297,7 +324,10 @@ fn filter_button(page: &ExplorerPane, cx: &mut Context<ExplorerPane>) -> impl In
 // "Recent folders", beside the button that opens the folder elsewhere: the
 // places visited last, shown on hover and listed by a click (or Alt+Down). The
 // arrow says the list is there; the menu says where each one goes.
-fn render_recent(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> impl IntoElement + use<> {
+fn render_recent(
+    page: &mut ExplorerPane,
+    cx: &mut Context<ExplorerPane>,
+) -> impl IntoElement + use<> {
     use nohrs_core::shortcuts::{Action, display};
     let recent = super::super::recent::RecentFolders::all(cx);
     let open = page.recent_menu;
@@ -327,7 +357,9 @@ fn render_recent(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> imp
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(theme::bg_hover())))
                 .when(open, |style| style.bg(rgb(theme::bg_hover())))
-                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                })
                 .on_click(cx.listener(|page, _, _, cx| {
                     page.recent_menu = !page.recent_menu;
                     page.open_in_menu = false;
@@ -336,7 +368,11 @@ fn render_recent(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> imp
                 .child(
                     Icon::new(IconName::ChevronDown)
                         .size_4()
-                        .text_color(rgb(if open { theme::accent() } else { theme::gray_600() })),
+                        .text_color(rgb(if open {
+                            theme::accent()
+                        } else {
+                            theme::gray_600()
+                        })),
                 ),
         )
         .when(open, |this| {
@@ -457,18 +493,41 @@ fn render_recent(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> imp
 // "Open in": the folder on screen in the Command Prompt, PowerShell,
 // Windows Terminal (when installed) or Windows' own Explorer, each with the
 // shortcut it was given in Settings › Shortcuts.
-fn render_open_in(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> impl IntoElement + use<> {
+fn render_open_in(
+    page: &mut ExplorerPane,
+    cx: &mut Context<ExplorerPane>,
+) -> impl IntoElement + use<> {
     use crate::explorer::commands::{OpenIn, has_windows_terminal};
     use nohrs_core::shortcuts::{Action, display};
     let open = page.open_in_menu;
     let mut items: Vec<(OpenIn, &'static str, &'static str, Option<String>)> = vec![
-        (OpenIn::CommandPrompt, "icons/square-terminal.svg", t!("Prompt de Comando"), display(Action::OpenCommandPrompt)),
-        (OpenIn::PowerShell, "icons/square-terminal.svg", "PowerShell", display(Action::OpenPowerShell)),
+        (
+            OpenIn::CommandPrompt,
+            "icons/square-terminal.svg",
+            t!("Prompt de Comando"),
+            display(Action::OpenCommandPrompt),
+        ),
+        (
+            OpenIn::PowerShell,
+            "icons/square-terminal.svg",
+            "PowerShell",
+            display(Action::OpenPowerShell),
+        ),
     ];
     if has_windows_terminal() {
-        items.push((OpenIn::WindowsTerminal, "icons/app-terminal.svg", "Windows Terminal", None));
+        items.push((
+            OpenIn::WindowsTerminal,
+            "icons/app-terminal.svg",
+            "Windows Terminal",
+            None,
+        ));
     }
-    items.push((OpenIn::FileExplorer, "icons/folder-open.svg", t!("Explorador do Windows"), display(Action::OpenFileExplorer)));
+    items.push((
+        OpenIn::FileExplorer,
+        "icons/folder-open.svg",
+        t!("Explorador do Windows"),
+        display(Action::OpenFileExplorer),
+    ));
     div()
         .relative()
         .flex_shrink_0()
@@ -482,7 +541,8 @@ fn render_open_in(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> im
                 .hover(|style| style.bg(rgb(theme::bg_hover())))
                 .when(open, |style| style.bg(rgb(theme::bg_hover())))
                 .tooltip(|window, cx| {
-                    gpui_component::tooltip::Tooltip::new(t!("Abrir a pasta em outro programa")).build(window, cx)
+                    gpui_component::tooltip::Tooltip::new(t!("Abrir a pasta em outro programa"))
+                        .build(window, cx)
                 })
                 .on_click(cx.listener(|page, _, _, cx| {
                     page.open_in_menu = !page.open_in_menu;
@@ -492,7 +552,11 @@ fn render_open_in(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> im
                     Icon::new(Icon::empty())
                         .path("icons/external-link.svg")
                         .size_4()
-                        .text_color(rgb(if open { theme::accent() } else { theme::gray_600() })),
+                        .text_color(rgb(if open {
+                            theme::accent()
+                        } else {
+                            theme::gray_600()
+                        })),
                 ),
         )
         .when(open, |this| {
@@ -540,9 +604,16 @@ fn render_open_in(page: &mut ExplorerPane, cx: &mut Context<ExplorerPane>) -> im
                             .text_color(rgb(theme::fg()))
                             .hover(|style| style.bg(rgb(theme::bg_hover())))
                             .on_click(cx.listener(move |page, _, _, cx| page.open_in(program, cx)))
-                            .child(Icon::new(Icon::empty()).path(icon).size_4().text_color(rgb(theme::fg_secondary())))
+                            .child(
+                                Icon::new(Icon::empty())
+                                    .path(icon)
+                                    .size_4()
+                                    .text_color(rgb(theme::fg_secondary())),
+                            )
                             .child(div().flex_1().child(label))
-                            .children(keys.map(|keys| div().text_xs().text_color(rgb(theme::muted())).child(keys)))
+                            .children(keys.map(|keys| {
+                                div().text_xs().text_color(rgb(theme::muted())).child(keys)
+                            }))
                     })),
             ))
         })
@@ -672,7 +743,10 @@ mod tests {
     fn up_goes_to_the_parent_and_from_a_drive_to_this_pc() {
         use crate::explorer::navigation::parent_location;
         use crate::explorer::places::THIS_PC;
-        assert_eq!(parent_location(r"C:\Users\ada").as_deref(), Some(r"C:\Users"));
+        assert_eq!(
+            parent_location(r"C:\Users\ada").as_deref(),
+            Some(r"C:\Users")
+        );
         assert_eq!(parent_location(r"C:\Users").as_deref(), Some(r"C:\"));
         assert_eq!(parent_location(r"C:\").as_deref(), Some(THIS_PC));
         assert_eq!(parent_location(r"d:").as_deref(), Some(THIS_PC));

@@ -101,9 +101,13 @@ pub(crate) fn read_folder(address: &str) -> Result<Vec<FileEntryDto>, String> {
         let rest = if inner.is_empty() {
             path
         } else {
-            let Some(rest) = path.strip_prefix(inner) else { continue };
+            let Some(rest) = path.strip_prefix(inner) else {
+                continue;
+            };
             // The folder's own line (`docs/`) is not one of its children.
-            let Some(rest) = rest.strip_prefix('/') else { continue };
+            let Some(rest) = rest.strip_prefix('/') else {
+                continue;
+            };
             rest
         };
         if rest.is_empty() {
@@ -133,7 +137,11 @@ pub(crate) fn read_folder(address: &str) -> Result<Vec<FileEntryDto>, String> {
         .into_iter()
         .map(|folder| row(archive, inner, &folder, "dir", 0))
         .collect();
-    rows.extend(files.into_iter().map(|(file, size)| row(archive, inner, &file, "file", size)));
+    rows.extend(
+        files
+            .into_iter()
+            .map(|(file, size)| row(archive, inner, &file, "file", size)),
+    );
     Ok(rows)
 }
 
@@ -177,7 +185,8 @@ pub(crate) fn display_name(address: &str) -> Option<String> {
 /// kept as it is — moving through a folder's files unpacks each once.
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn extract(address: &str) -> Result<std::path::PathBuf, String> {
-    let (archive, inner) = split(address).ok_or_else(|| format!("not an archive address: {address}"))?;
+    let (archive, inner) =
+        split(address).ok_or_else(|| format!("not an archive address: {address}"))?;
     let inner = inner.trim_matches('/');
     if inner.is_empty() {
         return Err("the archive itself has nothing to unpack".to_string());
@@ -189,7 +198,8 @@ pub(crate) fn extract(address: &str) -> Result<std::path::PathBuf, String> {
     // Fresh enough: unpacked from this very archive after it was written.
     if let (Ok(unpacked), Ok(archive_time)) =
         (std::fs::metadata(&target), std::fs::metadata(archive_path))
-        && let (Ok(unpacked_time), Ok(archive_time)) = (unpacked.modified(), archive_time.modified())
+        && let (Ok(unpacked_time), Ok(archive_time)) =
+            (unpacked.modified(), archive_time.modified())
         && unpacked_time >= archive_time
         && unpacked.len() > 0
     {
@@ -217,7 +227,13 @@ pub(crate) fn extract(address: &str) -> Result<std::path::PathBuf, String> {
 // so a preview is unpacked once.
 fn unpack_folder(archive: &Path, inner: &str) -> std::path::PathBuf {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in archive.to_string_lossy().to_lowercase().bytes().chain([0u8]).chain(inner.bytes()) {
+    for byte in archive
+        .to_string_lossy()
+        .to_lowercase()
+        .bytes()
+        .chain([0u8])
+        .chain(inner.bytes())
+    {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
@@ -233,7 +249,8 @@ fn unpack_folder(archive: &Path, inner: &str) -> std::path::PathBuf {
 #[allow(clippy::disallowed_methods)]
 fn extract_zip(archive: &Path, inner: &str, target: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive).map_err(|error| error.to_string())?;
-    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|error| error.to_string())?;
+    let mut zip =
+        zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|error| error.to_string())?;
     // Names inside a zip may be written with either separator.
     let name = if zip.file_names().any(|name| name == inner) {
         inner.to_string()
@@ -288,16 +305,25 @@ mod tests {
     fn addresses_split_at_their_one_bar() {
         assert_eq!(split("arc:C:\\a.zip"), Some(("C:\\a.zip", "")));
         assert_eq!(split("arc:C:\\a.zip|docs"), Some(("C:\\a.zip", "docs")));
-        assert_eq!(split("arc:C:\\a.zip|docs/2026"), Some(("C:\\a.zip", "docs/2026")));
+        assert_eq!(
+            split("arc:C:\\a.zip|docs/2026"),
+            Some(("C:\\a.zip", "docs/2026"))
+        );
         assert_eq!(split("C:\\a.zip"), None);
     }
 
     #[test]
     fn up_from_an_archive_goes_through_its_own_folders_to_the_file() {
         // Inside a folder: its parent inside the archive.
-        assert_eq!(parent("arc:C:\\a.zip|docs/2026").as_deref(), Some("arc:C:\\a.zip|docs"));
+        assert_eq!(
+            parent("arc:C:\\a.zip|docs/2026").as_deref(),
+            Some("arc:C:\\a.zip|docs")
+        );
         // One folder deep: the archive's own root.
-        assert_eq!(parent("arc:C:\\a.zip|docs").as_deref(), Some("arc:C:\\a.zip"));
+        assert_eq!(
+            parent("arc:C:\\a.zip|docs").as_deref(),
+            Some("arc:C:\\a.zip")
+        );
         // At the root: the folder holding the archive.
         assert_eq!(parent("arc:C:\\a.zip").as_deref(), Some("C:\\"));
         assert_eq!(parent("arc:C:\\pasta\\a.zip").as_deref(), Some("C:\\pasta"));
@@ -315,7 +341,10 @@ mod tests {
 
     #[test]
     fn the_path_bar_names_the_archive_and_where_it_is_inside() {
-        assert_eq!(display_name("arc:C:\\pasta\\a.zip").as_deref(), Some("a.zip"));
+        assert_eq!(
+            display_name("arc:C:\\pasta\\a.zip").as_deref(),
+            Some("a.zip")
+        );
         assert_eq!(
             display_name("arc:C:\\pasta\\a.zip|docs/2026").as_deref(),
             Some("a.zip › docs › 2026")
@@ -353,7 +382,13 @@ mod tests {
         let unpacked = extract(&address).expect("unpacked");
         assert!(unpacked.is_file(), "{unpacked:?}");
         assert_eq!(std::fs::read_to_string(&unpacked).expect("read"), "# oi");
-        assert_eq!(unpacked.file_name().map(|name| name.to_string_lossy().into_owned()).as_deref(), Some("leiame.md"));
+        assert_eq!(
+            unpacked
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .as_deref(),
+            Some("leiame.md")
+        );
 
         // Asking again reuses the copy rather than unpacking over it.
         assert_eq!(extract(&address).expect("again"), unpacked);
@@ -378,7 +413,8 @@ mod tests {
             zip.add_directory("docs/", options).expect("folder");
             zip.start_file("docs/leiame.md", options).expect("entry");
             zip.write_all(b"# oi").expect("write");
-            zip.start_file("docs/mais/fundo.txt", options).expect("entry");
+            zip.start_file("docs/mais/fundo.txt", options)
+                .expect("entry");
             zip.write_all(b"x").expect("write");
             zip.finish().expect("finish");
         }
@@ -386,7 +422,11 @@ mod tests {
 
         let root = read_folder(&location(&archive, "")).expect("the archive's root");
         let names: Vec<&str> = root.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, ["docs", "nota.txt"], "folders first, as a listing shows them");
+        assert_eq!(
+            names,
+            ["docs", "nota.txt"],
+            "folders first, as a listing shows them"
+        );
 
         let docs = read_folder(&location(&archive, "docs")).expect("a folder inside");
         let names: Vec<&str> = docs.iter().map(|entry| entry.name.as_str()).collect();
@@ -396,8 +436,14 @@ mod tests {
         // Up from a folder inside leads back to the archive's root, and from
         // there to the folder holding it.
         let inner = location(&archive, "docs/mais");
-        assert_eq!(parent(&inner).as_deref(), Some(location(&archive, "docs").as_str()));
-        assert_eq!(parent(&location(&archive, "")).as_deref(), Some(folder.path().to_string_lossy().as_ref()));
+        assert_eq!(
+            parent(&inner).as_deref(),
+            Some(location(&archive, "docs").as_str())
+        );
+        assert_eq!(
+            parent(&location(&archive, "")).as_deref(),
+            Some(folder.path().to_string_lossy().as_ref())
+        );
 
         // A file that is not an archive is refused rather than listed empty.
         let text = folder.path().join("nota.txt");

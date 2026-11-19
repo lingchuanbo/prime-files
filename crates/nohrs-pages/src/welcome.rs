@@ -1,4 +1,4 @@
-//! The welcome screen: the first thing Prime Files shows, and what Settings ›
+//! The welcome screen: the first thing LumaFiles shows, and what Settings ›
 //! About opens again. Five short steps — language, theme and accent; how the
 //! files look and sound (hidden items, compact mode, sounds under the mouse,
 //! waveforms); the default file manager, starting with Windows and updates;
@@ -105,7 +105,7 @@ impl WelcomePage {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.error = Some(tf!("Não foi possível achar o executável do Prime Files: {error}", error = error));
+                self.error = Some(tf!("Não foi possível achar o executável do LumaFiles: {error}", error = error));
                 cx.notify();
                 return;
             }
@@ -146,7 +146,7 @@ impl WelcomePage {
             .flex()
             .flex_col()
             .gap(px(22.0))
-            .child(hero("icons/folder-open.svg", t!("Bem-vindo ao Prime Files"), t!("Um explorador de arquivos rápido para o Windows. Vamos deixá-lo do seu jeito em menos de um minuto.")))
+            .child(hero("icons/folder-open.svg", t!("Bem-vindo ao LumaFiles"), t!("Um explorador de arquivos rápido para o Windows. Vamos deixá-lo do seu jeito em menos de um minuto.")))
             .child(
                 card()
                     .child(card_title(t!("Idioma")))
@@ -290,7 +290,7 @@ impl WelcomePage {
             .child(option_card(
                 "welcome-default",
                 "icons/folder-open.svg",
-                t!("Usar o Prime Files como explorador padrão"),
+                t!("Usar o LumaFiles como explorador padrão"),
                 t!("Pastas, unidades, Win+E e o ícone do Explorador na barra de tarefas passam a abrir aqui."),
                 is_default,
                 self.busy,
@@ -324,7 +324,7 @@ impl WelcomePage {
                 "welcome-updates",
                 "icons/refresh-cw.svg",
                 t!("Atualizar automaticamente"),
-                t!("Procura uma versão nova ao abrir, baixa em segundo plano e instala quando você fecha o Prime Files."),
+                t!("Procura uma versão nova ao abrir, baixa em segundo plano e instala quando você fecha o LumaFiles."),
                 self.config.updates.automatic,
                 ("updates", "automatic"),
                 cx,
@@ -353,7 +353,7 @@ impl WelcomePage {
                     "welcome-listary",
                     "icons/search.svg",
                     t!("Abrir as pastas do Listary aqui"),
-                    t!("As pastas que você abre pelo Listary (Ctrl duas vezes) abrem no Prime Files. O Listary reinicia ao mudar."),
+                    t!("As pastas que você abre pelo Listary (Ctrl duas vezes) abrem no LumaFiles. O Listary reinicia ao mudar."),
                     state.map(|_| ours),
                     self.busy,
                     cx.listener(move |page, _, _, cx| {
@@ -377,12 +377,12 @@ impl WelcomePage {
             .flex()
             .flex_col()
             .gap(px(22.0))
-            .child(hero("icons/layers.svg", t!("Os seus outros programas"), t!("O Prime Files atende os programas que pedem para mostrar um arquivo, e destaca o arquivo quando ele chega.")))
+            .child(hero("icons/layers.svg", t!("Os seus outros programas"), t!("O LumaFiles atende os programas que pedem para mostrar um arquivo, e destaca o arquivo quando ele chega.")))
             .child(option_card(
                 "welcome-reveal",
                 "icons/film.svg",
                 t!("\"Mostrar na pasta\" abre aqui"),
-                t!("Premiere (Revelar no Explorador), Chrome, Edge e Firefox (Mostrar na pasta, depois de baixar) e o menu Iniciar (Abrir local do arquivo) abrem a pasta no Prime Files, com o arquivo selecionado e piscando em destaque."),
+                t!("Premiere (Revelar no Explorador), Chrome, Edge e Firefox (Mostrar na pasta, depois de baixar) e o menu Iniciar (Abrir local do arquivo) abrem a pasta no LumaFiles, com o arquivo selecionado e piscando em destaque."),
                 Some(reveal),
                 false,
                 cx.listener(move |page, _, _, cx| {
@@ -403,7 +403,7 @@ impl WelcomePage {
                 .when_some(mft_error, |this, error| this.child(note_text(tf!("Não deu certo: {error}", error = error))))
             })
             .when(reveal && self.starts_with_windows == Some(false), |this| {
-                this.child(note(t!("Isso vale enquanto o Prime Files está aberto. Para valer sempre, ligue \"Iniciar com o Windows\" no passo anterior.")))
+                this.child(note(t!("Isso vale enquanto o LumaFiles está aberto. Para valer sempre, ligue \"Iniciar com o Windows\" no passo anterior.")))
             })
     }
 

@@ -53,7 +53,7 @@ cargo build
 
 # GUI バイナリ
 cargo build --features gui
-cargo run --features gui --bin nohrs
+cargo run --features gui --bin LumaFiles
 ```
 
 #### gpui のための macOS 前提条件

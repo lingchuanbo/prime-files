@@ -38,6 +38,29 @@ pub(super) fn render(
             ),
         )
         .child(
+            div().flex().gap_2().children(
+                [(false, "按规则重命名"), (true, "按列表重命名")]
+                    .into_iter()
+                    .map(|(list_mode, label)| {
+                        Button::new(if list_mode {
+                            "rename-method-list"
+                        } else {
+                            "rename-method-rule"
+                        })
+                        .small()
+                        .flex_1()
+                        .label(label)
+                        .disabled(view.busy)
+                        .when(view.list_mode == list_mode, |button| button.primary())
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.list_mode = list_mode;
+                            view.schedule_preview(cx);
+                        }))
+                    }),
+            ),
+        )
+        .when(!view.list_mode, |section| {
+            section.child(
             Checkbox::new("rename-counter-per-directory")
                 .debug_selector(|| "rename-counter-per-directory".into())
                 .label("每个目录独立编号")
@@ -54,7 +77,7 @@ pub(super) fn render(
                 .text_color(rgb(theme::fg_secondary()))
                 .child("勾选后各目录从起始值编号；起始 0、位数 5：A\\00000.png、B\\00000.png。"),
         )
-        .when(view.scope.options.directory_mode, |section| {
+        .when(!view.list_mode && view.scope.options.directory_mode, |section| {
             section
                 .child(
                     Checkbox::new("rename-scope-recursive")
@@ -106,5 +129,6 @@ pub(super) fn render(
                             }
                         })),
                 )
+        })
         })
 }

@@ -1,9 +1,9 @@
-use nohrs_core::tf;
 use crate::explorer::ExplorerPane;
 use crate::explorer::filter::KindFilter;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{Icon, IconName};
+use nohrs_core::tf;
 use nohrs_ui::theme::theme;
 
 /// Renders the filter bar: a name pattern and one chip per kind of entry.

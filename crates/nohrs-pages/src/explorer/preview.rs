@@ -1,5 +1,5 @@
-use nohrs_core::t;
 use nohrs_core::config;
+use nohrs_core::t;
 use nohrs_core::telemetry::LogErr as _;
 
 use gpui::{AppContext, AsyncWindowContext, Context, Window};
@@ -218,7 +218,9 @@ fn read_unless_binary(path: &str, image: bool) -> std::io::Result<Option<Vec<u8>
     use std::io::Read as _;
     let mut file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
-    (&mut file).take(SNIFF_BYTES as u64).read_to_end(&mut bytes)?;
+    (&mut file)
+        .take(SNIFF_BYTES as u64)
+        .read_to_end(&mut bytes)?;
     if !image && bytes.contains(&0) {
         return Ok(None);
     }
@@ -338,7 +340,8 @@ impl ExplorerPane {
     /// dragging, so only a folder is read.
     pub(crate) fn refresh_preview_listing(&mut self, cx: &mut Context<Self>) {
         use nohrs_core::telemetry::LogErr as _;
-        let (Some(path), Some(_)) = (self.preview_path.clone(), self.preview_listing.as_ref()) else {
+        let (Some(path), Some(_)) = (self.preview_path.clone(), self.preview_listing.as_ref())
+        else {
             return;
         };
         let show_hidden = self.show_hidden;
@@ -383,7 +386,12 @@ impl ExplorerPane {
 
     /// Previews `path`, clicked inside the preview's folder listing; the
     /// back button returns to what was shown before.
-    pub(crate) fn preview_into(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn preview_into(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(current) = self.preview_path.take() {
             self.preview_back.push(current);
         }
@@ -504,7 +512,8 @@ impl ExplorerPane {
             }
             PreviewOutcome::TooLarge => {
                 self.preview_path = Some(path);
-                self.preview_message = Some(t!("(Arquivo grande demais para visualizar)").to_string());
+                self.preview_message =
+                    Some(t!("(Arquivo grande demais para visualizar)").to_string());
             }
             PreviewOutcome::Image => {
                 self.preview_path = Some(path.clone());
@@ -526,7 +535,8 @@ impl ExplorerPane {
                 self.preview_path = Some(path);
                 self.preview_listing = Some(std::rc::Rc::new(listing));
                 // Another folder starts at its top.
-                self.preview_listing_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                self.preview_listing_scroll
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
             }
             PreviewOutcome::Unsupported => {
                 self.preview_path = Some(path);
@@ -544,12 +554,19 @@ impl ExplorerPane {
                 self.preview_path = Some(path);
                 self.preview_markdown = Some(markdown.into());
             }
-            PreviewOutcome::Creative(super::creative::Creative::Picture { width, height, bgra, caption }) => {
+            PreviewOutcome::Creative(super::creative::Creative::Picture {
+                width,
+                height,
+                bgra,
+                caption,
+            }) => {
                 self.preview_path = Some(path);
-                self.preview_picture = super::thumbnails::render_image(width, height, bgra).map(std::sync::Arc::new);
+                self.preview_picture =
+                    super::thumbnails::render_image(width, height, bgra).map(std::sync::Arc::new);
                 self.preview_caption = (!caption.is_empty()).then_some(caption);
                 if self.preview_picture.is_none() {
-                    self.preview_message = Some(t!("(Sem visualização para este arquivo)").to_string());
+                    self.preview_message =
+                        Some(t!("(Sem visualização para este arquivo)").to_string());
                 }
             }
             PreviewOutcome::Text(text) => {
@@ -563,7 +580,9 @@ impl ExplorerPane {
                 // line to keep: it is rendered like any file. Until 05/11/2026
                 // every hit counted, and a .md found that way showed raw.
                 let from_search = self.search_results.as_ref().is_some_and(|results| {
-                    results.iter().any(|result| result.path == path && !result.matches.is_empty())
+                    results
+                        .iter()
+                        .any(|result| result.path == path && !result.matches.is_empty())
                 });
                 self.preview_crlf = text.contains("\r\n");
                 if !from_search && language == "markdown" {
@@ -626,7 +645,12 @@ impl ExplorerPane {
             cx.notify();
             return;
         }
-        let Some(text) = self.preview_markdown.as_ref().map(|text| text.to_string()).or_else(|| self.preview_text.clone()) else {
+        let Some(text) = self
+            .preview_markdown
+            .as_ref()
+            .map(|text| text.to_string())
+            .or_else(|| self.preview_text.clone())
+        else {
             return;
         };
         let editor = cx.new(|cx| PreviewEditor::new(window, cx));
@@ -642,7 +666,12 @@ impl ExplorerPane {
     }
 
     // Each change in the editor says whether it now differs from the file.
-    fn watch_preview_editor(&mut self, editor: &gpui::Entity<PreviewEditor>, window: &mut Window, cx: &mut Context<Self>) {
+    fn watch_preview_editor(
+        &mut self,
+        editor: &gpui::Entity<PreviewEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let state = editor.read(cx).state().clone();
         let editor = editor.downgrade();
         self.preview_editor_changes = Some(cx.subscribe_in(
@@ -656,7 +685,11 @@ impl ExplorerPane {
                     return;
                 };
                 let text = editor.read(cx).text(cx);
-                let dirty = this.preview_text.as_deref().map(|saved| saved.replace("\r\n", "\n")) != Some(text);
+                let dirty = this
+                    .preview_text
+                    .as_deref()
+                    .map(|saved| saved.replace("\r\n", "\n"))
+                    != Some(text);
                 if dirty != this.preview_dirty {
                     this.preview_dirty = dirty;
                     cx.notify();
@@ -668,18 +701,25 @@ impl ExplorerPane {
     /// Writes the editor's text to the file it came from (Ctrl+S, or the
     /// preview's save button), keeping its line endings.
     pub(crate) fn save_preview(&mut self, cx: &mut Context<Self>) {
-        let (Some(path), Some(editor)) = (self.preview_path.clone(), self.preview_editor.clone()) else {
+        let (Some(path), Some(editor)) = (self.preview_path.clone(), self.preview_editor.clone())
+        else {
             return;
         };
         if !self.preview_saveable {
             return;
         }
         let text = editor.read(cx).text(cx);
-        let written = if self.preview_crlf { text.replace("\r\n", "\n").replace('\n', "\r\n") } else { text.clone() };
+        let written = if self.preview_crlf {
+            text.replace("\r\n", "\n").replace('\n', "\r\n")
+        } else {
+            text.clone()
+        };
         let write = cx.background_spawn({
             let path = path.clone();
             #[allow(clippy::disallowed_methods)]
-            async move { std::fs::write(&path, written) }
+            async move {
+                std::fs::write(&path, written)
+            }
         });
         cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result = write.await;
@@ -692,7 +732,13 @@ impl ExplorerPane {
                         }
                         pane.set_status(
                             super::types::StatusLevel::Info,
-                            nohrs_core::tf!("Salvo: {name}", name = std::path::Path::new(&path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()),
+                            nohrs_core::tf!(
+                                "Salvo: {name}",
+                                name = std::path::Path::new(&path)
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            ),
                         );
                     }
                     Err(error) => pane.set_status(
@@ -810,16 +856,27 @@ mod tests {
         let mut bytes = b"MZ\x90\x00".to_vec();
         bytes.resize(1024 * 1024, 7);
         std::fs::write(&program, &bytes).unwrap();
-        assert!(read_unless_binary(&program.to_string_lossy(), false).unwrap().is_none());
+        assert!(
+            read_unless_binary(&program.to_string_lossy(), false)
+                .unwrap()
+                .is_none()
+        );
 
         // Text longer than the sniffed part arrives whole.
         let notes = dir.path().join("notas.txt");
         let text = "linha de texto\n".repeat(2000);
         std::fs::write(&notes, &text).unwrap();
-        assert_eq!(read_unless_binary(&notes.to_string_lossy(), false).unwrap(), Some(text.into_bytes()));
+        assert_eq!(
+            read_unless_binary(&notes.to_string_lossy(), false).unwrap(),
+            Some(text.into_bytes())
+        );
 
         // What may be an image is read whole for the caller to try.
-        assert!(read_unless_binary(&program.to_string_lossy(), true).unwrap().is_some());
+        assert!(
+            read_unless_binary(&program.to_string_lossy(), true)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

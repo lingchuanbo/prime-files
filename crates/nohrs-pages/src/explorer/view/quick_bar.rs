@@ -1,14 +1,14 @@
-use nohrs_core::{t, tf};
-use nohrs_core::i18n;
 use crate::explorer::entries::FolderOrder;
 use crate::explorer::filter::KindFilter;
-use gpui_component::tooltip::Tooltip;
 use crate::explorer::types::StatusLevel;
 use crate::explorer::{ExplorerPane, zoom};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::input::InputState;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName};
+use nohrs_core::i18n;
+use nohrs_core::{t, tf};
 use nohrs_ui::theme::theme;
 
 /// 底栏左侧显示搜索框，右侧显示状态、计数与视图缩放控件。
@@ -17,7 +17,11 @@ pub fn render(
     window: &mut Window,
     cx: &mut Context<ExplorerPane>,
 ) -> impl IntoElement + use<> {
-    let files = page.entries.iter().filter(|entry| entry.kind != "dir").count();
+    let files = page
+        .entries
+        .iter()
+        .filter(|entry| entry.kind != "dir")
+        .count();
     let search = super::quick_search::render(page, window, cx);
     // A file operation's report, a search's progress, or nothing.
     let everything_status = page.everything_status(cx);
@@ -33,22 +37,36 @@ pub fn render(
                 StatusLevel::Error => theme::danger(),
             },
         ),
-        (None, Some(search)) if search.running => {
-            (tf!("Buscando… {n}", n = search.found), theme::fg_secondary())
-        }
-        (None, Some(search)) if search.detail.is_empty() => {
-            (tf!("{n} encontrados", n = search.found), theme::fg_secondary())
-        }
+        (None, Some(search)) if search.running => (
+            tf!("Buscando… {n}", n = search.found),
+            theme::fg_secondary(),
+        ),
+        (None, Some(search)) if search.detail.is_empty() => (
+            tf!("{n} encontrados", n = search.found),
+            theme::fg_secondary(),
+        ),
         (None, Some(search)) => (
-            format!("{} · {}", tf!("{n} encontrados", n = search.found), search.detail),
+            format!(
+                "{} · {}",
+                tf!("{n} encontrados", n = search.found),
+                search.detail
+            ),
             theme::fg_secondary(),
         ),
         (None, None) => (String::new(), theme::fg_secondary()),
     };
 
     let is_file = |entry: &&nohrs_services::fs::listing::FileEntryDto| entry.kind != "dir";
-    let folders_shown = page.filtered_entries.iter().filter(|entry| entry.kind == "dir").count();
-    let folders_total = page.entries.iter().filter(|entry| entry.kind == "dir").count();
+    let folders_shown = page
+        .filtered_entries
+        .iter()
+        .filter(|entry| entry.kind == "dir")
+        .count();
+    let folders_total = page
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == "dir")
+        .count();
     let files_shown = page.filtered_entries.iter().filter(is_file).count();
     // Search results come from other folders: against this folder's totals
     // they would read as "1121 of 272".
@@ -72,7 +90,12 @@ pub fn render(
         .w_full()
         // Out of compact mode's frame it takes in the frame's band below it,
         // and centres its contents in the whole.
-        .h(px(32.0 + if framed { page.compact.frame_px as f32 } else { 0.0 }))
+        .h(px(32.0
+            + if framed {
+                page.compact.frame_px as f32
+            } else {
+                0.0
+            }))
         // Out of compact mode's frame, the same room on both ends, clear of
         // the frame's sides.
         .pl(px(if framed { 8.0 } else { 6.0 }))
@@ -80,7 +103,9 @@ pub fn render(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .when(!framed, |this| this.bg(rgb(theme::footer_bg())).border_t_1())
+        .when(!framed, |this| {
+            this.bg(rgb(theme::footer_bg())).border_t_1()
+        })
         .border_color(rgb(theme::border()))
         .child(search)
         .child(
@@ -96,12 +121,17 @@ pub fn render(
         )
         .when(selected > 0, |bar| {
             bar.child(
-                bar_button("bar-selected", Icon::new(IconName::Check), tf!("{n} selecionados", n = selected), false)
-                    // Clicking the count clears the selection.
-                    .on_click(cx.listener(|page, _, _, cx| {
-                        page.clear_selection();
-                        cx.notify();
-                    })),
+                bar_button(
+                    "bar-selected",
+                    Icon::new(IconName::Check),
+                    tf!("{n} selecionados", n = selected),
+                    false,
+                )
+                // Clicking the count clears the selection.
+                .on_click(cx.listener(|page, _, _, cx| {
+                    page.clear_selection();
+                    cx.notify();
+                })),
             )
             .child(divider())
         })
@@ -116,8 +146,11 @@ pub fn render(
                 false,
             )
             .tooltip(|window, cx| {
-                Tooltip::new(nohrs_core::shortcuts::with_keys("Terminal", nohrs_core::shortcuts::Action::ToggleTerminal))
-                    .build(window, cx)
+                Tooltip::new(nohrs_core::shortcuts::with_keys(
+                    "Terminal",
+                    nohrs_core::shortcuts::Action::ToggleTerminal,
+                ))
+                .build(window, cx)
             })
             .on_click(cx.listener(|_page, _, window, cx| {
                 window.dispatch_action(Box::new(crate::explorer::page::ToggleTerminal), cx);
@@ -130,22 +163,44 @@ pub fn render(
                 .items_center()
                 .gap(px(2.0))
                 .child(
-                    bar_button("bar-folders", Icon::new(IconName::Folder), folders, kind == KindFilter::Folders)
-                        // As in File Pilot: the folder count shows folders
-                        // only, and a second click shows everything again.
-                        .on_click(cx.listener(|page, _, _, cx| page.toggle_kind_only(KindFilter::Folders, cx))),
+                    bar_button(
+                        "bar-folders",
+                        Icon::new(IconName::Folder),
+                        folders,
+                        kind == KindFilter::Folders,
+                    )
+                    // As in File Pilot: the folder count shows folders
+                    // only, and a second click shows everything again.
+                    .on_click(
+                        cx.listener(|page, _, _, cx| {
+                            page.toggle_kind_only(KindFilter::Folders, cx)
+                        }),
+                    ),
                 )
                 .child(
-                    bar_button("bar-files", Icon::new(IconName::File), files, kind == KindFilter::Files)
-                        .on_click(cx.listener(|page, _, _, cx| page.toggle_kind_only(KindFilter::Files, cx))),
+                    bar_button(
+                        "bar-files",
+                        Icon::new(IconName::File),
+                        files,
+                        kind == KindFilter::Files,
+                    )
+                    .on_click(
+                        cx.listener(|page, _, _, cx| page.toggle_kind_only(KindFilter::Files, cx)),
+                    ),
                 ),
         )
         .child(divider())
         .child({
             let order = page.folder_order;
             let (icon, tip) = match order {
-                FolderOrder::First => ("icons/folder-up.svg", t!("Pastas primeiro, depois arquivos")),
-                FolderOrder::Last => ("icons/folder-down.svg", t!("Arquivos primeiro, depois pastas")),
+                FolderOrder::First => (
+                    "icons/folder-up.svg",
+                    t!("Pastas primeiro, depois arquivos"),
+                ),
+                FolderOrder::Last => (
+                    "icons/folder-down.svg",
+                    t!("Arquivos primeiro, depois pastas"),
+                ),
                 FolderOrder::Mixed => ("icons/folder.svg", t!("Pastas e arquivos misturados")),
             };
             bar_button(
@@ -181,12 +236,7 @@ pub fn render(
 
 // A count or switch in the bar, as File Pilot's: an icon and its number,
 // lit while what it switches is on.
-fn bar_button(
-    id: &'static str,
-    icon: Icon,
-    text: String,
-    on: bool,
-) -> Stateful<Div> {
+fn bar_button(id: &'static str, icon: Icon, text: String, on: bool) -> Stateful<Div> {
     div()
         .id(id)
         .flex_shrink_0()
@@ -199,14 +249,25 @@ fn bar_button(
         .text_xs()
         .cursor_pointer()
         .hover(|button| button.bg(rgb(theme::bg_hover())))
-        .text_color(rgb(if on { theme::accent() } else { theme::fg_secondary() }))
-        .child(icon.size_3p5().text_color(rgb(if on { theme::accent() } else { theme::muted() })))
+        .text_color(rgb(if on {
+            theme::accent()
+        } else {
+            theme::fg_secondary()
+        }))
+        .child(
+            icon.size_3p5()
+                .text_color(rgb(if on { theme::accent() } else { theme::muted() })),
+        )
         .when(!text.is_empty(), |button| button.child(text))
 }
 
 // The hairline between the bar's groups.
 fn divider() -> impl IntoElement {
-    div().w(px(1.0)).h(px(14.0)).flex_shrink_0().bg(rgb(theme::border()))
+    div()
+        .w(px(1.0))
+        .h(px(14.0))
+        .flex_shrink_0()
+        .bg(rgb(theme::border()))
 }
 
 /// A count shortened the way File Pilot writes it: 7 600 is "7.6K".
@@ -247,10 +308,15 @@ fn render_zoom_switch(
                 .when(open, |style| style.bg(rgb(theme::bg_hover())))
                 .on_click(cx.listener(|page, _, _, cx| {
                     // A shown-for-a-moment menu clicked stays, as a clicked one.
-                    page.zoom_menu_open = page.zoom_menu_flash.take().is_some() || !page.zoom_menu_open;
+                    page.zoom_menu_open =
+                        page.zoom_menu_flash.take().is_some() || !page.zoom_menu_open;
                     cx.notify();
                 }))
-                .child(view_icon(current).size_3p5().text_color(rgb(theme::muted())))
+                .child(
+                    view_icon(current)
+                        .size_3p5()
+                        .text_color(rgb(theme::muted())),
+                )
                 .child(i18n::tr(current))
                 .child(
                     div()
@@ -267,14 +333,16 @@ fn render_zoom_switch(
                         .child(format!("{percent}%")),
                 ),
         )
-        .when(open, |this| this.child(deferred(render_zoom_menu(current, position, cx))))
+        .when(open, |this| {
+            this.child(deferred(render_zoom_menu(current, position, cx)))
+        })
 }
 
 // Height of the slider's travel in the menu, and of one view's row.
 const ROW: f32 = 26.0;
 const ROW_GAP: f32 = 4.0;
-const TRACK: f32 = ROW * zoom::MENU_STOPS.len() as f32
-    + ROW_GAP * (zoom::MENU_STOPS.len() - 1) as f32;
+const TRACK: f32 =
+    ROW * zoom::MENU_STOPS.len() as f32 + ROW_GAP * (zoom::MENU_STOPS.len() - 1) as f32;
 // The slider runs from the middle of the top row to the middle of the bottom
 // one, so the knob is level with the row it stands for.
 const INSET: f32 = ROW / 2.0;
@@ -432,7 +500,9 @@ fn preset_row(
         .rounded(px(4.0))
         .text_xs()
         .cursor_pointer()
-        .when(active, |row| row.bg(rgb(theme::accent())).text_color(rgb(theme::bg())))
+        .when(active, |row| {
+            row.bg(rgb(theme::accent())).text_color(rgb(theme::bg()))
+        })
         .when(!active, |row| {
             row.text_color(rgb(theme::fg()))
                 .hover(|row| row.bg(rgb(theme::bg_hover())))
@@ -554,7 +624,11 @@ impl ExplorerPane {
 
     /// Shows only `kind`, or everything again when it already is.
     pub(crate) fn toggle_kind_only(&mut self, kind: KindFilter, cx: &mut Context<Self>) {
-        let next = if self.kind_filter == kind { KindFilter::All } else { kind };
+        let next = if self.kind_filter == kind {
+            KindFilter::All
+        } else {
+            kind
+        };
         self.set_kind_filter(next, cx);
     }
 }

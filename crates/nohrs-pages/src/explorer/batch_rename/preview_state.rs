@@ -18,14 +18,27 @@ impl RenameWindow {
         self.cancel_preview();
         self.pending = true;
         let generation = self.generation;
-        let rules = self.rules(cx);
+        let rules = if self.list_mode {
+            None
+        } else {
+            Some(self.rules(cx))
+        };
+        let list_mode = self.list_mode;
+        let list_lines = self.list_lines(cx);
+        let list_apply = self.list_apply;
         let entries = self.entries.clone();
         let excluded = self.scope.excluded.clone();
         let restart = self.scope.options.restart_counter;
         self.status = "正在生成预览…".into();
         self.preview_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(100)).await;
-            let result = cx.background_spawn(async move { rules.map(|rules| plan::preview_selected(&entries, &rules, &excluded, restart)) }).await;
+            let result = cx.background_spawn(async move {
+                if list_mode {
+                    Ok(plan::preview_list(&entries, &list_lines, list_apply, &excluded))
+                } else {
+                    rules.expect("rule mode has rules").map(|rules| plan::preview_selected(&entries, &rules, &excluded, restart))
+                }
+            }).await;
             this.update(cx, |view, cx| {
                 if generation != view.generation { return; }
                 view.pending = false;

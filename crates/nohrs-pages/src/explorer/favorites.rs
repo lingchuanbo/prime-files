@@ -140,7 +140,8 @@ impl Favorites {
 
     /// The entry `id`, wherever it sits in the tree.
     pub(crate) fn get(id: u32, cx: &App) -> Option<FavoriteItem> {
-        cx.try_global::<Self>().and_then(|favorites| find(&favorites.items, id))
+        cx.try_global::<Self>()
+            .and_then(|favorites| find(&favorites.items, id))
     }
 
     /// Adds `path` as a shortcut under `parent` (`None` = the top level),
@@ -294,7 +295,8 @@ impl Favorites {
                 items: favorites.items.clone(),
                 next_id: favorites.next_id,
             };
-            let (Some(store), Ok(bytes)) = (favorites.store.clone(), serde_json::to_vec(&stored)) else {
+            let (Some(store), Ok(bytes)) = (favorites.store.clone(), serde_json::to_vec(&stored))
+            else {
                 return result;
             };
             favorites.save = Some(cx.background_spawn(async move {
@@ -364,7 +366,11 @@ fn is_within(items: &[FavoriteItem], root: u32, candidate: u32) -> bool {
 }
 
 fn subtree_has(item: &FavoriteItem, candidate: u32) -> bool {
-    item.id == candidate || item.children.iter().any(|child| subtree_has(child, candidate))
+    item.id == candidate
+        || item
+            .children
+            .iter()
+            .any(|child| subtree_has(child, candidate))
 }
 
 // Inserts `item` inside submenu `parent`, wherever it sits. Returns whether
@@ -399,7 +405,9 @@ fn remove_from(items: &mut Vec<FavoriteItem>, id: u32) -> bool {
     if items.len() != before {
         return true;
     }
-    items.iter_mut().any(|item| remove_from(&mut item.children, id))
+    items
+        .iter_mut()
+        .any(|item| remove_from(&mut item.children, id))
 }
 
 fn holds_path(items: &[FavoriteItem], path: &str) -> bool {
@@ -462,7 +470,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn submenus_are_listed_depth_first_with_the_names_leading_to_them(cx: &mut gpui::TestAppContext) {
+    fn submenus_are_listed_depth_first_with_the_names_leading_to_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             Favorites::install(None, cx);
             let work = Favorites::add_submenu(None, "Trabalho".into(), cx);
@@ -561,7 +571,12 @@ mod tests {
             assert_eq!(tree[0].children[0].path, one);
             // A shortcut is named after its folder until renamed.
             Favorites::rename(tree[0].children[0].id, "Um".into(), cx);
-            assert_eq!(Favorites::get(tree[0].children[0].id, cx).expect("item").name, "Um");
+            assert_eq!(
+                Favorites::get(tree[0].children[0].id, cx)
+                    .expect("item")
+                    .name,
+                "Um"
+            );
             Favorites::rename(submenu, "Job".into(), cx);
             assert_eq!(Favorites::get(submenu, cx).expect("submenu").name, "Job");
             // Deleting the submenu takes its shortcuts out, folders stay.

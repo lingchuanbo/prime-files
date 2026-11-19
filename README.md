@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/icon/prime-files.png" alt="" width="112" height="112">
 
-  # Prime Files
+  # LumaFiles
 
   Explorador de arquivos para Windows, rápido, escrito em Rust.
 </div>
@@ -16,7 +16,7 @@ Pegue o instalador na página de [Releases](https://github.com/CakeDev4k/prime-f
 - o **7-Zip**, se você marcar a opção, para ver `.rar`, `.7z` e `.iso` no visualizador;
 - no Windows edição "N", o **Media Feature Pack**, sem o qual o programa não abre.
 
-Depois de instalado, o Prime Files se atualiza sozinho: procura uma versão nova ao abrir, baixa em segundo plano e instala quando você fecha o programa (ou na hora, em Configurações › Sobre). Dá para desligar em Configurações › Sobre.
+Depois de instalado, o LumaFiles se atualiza sozinho: procura uma versão nova ao abrir, baixa em segundo plano e instala quando você fecha o programa (ou na hora, em Configurações › Sobre). Dá para desligar em Configurações › Sobre.
 
 O instalador não é assinado digitalmente: o Windows pode mostrar "O Windows protegeu o computador". Clique em **Mais informações → Executar assim mesmo**. Cada release traz um `SHA256SUMS.txt` para conferir o arquivo.
 
@@ -34,8 +34,8 @@ Requer Windows 10 (1903) ou mais novo, 64 bits.
 - **Terminal** embutido com abas (Ctrl+')
 - **Nove idiomas**: português, inglês, espanhol, francês, alemão, italiano, russo, japonês e chinês simplificado
 - **Modo compacto** no estilo do Zen Browser: abas, barra de rota, barra lateral, visualizador e barra de baixo escondidos até o mouse encostar na borda, por cima da lista ou empurrando-a, numa moldura de cantos arredondados
-- **Explorador padrão** do Windows, opcional (Configurações › Integração com o Windows): pastas, drives e Win+E abrem no Prime Files
-- **Listary**, opcional (Configurações › Integração com o Windows): pastas abertas pelo Listary abrem no Prime Files; o desinstalador devolve ao Explorador
+- **Explorador padrão** do Windows, opcional (Configurações › Integração com o Windows): pastas, drives e Win+E abrem no LumaFiles
+- **Listary**, opcional (Configurações › Integração com o Windows): pastas abertas pelo Listary abrem no LumaFiles; o desinstalador devolve ao Explorador
 - **Atualização automática** pelas releases deste repositório
 
 ## Compilar
@@ -46,7 +46,7 @@ Precisa do [Rust](https://rustup.rs) (stable) e do Windows.
 cargo build --release -p nohrs
 ```
 
-O programa fica em `target/release/nohrs.exe` (o código usa internamente o nome `nohrs`: crates `nohrs-*` e a pasta de configuração). Para compilar também o serviço de indexação, `cargo build --release -p nohrs -p nohrs-indexer`.
+O programa fica em `target/release/LumaFiles.exe` (o código usa internamente o nome `nohrs`: crates `nohrs-*` e a pasta de configuração). Para compilar também o serviço de indexação, `cargo build --release -p nohrs -p nohrs-indexer`.
 
 No Windows, `compilar.bat` faz os dois de uma vez: `compilar.bat` para o uso do dia a dia (perfil `release`, recompila rápido), `compilar.bat dist` para o que o instalador empacota (`target/dist`). O instalador sai de `installer/prime-files.iss` com o [Inno Setup 6](https://jrsoftware.org/isinfo.php); o workflow `.github/workflows/release.yml` faz os dois e publica a release a cada tag `v*`. O ícone é gerado por `assets/icon/make_icon.py`.
 

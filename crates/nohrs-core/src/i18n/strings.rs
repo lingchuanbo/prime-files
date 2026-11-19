@@ -62,9 +62,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "La versión {version} está lista para instalar.",
     ),
     (
-        "A versão {version} foi baixada e será instalada quando você fechar o Prime Files.",
-        "Version {version} was downloaded and will be installed when you close Prime Files.",
-        "La versión {version} se descargó y se instalará cuando cierres Prime Files.",
+        "A versão {version} foi baixada e será instalada quando você fechar o LumaFiles.",
+        "Version {version} was downloaded and will be installed when you close LumaFiles.",
+        "La versión {version} se descargó y se instalará cuando cierres LumaFiles.",
     ),
     (
         "A versão {version} foi baixada. Instale em Configurações › Sobre.",
@@ -122,14 +122,14 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Abrir esta carpeta en",
     ),
     (
-        "Abrir no Prime Files",
-        "Open in Prime Files",
-        "Abrir en Prime Files",
+        "Abrir no LumaFiles",
+        "Open in LumaFiles",
+        "Abrir en LumaFiles",
     ),
     (
-        "Abrir no Prime Files as pastas do Windows e de outros programas.",
-        "Open folders from Windows and other programs in Prime Files.",
-        "Abrir en Prime Files las carpetas de Windows y de otros programas.",
+        "Abrir no LumaFiles as pastas do Windows e de outros programas.",
+        "Open folders from Windows and other programs in LumaFiles.",
+        "Abrir en LumaFiles las carpetas de Windows y de otros programas.",
     ),
     (
         "Abrir no programa padrão",
@@ -185,9 +185,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Primero archivos, después carpetas",
     ),
     (
-        "As pastas que você abre pelo Listary (Ctrl duas vezes) abrem no Prime Files. O Listary reinicia ao mudar.",
-        "Folders you open from Listary (Ctrl twice) open in Prime Files. Listary restarts when this changes.",
-        "Las carpetas que abres desde Listary (Ctrl dos veces) se abren en Prime Files. Listary se reinicia al cambiar.",
+        "As pastas que você abre pelo Listary (Ctrl duas vezes) abrem no LumaFiles. O Listary reinicia ao mudar.",
+        "Folders you open from Listary (Ctrl twice) open in LumaFiles. Listary restarts when this changes.",
+        "Las carpetas que abres desde Listary (Ctrl dos veces) se abren en LumaFiles. Listary se reinicia al cambiar.",
     ),
     ("Atalho", "Link", "Acceso directo"),
     ("Atalhos", "Shortcuts", "Atajos"),
@@ -229,9 +229,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ("Barra lateral", "Sidebar", "Barra lateral"),
     ("Barras", "Bars", "Barras"),
     (
-        "Bem-vindo ao Prime Files",
-        "Welcome to Prime Files",
-        "Bienvenido a Prime Files",
+        "Bem-vindo ao LumaFiles",
+        "Welcome to LumaFiles",
+        "Bienvenido a LumaFiles",
     ),
     ("Busca", "Search", "Búsqueda"),
     ("Buscando… {n}", "Searching… {n}", "Buscando… {n}"),
@@ -579,9 +579,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Esto no se puede deshacer.",
     ),
     (
-        "Isso vale enquanto o Prime Files está aberto. Para valer sempre, ligue \"Iniciar com o Windows\" no passo anterior.",
-        "This works while Prime Files is open. To have it always, turn on \"Start with Windows\" in the previous step.",
-        "Esto funciona mientras Prime Files está abierto. Para que funcione siempre, activa \"Iniciar con Windows\" en el paso anterior.",
+        "Isso vale enquanto o LumaFiles está aberto. Para valer sempre, ligue \"Iniciar com o Windows\" no passo anterior.",
+        "This works while LumaFiles is open. To have it always, turn on \"Start with Windows\" in the previous step.",
+        "Esto funciona mientras LumaFiles está abierto. Para que funcione siempre, activa \"Iniciar con Windows\" en el paso anterior.",
     ),
     ("Itens ocultos", "Hidden items", "Elementos ocultos"),
     ("Lado a lado", "Side by side", "En paralelo"),
@@ -761,9 +761,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "No se pudo abrir {path}: {error}",
     ),
     (
-        "Não foi possível achar o executável do Prime Files: {error}",
-        "Could not find the Prime Files executable: {error}",
-        "No se encontró el ejecutable de Prime Files: {error}",
+        "Não foi possível achar o executável do LumaFiles: {error}",
+        "Could not find the LumaFiles executable: {error}",
+        "No se encontró el ejecutable de LumaFiles: {error}",
     ),
     (
         "Não foi possível arrastar: {error}",
@@ -852,9 +852,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Everything no respondió: {error}",
     ),
     (
-        "O Listary agora abre pastas no Prime Files.",
-        "Listary now opens folders in Prime Files.",
-        "Listary ahora abre las carpetas en Prime Files.",
+        "O Listary agora abre pastas no LumaFiles.",
+        "Listary now opens folders in LumaFiles.",
+        "Listary ahora abre las carpetas en LumaFiles.",
     ),
     (
         "O Listary não está instalado. Se você instalar depois, ligue em Configurações › Integração com o Windows.",
@@ -867,9 +867,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Listary vuelve a abrir las carpetas en el Explorador.",
     ),
     (
-        "O Prime Files atende os programas que pedem para mostrar um arquivo, e destaca o arquivo quando ele chega.",
-        "Prime Files answers programs that ask to show a file, and highlights the file when it arrives.",
-        "Prime Files atiende a los programas que piden mostrar un archivo, y resalta el archivo cuando llega.",
+        "O LumaFiles atende os programas que pedem para mostrar um arquivo, e destaca o arquivo quando ele chega.",
+        "LumaFiles answers programs that ask to show a file, and highlights the file when it arrives.",
+        "LumaFiles atiende a los programas que piden mostrar un archivo, y resalta el archivo cuando llega.",
     ),
     (
         "O config.toml tem uma cor própria; escolher uma aqui a substitui.",
@@ -948,9 +948,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ("Pasta vazia", "Empty folder", "Carpeta vacía"),
     ("Pastas", "Folders", "Carpetas"),
     (
-        "Pastas abertas pelo Listary abrem no Prime Files. O Listary é reiniciado ao mudar.",
-        "Folders opened from Listary open in Prime Files. Listary restarts when this changes.",
-        "Las carpetas abiertas desde Listary se abren en Prime Files. Listary se reinicia al cambiarlo.",
+        "Pastas abertas pelo Listary abrem no LumaFiles. O Listary é reiniciado ao mudar.",
+        "Folders opened from Listary open in LumaFiles. Listary restarts when this changes.",
+        "Las carpetas abiertas desde Listary se abren en LumaFiles. Listary se reinicia al cambiarlo.",
     ),
     (
         "Pastas e arquivos misturados",
@@ -968,14 +968,14 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Las carpetas vuelven a abrirse en el Explorador de Windows.",
     ),
     (
-        "Pastas, drives e Win+E agora abrem no Prime Files.",
-        "Folders, drives and Win+E now open in Prime Files.",
-        "Las carpetas, unidades y Win+E ahora se abren en Prime Files.",
+        "Pastas, drives e Win+E agora abrem no LumaFiles.",
+        "Folders, drives and Win+E now open in LumaFiles.",
+        "Las carpetas, unidades y Win+E ahora se abren en LumaFiles.",
     ),
     (
-        "Pastas, drives, Win+E e o ícone do Explorador na barra de tarefas abrem no Prime Files. Só neste usuário do Windows; desligar devolve tudo ao Explorador.",
-        "Folders, drives, Win+E and the Explorer icon on the taskbar open in Prime Files. Only for this Windows user; turning it off gives everything back to Explorer.",
-        "Las carpetas, unidades, Win+E y el icono del Explorador en la barra de tareas se abren en Prime Files. Solo para este usuario de Windows; al desactivarlo todo vuelve al Explorador.",
+        "Pastas, drives, Win+E e o ícone do Explorador na barra de tarefas abrem no LumaFiles. Só neste usuário do Windows; desligar devolve tudo ao Explorador.",
+        "Folders, drives, Win+E and the Explorer icon on the taskbar open in LumaFiles. Only for this Windows user; turning it off gives everything back to Explorer.",
+        "Las carpetas, unidades, Win+E y el icono del Explorador en la barra de tareas se abren en LumaFiles. Solo para este usuario de Windows; al desactivarlo todo vuelve al Explorador.",
     ),
     (
         "Pastas, unidades, Win+E e o ícone do Explorador na barra de tarefas passam a abrir aqui.",
@@ -999,9 +999,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Preferences.json de Listary no es un objeto",
     ),
     (
-        "Premiere (Revelar no Explorador), Chrome, Edge e Firefox (Mostrar na pasta, depois de baixar) e o menu Iniciar (Abrir local do arquivo) abrem a pasta no Prime Files, com o arquivo selecionado e piscando em destaque.",
-        "Premiere (Reveal in Explorer), Chrome, Edge and Firefox (Show in folder, after a download) and the Start menu (Open file location) open the folder in Prime Files, with the file selected and flashing in the accent colour.",
-        "Premiere (Mostrar en el Explorador), Chrome, Edge y Firefox (Mostrar en la carpeta, tras descargar) y el menú Inicio (Abrir ubicación del archivo) abren la carpeta en Prime Files, con el archivo seleccionado y parpadeando resaltado.",
+        "Premiere (Revelar no Explorador), Chrome, Edge e Firefox (Mostrar na pasta, depois de baixar) e o menu Iniciar (Abrir local do arquivo) abrem a pasta no LumaFiles, com o arquivo selecionado e piscando em destaque.",
+        "Premiere (Reveal in Explorer), Chrome, Edge and Firefox (Show in folder, after a download) and the Start menu (Open file location) open the folder in LumaFiles, with the file selected and flashing in the accent colour.",
+        "Premiere (Mostrar en el Explorador), Chrome, Edge y Firefox (Mostrar en la carpeta, tras descargar) y el menú Inicio (Abrir ubicación del archivo) abren la carpeta en LumaFiles, con el archivo seleccionado y parpadeando resaltado.",
     ),
     (
         "Primeiras 40 de {total} páginas",
@@ -1014,9 +1014,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Busca desde la carpeta abierta, leyendo el disco en el momento.",
     ),
     (
-        "Procura uma versão nova ao abrir, baixa em segundo plano e instala quando você fecha o Prime Files.",
-        "Looks for a new version on start, downloads it in the background and installs it when you close Prime Files.",
-        "Busca una versión nueva al abrir, la descarga en segundo plano y la instala cuando cierras Prime Files.",
+        "Procura uma versão nova ao abrir, baixa em segundo plano e instala quando você fecha o LumaFiles.",
+        "Looks for a new version on start, downloads it in the background and installs it when you close LumaFiles.",
+        "Busca una versión nueva al abrir, la descarga en segundo plano y la instala cuando cierras LumaFiles.",
     ),
     ("Procurando…", "Checking…", "Buscando…"),
     ("Procurar agora", "Check now", "Buscar ahora"),
@@ -1227,9 +1227,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Unidades y almacenamiento",
     ),
     (
-        "Usar o Prime Files como explorador padrão",
-        "Use Prime Files as the default file manager",
-        "Usar Prime Files como explorador predeterminado",
+        "Usar o LumaFiles como explorador padrão",
+        "Use LumaFiles as the default file manager",
+        "Usar LumaFiles como explorador predeterminado",
     ),
     (
         "Use padrões de nome sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*. As regras anteriores têm prioridade.",
@@ -1269,9 +1269,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Puedes cambiar cualquiera de estas opciones después, en Configuración.",
     ),
     (
-        "Volta com as abas da última vez. Vale na próxima vez que o Prime Files abrir.",
-        "Brings back the tabs from last time. Takes effect the next time Prime Files opens.",
-        "Recupera las pestañas de la última vez. Se aplica la próxima vez que se abra Prime Files.",
+        "Volta com as abas da última vez. Vale na próxima vez que o LumaFiles abrir.",
+        "Brings back the tabs from last time. Takes effect the next time LumaFiles opens.",
+        "Recupera las pestañas de la última vez. Se aplica la próxima vez que se abra LumaFiles.",
     ),
     ("Voltar", "Back", "Atrás"),
     (
@@ -1285,9 +1285,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Volver a los archivos",
     ),
     (
-        "Vêm das releases do Prime Files no GitHub; cada instalador é conferido pelo SHA256SUMS.txt antes de rodar.",
-        "They come from Prime Files' releases on GitHub; each installer is checked against SHA256SUMS.txt before it runs.",
-        "Vienen de las versiones de Prime Files en GitHub; cada instalador se comprueba con SHA256SUMS.txt antes de ejecutarse.",
+        "Vêm das releases do LumaFiles no GitHub; cada instalador é conferido pelo SHA256SUMS.txt antes de rodar.",
+        "They come from LumaFiles' releases on GitHub; each installer is checked against SHA256SUMS.txt before it runs.",
+        "Vienen de las versiones de LumaFiles en GitHub; cada instalador se comprueba con SHA256SUMS.txt antes de ejecutarse.",
     ),
     ("Vídeos", "Videos", "Vídeos"),
     (

@@ -49,7 +49,11 @@ pub fn render(
         page.file_type_color(&item.name).unwrap_or_else(theme::fg)
     };
     let tree_view = page.view_mode == crate::explorer::types::ViewMode::Tree;
-    let depth = if tree_view { page.tree_depth(&item.path) } else { 0 };
+    let depth = if tree_view {
+        page.tree_depth(&item.path)
+    } else {
+        0
+    };
     let tree_folder = tree_view && item.kind == "dir";
     let tree_open = tree_folder && page.tree_open(&item.path);
 
@@ -153,14 +157,14 @@ pub fn render(
             }),
         )
         .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    // The rows sit inside the listing, whose own right click is
-                    // the folder's menu.
-                    cx.stop_propagation();
-                    this.open_context_menu(Some(ix), event.modifiers.shift, window, cx);
-                }),
-            )
+            gpui::MouseButton::Right,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                // The rows sit inside the listing, whose own right click is
+                // the folder's menu.
+                cx.stop_propagation();
+                this.open_context_menu(Some(ix), event.modifiers.shift, window, cx);
+            }),
+        )
         .child(
             ListItem::new(("file-row", ix))
                 .w(px(total_width))
@@ -268,7 +272,9 @@ pub fn render(
                                     )
                                 })
                                 .when(depth > 0, |this| {
-                                    this.child(div().w(px(depth as f32 * TREE_INDENT)).flex_shrink_0())
+                                    this.child(
+                                        div().w(px(depth as f32 * TREE_INDENT)).flex_shrink_0(),
+                                    )
                                 })
                                 .when(!has_content_matches && !tree_folder, |this| {
                                     this.child(div().w(px(20.0)).flex_shrink_0())
@@ -365,7 +371,10 @@ pub fn render(
                                                     .gap(px(3.0))
                                                     .pl(px(6.0))
                                                     .children(tag_colors.iter().map(|color| {
-                                                        div().size(px(8.0)).rounded_full().bg(rgb(*color))
+                                                        div()
+                                                            .size(px(8.0))
+                                                            .rounded_full()
+                                                            .bg(rgb(*color))
                                                     })),
                                             )
                                         })
