@@ -29,6 +29,9 @@ pub mod pane_group;
 pub mod updater;
 /// Other programs' "show in folder", answered by Nohrs.
 pub mod reveal;
+/// The folder windows other programs see through `IShellWindows`, so their
+/// "show in folder" is answered here instead of by a new Explorer window.
+pub mod shell_windows;
 /// The standalone, indexed full-computer search window.
 pub mod search_window;
 /// The application root view that hosts the sidebar and active page.

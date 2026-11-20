@@ -141,8 +141,53 @@ impl RootView {
         crate::explorer_link::install(window, cx);
         crate::file_dialog::watch(window, cx);
         crate::reveal::watch(window, cx);
+        crate::shell_windows::watch(window, cx);
+        view.start_shell_windows(window, cx);
         view.start_updates(window, cx);
         view
+    }
+
+    /// Keeps the shell's view of the open tabs current: the folders another
+    /// program's "show in folder" can find, and select in, without an Explorer
+    /// window opening. Polled rather than pushed from every navigation so all
+    /// the paths that move a tab are covered by one place.
+    fn start_shell_windows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(
+            window,
+            async move |this: WeakEntity<RootView>, cx: &mut AsyncWindowContext| {
+                let mut cx = cx.clone();
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(300))
+                        .await;
+                    let published = this.update_in(&mut cx, |root, window, cx| {
+                        // Off, the shell is left with Explorer's own windows.
+                        if !root.config.explorer.reveal_from_other_apps {
+                            return Vec::new();
+                        }
+                        let Some(hwnd) = crate::ipc::window_hwnd(window) else {
+                            return Vec::new();
+                        };
+                        root.explorer
+                            .read(cx)
+                            .shell_entries(cx)
+                            .into_iter()
+                            .map(|(key, path)| crate::shell_windows::Entry {
+                                key,
+                                path,
+                                hwnd: hwnd as isize,
+                            })
+                            .collect()
+                    });
+                    match published {
+                        Ok(entries) => crate::shell_windows::publish(entries),
+                        // The view (and window) is gone.
+                        Err(_) => return,
+                    }
+                }
+            },
+        )
+        .detach();
     }
 
     // Looks for an update a few seconds after the window is up (so it never
@@ -489,6 +534,14 @@ impl RootView {
 impl Focusable for RootView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl Drop for RootView {
+    fn drop(&mut self) {
+        // Explorer holds references to the objects registered for each tab;
+        // take them back before this process goes away.
+        crate::shell_windows::shutdown();
     }
 }
 

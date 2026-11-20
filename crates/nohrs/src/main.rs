@@ -85,6 +85,10 @@ fn main() {
 
     app::NohrsApp::run(&cli);
 
+    // Explorer still holds the shell windows registered for the open tabs;
+    // take them back while this process can still answer.
+    nohrs_pages::shell_windows::shutdown();
+
     // Here, after the event loop, rather than in a gpui quit hook: the window
     // is gone and nothing of the app is left for the installer to wait on.
     nohrs_pages::updater::install_pending_on_exit();

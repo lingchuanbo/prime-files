@@ -1045,6 +1045,68 @@ impl ExplorerPage {
             .collect()
     }
 
+    /// Every open tab the Windows shell can find, as `(entity id, folder)`: a
+    /// drive or UNC folder, or This PC as an empty string. Tabs showing an
+    /// archive, a search result or a place the shell has no folder for are left
+    /// out.
+    pub fn shell_entries(&self, cx: &App) -> Vec<(u64, String)> {
+        self.group
+            .all_tabs()
+            .into_iter()
+            .filter_map(|tab| {
+                let folder = shell_folder(&tab.read(cx).cwd)?;
+                Some((tab.entity_id().as_u64(), folder))
+            })
+            .collect()
+    }
+
+    /// Shows the item `item` in the tab whose entity id is `tab_id`, the way
+    /// the Windows shell asks when another program reveals a file: the tab is
+    /// activated and its folder shown with the item selected. Returns whether
+    /// the tab still exists.
+    pub fn reveal_shell_selection(
+        &mut self,
+        tab_id: u64,
+        item: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self
+            .group
+            .all_tabs()
+            .into_iter()
+            .find(|tab| tab.entity_id().as_u64() == tab_id)
+        else {
+            return false;
+        };
+        let Some((pane_index, tab_index)) = self.group.locate_tab(tab.entity_id()) else {
+            return false;
+        };
+        self.group.set_active_tab(pane_index, tab_index, window, cx);
+        self.group.set_active(pane_index, window, cx);
+        // The item's own folder: for a folder item the parent is shown and the
+        // folder itself selected, as Explorer does for "show in folder".
+        let folder = std::path::Path::new(item)
+            .parent()
+            .map(|folder| folder.to_string_lossy().into_owned())
+            .filter(|folder| !folder.is_empty());
+        tab.update(cx, |pane, cx| {
+            match &folder {
+                Some(folder) if !super::same_path(&pane.cwd, folder) => {
+                    pane.change_dir(folder.clone(), window, cx);
+                }
+                _ => {}
+            }
+            pane.ensure_loaded(cx);
+            pane.reveal(item);
+            cx.notify();
+        });
+        self.group.focus_active(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
+        true
+    }
+
     /// Absolute path of the active tab's current directory, for the footer.
     pub fn current_path(&self, cx: &App) -> String {
         self.group.active_pane().read(cx).cwd.clone()
@@ -1968,6 +2030,26 @@ fn terminal_directory(cwd: &str) -> std::path::PathBuf {
     } else {
         std::path::PathBuf::from(home_dir())
     }
+}
+
+// The tab's folder as the Windows shell can be told about it, for the
+// shell-window registration: a drive or UNC folder, or This PC (empty). An
+// archive address (arc:…), a search view or a place without a file system
+// folder is not a folder window.
+fn shell_folder(cwd: &str) -> Option<String> {
+    if cwd.eq_ignore_ascii_case(super::places::THIS_PC) {
+        return Some(String::new());
+    }
+    let path = match cwd.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => cwd.strip_prefix(r"\\?\").unwrap_or(cwd).to_owned(),
+    };
+    let bytes = path.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    (drive || path.starts_with(r"\\")).then_some(path)
 }
 
 impl Render for ExplorerPage {

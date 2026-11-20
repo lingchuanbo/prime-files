@@ -74,6 +74,9 @@ windows = { version = "0.61", features = [
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_UI_Accessibility",
+  # The shell-window registration (shell_windows.rs) implements IShellView,
+  # whose bindings include the property-sheet methods.
+  "Win32_UI_Controls",
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
   "Win32_UI_Shell_PropertiesSystem",
