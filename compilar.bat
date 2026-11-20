@@ -72,6 +72,14 @@ if /i "%PROFILE%"=="dist" (
   ) else (
     echo AVISO: target\release\dll nao encontrado; o programa nao podera usar o indice do Everything.
   )
+  rem HatchZip (MIT/Apache-2.0, https://github.com/xevrion/hatchzip): o extrator
+  rem que acompanha o programa. O instalador embala a pasta tools ao lado do exe.
+  if exist "target\release\tools" (
+    if not exist "%OUT%\tools" mkdir "%OUT%\tools"
+    xcopy /e /i /y "target\release\tools" "%OUT%\tools" >nul
+  ) else (
+    echo AVISO: target\release\tools nao encontrado; o HatchZip nao sera empacotado.
+  )
 )
 
 echo.

@@ -92,8 +92,8 @@ mod platform {
     const SETTLE: Duration = Duration::from_secs(5);
     const POLL: Duration = Duration::from_millis(50);
     /// Polls after the listing during which a reveal's selection may still
-    /// arrive: 150 ms, too soon for a person to have clicked.
-    const SELECTION_GRACE: u32 = 3;
+    /// arrive: 500 ms, while leaving ordinary folder navigation alone.
+    const SELECTION_GRACE: u32 = 10;
 
     static SENDER: OnceLock<async_channel::Sender<String>> = OnceLock::new();
 
