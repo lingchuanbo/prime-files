@@ -32,13 +32,14 @@ pub(super) enum ListApply {
     FullName,
 }
 
+/// One row per file of the list: line `i` names file `i`, and a blank or
+/// missing line leaves that file's name alone.
 pub(super) fn preview_list(
     entries: &[FileEntryDto],
     lines: &[String],
     apply: ListApply,
     excluded: &HashSet<String>,
 ) -> Vec<Preview> {
-    let count_matches = entries.len() == lines.len();
     let mut rows = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
         let selected = !excluded.contains(&entry.path);
@@ -51,7 +52,19 @@ pub(super) fn preview_list(
             });
             continue;
         }
-        let target = lines.get(index).map(|line| match apply {
+        // A blank line, or no line left, keeps the entry as it is: a list half
+        // typed is not an error, and the preview greys the name it keeps
+        // instead of reddening every file that has no name yet.
+        let Some(line) = lines.get(index).filter(|line| !line.trim().is_empty()) else {
+            rows.push(Preview {
+                entry: entry.clone(),
+                name: entry.name.clone(),
+                error: None,
+                selected,
+            });
+            continue;
+        };
+        let target = match apply {
             ListApply::Name if entry.kind == "dir" => line.clone(),
             ListApply::Name => match Path::new(&entry.name)
                 .extension()
@@ -74,24 +87,10 @@ pub(super) fn preview_list(
                 }
             }
             ListApply::FullName => line.clone(),
-        });
-        let (name, error) = match target {
-            Some(name) if count_matches => match validate_name(&name) {
-                Ok(()) => (name, None),
-                Err(error) => (String::new(), Some(error)),
-            },
-            Some(_) => (
-                String::new(),
-                Some(format!(
-                    "列表有 {} 行，当前有 {} 个项目，数量必须一致",
-                    lines.len(),
-                    entries.len()
-                )),
-            ),
-            None => (
-                String::new(),
-                Some(format!("列表缺少第 {} 行目标名称", index + 1)),
-            ),
+        };
+        let (name, error) = match validate_name(&target) {
+            Ok(()) => (target, None),
+            Err(error) => (String::new(), Some(error)),
         };
         rows.push(Preview {
             entry: entry.clone(),

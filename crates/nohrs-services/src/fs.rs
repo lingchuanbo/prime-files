@@ -10,3 +10,5 @@ pub mod ops;
 pub mod space;
 /// Listing, restoring from, and emptying the trash.
 pub mod trash;
+/// Progress and cancellation for long copy, move and delete runs.
+pub mod transfer;

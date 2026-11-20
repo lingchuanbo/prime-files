@@ -23,13 +23,10 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{Icon, IconName};
 use nohrs_core::config::{Compact, DockSide, SplitDirection, TabWidthMode};
+use nohrs_ui::components::layout::unified_toolbar::{TITLE_CONTROLS_WIDTH, title_bar_controls};
 use nohrs_ui::theme::theme;
 
 use crate::compact::{self, Edge, Reveal};
-
-/// Width the settings button and the three window buttons take at the end
-/// of the tab row when it is the title bar: 32 + 4 + 3 x 46.
-const TITLE_CONTROLS_WIDTH: f32 = 174.0;
 
 /// Content that a [`PaneGroup`] can host as a tab. Implemented by the views shown
 /// inside a tab (today only `ExplorerPane`).
@@ -1075,6 +1072,7 @@ impl<T: PaneItem> PaneGroup<T> {
             .child(
                 div()
                     .id(("tab-bar-drag", pane_index))
+                    .debug_selector(move || format!("tab-bar-drag-{pane_index}"))
                     .flex_grow()
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
@@ -1107,7 +1105,12 @@ impl<T: PaneItem> PaneGroup<T> {
             // window's buttons reach the top edge, over the top padding.
             .when(title_bar, |this| {
                 // Room for them at the end of the row, then the buttons
-                // themselves, pinned to the top right corner.
+                // themselves, pinned to the top right corner. The room is the
+                // width they really take: the row's empty stretch beside it
+                // moves the window as a caption, and whatever it reaches is
+                // answered as a caption press rather than a click — a reserve
+                // even one button short leaves that button (the search one,
+                // leftmost) unable to be clicked.
                 this.relative()
                     .child(div().flex_shrink_0().w(px(TITLE_CONTROLS_WIDTH)))
                     .child(
@@ -1116,14 +1119,14 @@ impl<T: PaneItem> PaneGroup<T> {
                             .top_0()
                             .right_0()
                             .h(px(40.0))
-                            .child(nohrs_ui::components::layout::unified_toolbar::title_bar_controls(
-                                window,
-                                |cx| {
-                                    if let Err(error) = crate::search_window::toggle(cx) {
-                                        tracing::error!(%error, "failed to open whole-computer search window");
-                                    }
-                                },
-                            )),
+                            // The buttons keep the mouse where they are drawn,
+                            // whatever the row's own regions do beside them.
+                            .occlude()
+                            .child(title_bar_controls(window, |cx| {
+                                if let Err(error) = crate::search_window::toggle(cx) {
+                                    tracing::error!(%error, "failed to open whole-computer search window");
+                                }
+                            })),
                     )
             })
     }

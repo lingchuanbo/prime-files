@@ -38,6 +38,16 @@ pub(super) struct RenameWindow {
     pub(super) preview_task: Option<Task<()>>,
 }
 
+/// The window title. It also names the page the form is on: the list replaces
+/// the rule fields and carries no heading of its own in the panel.
+fn window_title(list_mode: bool) -> String {
+    if list_mode {
+        "轻寻文件 · 批量重命名 · 列表".to_owned()
+    } else {
+        "轻寻文件 · 批量重命名".to_owned()
+    }
+}
+
 impl RenameWindow {
     fn new(
         entries: Vec<FileEntryDto>,
@@ -92,6 +102,18 @@ impl RenameWindow {
             _subscriptions: subscriptions,
             preview_task: None,
         }
+    }
+
+    /// Shows the rule form or the list, titling the window after the page.
+    pub(super) fn set_list_mode(
+        &mut self,
+        list_mode: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.list_mode = list_mode;
+        window.set_window_title(&window_title(list_mode));
+        self.schedule_preview(cx);
     }
 
     pub(super) fn fill_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -226,7 +248,7 @@ pub(super) fn open(
             cx,
         ))),
         titlebar: Some(TitlebarOptions {
-            title: Some("轻寻文件 · 批量重命名".into()),
+            title: Some(window_title(false).into()),
             ..Default::default()
         }),
         window_min_size: Some(size(px(1020.0), px(660.0))),
@@ -234,6 +256,7 @@ pub(super) fn open(
     };
     let mut current_view = None;
     let handle = cx.open_window(options, |window, cx| {
+        match_title_bar_to_theme(window);
         let view = cx.new(|cx| RenameWindow::new(entries, pane, window, cx));
         current_view = Some(view.downgrade());
         view.update(cx, |view, cx| view.rescan(cx));
@@ -242,6 +265,40 @@ pub(super) fn open(
     cx.set_global(OpenRenameWindow(current_view.map(|view| (handle, view))));
     Ok(())
 }
+
+/// The window keeps the OS-drawn title bar (`appears_transparent` is off), so
+/// its colour is the system's unless told otherwise: Windows light mode leaves
+/// a white bar over the dark form. Paint it with the app's palette instead.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn match_title_bar_to_theme(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::mem::size_of;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+    use windows::core::BOOL;
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
+    let dark: BOOL = theme::is_dark().into();
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const _ as *const core::ffi::c_void,
+            size_of::<BOOL>() as u32,
+        )
+        .log_err();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn match_title_bar_to_theme(_window: &Window) {}
 
 fn create_inputs(
     values: [String; 7],

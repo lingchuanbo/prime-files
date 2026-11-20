@@ -15,4 +15,7 @@ pub enum Error {
     /// A failure that does not fit the other variants.
     #[error("other error: {0}")]
     Other(String),
+    /// The user asked a long operation to stop before it finished.
+    #[error("cancelled")]
+    Cancelled,
 }

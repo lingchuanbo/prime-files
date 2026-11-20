@@ -17,7 +17,7 @@ use gpui::*;
 use gpui_component::resizable::ResizableState;
 use gpui_component::scroll::ScrollableElement;
 use nohrs_core::config::{
-    Compact, DockSide, Explorer as ExplorerConfig, Layout, SpaceMap, SplitDirection, Ui,
+    Archive, Compact, DockSide, Explorer as ExplorerConfig, Layout, SpaceMap, SplitDirection, Ui,
 };
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::fs::trash::Ledger as TrashLedger;
@@ -847,6 +847,14 @@ impl ExplorerPage {
         self.space_map = style.clone();
         for tab in self.group.all_tabs() {
             tab.update(cx, |pane, cx| pane.apply_config_space_map(style, cx));
+        }
+    }
+
+    /// Applies the `[archive]` config section to every tab: the program that
+    /// unpacks an archive.
+    pub fn apply_config_archive(&mut self, archive: &Archive, cx: &mut Context<Self>) {
+        for tab in self.group.all_tabs() {
+            tab.update(cx, |pane, cx| pane.apply_config_archive(archive, cx));
         }
     }
 

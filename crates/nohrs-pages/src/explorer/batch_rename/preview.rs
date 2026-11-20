@@ -123,6 +123,10 @@ fn row(item: &Preview, index: usize, context: RowContext) -> impl IntoElement + 
     div()
         .id(("batch-rename-row", index))
         .debug_selector(move || format!("rename-row-{index}"))
+        // A list row starts at its content width; without this the columns
+        // stop lining up with the headings above them (each cell the width of
+        // its text) and the directory lands under the new-name heading.
+        .w_full()
         .h(px(44.0))
         .px_3()
         .flex()
@@ -148,9 +152,15 @@ fn row(item: &Preview, index: usize, context: RowContext) -> impl IntoElement + 
         )
         .child(ellipsis(item.entry.name.clone()).flex_1())
         .child(
+            // The name a row keeps is grey, as the list tools people come from
+            // show it: nothing will happen to that file.
             ellipsis(item.name.clone())
                 .flex_1()
-                .when(item.changed(), |cell| cell.text_color(rgb(color))),
+                .text_color(rgb(if item.changed() {
+                    color
+                } else {
+                    theme::muted()
+                })),
         )
         .child(
             ellipsis(context.directory)

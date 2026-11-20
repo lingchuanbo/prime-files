@@ -14,12 +14,14 @@ use nohrs_core::{k, t, tf};
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{fs, io};
 
 use gpui::*;
 use gpui_component::input::{InputEvent, InputState};
 use nohrs_core::errors::{Error, Result};
 use nohrs_services::fs::ops::{self, ConflictResolution};
+use nohrs_services::fs::transfer::TransferProgress;
 
 use super::state::ExplorerPane;
 use super::types::StatusLevel;
@@ -225,10 +227,33 @@ fn rename_selection_end(name: &str, is_dir: bool) -> usize {
 // dialog — and between that look and this call the name can be taken by anything
 // else on the machine. A replacing write would destroy what took it; refusing
 // costs one reported failure.
-fn apply_one(mode: ClipMode, src: &Path, dst: &Path) -> ops::ClaimResult<()> {
-    match mode {
-        ClipMode::Copy => ops::copy_path_no_replace(src, dst),
-        ClipMode::Cut => ops::move_path_no_replace(src, dst).map(|_| ()),
+fn apply_one(
+    mode: ClipMode,
+    src: &Path,
+    dst: &Path,
+    progress: Option<&TransferProgress>,
+) -> ops::ClaimResult<()> {
+    match (mode, progress) {
+        (ClipMode::Copy, None) => ops::copy_path_no_replace(src, dst),
+        (ClipMode::Copy, Some(progress)) => {
+            ops::copy_path_no_replace_reported(src, dst, progress)
+        }
+        (ClipMode::Cut, None) => ops::move_path_no_replace(src, dst).map(|_| ()),
+        (ClipMode::Cut, Some(progress)) => {
+            ops::move_path_no_replace_reported(src, dst, progress).map(|_| ())
+        }
+    }
+}
+
+// [`ops::move_path_no_replace`], reporting to the dialog when there is one.
+fn move_no_replace(
+    src: &Path,
+    dst: &Path,
+    progress: Option<&TransferProgress>,
+) -> ops::ClaimResult<ops::MoveKind> {
+    match progress {
+        Some(progress) => ops::move_path_no_replace_reported(src, dst, progress),
+        None => ops::move_path_no_replace(src, dst),
     }
 }
 
@@ -386,8 +411,13 @@ impl OpReport {
 // hand the source back to the retry, and the retry would number around the name
 // this very call just took — the same `report (2)` as above, this time beside a
 // finished `report`.
-fn apply_to_free_name(mode: ClipMode, src: &Path, dst: &Path) -> Result<Applied> {
-    let Err(failure) = apply_one(mode, src, dst) else {
+fn apply_to_free_name(
+    mode: ClipMode,
+    src: &Path,
+    dst: &Path,
+    progress: Option<&TransferProgress>,
+) -> Result<Applied> {
+    let Err(failure) = apply_one(mode, src, dst, progress) else {
         return Ok(Applied::Cleanly);
     };
     if failure.leftover() == ops::Leftover::WholeDestination {
@@ -420,12 +450,17 @@ fn apply_to_free_name(mode: ClipMode, src: &Path, dst: &Path) -> Result<Applied>
 // The new entry is built at a path only this call knows and moved onto `dst` at
 // the end, so the destination is claimed once the replacement is whole rather
 // than held open for the length of a copy.
-fn overwrite_apply(mode: ClipMode, src: &Path, dst: &Path) -> Result<Applied> {
+fn overwrite_apply(
+    mode: ClipMode,
+    src: &Path,
+    dst: &Path,
+    progress: Option<&TransferProgress>,
+) -> Result<Applied> {
     if !ops::would_conflict(dst) {
-        return apply_to_free_name(mode, src, dst);
+        return apply_to_free_name(mode, src, dst, progress);
     }
     let backup = scratch_path(dst, "old");
-    if let Err(failure) = ops::move_path_no_replace(dst, &backup) {
+    if let Err(failure) = move_no_replace(dst, &backup, progress) {
         drop_claimed(&failure, &backup);
         // The same stranding the staging step can suffer, one step earlier: the
         // copy to `backup` landed and only clearing `dst` gave up partway, so
@@ -450,7 +485,7 @@ fn overwrite_apply(mode: ClipMode, src: &Path, dst: &Path) -> Result<Applied> {
         return Err(failure.into());
     }
     let staged = scratch_path(dst, "new");
-    let error = match build_and_commit(mode, src, dst, &staged) {
+    let error = match build_and_commit(mode, src, dst, &staged, progress) {
         Ok(applied) => {
             let Err(error) = ops::delete_permanent(&backup) else {
                 return Ok(applied);
@@ -477,7 +512,7 @@ fn overwrite_apply(mode: ClipMode, src: &Path, dst: &Path) -> Result<Applied> {
     };
     // Put the original back. Whatever took `dst` in the meantime is not ours to
     // replace, so a failure here leaves the original at `backup` and says where.
-    if let Err(failure) = ops::move_path_no_replace(&backup, dst) {
+    if let Err(failure) = move_no_replace(&backup, dst, progress) {
         // Unless the rollback itself got as far as taking `dst`: then what is
         // there is the rollback's own fragment, and it has to go for the message
         // below — the original is at `backup` — to be the whole truth.
@@ -500,8 +535,14 @@ fn overwrite_apply(mode: ClipMode, src: &Path, dst: &Path) -> Result<Applied> {
 // Builds the replacement at `staged` and takes `dst` with it, leaving nothing of
 // its own behind when it cannot. `dst` is free on entry — the caller moved what
 // was there to the backup.
-fn build_and_commit(mode: ClipMode, src: &Path, dst: &Path, staged: &Path) -> Result<Applied> {
-    if let Err(failure) = apply_one(mode, src, staged) {
+fn build_and_commit(
+    mode: ClipMode,
+    src: &Path,
+    dst: &Path,
+    staged: &Path,
+    progress: Option<&TransferProgress>,
+) -> Result<Applied> {
+    if let Err(failure) = apply_one(mode, src, staged, progress) {
         // Anything a *partial* failure left at `staged` is a fragment the source
         // outlived: a rename that fails moves nothing, and the copy-and-delete
         // fallback deletes the source only once the copy is whole. That is what
@@ -532,7 +573,7 @@ fn build_and_commit(mode: ClipMode, src: &Path, dst: &Path, staged: &Path) -> Re
     }
     // Past here `apply_one` returned `Ok`, which for a cut is what says the
     // source is gone and `staged` holds the only copy of it there is.
-    if let Err(failure) = ops::move_path_no_replace(staged, dst) {
+    if let Err(failure) = move_no_replace(staged, dst, progress) {
         // Where the filesystem has no no-replace rename this was a copy, and one
         // that failed partway left a partial `dst` that would block the rollback
         // the caller is about to run. Removing it is safe only because the
@@ -618,47 +659,86 @@ fn scratch_path(dst: &Path, role: &str) -> PathBuf {
 }
 
 impl ExplorerPane {
+    // Opens the progress dialog for `items` entries and returns the board the
+    // worker updates; the dialog closes when `end_transfer` sees it finish.
+    pub(crate) fn begin_transfer(&mut self, title: &'static str, items: usize) -> Arc<TransferProgress> {
+        let progress = TransferProgress::new(items as u64);
+        self.transfer = Some(super::state::ActiveTransfer {
+            title,
+            progress: progress.clone(),
+        });
+        progress
+    }
+
+    // Closes the dialog if `progress` is the run it is showing — never a newer
+    // one started while this finished.
+    pub(crate) fn end_transfer(&mut self, progress: &Arc<TransferProgress>) {
+        if self
+            .transfer
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&active.progress, progress))
+        {
+            self.transfer = None;
+        }
+    }
+
+    /// The progress dialog's Cancel: the worker stops at its next check.
+    pub(crate) fn cancel_transfer(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = &self.transfer {
+            active.progress.cancel();
+            cx.notify();
+        }
+    }
+
     // Runs `op` (which performs the filesystem work and returns one message per
     // failure) on the background executor, then reloads the listing and reports
     // the outcome in the status bar. `total` and `success_label` describe the
-    // batch for the success / partial-failure messages.
-    fn run_fs_op<F>(&mut self, total: usize, success_label: String, cx: &mut Context<Self>, op: F)
-    where
-        F: FnOnce() -> OpReport + Send + 'static,
-    {
-        self.run_fs_op_with(total, success_label, cx, move || (op(), ()), |(), _| {});
-    }
-
-    // [`run_fs_op`](Self::run_fs_op) for batches that carry an outcome of their
-    // own beyond the failure messages. `on_complete` takes `&mut App` rather
-    // than the pane, and runs whether or not the pane outlived the batch, so an
-    // outcome owning process-wide state is not dropped along with the pane that
-    // started the work.
+    // batch for the success / partial-failure messages. With a `title`, the
+    // progress dialog opens for the run and the board is handed to `op`.
+    //
+    // [`run_fs_op_with`](Self::run_fs_op_with) for batches that carry an outcome
+    // of their own beyond the failure messages. `on_complete` takes `&mut App`
+    // rather than the pane, and runs whether or not the pane outlived the batch,
+    // so an outcome owning process-wide state is not dropped along with the pane
+    // that started the work.
     fn run_fs_op_with<T, F, G>(
         &mut self,
         total: usize,
         success_label: String,
+        transfer_title: Option<&'static str>,
         cx: &mut Context<Self>,
         op: F,
         on_complete: G,
     ) where
         T: Send + 'static,
-        F: FnOnce() -> (OpReport, T) + Send + 'static,
+        F: FnOnce(Option<Arc<TransferProgress>>) -> (OpReport, T) + Send + 'static,
         G: FnOnce(T, &mut App) + 'static,
     {
         use nohrs_core::telemetry::LogErr as _;
-        let task = cx.background_spawn(async move { op() });
+        let progress = transfer_title.map(|title| self.begin_transfer(title, total));
+        let worker = progress.clone();
+        let task = cx.background_spawn(async move { op(worker) });
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 let (report, outcome) = task.await;
+                let cancelled = progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.cancelled());
                 cx.update(|cx| on_complete(outcome, cx)).log_err();
                 // Before the update, not inside it: this is what writes the
                 // failures to the log, and a batch can outlive the pane that
                 // started it. Computed in there, a closed pane would take the
                 // whole record of what went wrong with it.
-                let (level, text) = report.footer(total, &success_label);
+                let (level, text) = if cancelled {
+                    (StatusLevel::Info, format!("已取消：{success_label}"))
+                } else {
+                    report.footer(total, &success_label)
+                };
                 if let Err(error) = this.update(&mut cx, |pane, cx| {
+                    if let Some(progress) = &progress {
+                        pane.end_transfer(progress);
+                    }
                     pane.reload(cx);
                     pane.set_status(level, text);
                     cx.notify();
@@ -670,6 +750,8 @@ impl ExplorerPane {
             }
         })
         .detach();
+        // The dialog has to be on screen while the worker runs.
+        cx.notify();
     }
 
     // ---- Delete (§1.1) ----
@@ -712,8 +794,9 @@ impl ExplorerPane {
         self.run_fs_op_with(
             total,
             label,
+            Some("删除到回收站"),
             cx,
-            move || {
+            move |progress| {
                 let mut report = OpReport::default();
                 // Read in here rather than captured: `to_record` borrows from
                 // `ledger`, which this closure owns.
@@ -726,16 +809,24 @@ impl ExplorerPane {
                         return (report, Vec::new());
                     }
                 };
-                // One call for the whole selection: on Windows that is one Shell
-                // operation instead of one per item (`ops::trash_paths`).
                 let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-                let failures = ops::trash_paths(&paths, record);
-                let trashed = paths
-                    .iter()
-                    .filter(|path| !failures.iter().any(|(failed, _)| failed == *path))
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>();
+                let cancelled = progress.as_ref().is_some_and(|progress| progress.cancelled());
+                let failures = ops::trash_paths_reported(&paths, record, progress.as_deref());
+                let trashed = if cancelled {
+                    // What the batch had not reached is neither trashed nor
+                    // failed; the space map must not subtract it.
+                    Vec::new()
+                } else {
+                    paths
+                        .iter()
+                        .filter(|path| !failures.iter().any(|(failed, _)| failed == *path))
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                };
                 for (path, error) in failures {
+                    if matches!(error, Error::Cancelled) {
+                        continue;
+                    }
                     report.failed(format!("{}: {error}", path.display()));
                 }
                 (report, trashed)
@@ -755,15 +846,39 @@ impl ExplorerPane {
     pub(crate) fn delete_permanent_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
         let total = paths.len();
         let label = i18n::plural(total, k!("{n} item excluído"), k!("{n} itens excluídos"));
-        self.run_fs_op(total, label, cx, move || {
-            let mut report = OpReport::default();
-            for path in paths {
-                if let Err(error) = ops::delete_permanent(Path::new(&path)) {
-                    report.failed(format!("{path}: {error}"));
+        self.run_fs_op_with(
+            total,
+            label,
+            Some("永久删除"),
+            cx,
+            move |progress| {
+                let mut report = OpReport::default();
+                for path in paths {
+                    if progress
+                        .as_ref()
+                        .is_some_and(|progress| progress.cancelled())
+                    {
+                        break;
+                    }
+                    let result = match &progress {
+                        Some(progress) => {
+                            ops::delete_permanent_reported(Path::new(&path), progress)
+                        }
+                        None => ops::delete_permanent(Path::new(&path)),
+                    };
+                    if let Err(error) = result {
+                        if !matches!(error, Error::Cancelled) {
+                            report.failed(format!("{path}: {error}"));
+                        }
+                    }
+                    if let Some(progress) = &progress {
+                        progress.item_done();
+                    }
                 }
-            }
-            report
-        });
+                (report, ())
+            },
+            |(), _| {},
+        );
     }
 
     // ---- Copy / cut / paste (§1.2) ----
@@ -1004,19 +1119,41 @@ impl ExplorerPane {
         } else {
             i18n::plural(total, k!("{n} item colado"), k!("{n} itens colados"))
         };
+        let title = if mode == ClipMode::Cut { "移动" } else { "复制" };
         self.run_fs_op_with(
             total,
             label,
+            Some(title),
             cx,
-            move || {
+            move |progress| {
+                let progress_ref = progress.as_deref();
                 let mut report = OpReport::default();
                 let mut failed = Vec::new();
+                // The bar is measured in bytes; a Cancel here stops before a
+                // single file is written.
+                if let Some(progress) = progress_ref {
+                    let sources: Vec<PathBuf> = clear
+                        .iter()
+                        .cloned()
+                        .chain(resolved.iter().map(|(source, _)| source.clone()))
+                        .collect();
+                    match ops::bytes_to_copy(&sources, Some(progress)) {
+                        Ok(bytes) => progress.set_total(bytes),
+                        Err(_) => return (report, failed),
+                    }
+                }
                 for src in clear {
+                    if progress_ref.is_some_and(|progress| progress.cancelled()) {
+                        break;
+                    }
                     // Owned so the borrow of `src` ends before `src` is moved
                     // into `failed`.
                     let Some(name) = src.file_name().map(OsStr::to_os_string) else {
                         continue;
                     };
+                    if let Some(progress) = progress_ref {
+                        progress.set_detail(name.to_string_lossy().into_owned());
+                    }
                     // The plan reserved this name by comparing paths lexically,
                     // which is not how the filesystem compares them: on a
                     // case-insensitive volume `foo.txt` and `FOO.txt` are one
@@ -1031,32 +1168,52 @@ impl ExplorerPane {
                             continue;
                         }
                     };
-                    match apply_to_free_name(mode, &src, &dst) {
+                    match apply_to_free_name(mode, &src, &dst, progress_ref) {
                         Ok(applied) => report.applied(applied),
                         Err(error) => {
-                            report.failed(format!("{}: {error}", src.display()));
+                            if !matches!(error, Error::Cancelled) {
+                                report.failed(format!("{}: {error}", src.display()));
+                            }
                             failed.push(src);
                         }
                     }
+                    if let Some(progress) = progress_ref {
+                        progress.item_done();
+                    }
                 }
                 for (src, resolution) in resolved {
+                    if progress_ref.is_some_and(|progress| progress.cancelled()) {
+                        break;
+                    }
                     let Some(name) = src.file_name().map(OsStr::to_os_string) else {
                         continue;
                     };
+                    if let Some(progress) = progress_ref {
+                        progress.set_detail(name.to_string_lossy().into_owned());
+                    }
                     let result = match resolution {
                         // Filtered out above; kept for exhaustiveness without panicking.
                         ConflictResolution::Skip => continue,
                         ConflictResolution::Rename => free_destination(&dest_dir, &name)
-                            .and_then(|dst| apply_to_free_name(mode, &src, &dst)),
+                            .and_then(|dst| {
+                                apply_to_free_name(mode, &src, &dst, progress_ref)
+                            }),
                         ConflictResolution::Overwrite => ops::destination_in(&dest_dir, &name)
-                            .and_then(|dst| overwrite_apply(mode, &src, &dst)),
+                            .and_then(|dst| {
+                                overwrite_apply(mode, &src, &dst, progress_ref)
+                            }),
                     };
                     match result {
                         Ok(applied) => report.applied(applied),
                         Err(error) => {
-                            report.failed(format!("{}: {error}", src.display()));
+                            if !matches!(error, Error::Cancelled) {
+                                report.failed(format!("{}: {error}", src.display()));
+                            }
                             failed.push(src);
                         }
+                    }
+                    if let Some(progress) = progress_ref {
+                        progress.item_done();
                     }
                 }
                 (report, failed)

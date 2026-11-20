@@ -76,6 +76,8 @@ pub struct Config {
     pub diagnostics: Diagnostics,
     /// The space map (the treemap of what a folder weighs).
     pub space_map: SpaceMap,
+    /// Unpacking archives.
+    pub archive: Archive,
 }
 
 impl Default for Config {
@@ -96,6 +98,7 @@ impl Default for Config {
             launcher: Launcher::default(),
             diagnostics: Diagnostics::default(),
             space_map: SpaceMap::default(),
+            archive: Archive::default(),
         }
     }
 }
@@ -183,6 +186,55 @@ pub enum SpaceMapColor {
     Size,
     /// What the tile holds: folders, pictures, video, and the rest.
     Kind,
+}
+
+/// Settings for unpacking archives ("解压到同名文件夹").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Archive {
+    /// The program that unpacks an archive.
+    pub tool: ArchiveTool,
+}
+
+impl Default for Archive {
+    fn default() -> Self {
+        // HatchZip ships beside the program and reads every format the
+        // explorer opens in one pass, so it works on a machine with nothing
+        // installed; 7-Zip stays the choice for an existing install.
+        Self {
+            tool: ArchiveTool::HatchZip,
+        }
+    }
+}
+
+/// The program that unpacks an archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveTool {
+    /// The HatchZip bundled in `tools\HatchZip`.
+    #[default]
+    HatchZip,
+    /// The 7-Zip installed on the machine.
+    SevenZip,
+}
+
+impl ArchiveTool {
+    /// The setting's name in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HatchZip => "hatchzip",
+            Self::SevenZip => "sevenzip",
+        }
+    }
+
+    /// Reads an `archive.tool` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "hatchzip" => Some(Self::HatchZip),
+            "sevenzip" => Some(Self::SevenZip),
+            _ => None,
+        }
+    }
 }
 
 impl SpaceMapColor {
@@ -1091,6 +1143,12 @@ impl Config {
                 None => diagnostics.push(Diagnostic::warn("[space_map] is not a table; ignoring")),
             }
         }
+        if let Some(value) = table.get("archive") {
+            match value.as_table() {
+                Some(archive) => read_archive(archive, &mut config.archive, &mut diagnostics),
+                None => diagnostics.push(Diagnostic::warn("[archive] is not a table; ignoring")),
+            }
+        }
 
         warn_unknown_keys(
             table,
@@ -1110,6 +1168,7 @@ impl Config {
                 "launcher",
                 "diagnostics",
                 "space_map",
+                "archive",
             ],
             "",
             &mut diagnostics,
@@ -1223,6 +1282,13 @@ impl Config {
              color = \"size\"   # \"size\" | \"kind\"\n\
              bands_gb = [10, 5, 1]\n\
              colors = [\"#ef4444\", \"#f97316\", \"#fb923c\", \"#22c55e\"]\n\
+             \n\
+             # Unpacking an archive (\"解压到同名文件夹\"): the bundled HatchZip\n\
+             # (tools\\HatchZip) reads zip, 7z, rar and the tar family in one\n\
+             # pass; \"sevenzip\" is the installed 7-Zip. Whichever is missing\n\
+             # falls back to the other, and bz2/zst/cab/iso always take 7-Zip.\n\
+             [archive]\n\
+             tool = \"hatchzip\"   # \"hatchzip\" | \"sevenzip\"\n\
              \n\
              # Draft sections; defaults are built-in, so these stay empty until\n\
              # keybindings (P3) and plugins (P4) are wired up.\n\
@@ -1862,6 +1928,20 @@ fn read_diagnostics_store(
     );
 }
 
+/// Reads `[archive]`: which program unpacks an archive.
+fn read_archive(table: &toml::Table, archive: &mut Archive, diagnostics: &mut Vec<Diagnostic>) {
+    if let Some(value) = table.get("tool") {
+        match value.as_str().and_then(ArchiveTool::parse) {
+            Some(tool) => archive.tool = tool,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid archive.tool {value}; using \"{}\"",
+                archive.tool.as_str()
+            ))),
+        }
+    }
+    warn_unknown_keys(table, &["tool"], "archive.", diagnostics);
+}
+
 /// Reads `[space_map]`: how the treemap colours its tiles, and the colours by
 /// size.
 fn read_space_map(table: &toml::Table, map: &mut SpaceMap, diagnostics: &mut Vec<Diagnostic>) {
@@ -2477,6 +2557,25 @@ mod tests {
         assert_eq!(config.space_map.color_for_bytes(30 * GB), Some(0x111111));
         assert_eq!(config.space_map.color_for_bytes(3 * GB), Some(0x333333));
         assert_eq!(config.space_map.color_for_bytes(GB), Some(0x444444));
+    }
+
+    #[test]
+    fn archive_tool_defaults_to_hatchzip_and_reads_both_spellings() {
+        assert_eq!(ArchiveTool::default(), ArchiveTool::HatchZip);
+        assert_eq!(Config::default().archive.tool, ArchiveTool::HatchZip);
+        let (config, diagnostics) = Config::from_toml_str("[archive]\ntool = \"sevenzip\"\n");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(config.archive.tool, ArchiveTool::SevenZip);
+        let (config, diagnostics) = Config::from_toml_str("[archive]\ntool = \"7z\"\n");
+        assert_eq!(config.archive.tool, ArchiveTool::HatchZip);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("archive.tool"))
+        );
+        assert_eq!(ArchiveTool::parse("hatchzip"), Some(ArchiveTool::HatchZip));
+        assert_eq!(ArchiveTool::parse("sevenzip"), Some(ArchiveTool::SevenZip));
+        assert_eq!(ArchiveTool::parse("winrar"), None);
     }
 
     #[test]

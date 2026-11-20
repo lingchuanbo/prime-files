@@ -90,6 +90,13 @@ pub fn render(
             let key_lc = event.keystroke.key.to_lowercase();
             let modifiers = event.keystroke.modifiers;
             let with_modifier = modifiers.platform || modifiers.control;
+            // Escape asks the running copy, move, delete, extract or compress
+            // to stop, as the progress dialog's Cancel does.
+            if key_lc == "escape" && this.transfer.is_some() {
+                this.cancel_transfer(cx);
+                cx.stop_propagation();
+                return;
+            }
             // Escape lets go of a drag of a panel or an edge: nothing opens.
             if key_lc == "escape" && this.cancel_dock_drag() {
                 cx.notify();
@@ -402,6 +409,7 @@ pub fn render(
         .map(|this| render_body(this, page, window, cx))
         .children(preview::render_quick_look(page, window, cx))
         .children(menu::render(page, window, cx))
+        .children(self::dialogs::transfer_dialog(page, window, cx))
 }
 
 // Address bar, filter bar, the three columns and the bar under them, in that

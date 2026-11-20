@@ -52,10 +52,11 @@ pub(super) fn render(
                         .label(label)
                         .disabled(view.busy)
                         .when(view.list_mode == list_mode, |button| button.primary())
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.list_mode = list_mode;
-                            view.schedule_preview(cx);
-                        }))
+                        .on_click(cx.listener(
+                            move |view, _, window, cx| {
+                                view.set_list_mode(list_mode, window, cx);
+                            },
+                        ))
                     }),
             ),
         )

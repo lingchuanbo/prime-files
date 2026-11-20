@@ -2,6 +2,28 @@ use super::*;
 use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext, point};
 
 #[gpui::test]
+fn archive_tool_starts_on_hatchzip_and_resets_to_it(cx: &mut TestAppContext) {
+    let page = cx.new(SettingsPage::new);
+    page.update(cx, |page, cx| {
+        assert_eq!(page.config.archive.tool, config::ArchiveTool::HatchZip);
+        let groups = page.files(cx);
+        let row = groups.iter().flat_map(|group| &group.rows)
+            .find(|row| row.label == "解压工具").expect("archive tool setting");
+        assert!(row.hint.is_some());
+        // At its default there is nothing to reset.
+        assert!(row.reset.is_none());
+
+        page.config.archive.tool = config::ArchiveTool::SevenZip;
+        let groups = page.files(cx);
+        let row = groups.iter().flat_map(|group| &group.rows)
+            .find(|row| row.label == "解压工具").expect("archive tool setting");
+        assert!(matches!(&row.reset,
+            Some(Pick::Config("archive", "tool", value)) if value.as_ref() == "\"hatchzip\""
+        ));
+    });
+}
+
+#[gpui::test]
 fn runtime_log_setting_is_off_by_default_and_resets_to_off(cx: &mut TestAppContext) {
     let page = cx.new(SettingsPage::new);
     page.update(cx, |page, cx| {

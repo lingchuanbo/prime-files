@@ -1843,6 +1843,20 @@ impl SettingsPage {
                 ),
             )
             .reset(("ui", "default_sort_descending"), !ui.default_sort_descending, "false"),
+            Row::hint(
+                "解压工具",
+                "解压到同名文件夹时使用的程序。HatchZip 随应用附带，zip、7z、rar、tar 和分卷都能解，tar.gz 一次解出；7-Zip 需要先安装，bz2、zst、cab、iso 仍由它来解。",
+                self.config_choice(
+                    "archive-tool",
+                    &[
+                        ("HatchZip", self.config.archive.tool == config::ArchiveTool::HatchZip, "\"hatchzip\""),
+                        ("7-Zip", self.config.archive.tool == config::ArchiveTool::SevenZip, "\"sevenzip\""),
+                    ],
+                    ("archive", "tool"),
+                    cx,
+                ),
+            )
+            .reset(("archive", "tool"), self.config.archive.tool == config::ArchiveTool::HatchZip, "\"hatchzip\""),
         ]), Group::titled(t!("Regras de cor por tipo de arquivo"), vec![Row::hint(
             t!("Cor dos nomes por tipo de arquivo"),
             t!("Use padrões de nome sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*. As regras anteriores têm prioridade."),

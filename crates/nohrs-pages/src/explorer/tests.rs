@@ -12,7 +12,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AppContext, ClipboardItem, Entity, TestAppContext, WindowHandle, point, px};
+use gpui::{
+    AppContext, ClipboardItem, Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle,
+    point, px,
+};
 use gpui_component::input::InputState;
 use gpui_component::resizable::ResizableState;
 use gpui_component::{Root, WindowExt};
@@ -52,6 +55,23 @@ fn new_explorer(cx: &mut TestAppContext) -> WindowHandle<ExplorerPane> {
     })
 }
 
+/// Build a real `ExplorerPane` whose window is the visual root, for tests that
+/// read element bounds (the progress dialog and its controls).
+fn new_explorer_visual(cx: &mut TestAppContext) -> (Entity<ExplorerPane>, &mut VisualTestContext) {
+    cx.update(gpui_component::init);
+    cx.add_window_view(|window, cx| {
+        let resizable = cx.new(|_| ResizableState::default());
+        let search_input = cx.new(|cx| InputState::new(window, cx));
+        ExplorerPane::new(
+            resizable,
+            search_input,
+            None,
+            TrashLedger::KeptByOs,
+            cx.focus_handle(),
+        )
+    })
+}
+
 /// Build the split-view container (`ExplorerPage`), which owns its panes. No KV
 /// store, so session save/restore is inert.
 fn new_explorer_page(cx: &mut TestAppContext) -> WindowHandle<ExplorerPage> {
@@ -68,6 +88,25 @@ fn new_explorer_page(cx: &mut TestAppContext) -> WindowHandle<ExplorerPage> {
             cx,
         )
     })
+}
+
+/// Build the split-view container and hand back the visual context, for tests
+/// that read element bounds from the frame (the title bar's geometry).
+fn new_explorer_page_visual(cx: &mut TestAppContext) -> &mut VisualTestContext {
+    cx.update(gpui_component::init);
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let resizable = cx.new(|_| ResizableState::default());
+        ExplorerPage::new(
+            resizable,
+            None,
+            None,
+            TrashLedger::KeptByOs,
+            false,
+            window,
+            cx,
+        )
+    });
+    cx
 }
 
 /// Build the container backed by a `store`, optionally restoring its session,
@@ -100,6 +139,84 @@ fn file(name: &str, kind: &str, size: u64) -> FileEntryDto {
         size,
         modified: 0,
     }
+}
+
+// The window's buttons (search, settings, and on Windows minimize/maximize/
+// close) are drawn at the end of the tab row while it is the title bar, and the
+// row's empty stretch beside the tabs is a caption drag region. Windows answers
+// a press on a caption as a window move (`WM_NCHITTEST` -> `HTCAPTION`), before
+// any click reaches the element under the pointer, so a drag region reaching
+// under the buttons turns them off: the search button opened nothing while the
+// region reserved 20 points less than the buttons take.
+#[gpui::test]
+async fn title_bar_controls_lie_outside_the_tab_rows_drag_region(cx: &mut TestAppContext) {
+    let cx = new_explorer_page_visual(cx);
+    let controls = cx
+        .debug_bounds("title-bar-controls")
+        .expect("the window buttons at the right end of the tab row");
+    let drag = cx
+        .debug_bounds("tab-bar-drag-0")
+        .expect("the drag region beside the tabs");
+    assert!(
+        drag.right() <= controls.left(),
+        "the drag region must end where the window buttons begin, or the window \
+         manager reads presses on the buttons as caption drags: drag={drag:?} \
+         controls={controls:?}"
+    );
+}
+
+// A copy, move, delete, extract or compress shows the progress dialog; its
+// Cancel asks the worker to stop, and the box goes when the run is over.
+#[gpui::test]
+async fn the_progress_dialog_opens_for_a_transfer_and_cancels_it(cx: &mut TestAppContext) {
+    let (pane, cx) = new_explorer_visual(cx);
+    assert!(cx.debug_bounds("transfer-progress-dialog").is_none());
+
+    pane.update(cx, |pane, cx| {
+        let progress = pane.begin_transfer("复制", 2);
+        progress.set_total(100);
+        progress.add_bytes(40);
+        progress.set_detail("a.bin");
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("transfer-progress-dialog").is_some(),
+        "the dialog must be over the pane while the run is going"
+    );
+
+    let cancel = cx
+        .debug_bounds("transfer-cancel")
+        .expect("the dialog's cancel button");
+    // The wrapper spans the card; the button sits at its right end.
+    cx.simulate_click(
+        point(cancel.right() - px(24.0), cancel.center().y),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        let active = pane.transfer.as_ref().expect("the run is still going");
+        assert!(active.progress.cancelled());
+    });
+
+    // Whatever the worker does next, the end of the run closes the box.
+    pane.update(cx, |pane, cx| {
+        let progress = pane
+            .transfer
+            .as_ref()
+            .expect("the run is still going")
+            .progress
+            .clone();
+        pane.end_transfer(&progress);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    // The box is drawn only while `transfer` is set; `debug_bounds` keeps
+    // entries across frames in the test backend, so the state is what is
+    // asserted here.
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.transfer.is_none(), "the run's board must be gone");
+    });
 }
 
 #[gpui::test]

@@ -10,9 +10,12 @@ use gpui_component::WindowExt as _;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogButtonProps;
+use gpui_component::progress::Progress;
+use gpui_component::Disableable as _;
 use nohrs_core::telemetry::LogErr as _;
 use nohrs_core::{t, tf};
 use nohrs_services::fs::ops::ConflictResolution;
+use nohrs_ui::theme::theme;
 
 use crate::explorer::ExplorerPane;
 use crate::explorer::file_ops::file_name_of;
@@ -185,4 +188,171 @@ fn cancel_button(weak: &WeakEntity<ExplorerPane>) -> Button {
             window.close_dialog(cx);
             weak.update(cx, |pane, cx| pane.cancel_paste(cx)).log_err();
         })
+}
+
+/// The progress dialog over the pane while a copy, move, delete, extract or
+/// compress runs: what it is doing, how far, and a Cancel that the worker
+/// answers at its next check.
+pub(crate) fn transfer_dialog(
+    page: &mut ExplorerPane,
+    window: &mut Window,
+    cx: &mut Context<ExplorerPane>,
+) -> Option<AnyElement> {
+    let active = page.transfer.as_ref()?;
+    let title = active.title;
+    let progress = active.progress.clone();
+    let snapshot = progress.snapshot();
+    // The bar and the counters move without any input, so keep the window
+    // drawing until the worker says it is done.
+    window.request_animation_frame();
+
+    let value = bar_value(&snapshot);
+    let counts = counts_line(&snapshot);
+    let detail = if snapshot.detail.is_empty() {
+        "正在准备…".to_string()
+    } else {
+        snapshot.detail.clone()
+    };
+    let weak = cx.entity().downgrade();
+
+    Some(
+        div()
+            .id("transfer-progress-dialog")
+            .debug_selector(|| "transfer-progress-dialog".into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            // The pane under it must not take the clicks aimed at the dialog.
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba((theme::bg() << 8) | 0xB4))
+            .child(
+                div()
+                    .w(px(440.0))
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .rounded(px(10.0))
+                    .bg(rgb(theme::bg_secondary()))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            )
+                            .when(snapshot.cancelled, |row| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme::muted()))
+                                        .child("正在取消…"),
+                                )
+                            }),
+                    )
+                    .child(
+                        Progress::new()
+                            .value(value)
+                            .bg(Hsla::from(rgb(theme::accent()))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::fg_secondary()))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(detail),
+                    )
+                    .when(!counts.is_empty(), |card| {
+                        card.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme::muted()))
+                                .child(counts),
+                        )
+                    })
+                    .child(
+                        div()
+                            .debug_selector(|| "transfer-cancel".into())
+                            .flex()
+                            .justify_end()
+                            .child(
+                                Button::new("transfer-cancel")
+                                    .label(if snapshot.cancelled {
+                                        "正在取消…"
+                                    } else {
+                                        "取消"
+                                    })
+                                    .disabled(snapshot.cancelled)
+                                    .on_click(move |_, _, cx| {
+                                        weak.update(cx, |pane, cx| pane.cancel_transfer(cx))
+                                            .log_err();
+                                    }),
+                            ),
+                    ),
+            )
+            .into_any_element(),
+    )
+}
+
+// The bar's percentage: bytes when their total is known (a copy), the item
+// count for a batch counted as it goes (a delete), and a moving bar while
+// neither is known yet (measuring, or an archive tool that reports no
+// numbers).
+fn bar_value(snapshot: &nohrs_services::fs::transfer::TransferSnapshot) -> f32 {
+    if snapshot.total > 0 {
+        return (snapshot.done as f64 / snapshot.total as f64 * 100.0) as f32;
+    }
+    // A batch counted as it goes (a delete) moves by item; one item alone has
+    // no total to show, so the bar runs until it is done.
+    if snapshot.items_total > 1 {
+        return (snapshot.items_done as f64 / snapshot.items_total as f64 * 100.0) as f32;
+    }
+    // Indeterminate: a band that crosses the bar and repeats.
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let phase = (millis % 1400) as f32 / 1400.0;
+    (phase * 100.0).clamp(0.0, 100.0)
+}
+
+// What the dialog says it has done: bytes for a copy, items and files for a
+// delete, one or both while it is still measuring.
+fn counts_line(snapshot: &nohrs_services::fs::transfer::TransferSnapshot) -> String {
+    let mut parts = Vec::new();
+    if snapshot.items_total > 1 {
+        parts.push(format!(
+            "{}/{} 项",
+            snapshot.items_done, snapshot.items_total
+        ));
+    }
+    if snapshot.files_done > 0 {
+        parts.push(format!("已处理 {} 个文件", snapshot.files_done));
+    }
+    if snapshot.done > 0 {
+        if snapshot.total > 0 {
+            parts.push(format!(
+                "{} / {}",
+                nohrs_ui::components::file_list::human_bytes(snapshot.done),
+                nohrs_ui::components::file_list::human_bytes(snapshot.total)
+            ));
+        } else {
+            parts.push(nohrs_ui::components::file_list::human_bytes(snapshot.done));
+        }
+    }
+    parts.join(" · ")
 }

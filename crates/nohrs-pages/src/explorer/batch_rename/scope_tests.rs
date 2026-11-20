@@ -79,7 +79,70 @@ fn list_rename_maps_lines_in_order_and_preserves_extensions() {
 }
 
 #[test]
-fn list_rename_rejects_mismatched_line_counts() {
+fn list_rename_keeps_names_for_blank_or_missing_lines() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(root.path().join(name), "safe").unwrap();
+    }
+    let entries = scan::scan(
+        &root.path().to_string_lossy(),
+        false,
+        "",
+        &Progress::default(),
+    )
+    .unwrap()
+    .entries;
+    // The first line renames, the blank second line and the missing third one
+    // leave their files alone: a list being typed is not an error.
+    let rows = plan::preview_list(
+        &entries,
+        &["renamed".into(), String::new()],
+        plan::ListApply::Name,
+        &HashSet::new(),
+    );
+    assert_eq!("renamed.txt", rows[0].name);
+    assert!(rows[0].changed());
+    assert_eq!("b.txt", rows[1].name);
+    assert!(!rows[1].changed());
+    assert_eq!("c.txt", rows[2].name);
+    assert!(!rows[2].changed());
+    assert!(rows.iter().all(|row| row.error.is_none()));
+}
+
+#[test]
+fn list_rename_with_an_empty_list_changes_nothing_and_reports_no_error() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt"] {
+        fs::write(root.path().join(name), "safe").unwrap();
+    }
+    let entries = scan::scan(
+        &root.path().to_string_lossy(),
+        false,
+        "",
+        &Progress::default(),
+    )
+    .unwrap()
+    .entries;
+    // An untouched multi-line input splits to one blank line, whatever the
+    // number of files.
+    for lines in [
+        vec![String::new()],
+        vec![String::new(), String::new(), String::new()],
+    ] {
+        let rows = plan::preview_list(&entries, &lines, plan::ListApply::FullName, &HashSet::new());
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>()
+        );
+        assert!(rows.iter().all(|row| !row.changed() && row.error.is_none()));
+    }
+}
+
+#[test]
+fn list_rename_ignores_lines_beyond_the_files_and_still_rejects_invalid_names() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("a.txt"), "safe").unwrap();
     let entries = scan::scan(
@@ -96,8 +159,18 @@ fn list_rename_rejects_mismatched_line_counts() {
         plan::ListApply::FullName,
         &HashSet::new(),
     );
-    assert!(rows[0].error.as_deref().unwrap().contains("数量必须一致"));
+    assert_eq!("one", rows[0].name);
+    assert!(rows[0].error.is_none());
+    // An invalid name on a used line is still an error.
+    let rows = plan::preview_list(
+        &entries,
+        &["bad:name".into()],
+        plan::ListApply::FullName,
+        &HashSet::new(),
+    );
+    assert!(rows[0].error.is_some());
 }
+
 #[test]
 fn deselecting_conflicting_rows_releases_conflicts_but_existing_files_still_block() {
     let root = tempfile::tempdir().unwrap();

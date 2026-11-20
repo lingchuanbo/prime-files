@@ -1,7 +1,7 @@
 use super::{history, plan, rules::CaseMode, window::RenameWindow};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    Disableable, Sizable,
+    Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     input::Input,
@@ -19,25 +19,36 @@ pub(super) fn render(
         .w(px(344.0))
         .h_full()
         .flex_shrink_0()
-        .overflow_y_scroll()
+        .flex()
+        .flex_col()
         .bg(rgb(theme::bg_secondary()))
         .border_r_1()
         .border_color(rgb(theme::border()))
+        // Above the scrolling fields, so it stays at hand however far down the
+        // list they are.
+        .when(view.list_mode, |panel| panel.child(list_back_bar(view, cx)))
         .child(
             div()
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_5()
-                .child(super::scope_controls::render(view, window, cx))
-                .when(view.list_mode, |_| list_editor(view, cx))
-                .when(!view.list_mode, |panel| {
-                    panel
-                        .child(naming(view, window, cx))
-                        .child(replacement(view, window, cx))
-                        .child(counter(view, window, cx))
-                        .child(case_options(view, cx))
-                }),
+                .id("rename-settings-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_5()
+                        .child(super::scope_controls::render(view, window, cx))
+                        .when(view.list_mode, |_| list_editor(view, cx))
+                        .when(!view.list_mode, |panel| {
+                            panel
+                                .child(naming(view, window, cx))
+                                .child(replacement(view, window, cx))
+                                .child(counter(view, window, cx))
+                                .child(case_options(view, cx))
+                        }),
+                ),
         )
 }
 
@@ -57,8 +68,40 @@ pub(super) fn section(title: &'static str, description: &'static str) -> Div {
     )
 }
 
+/// The way back out of the list, which replaces the rule fields while it is
+/// showing; the typed list stays in its input.
+fn list_back_bar(view: &RenameWindow, cx: &mut Context<RenameWindow>) -> Div {
+    div()
+        .flex_shrink_0()
+        .px_3()
+        .py_2()
+        .flex()
+        .items_center()
+        .border_b_1()
+        .border_color(rgb(theme::border()))
+        .child(
+            div().debug_selector(|| "rename-list-back".into()).child(
+                Button::new("rename-list-back")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(IconName::ArrowLeft).size_3p5())
+                    .label("返回")
+                    .tooltip("返回按规则重命名；列表内容会保留")
+                    .disabled(view.busy)
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.set_list_mode(false, window, cx);
+                    })),
+            ),
+        )
+}
+
+// No heading of its own: the window title names the page, as the list is the
+// second form of the same dialog.
 fn list_editor(view: &RenameWindow, cx: &mut Context<RenameWindow>) -> Div {
-    section("列表重命名", "每行对应一个文件，顺序与右侧预览一致。")
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
         .child(
             div()
                 .flex()
@@ -121,8 +164,17 @@ fn list_editor(view: &RenameWindow, cx: &mut Context<RenameWindow>) -> Div {
                 }),
             ),
         )
-        .child(Input::new(&view.list_input).h(px(280.0)))
-        .child(hint("列表行数必须与文件数一致；扩展名模式不需要输入句点。"))
+        // In a wrapper, as the rule fields are: a bare `Input` as a direct
+        // child of the scrolling form lays out at its minimum width and shows
+        // as a thin strip.
+        .child(
+            div()
+                .debug_selector(|| "rename-list-input".into())
+                .child(Input::new(&view.list_input).h(px(280.0))),
+        )
+        .child(hint(
+            "每行对应一个文件；该行留空时保持原名。扩展名模式不需要输入句点。",
+        ))
 }
 fn hint(text: &'static str) -> Div {
     div()

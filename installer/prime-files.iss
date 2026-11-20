@@ -31,6 +31,12 @@
 #ifndef DllSource
   #define DllSource "..\target\dist\dll"
 #endif
+; HatchZip (MIT OR Apache-2.0, https://github.com/xevrion/hatchzip): the
+; bundled archive extractor, so unpacking needs no 7-Zip install. The licence
+; files that come with it go along.
+#ifndef ToolsSource
+  #define ToolsSource "..\target\dist\tools"
+#endif
 
 #define AppName "LumaFiles"
 #define AppExe "LumaFiles.exe"
@@ -101,6 +107,12 @@ Source: "{#IndexerSource}"; DestDir: "{app}"; Flags: ignoreversion
 ; Everything's SDK, read only when the person picks Everything's index in
 ; Settings › Search. A build without the DLLs installs without them.
 Source: "{#DllSource}\*.dll"; DestDir: "{app}\dll"; Flags: ignoreversion skipifsourcedoesntexist
+; The bundled extractor (Settings › Files › 解压工具). A build without it falls
+; back to an installed 7-Zip, and the setting says so. The GUI, the shell
+; completion and the README are left out: only the command line is used, and
+; the licence files stay for the code inside it.
+Source: "{#ToolsSource}\HatchZip\hatchzip.exe"; DestDir: "{app}\tools\HatchZip"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#ToolsSource}\HatchZip\LICENSE-*.txt"; DestDir: "{app}\tools\HatchZip"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"

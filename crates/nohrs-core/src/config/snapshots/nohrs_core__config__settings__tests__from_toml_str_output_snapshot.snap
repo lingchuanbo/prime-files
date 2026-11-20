@@ -59,6 +59,9 @@ expression: parsed
             vertical_tabs_side: Left,
             move_grips: false,
             preview_visible: true,
+            tab_width_mode: Adaptive,
+            tab_width: 160,
+            show_tab_numbers: true,
         },
         updates: Updates {
             automatic: true,
@@ -106,6 +109,9 @@ expression: parsed
                 "#fb923c",
                 "#22c55e",
             ],
+        },
+        archive: Archive {
+            tool: HatchZip,
         },
     },
     [

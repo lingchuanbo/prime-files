@@ -8,6 +8,7 @@
 //! calling `std::fs` directly (see `docs/explorer-essentials.md` §8).
 
 use crate::fs::trash;
+use crate::fs::transfer::{self, TransferProgress};
 use nohrs_core::errors::{Error, Result};
 use nohrs_store::TrashLedger;
 use std::ffi::OsStr;
@@ -703,20 +704,31 @@ pub fn unique_name(dir: &Path, name: &str) -> String {
 /// overwritten. Fails if `dst` is `src` or sits inside it.
 #[tracing::instrument(target = "nohrs::op", name = "fs.copy", level = "debug", skip_all, fields(src = %src.display(), dst = %dst.display()))]
 pub fn copy_path(src: &Path, dst: &Path) -> Result<()> {
+    copy_path_inner(src, dst, None)
+}
+
+/// [`copy_path`] while reporting bytes to `progress`, and stopping with
+/// [`Error::Cancelled`] when the user cancels.
+#[tracing::instrument(target = "nohrs::op", name = "fs.copy", level = "debug", skip_all, fields(src = %src.display(), dst = %dst.display()))]
+pub fn copy_path_reported(src: &Path, dst: &Path, progress: &TransferProgress) -> Result<()> {
+    copy_path_inner(src, dst, Some(progress))
+}
+
+fn copy_path_inner(src: &Path, dst: &Path, progress: Option<&TransferProgress>) -> Result<()> {
     ensure_destination_outside_source(src, dst)?;
     // Before the parent is created, so a copy of something that is not there
     // leaves no empty directory behind.
+    transfer::check(progress)?;
     let metadata = fs::symlink_metadata(src)?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
     if metadata.is_symlink() {
-        copy_symlink(src, dst, Existing::Replace)
+        copy_symlink(src, dst, Existing::Replace, progress)
     } else if metadata.is_dir() {
-        copy_dir_all(src, dst, Existing::Replace)
+        copy_dir_all(src, dst, Existing::Replace, progress)
     } else {
-        fs::copy(src, dst)?;
-        Ok(())
+        copy_file(src, dst, Existing::Replace, progress)
     }
 }
 
@@ -743,7 +755,13 @@ enum Existing {
 }
 
 // Recreates the symbolic link `from` at `to`.
-fn copy_symlink(from: &Path, to: &Path, existing: Existing) -> Result<()> {
+fn copy_symlink(
+    from: &Path,
+    to: &Path,
+    existing: Existing,
+    progress: Option<&TransferProgress>,
+) -> Result<()> {
+    transfer::check(progress)?;
     let target = fs::read_link(from)?;
     // A directory is left alone: removing one to make room for a link would
     // discard whatever it holds, which is more than an overwrite was asked to do.
@@ -753,16 +771,29 @@ fn copy_symlink(from: &Path, to: &Path, existing: Existing) -> Result<()> {
     {
         fs::remove_file(to)?;
     }
-    symlink_no_replace(&target, to)
+    symlink_no_replace(&target, to)?;
+    if let Some(progress) = progress {
+        progress.file_done();
+    }
+    Ok(())
 }
 
 // Copies the regular file `from` to `to`.
-fn copy_file(from: &Path, to: &Path, existing: Existing) -> Result<()> {
-    if existing == Existing::Replace {
+fn copy_file(
+    from: &Path,
+    to: &Path,
+    existing: Existing,
+    progress: Option<&TransferProgress>,
+) -> Result<()> {
+    if existing == Existing::Replace && progress.is_none() {
+        // The fast path with nothing to report: one kernel call.
         fs::copy(from, to)?;
         return Ok(());
     }
-    copy_file_claiming(from, to).map_err(ClaimFailure::into_error)
+    if existing == Existing::Replace {
+        return copy_file_replacing_reported(from, to, progress);
+    }
+    copy_file_claiming(from, to, progress).map_err(ClaimFailure::into_error)
 }
 
 /// Copies the regular file `from` to `to`, taking `to` with a call that fails if
@@ -780,23 +811,47 @@ fn copy_file(from: &Path, to: &Path, existing: Existing) -> Result<()> {
 /// (`examples/copy_ab.rs`; `docs/PERFORMANCE.md`, passada 4).
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn copy_file_claiming(from: &Path, to: &Path) -> ClaimResult<()> {
-    use windows::Win32::Storage::FileSystem::{COPY_FILE_FAIL_IF_EXISTS, CopyFileExW};
-    use windows::core::PCWSTR;
-    let (source, destination) = (wide(from), wide(to));
-    // SAFETY: both buffers are NUL-terminated UTF-16 and outlive the call; no
-    // progress routine, data or cancel flag is passed.
-    let copied = unsafe {
-        CopyFileExW(
-            PCWSTR(source.as_ptr()),
-            PCWSTR(destination.as_ptr()),
-            None,
-            None,
-            None,
-            COPY_FILE_FAIL_IF_EXISTS,
-        )
+fn copy_file_claiming(
+    from: &Path,
+    to: &Path,
+    progress: Option<&TransferProgress>,
+) -> ClaimResult<()> {
+    use windows::Win32::Storage::FileSystem::COPY_FILE_FAIL_IF_EXISTS;
+    let Some(progress) = progress else {
+        use windows::Win32::Storage::FileSystem::CopyFileExW;
+        use windows::core::PCWSTR;
+        let (source, destination) = (wide(from), wide(to));
+        // SAFETY: both buffers are NUL-terminated UTF-16 and outlive the call; no
+        // progress routine, data or cancel flag is passed.
+        let copied = unsafe {
+            CopyFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(destination.as_ptr()),
+                None,
+                None,
+                None,
+                COPY_FILE_FAIL_IF_EXISTS,
+            )
+        };
+        return claim_copy_result(copied.map_err(win32_io_error), to);
     };
-    let Err(error) = copied.map_err(win32_io_error) else {
+    // With a dialog to feed, the same call carries the progress routine, which
+    // also answers the user's Cancel.
+    let copied = copy_file_ex(from, to, true, progress);
+    if progress.cancelled() {
+        // CopyFileExW's own cleanup of an aborted copy is not something to
+        // rely on (the destination may be there, part-written) and the
+        // identity based cleanup below does nothing on Windows; the name is
+        // ours — it was claimed with CREATE_NEW inside the call — so it goes.
+        let _ = fs::remove_file(to);
+        return Err(ClaimFailure::untouched(Error::Cancelled));
+    }
+    claim_copy_result(copied, to)
+}
+
+#[cfg(windows)]
+fn claim_copy_result(copied: std::io::Result<()>, to: &Path) -> ClaimResult<()> {
+    let Err(error) = copied else {
         return Ok(());
     };
     // "The name was taken" is answered before anything is written, so it never
@@ -813,8 +868,111 @@ fn copy_file_claiming(from: &Path, to: &Path) -> ClaimResult<()> {
     }
 }
 
+/// `CopyFileExW` with the progress routine installed, for a copy that reports
+/// bytes and can be cancelled mid-file.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn copy_file_ex(
+    from: &Path,
+    to: &Path,
+    fail_if_exists: bool,
+    progress: &TransferProgress,
+) -> std::io::Result<()> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        COPY_FILE_FAIL_IF_EXISTS, COPYFILE_FLAGS, COPYPROGRESSROUTINE_PROGRESS, CopyFileExW,
+        LPPROGRESS_ROUTINE_CALLBACK_REASON, PROGRESS_CANCEL, PROGRESS_CONTINUE,
+    };
+    use windows::core::PCWSTR;
+
+    // What the routine writes back: bytes already reported per file stream, so
+    // each callback adds the difference instead of the running total again.
+    struct Ticker<'a> {
+        progress: &'a TransferProgress,
+        reported: [i64; 16],
+    }
+
+    unsafe extern "system" fn tick(
+        _total: i64,
+        transferred: i64,
+        _stream_size: i64,
+        _stream_transferred: i64,
+        stream: u32,
+        _reason: LPPROGRESS_ROUTINE_CALLBACK_REASON,
+        _source: HANDLE,
+        _destination: HANDLE,
+        data: *const core::ffi::c_void,
+    ) -> COPYPROGRESSROUTINE_PROGRESS {
+        // SAFETY: `data` is the `Ticker` `copy_file_ex` passes to
+        // `CopyFileExW`, which hands the same pointer back untouched, and no
+        // Rust reference to it is alive across the call.
+        let ticker = unsafe { &mut *(data as *mut Ticker) };
+        if ticker.progress.cancelled() {
+            return PROGRESS_CANCEL;
+        }
+        let slot = stream as usize;
+        if slot < ticker.reported.len() {
+            let last = ticker.reported[slot];
+            if transferred > last {
+                ticker.progress.add_bytes((transferred - last) as u64);
+                ticker.reported[slot] = transferred;
+            }
+        }
+        PROGRESS_CONTINUE
+    }
+
+    let (source, destination) = (wide(from), wide(to));
+    let mut ticker = Ticker {
+        progress,
+        reported: [0; 16],
+    };
+    let flags = if fail_if_exists {
+        COPY_FILE_FAIL_IF_EXISTS
+    } else {
+        COPYFILE_FLAGS(0)
+    };
+    // SAFETY: both buffers are NUL-terminated UTF-16 and outlive the call, the
+    // ticker lives across it, and the routine only touches that ticker.
+    let copied = unsafe {
+        CopyFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            Some(tick),
+            Some(&mut ticker as *mut Ticker as *const core::ffi::c_void),
+            None,
+            flags,
+        )
+    };
+    copied.map_err(win32_io_error)
+}
+
+/// A copy that overwrites, reporting as it goes; the `Existing::Replace` side
+/// of [`copy_file`] when a dialog is watching.
+#[cfg(windows)]
+fn copy_file_replacing_reported(
+    from: &Path,
+    to: &Path,
+    progress: Option<&TransferProgress>,
+) -> Result<()> {
+    let Some(progress) = progress else {
+        return Err(Error::Other("no progress to report".into()));
+    };
+    // The name is free (the paste plan claimed it), so asking for "fail if it
+    // exists" keeps the same guarantee as the claim.
+    let copied = copy_file_ex(from, to, true, progress);
+    if progress.cancelled() {
+        let _ = fs::remove_file(to);
+        return Err(Error::Cancelled);
+    }
+    copied.map_err(Error::Io)
+}
+
 #[cfg(not(windows))]
-fn copy_file_claiming(from: &Path, to: &Path) -> ClaimResult<()> {
+fn copy_file_claiming(
+    from: &Path,
+    to: &Path,
+    progress: Option<&TransferProgress>,
+) -> ClaimResult<()> {
     // Opening the source first, so a source that cannot be read fails before the
     // destination name is taken.
     let source = fs::File::open(from).map_err(ClaimFailure::untouched)?;
@@ -823,7 +981,19 @@ fn copy_file_claiming(from: &Path, to: &Path) -> ClaimResult<()> {
     // itself made, so nothing that takes the name in between can be recorded as
     // the claim and later deleted as though it were.
     let claimed = handle_identity(&destination);
-    fill_file(from, to, source, destination).map_err(|error| ClaimFailure::partial(error, claimed))
+    fill_file(from, to, source, destination, progress)
+        .map_err(|error| ClaimFailure::partial(error, claimed))
+}
+
+#[cfg(not(windows))]
+fn copy_file_replacing_reported(
+    from: &Path,
+    to: &Path,
+    progress: Option<&TransferProgress>,
+) -> Result<()> {
+    let source = fs::File::open(from)?;
+    let destination = fs::File::create(to)?;
+    fill_file(from, to, source, destination, progress)
 }
 
 // Takes the name `to` with a call that fails if it is already there — the point
@@ -836,15 +1006,36 @@ fn claim_file(to: &Path) -> Result<fs::File> {
         .open(to)?)
 }
 
-// Writes `from` into the already-claimed `to`.
+// Writes `from` into the already-claimed `to`. With a progress board the bytes
+// go through a chunk loop, so the dialog moves and Cancel is answered inside a
+// single large file rather than at the next one.
 #[cfg(not(windows))]
 fn fill_file(
     from: &Path,
     to: &Path,
     mut source: fs::File,
     mut destination: fs::File,
+    progress: Option<&TransferProgress>,
 ) -> Result<()> {
-    std::io::copy(&mut source, &mut destination)?;
+    match progress {
+        None => {
+            std::io::copy(&mut source, &mut destination)?;
+        }
+        Some(progress) => {
+            use std::io::{Read as _, Write as _};
+            const CHUNK: usize = 256 * 1024;
+            let mut buffer = vec![0_u8; CHUNK];
+            loop {
+                transfer::check(Some(progress))?;
+                let read = source.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                destination.write_all(&buffer[..read])?;
+                progress.add_bytes(read as u64);
+            }
+        }
+    }
     // After the contents, so a read-only mode cannot stop the copy that has to
     // happen first.
     fs::set_permissions(to, fs::metadata(from)?.permissions())?;
@@ -856,9 +1047,14 @@ fn fill_file(
 // is taken — not just the root: a tree takes time to write, and the guarantee is
 // worth nothing if something else can create an entry inside it meanwhile and
 // have it silently replaced.
-fn copy_dir_all(src: &Path, dst: &Path, existing: Existing) -> Result<()> {
+fn copy_dir_all(
+    src: &Path,
+    dst: &Path,
+    existing: Existing,
+    progress: Option<&TransferProgress>,
+) -> Result<()> {
     claim_dir(dst, existing)?;
-    fill_dir(src, dst, existing)
+    fill_dir(src, dst, existing, progress)
 }
 
 // Creates `dst` itself — the point past which everything under that path was
@@ -876,18 +1072,31 @@ fn claim_dir(dst: &Path, existing: Existing) -> Result<()> {
 }
 
 // Copies the contents of `src` into the already-claimed `dst`.
-fn fill_dir(src: &Path, dst: &Path, existing: Existing) -> Result<()> {
+fn fill_dir(
+    src: &Path,
+    dst: &Path,
+    existing: Existing,
+    progress: Option<&TransferProgress>,
+) -> Result<()> {
     for entry in fs::read_dir(src)? {
+        // Between entries: a folder copy is the case with an item to reach.
+        transfer::check(progress)?;
         let entry = entry?;
         let file_type = entry.file_type()?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
+        if let Some(progress) = progress {
+            progress.set_detail(entry.file_name().to_string_lossy().into_owned());
+        }
         if file_type.is_symlink() {
-            copy_symlink(&from, &to, existing)?;
+            copy_symlink(&from, &to, existing, progress)?;
         } else if file_type.is_dir() {
-            copy_dir_all(&from, &to, existing)?;
+            copy_dir_all(&from, &to, existing, progress)?;
         } else {
-            copy_file(&from, &to, existing)?;
+            copy_file(&from, &to, existing, progress)?;
+            if let Some(progress) = progress {
+                progress.file_done();
+            }
         }
     }
     // `create_dir_all` derives the mode from the umask, so a private `0700`
@@ -938,6 +1147,27 @@ pub fn move_path(src: &Path, dst: &Path) -> Result<MoveKind> {
 /// so the source it could not finish removing may be a fragment — which would
 /// make that copy the only whole one there is.
 pub fn move_path_no_replace(src: &Path, dst: &Path) -> ClaimResult<MoveKind> {
+    move_path_no_replace_inner(src, dst, None)
+}
+
+/// [`move_path_no_replace`] while reporting bytes to `progress`, and stopping
+/// with [`Error::Cancelled`] when the user cancels. A cut within one volume is
+/// a rename and finishes at once; the reporting matters for the cross-volume
+/// copy-and-delete half.
+#[tracing::instrument(target = "nohrs::op", name = "fs.move", level = "debug", skip_all, fields(src = %src.display(), dst = %dst.display()))]
+pub fn move_path_no_replace_reported(
+    src: &Path,
+    dst: &Path,
+    progress: &TransferProgress,
+) -> ClaimResult<MoveKind> {
+    move_path_no_replace_inner(src, dst, Some(progress))
+}
+
+fn move_path_no_replace_inner(
+    src: &Path,
+    dst: &Path,
+    progress: Option<&TransferProgress>,
+) -> ClaimResult<MoveKind> {
     ensure_destination_outside_source(src, dst).map_err(ClaimFailure::untouched)?;
     match rename_no_replace(src, dst) {
         Some(Ok(())) => return Ok(MoveKind::Rename),
@@ -949,7 +1179,13 @@ pub fn move_path_no_replace(src: &Path, dst: &Path) -> ClaimResult<MoveKind> {
         // Cross-device, or no no-replace rename to be had: copy and delete.
         Some(Err(_)) | None => {}
     }
-    copy_path_no_replace(src, dst)?;
+    copy_path_no_replace_inner(src, dst, progress)?;
+    // A Cancel that arrived during the copy leaves the source where it is: the
+    // copy is cleared away here rather than left as a second, unasked-for copy.
+    if transfer::check(progress).is_err() {
+        let _ = delete_permanent(dst);
+        return Err(ClaimFailure::untouched(Error::Cancelled));
+    }
     delete_permanent(src).map_err(ClaimFailure::whole)?;
     Ok(MoveKind::CrossVolume)
 }
@@ -1052,7 +1288,27 @@ fn rename_no_replace(_src: &Path, _dst: &Path) -> Option<std::io::Result<()>> {
 /// first and a name colliding inside a tree this call had already claimed both
 /// come back as, and only the second leaves something a caller may remove.
 pub fn copy_path_no_replace(src: &Path, dst: &Path) -> ClaimResult<()> {
+    copy_path_no_replace_inner(src, dst, None)
+}
+
+/// [`copy_path_no_replace`] while reporting bytes to `progress`, and stopping
+/// with [`Error::Cancelled`] when the user cancels.
+#[tracing::instrument(target = "nohrs::op", name = "fs.copy", level = "debug", skip_all, fields(src = %src.display(), dst = %dst.display()))]
+pub fn copy_path_no_replace_reported(
+    src: &Path,
+    dst: &Path,
+    progress: &TransferProgress,
+) -> ClaimResult<()> {
+    copy_path_no_replace_inner(src, dst, Some(progress))
+}
+
+fn copy_path_no_replace_inner(
+    src: &Path,
+    dst: &Path,
+    progress: Option<&TransferProgress>,
+) -> ClaimResult<()> {
     ensure_destination_outside_source(src, dst).map_err(ClaimFailure::untouched)?;
+    transfer::check(progress).map_err(ClaimFailure::untouched)?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(ClaimFailure::untouched)?;
     }
@@ -1060,7 +1316,8 @@ pub fn copy_path_no_replace(src: &Path, dst: &Path) -> ClaimResult<()> {
     if metadata.is_symlink() {
         // `symlink(2)` takes the name and writes the link in the one call, so it
         // did both or neither: a failure never leaves the destination ours.
-        return copy_symlink(src, dst, Existing::Refuse).map_err(ClaimFailure::untouched);
+        return copy_symlink(src, dst, Existing::Refuse, progress)
+            .map_err(ClaimFailure::untouched);
     }
     if metadata.is_dir() {
         claim_dir(dst, Existing::Refuse).map_err(ClaimFailure::untouched)?;
@@ -1069,10 +1326,20 @@ pub fn copy_path_no_replace(src: &Path, dst: &Path) -> ClaimResult<()> {
         // `mkdir` hands back no handle, so this one is a `stat` by path and
         // carries the gap the cleanup's doc comment owns up to.
         let claimed = entry_identity(dst);
-        return fill_dir(src, dst, Existing::Refuse)
-            .map_err(|error| ClaimFailure::partial(error, claimed));
+        return fill_dir(src, dst, Existing::Refuse, progress).map_err(|error| {
+            // A cancelled tree copy leaves a half-filled destination. On
+            // Windows the identity above is None, so the generic cleanup cannot
+            // take it; the name was free until this call claimed it, so what is
+            // there is the copy's own work.
+            if matches!(error, Error::Cancelled) {
+                let _ = fs::remove_dir_all(dst);
+                ClaimFailure::untouched(error)
+            } else {
+                ClaimFailure::partial(error, claimed)
+            }
+        });
     }
-    copy_file_claiming(src, dst)
+    copy_file_claiming(src, dst, progress)
 }
 
 // Recreates a symlink to `target` at `link`, failing if `link` is taken.
@@ -1182,22 +1449,54 @@ pub fn trash_path(path: &Path, ledger: Option<&dyn TrashLedger>) -> Result<()> {
 /// Where a ledger has to be written, each item is captured and recorded on its
 /// own, as [`trash_path`] does.
 pub fn trash_paths(paths: &[PathBuf], ledger: Option<&dyn TrashLedger>) -> Vec<(PathBuf, Error)> {
-    match ledger {
-        Some(ledger) => paths
-            .iter()
-            .filter_map(|path| {
-                trash_path(path, Some(ledger))
-                    .err()
-                    .map(|error| (path.clone(), error))
-            })
-            .collect(),
-        None => trash_in_one_batch(
-            paths,
-            |path| fs::symlink_metadata(path).is_ok(),
-            os_trash_delete_all,
-            os_trash_delete,
-        ),
+    trash_paths_reported(paths, ledger, None)
+}
+
+/// [`trash_paths`] while counting items for `progress` and stopping between
+/// chunks when the user cancels. The batch call is kept for speed and done in
+/// chunks, so a long empty-the-selection can be stopped without falling back to
+/// one call per file.
+pub fn trash_paths_reported(
+    paths: &[PathBuf],
+    ledger: Option<&dyn TrashLedger>,
+    progress: Option<&TransferProgress>,
+) -> Vec<(PathBuf, Error)> {
+    // One shell call per chunk: large enough that the per-call cost disappears,
+    // small enough that Cancel is answered within a second or two.
+    const CHUNK: usize = 64;
+    let mut failed = Vec::new();
+    for chunk in paths.chunks(CHUNK) {
+        if transfer::check(progress).is_err() {
+            break;
+        }
+        if let Some(progress) = progress {
+            if let Some(first) = chunk.first().and_then(|path| path.file_name()) {
+                progress.set_detail(first.to_string_lossy().into_owned());
+            }
+        }
+        match ledger {
+            Some(ledger) => {
+                for path in chunk {
+                    if transfer::check(progress).is_err() {
+                        break;
+                    }
+                    if let Err(error) = trash_path(path, Some(ledger)) {
+                        failed.push((path.clone(), error));
+                    }
+                }
+            }
+            None => failed.extend(trash_in_one_batch(
+                chunk,
+                |path| fs::symlink_metadata(path).is_ok(),
+                os_trash_delete_all,
+                os_trash_delete,
+            )),
+        }
+        if let Some(progress) = progress {
+            progress.items_added(chunk.len());
+        }
     }
+    failed
 }
 
 // The plan behind [`trash_paths`] without a ledger, apart from the system calls
@@ -1298,6 +1597,111 @@ pub fn delete_permanent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// [`delete_permanent`] while counting the files it removes and stopping with
+/// [`Error::Cancelled`] when the user cancels.
+///
+/// A cancelled tree delete leaves part of the tree in place: what was deleted is
+/// deleted, and the rest is reported by the caller. That is the only honest
+/// outcome — the entries are gone the moment each `remove` returns.
+pub fn delete_permanent_reported(
+    path: &Path,
+    progress: &TransferProgress,
+) -> Result<()> {
+    transfer::check(Some(progress))?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        delete_tree_reported(path, progress)
+    } else {
+        note_deleting(progress, path);
+        remove_file_clearing_readonly(path)?;
+        progress.file_done();
+        Ok(())
+    }
+}
+
+fn delete_tree_reported(dir: &Path, progress: &TransferProgress) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        // Between entries, so a large tree can be stopped partway.
+        transfer::check(Some(progress))?;
+        let entry = entry?;
+        let path = entry.path();
+        note_deleting(progress, &path);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            delete_tree_reported(&path, progress)?;
+        } else {
+            remove_file_clearing_readonly(&path)?;
+            progress.file_done();
+        }
+    }
+    fs::remove_dir(dir)?;
+    Ok(())
+}
+
+fn note_deleting(progress: &TransferProgress, path: &Path) {
+    if let Some(name) = path.file_name() {
+        progress.set_detail(name.to_string_lossy().into_owned());
+    }
+}
+
+// Removes a file, clearing a read-only attribute first when that is what stops
+// it: Explorer deletes a read-only file after asking, and a cancelled permanent
+// delete should not halt on one.
+fn remove_file_clearing_readonly(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            if let Ok(metadata) = fs::symlink_metadata(path) {
+                let mut permissions = metadata.permissions();
+                if permissions.readonly() {
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    permissions.set_readonly(false);
+                    fs::set_permissions(path, permissions)?;
+                }
+            }
+            Ok(fs::remove_file(path)?)
+        }
+        other => Ok(other?),
+    }
+}
+
+/// Bytes in `paths` and everything under them, for a copy dialog's bar. Symbolic
+/// links are skipped, as a copy never follows them. Fails with
+/// [`Error::Cancelled`] if the measuring itself is cancelled, before anything
+/// is written.
+pub fn bytes_to_copy(paths: &[PathBuf], progress: Option<&TransferProgress>) -> Result<u64> {
+    let mut total = 0_u64;
+    for path in paths {
+        transfer::check(progress)?;
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            continue;
+        };
+        if metadata.is_file() {
+            total += metadata.len();
+        } else if metadata.is_dir() {
+            total += tree_bytes(path, progress)?;
+        }
+    }
+    Ok(total)
+}
+
+fn tree_bytes(dir: &Path, progress: Option<&TransferProgress>) -> Result<u64> {
+    let mut total = 0_u64;
+    for entry in fs::read_dir(dir)? {
+        transfer::check(progress)?;
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            total += tree_bytes(&entry.path(), progress)?;
+        } else if let Ok(metadata) = entry.metadata() {
+            total += metadata.len();
+        }
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
@@ -1346,6 +1750,70 @@ mod tests {
         copy_path(&src, &dst).unwrap();
         assert_eq!(fs::read_to_string(&dst).unwrap(), "hello");
         assert!(src.exists(), "source is preserved on copy");
+    }
+
+    #[test]
+    fn a_reported_copy_counts_bytes_and_files() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("pasta");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "12345").unwrap();
+        fs::write(src.join("sub").join("b.txt"), "1234567890").unwrap();
+        let dst = dir.path().join("copia");
+        let progress = TransferProgress::new(1);
+        let total = bytes_to_copy(&[src.clone()], Some(&progress)).unwrap();
+        assert_eq!(total, 15);
+        progress.set_total(total);
+        copy_path_reported(&src, &dst, &progress).unwrap();
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.done, 15);
+        assert_eq!(snapshot.files_done, 2);
+        assert_eq!(
+            fs::read_to_string(dst.join("sub").join("b.txt")).unwrap(),
+            "1234567890"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_copy_stops_before_writing_anything() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("big.txt");
+        fs::write(&src, vec![7_u8; 1024 * 1024]).unwrap();
+        let dst = dir.path().join("copia.txt");
+        let progress = TransferProgress::new(1);
+        progress.cancel();
+        assert!(matches!(
+            bytes_to_copy(&[src.clone()], Some(&progress)),
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(
+            copy_path_reported(&src, &dst, &progress),
+            Err(Error::Cancelled)
+        ));
+        assert!(!dst.exists(), "a cancelled copy leaves no destination");
+    }
+
+    #[test]
+    fn a_reported_delete_counts_files_and_stops_when_cancelled() {
+        let dir = tempdir().unwrap();
+        let tree = dir.path().join("arvore");
+        fs::create_dir_all(tree.join("sub")).unwrap();
+        fs::write(tree.join("one.txt"), "a").unwrap();
+        fs::write(tree.join("sub").join("two.txt"), "b").unwrap();
+        let progress = TransferProgress::new(1);
+        delete_permanent_reported(&tree, &progress).unwrap();
+        assert_eq!(progress.snapshot().files_done, 2);
+        assert!(!tree.exists());
+
+        let cancelled = TransferProgress::new(1);
+        cancelled.cancel();
+        let kept = dir.path().join("kept.txt");
+        fs::write(&kept, "k").unwrap();
+        assert!(matches!(
+            delete_permanent_reported(&kept, &cancelled),
+            Err(Error::Cancelled)
+        ));
+        assert!(kept.exists(), "a cancelled delete leaves the entry");
     }
 
     #[test]

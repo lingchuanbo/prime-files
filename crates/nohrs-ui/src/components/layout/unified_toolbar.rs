@@ -18,6 +18,37 @@ pub const UNIFIED_TOOLBAR_HEIGHT: Pixels = px(36.0);
 const ACCOUNT_BUTTON_ID: &str = "unified-toolbar-account-button";
 const SEARCH_BUTTON_ID: &str = "unified-toolbar-search-button";
 
+/// Width of one icon-only button in the title bar: a [`Button`] at
+/// [`Size::Small`] with neither label nor children draws at `size_6`, which is
+/// 24 points at the 16-point rem the app runs with.
+const ICON_BUTTON_WIDTH: f32 = 24.0;
+/// The `gap_1` between the title bar's buttons: `rems(0.25)`.
+const CONTROLS_GAP: f32 = 4.0;
+/// Width of one of the caption buttons Windows draws through the OS.
+const CAPTION_BUTTON_WIDTH: f32 = 46.0;
+/// How many caption buttons there are: minimize, maximize, close.
+const CAPTION_BUTTON_COUNT: f32 = 3.0;
+/// Padding at the right of the controls where the OS draws the window's own
+/// buttons over the window (the traffic lights of macOS).
+const TRAFFIC_LIGHT_PADDING: f32 = 16.0;
+
+/// Width the controls at the right end of the title bar occupy, counted back
+/// from the window's edge.
+///
+/// A host that draws them at the end of a row of its own — the explorer's tab
+/// row is the title bar while it has one pane — has to reserve at least this
+/// much beside the rest of the row. The empty stretch of that row is a drag
+/// region, which Windows answers as a caption press (`HTCAPTION`), so any part
+/// of a button the stretch reaches moves the window instead of clicking: that
+/// is what left the search button dead, the reserve being 174 points for
+/// buttons taking 194 and the 20-point shortfall covering most of the
+/// magnifying glass while the settings button, one gap further right, worked.
+pub const TITLE_CONTROLS_WIDTH: f32 = if cfg!(target_os = "windows") {
+    ICON_BUTTON_WIDTH * 2.0 + CONTROLS_GAP * 2.0 + CAPTION_BUTTON_WIDTH * CAPTION_BUTTON_COUNT
+} else {
+    ICON_BUTTON_WIDTH * 2.0 + CONTROLS_GAP + TRAFFIC_LIGHT_PADDING
+};
+
 /// Build the unified toolbar element: a draggable window region plus the
 /// settings button with its menu.
 pub fn unified_toolbar<V: Render, F: Fn(&mut App) + 'static>(
@@ -115,6 +146,8 @@ pub fn title_bar_controls<F: Fn(&mut App) + 'static>(
         });
 
     div()
+        .id("title-bar-controls")
+        .debug_selector(|| "title-bar-controls".into())
         .flex_shrink_0()
         .h_full()
         .flex()
@@ -129,7 +162,6 @@ pub fn title_bar_controls<F: Fn(&mut App) + 'static>(
         })
 }
 
-const CAPTION_BUTTON_WIDTH: Pixels = px(46.0);
 const CAPTION_CLOSE_HOVER: u32 = 0xC42B1C;
 
 // `appears_transparent` hides the native caption on Windows as well, but there
@@ -144,7 +176,7 @@ fn windows_caption_buttons(maximized: bool) -> impl IntoElement {
     let caption_button = |id: &'static str, glyph: &'static str, area: WindowControlArea| {
         div()
             .id(id)
-            .w(CAPTION_BUTTON_WIDTH)
+            .w(px(CAPTION_BUTTON_WIDTH))
             .h_full()
             .flex()
             .items_center()

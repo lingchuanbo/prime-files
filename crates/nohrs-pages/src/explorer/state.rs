@@ -300,6 +300,8 @@ pub struct ExplorerPane {
     pub(crate) hit_boxes: super::marquee::HitBoxes,
     /// In-progress paste whose name conflicts are being resolved via the dialog.
     pub(crate) paste_plan: Option<super::file_ops::PastePlan>,
+    /// The long operation the progress dialog is showing, if any.
+    pub(crate) transfer: Option<ActiveTransfer>,
 
     // Zoom and the grid it drives
     /// Listing zoom in 0..=1: the list table at the bottom, ever larger tiles
@@ -385,6 +387,8 @@ pub struct ExplorerPane {
     pub(crate) space: Option<super::space_map::SpaceMap>,
     /// How the space map colours its tiles (`[space_map]` in the config).
     pub(crate) space_map_style: config::SpaceMap,
+    /// The program that unpacks archives (`[archive]` in the config).
+    pub(crate) archive_tool: config::ArchiveTool,
     /// The mouse is on the zoom menu.
     pub(crate) zoom_menu_hovered: bool,
     /// The header's "open in another program" menu is open.
@@ -634,6 +638,7 @@ impl ExplorerPane {
             marquee: None,
             hit_boxes: Default::default(),
             paste_plan: None,
+            transfer: None,
             zoom: 0.0,
             zoom_target: 0.0,
             zoom_tick: None,
@@ -669,6 +674,7 @@ impl ExplorerPane {
             workspace: None,
             space: None,
             space_map_style: config::SpaceMap::default(),
+            archive_tool: config::ArchiveTool::default(),
             zoom_menu_hovered: false,
             open_in_menu: false,
             recent_menu: false,
@@ -1358,6 +1364,15 @@ impl ExplorerPane {
         }
     }
 
+    /// Applies the `[archive]` config section: which program "解压到同名文件夹"
+    /// hands the file to.
+    pub fn apply_config_archive(&mut self, archive: &config::Archive, cx: &mut Context<Self>) {
+        if self.archive_tool != archive.tool {
+            self.archive_tool = archive.tool;
+            cx.notify();
+        }
+    }
+
     /// Puts on screen the view `cwd` was left with, or the defaults for a
     /// folder never changed — whose zoom is the one the tab already had, so
     /// browsing in icons stays in icons. Does nothing while the folder stays
@@ -1449,4 +1464,14 @@ pub(crate) struct WorkspaceView {
     pub tag: u32,
     pub cards: Option<std::rc::Rc<Vec<super::view::workspace::Card>>>,
     pub task: Option<gpui::Task<()>>,
+}
+
+/// A copy, move, delete, extract or compress still running, and the dialog that
+/// shows it: the title names the action, the board the worker updates.
+pub(crate) struct ActiveTransfer {
+    /// What the dialog calls the run: 复制 / 移动 / 解压 / 压缩 / 删除到回收站 /
+    /// 永久删除.
+    pub(crate) title: &'static str,
+    /// Counters and the Cancel flag, shared with the worker.
+    pub(crate) progress: std::sync::Arc<nohrs_services::fs::transfer::TransferProgress>,
 }

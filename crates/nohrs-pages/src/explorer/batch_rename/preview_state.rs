@@ -25,6 +25,14 @@ impl RenameWindow {
         };
         let list_mode = self.list_mode;
         let list_lines = self.list_lines(cx);
+        // A list still being typed, or one longer than the files, is said in
+        // the status line; it is not a red row on every file.
+        let list_blank = list_lines.iter().all(|line| line.trim().is_empty());
+        let extra_lines = list_lines
+            .iter()
+            .skip(self.entries.len())
+            .filter(|line| !line.trim().is_empty())
+            .count();
         let list_apply = self.list_apply;
         let entries = self.entries.clone();
         let excluded = self.scope.excluded.clone();
@@ -47,7 +55,14 @@ impl RenameWindow {
                         let selected = rows.iter().filter(|row| row.selected).count();
                         let errors = rows.iter().filter(|row| row.error.is_some()).count();
                         let changed = rows.iter().filter(|row| row.selected && row.changed() && row.error.is_none()).count();
-                        view.status = format!("匹配 {} 项 · 已勾选 {selected} 项 · 将修改 {changed} 项 · 冲突 {errors} 项", rows.len());
+                        view.status = if list_mode && list_blank {
+                            format!("列表为空 · 匹配 {} 项 · 在上方逐行填写新名称", rows.len())
+                        } else {
+                            format!("匹配 {} 项 · 已勾选 {selected} 项 · 将修改 {changed} 项 · 冲突 {errors} 项", rows.len())
+                        };
+                        if extra_lines > 0 {
+                            view.status.push_str(&format!(" · 列表多出 {extra_lines} 行未使用"));
+                        }
                         if !view.scope.issues.is_empty() { view.status.push_str(&format!(" · 扫描提示 {} 项（在预览上方查看）", view.scope.issues.len())); }
                         view.rows = Arc::new(rows);
                     }

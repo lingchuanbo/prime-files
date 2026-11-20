@@ -1,5 +1,31 @@
 {
   "$defs": {
+    "Archive": {
+      "description": "Settings for unpacking archives (\"解压到同名文件夹\").",
+      "properties": {
+        "tool": {
+          "$ref": "#/$defs/ArchiveTool",
+          "default": "hatchzip",
+          "description": "The program that unpacks an archive."
+        }
+      },
+      "type": "object"
+    },
+    "ArchiveTool": {
+      "description": "The program that unpacks an archive.",
+      "oneOf": [
+        {
+          "const": "hatchzip",
+          "description": "The HatchZip bundled in `tools\\HatchZip`.",
+          "type": "string"
+        },
+        {
+          "const": "sevenzip",
+          "description": "The 7-Zip installed on the machine.",
+          "type": "string"
+        }
+      ]
+    },
     "Compact": {
       "description": "Compact mode, as in Zen Browser: the chosen bars stay hidden and slide in\nwhile the pointer rests at their edge of the window, leaving the listing\nalone on screen. Off by default, so the window keeps its full chrome until\nsomeone asks for less.",
       "properties": {
@@ -669,6 +695,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "The fully merged, validated configuration.\n\nModels the P1 surface (`theme` / `ui`) plus the P2 sections: `[indexing]`,\n`[search]`, `[launcher]`, and `[diagnostics]`. `[keybindings]` and\n`[plugins]` are reserved here as forward-compatible drafts — their types are\ndefined and parsed leniently so files can adopt them now, but the values do\nnot drive behaviour yet (keybindings land in P3, plugins in P4; see\n`docs/config.md` §2/§5).\n\nOnly `theme`, `ui`, and `diagnostics` are consumed at runtime today. The\nremaining sections (`keybindings`, `plugins`, `indexing`, `search`,\n`launcher`) are accepted and validated now so files and editor completion can\nadopt them, but editing them has no effect until the matching subsystem is\nwired in a later phase — see the per-section notes and `docs/config.md` §5.\n\nEvery field is `#[serde(default)]`: the loader starts from\n[`Config::default`] and overlays only the keys present in the file, so a\nmissing section is filled with its default rather than rejected. The\ngenerated schema therefore has no `required` properties, matching the\nloader (an empty `config.toml` is valid).",
   "properties": {
+    "archive": {
+      "$ref": "#/$defs/Archive",
+      "default": {
+        "tool": "hatchzip"
+      },
+      "description": "Unpacking archives."
+    },
     "compact": {
       "$ref": "#/$defs/Compact",
       "default": {
