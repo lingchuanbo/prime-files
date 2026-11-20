@@ -769,9 +769,11 @@ fn favorite_rows(
                     ),
             ),
     );
-    for item in &favorites {
-        section = favorite_item_rows(page, section, item, 0, icon_px, cx);
+    for (index, item) in favorites.iter().enumerate() {
+        section = favorite_item_rows(page, section, item, 0, index, None, icon_px, cx);
     }
+    // Below the last entry: the gap that drops it at the end of the top level.
+    section = section.child(favorite_end_zone(cx));
     list.child(section)
 }
 
@@ -782,12 +784,17 @@ fn favorite_key(id: u32) -> String {
 
 // One entry and, when it is an open submenu, everything it holds. An entry
 // being renamed is a field in its place. Generic over the list builder, so
-// the section keeps its id and drop target while growing rows.
+// the section keeps its id and drop target while growing rows; `parent` and
+// `index` are where the entry sits, which is what the gaps around it drop
+// into (the manual order).
+#[allow(clippy::too_many_arguments)]
 fn favorite_item_rows<V: ParentElement>(
     page: &mut ExplorerPane,
     mut list: V,
     item: &crate::explorer::favorites::FavoriteItem,
     depth: usize,
+    index: usize,
+    parent: Option<u32>,
     icon_px: u32,
     cx: &mut Context<ExplorerPane>,
 ) -> V {
@@ -802,16 +809,185 @@ fn favorite_item_rows<V: ParentElement>(
     }
     if item.is_submenu() {
         let open = page.sidebar.expanded.contains(&favorite_key(item.id));
-        list = list.child(favorite_submenu_row(item, open, depth, cx));
+        let row = favorite_submenu_row(item, open, depth, cx);
+        list = list.child(favorite_with_drop_target(
+            row,
+            Some(item.id),
+            parent,
+            index,
+            (px(6.0), px(6.0)),
+            cx,
+        ));
         if open {
-            for child in &item.children {
-                list = favorite_item_rows(page, list, child, depth + 1, icon_px, cx);
+            for (child_index, child) in item.children.iter().enumerate() {
+                list = favorite_item_rows(
+                    page,
+                    list,
+                    child,
+                    depth + 1,
+                    child_index,
+                    Some(item.id),
+                    icon_px,
+                    cx,
+                );
             }
         }
     } else {
-        list = list.child(favorite_link_row(page, item, depth, icon_px, cx));
+        let row = favorite_link_row(page, item, depth, icon_px, cx);
+        // A shortcut takes no children, so the whole row's height is the two
+        // gaps: above it goes before, below it goes after.
+        list = list.child(favorite_with_drop_target(
+            row,
+            None,
+            parent,
+            index,
+            (relative(0.5), relative(0.5)),
+            cx,
+        ));
     }
     list
+}
+
+// A row with the zones a favorite can be dropped into. A submenu also gets a
+// band across its middle: dropped there, the favorite goes inside it, and the
+// band lights up as the place it will land. The top and bottom strips are the
+// reorder gaps, which draw an insertion line only. The two never share pixels,
+// so a drop is either "between" or "inside", never both at once.
+fn favorite_with_drop_target(
+    row: impl IntoElement,
+    submenu: Option<u32>,
+    parent: Option<u32>,
+    index: usize,
+    (top_height, bottom_height): (impl Into<Length> + Copy, impl Into<Length> + Copy),
+    cx: &mut Context<ExplorerPane>,
+) -> Div {
+    let key = |side: &str| match submenu {
+        Some(id) => format!("{id}-{side}"),
+        None => format!("{parent:?}-{index}-{side}"),
+    };
+    div()
+        .relative()
+        .child(row)
+        .when_some(submenu, |this, id| {
+            this.child(favorite_inside_zone(id, cx))
+        })
+        .child(favorite_gap_zone(
+            &key("before"),
+            parent,
+            index,
+            true,
+            top_height,
+            submenu,
+            cx,
+        ))
+        .child(favorite_gap_zone(
+            &key("after"),
+            parent,
+            index + 1,
+            false,
+            bottom_height,
+            submenu,
+            cx,
+        ))
+}
+
+// The band across a submenu's middle: the place a favorite goes *inside* it.
+// It sits clear of the two gaps, so the glow and the insertion line can never
+// be on screen together.
+fn favorite_inside_zone(id: u32, cx: &mut Context<ExplorerPane>) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("favorite-inside-{id}")))
+        .absolute()
+        .top(px(6.0))
+        .bottom(px(6.0))
+        .left_0()
+        .right_0()
+        .rounded(px(4.0))
+        .drag_over::<FavoriteDrag>(|style, _, _, _| {
+            style
+                .bg(rgb(theme::accent_subtle()))
+                .border_1()
+                .border_color(rgb(theme::accent()))
+        })
+        .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::accent_subtle())))
+        .on_drop(cx.listener(move |_this, drag: &FavoriteDrag, _window, cx| {
+            if crate::explorer::favorites::Favorites::move_item(drag.id, Some(id), cx) {
+                cx.notify();
+            }
+        }))
+        .on_drop(
+            cx.listener(move |this, paths: &ExternalPaths, _window, cx| {
+                drop_as_favorites(this, Some(id), paths, cx);
+            }),
+        )
+}
+
+// One of the gaps: an invisible strip that a dragged favorite lands on to be
+// put at `index`, drawing the insertion line while it is over it. Dropping a
+// folder from outside on a submenu's gap still adds it into that submenu.
+fn favorite_gap_zone(
+    key: &str,
+    parent: Option<u32>,
+    index: usize,
+    top: bool,
+    height: impl Into<Length> + Copy,
+    submenu: Option<u32>,
+    cx: &mut Context<ExplorerPane>,
+) -> Stateful<Div> {
+    let mut zone = div()
+        .id(SharedString::from(format!("favorite-gap-{key}")))
+        .absolute()
+        .left_0()
+        .right_0()
+        .when(top, |this| this.top_0().border_t_2())
+        .when(!top, |this| this.bottom_0().border_b_2())
+        .h(height)
+        // Nothing is drawn until a favorite is over it; then the border is the
+        // line the user reads as "it lands here".
+        .border_color(gpui::transparent_black())
+        .drag_over::<FavoriteDrag>(move |style, _, _, _| {
+            style
+                .border_color(rgb(theme::accent()))
+                .bg(rgb(theme::accent_subtle()))
+        })
+        .on_drop(cx.listener(move |_this, drag: &FavoriteDrag, _window, cx| {
+            if crate::explorer::favorites::Favorites::move_to(drag.id, parent, index, cx) {
+                cx.notify();
+            }
+        }));
+    if let Some(submenu) = submenu {
+        zone = zone
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::accent_subtle())))
+            .on_drop(
+                cx.listener(move |this, paths: &ExternalPaths, _window, cx| {
+                    drop_as_favorites(this, Some(submenu), paths, cx);
+                }),
+            );
+    }
+    zone
+}
+
+// The strip under the last entry: dropping a favorite there puts it at the end
+// of the top level, with the same accent line showing the place. In flow, not
+// absolute: it is the section's own last row.
+fn favorite_end_zone(cx: &mut Context<ExplorerPane>) -> Stateful<Div> {
+    let index = crate::explorer::favorites::Favorites::all(cx).len();
+    div()
+        .id("favorite-gap-end")
+        .w_full()
+        .h(px(10.0))
+        .border_b_2()
+        .border_color(gpui::transparent_black())
+        .drag_over::<FavoriteDrag>(move |style, _, _, _| {
+            style
+                .border_color(rgb(theme::accent()))
+                .bg(rgb(theme::accent_subtle()))
+        })
+        .on_drop(cx.listener(move |_this, drag: &FavoriteDrag, _window, cx| {
+            if crate::explorer::favorites::Favorites::move_to(drag.id, None, index, cx) {
+                cx.notify();
+            }
+        }))
 }
 
 // Opens or closes a favorite submenu; the children are the list's own, so
@@ -871,7 +1047,6 @@ fn favorite_submenu_row(
         .cursor_pointer()
         .hover(|this| this.bg(rgb(theme::bg_hover())))
         .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::accent_subtle())))
-        .drag_over::<FavoriteDrag>(|style, _, _, _| style.bg(rgb(theme::accent_subtle())))
         .on_drop(
             cx.listener(move |this, paths: &ExternalPaths, _window, cx| {
                 drop_as_favorites(this, Some(id), paths, cx);

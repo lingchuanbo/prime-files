@@ -1015,7 +1015,9 @@ impl<T: PaneItem> PaneGroup<T> {
             .flex()
             .flex_row()
             .items_end()
-            .h(px(if title_bar { 40.0 } else { 36.0 }))
+            // The row grows downwards when the tabs need more than one line;
+            // its height is a minimum, not a fixed size.
+            .min_h(px(if title_bar { 40.0 } else { 36.0 }))
             .w_full()
             .pl(px(6.0))
             .pr(px(if title_bar { 0.0 } else { 6.0 }))
@@ -1025,57 +1027,81 @@ impl<T: PaneItem> PaneGroup<T> {
             // explorer's bars then are: no line under it.
             .when(!self.tabs_in_frame(), |this| this.border_b_1())
             .border_color(rgb(theme::border()))
-            .when(title_bar, |this| {
-                this.child(
-                    div()
-                        .id("pane-title-bar-app-name")
-                        .flex_shrink_0()
-                        .px(px(10.0))
-                        .pb(px(5.0))
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgb(theme::toolbar_text()))
-                        .child(self.app_name.clone()),
-                )
-            })
-            .children(tabs)
-            // New-tab affordance (`Cmd/Ctrl+T`, §4 / §6).
             .child(
+                // One wrapping strip for the app's name, the tabs, the new-tab
+                // button and the empty stretch that moves the window. Its width
+                // is what is left after the window's buttons have their room, so
+                // no line of tabs can ever run under them; the name goes first,
+                // on the strip's first line, so the lines after it use the whole
+                // width.
                 div()
-                    .id(SharedString::from(format!("new-tab-{pane_index}")))
+                    .id(SharedString::from(format!("tab-strip-{pane_index}")))
+                    .debug_selector(move || format!("tab-strip-{pane_index}"))
                     .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(26.0))
-                    .ml(px(2.0))
-                    .mb(px(2.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(theme::toolbar_hover())))
-                    // Swallow the press so the pane-wide `on_mouse_down` does not
-                    // also fire (it would still activate the pane, which is fine,
-                    // but keeps the interaction crisp).
-                    .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        on_new_tab(this, pane_index, window, cx)
-                    }))
+                    .flex_row()
+                    .flex_wrap()
+                    .items_end()
+                    .gap_y(px(4.0))
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .when(title_bar, |this| {
+                        // The app's name doubles as the spot to drag the window
+                        // by: with the tabs wrapping, the empty stretch that used
+                        // to move it goes away first.
+                        this.child(
+                            div()
+                                .id("pane-title-bar-app-name")
+                                .debug_selector(|| "pane-title-bar-app-name".into())
+                                .window_control_area(WindowControlArea::Drag)
+                                .flex_shrink_0()
+                                .px(px(10.0))
+                                .pb(px(5.0))
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(rgb(theme::toolbar_text()))
+                                .child(self.app_name.clone()),
+                        )
+                    })
+                    .children(tabs)
+                    // New-tab affordance (`Cmd/Ctrl+T`, §4 / §6).
                     .child(
-                        Icon::new(IconName::Plus)
-                            .size_4()
-                            .text_color(rgb(theme::muted())),
+                        div()
+                            .id(SharedString::from(format!("new-tab-{pane_index}")))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(26.0))
+                            .ml(px(2.0))
+                            .mb(px(2.0))
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(theme::toolbar_hover())))
+                            // Swallow the press so the pane-wide `on_mouse_down` does not
+                            // also fire (it would still activate the pane, which is fine,
+                            // but keeps the interaction crisp).
+                            .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                                cx.stop_propagation()
+                            })
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                on_new_tab(this, pane_index, window, cx)
+                            }))
+                            .child(
+                                Icon::new(IconName::Plus)
+                                    .size_4()
+                                    .text_color(rgb(theme::muted())),
+                            ),
+                    )
+                    // The empty stretch beside the tabs moves the window, as it
+                    // does in Explorer and browsers; it fills whatever is left
+                    // of the last line.
+                    .child(
+                        div()
+                            .id(("tab-bar-drag", pane_index))
+                            .debug_selector(move || format!("tab-bar-drag-{pane_index}"))
+                            .flex_grow()
+                            .h(px(32.0))
+                            .window_control_area(WindowControlArea::Drag),
                     ),
-            )
-            // The empty stretch beside the tabs moves the window, as it does in
-            // Explorer and browsers; only the thin bar above did, and the tab
-            // strip is where a hand goes to drag. Being a caption to Windows,
-            // a double click there maximizes and Aero Snap works.
-            .child(
-                div()
-                    .id(("tab-bar-drag", pane_index))
-                    .debug_selector(move || format!("tab-bar-drag-{pane_index}"))
-                    .flex_grow()
-                    .h_full()
-                    .window_control_area(WindowControlArea::Drag),
             )
             .when(split, |this| {
                 this.child(

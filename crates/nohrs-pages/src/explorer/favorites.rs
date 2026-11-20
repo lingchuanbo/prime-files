@@ -268,6 +268,74 @@ impl Favorites {
         links
     }
 
+    /// Moves entry `id` to position `index` under `new_parent` (`None` = the
+    /// top level): the entry the user dropped it in front of. Also used for
+    /// dragging a favorite between the entries, where the position is the
+    /// order the user is arranging. `index` counts the target's entries as
+    /// they are listed now, so a move within one list accounts for the entry
+    /// leaving it first. Refused when the target is the entry itself or sits
+    /// inside its subtree. Returns whether the order changed.
+    pub(crate) fn move_to(
+        id: u32,
+        new_parent: Option<u32>,
+        index: usize,
+        cx: &mut App,
+    ) -> bool {
+        Self::change(cx, move |favorites| {
+            let parent_ok = match new_parent {
+                None => true,
+                Some(parent) => {
+                    parent != id
+                        && find(&favorites.items, parent).is_some_and(|target| target.is_submenu())
+                        && !is_within(&favorites.items, id, parent)
+                }
+            };
+            if !parent_ok {
+                return false;
+            }
+            let old_parent = parent_of(&favorites.items, id);
+            let Some(old_index) = index_in(&favorites.items, id) else {
+                return false;
+            };
+            let mut index = index;
+            if old_parent == new_parent {
+                // Dropped back where it was: the gap before or after itself.
+                if old_index == index || old_index + 1 == index {
+                    return false;
+                }
+                // Same list: once the entry is out, the places after it shift
+                // one step left.
+                if old_index < index {
+                    index -= 1;
+                }
+            }
+            let Some(item) = take_out(&mut favorites.items, id) else {
+                return false;
+            };
+            match new_parent {
+                Some(parent) => match item_mut(&mut favorites.items, parent) {
+                    Some(submenu) => {
+                        let at = index.min(submenu.children.len());
+                        submenu.children.insert(at, item);
+                        true
+                    }
+                    // The parent vanished mid-move; the entry comes back at the
+                    // top level rather than being lost.
+                    None => {
+                        favorites.items.push(item);
+                        false
+                    }
+                },
+                None => {
+                    let at = index.min(favorites.items.len());
+                    favorites.items.insert(at, item);
+                    true
+                }
+            }
+        })
+        .unwrap_or(false)
+    }
+
     /// The submenus of the tree, depth first, each with the names that lead
     /// to it (`Trabalho / Projetos`): the places the directory menu offers
     /// for putting the folder on screen into.
@@ -336,6 +404,15 @@ fn take_out(items: &mut Vec<FavoriteItem>, id: u32) -> Option<FavoriteItem> {
     None
 }
 
+// The place of `id` among its own siblings; `None` when it is not in the tree.
+fn index_in(items: &[FavoriteItem], id: u32) -> Option<usize> {
+    if let Some(index) = items.iter().position(|item| item.id == id) {
+        return Some(index);
+    }
+    items
+        .iter()
+        .find_map(|item| index_in(&item.children, id))
+}
 // The id of the submenu holding `id`; `None` when it sits at the top level
 // (or is not in the tree at all).
 fn parent_of(items: &[FavoriteItem], id: u32) -> Option<u32> {
@@ -467,6 +544,60 @@ mod tests {
         assert_eq!(normalize(" Q:\\ "), "Q:\\");
         assert_eq!(normalize(r"\\nas\edicao\"), r"\\nas\edicao");
         assert_eq!(normalize(""), "");
+    }
+
+    #[gpui::test]
+    fn entries_are_reordered_by_position_and_into_submenus(cx: &mut gpui::TestAppContext) {
+        let folder = tempfile::tempdir().expect("temp folder");
+        let mut paths = Vec::new();
+        for name in ["a", "b", "c"] {
+            let path = folder.path().join(name);
+            std::fs::create_dir(&path).expect("folder");
+            paths.push(path.to_string_lossy().into_owned());
+        }
+        cx.update(|cx| {
+            Favorites::install(None, cx);
+            for path in &paths {
+                assert!(Favorites::add_link(None, path, cx));
+            }
+            let ids: Vec<u32> = Favorites::all(cx).iter().map(|item| item.id).collect();
+
+            // c dropped in front of a: [c, a, b].
+            assert!(Favorites::move_to(ids[2], None, 0, cx));
+            let order: Vec<String> = Favorites::all(cx)
+                .iter()
+                .map(|item| item.path.clone())
+                .collect();
+            assert_eq!(order, vec![paths[2].clone(), paths[0].clone(), paths[1].clone()]);
+
+            // a dropped after b (the gap below b is place 3 before a leaves):
+            // [c, b, a].
+            assert!(Favorites::move_to(ids[0], None, 3, cx));
+            let order: Vec<String> = Favorites::all(cx)
+                .iter()
+                .map(|item| item.path.clone())
+                .collect();
+            assert_eq!(order, vec![paths[2].clone(), paths[1].clone(), paths[0].clone()]);
+
+            // Dropped back into its own gap: no change.
+            assert!(!Favorites::move_to(ids[0], None, 2, cx));
+            assert!(!Favorites::move_to(ids[0], None, 3, cx));
+
+            // b into a submenu at its first place.
+            let submenu = Favorites::add_submenu(None, "Grupo".into(), cx);
+            assert!(Favorites::move_to(ids[1], Some(submenu), 0, cx));
+            let tree = Favorites::all(cx);
+            let group = tree
+                .iter()
+                .find(|item| item.id == submenu)
+                .expect("submenu");
+            assert_eq!(group.children.len(), 1);
+            assert_eq!(group.children[0].path, paths[1]);
+
+            // A submenu cannot be put inside its own subtree.
+            let inner = Favorites::add_submenu(Some(submenu), "Dentro".into(), cx);
+            assert!(!Favorites::move_to(submenu, Some(inner), 0, cx));
+        });
     }
 
     #[gpui::test]

@@ -70,7 +70,7 @@ mod platform {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
-    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::Com::{
         CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
         CoUninitialize, IServiceProvider,
@@ -82,8 +82,9 @@ mod platform {
         SVGIO_ALLVIEW, ShellWindows,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, EVENT_OBJECT_SHOW, GetClassNameW, GetMessageW, MSG, OBJID_WINDOW,
-        TranslateMessage, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+        DispatchMessageW, EVENT_OBJECT_SHOW, GetClassNameW, GetMessageW, IsWindow, MSG,
+        OBJID_WINDOW, PostMessageW, SW_HIDE, ShowWindow, TranslateMessage, WINEVENT_OUTOFCONTEXT,
+        WINEVENT_SKIPOWNPROCESS, WM_CLOSE,
     };
     use windows::core::Interface;
 
@@ -94,6 +95,20 @@ mod platform {
     /// Polls after the listing during which a reveal's selection may still
     /// arrive: 500 ms, while leaving ordinary folder navigation alone.
     const SELECTION_GRACE: u32 = 10;
+    /// How long the Explorer window stays on screen after the reveal is handed
+    /// over, before it is hidden. The program that asked for the reveal
+    /// (`SHOpenFolderAndSelectItems`, `explorer /select,…`) is still inside its
+    /// shell call, and a window taken away under that call leaves the caller
+    /// blocked until its own timeout: QQ and WeChat show that as a minute-long
+    /// freeze on the next "open folder". Once the caller has returned, hiding
+    /// takes the window out of sight and the close below finishes it off.
+    const HIDE_DELAY: Duration = Duration::from_millis(1500);
+    /// How long the hidden window is left before the close; the shell may
+    /// still be dropping its references for a moment.
+    const CLOSE_DELAY: Duration = Duration::from_millis(800);
+    /// How long the graceful close is given before the window is closed the
+    /// hard way instead.
+    const CLOSE_WAIT: Duration = Duration::from_millis(1500);
 
     static SENDER: OnceLock<async_channel::Sender<String>> = OnceLock::new();
 
@@ -171,9 +186,7 @@ mod platform {
                     if let Some(sender) = SENDER.get()
                         && sender.send_blocking(path).is_ok()
                     {
-                        // The window's own Quit: a posted WM_CLOSE is dropped
-                        // by a window still finishing its navigation.
-                        unsafe { browser.Quit() }.ok();
+                        close_after_the_caller_returns(hwnd, &browser);
                     }
                     break;
                 }
@@ -195,6 +208,31 @@ mod platform {
         unsafe { CoUninitialize() };
     }
 
+    // Takes the Explorer window out of sight and closes it once the program that
+    // asked for the reveal has returned. Closing it at the moment the selection
+    // appears destroys a window the caller's shell call is still talking to,
+    // and that call then waits for its own timeout (a minute in QQ and WeChat,
+    // seen as a freeze on the next "open folder"). So: leave it for a moment,
+    // hide it (out of sight, still a live window), and close it after.
+    fn close_after_the_caller_returns(hwnd: isize, browser: &IWebBrowser2) {
+        let window = HWND(hwnd as _);
+        std::thread::sleep(HIDE_DELAY);
+        let _ = unsafe { ShowWindow(window, SW_HIDE) };
+        std::thread::sleep(CLOSE_DELAY);
+        unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) }.ok();
+        let deadline = Instant::now() + CLOSE_WAIT;
+        while Instant::now() < deadline {
+            if !unsafe { IsWindow(Some(window)) }.as_bool() {
+                return;
+            }
+            std::thread::sleep(POLL);
+        }
+        // Still there (a window busy with something else); the hard close goes
+        // last, and by now nobody is waiting on it.
+        tracing::warn!("an Explorer window showing a reveal did not close; asking it to");
+        unsafe { browser.Quit() }.ok();
+    }
+
     enum View {
         /// Items are listed and none is selected.
         Listed,
@@ -209,7 +247,7 @@ mod platform {
         for index in 0..count {
             let Ok(item) = (unsafe { windows.Item(&VARIANT::from(index)) }) else { continue };
             let Ok(browser) = item.cast::<IWebBrowser2>() else { continue };
-            if !unsafe { browser.HWND() }.is_ok_and(|handle| handle.0 as isize == hwnd) {
+            if !unsafe { browser.HWND() }.is_ok_and(|handle| handle.0 == hwnd) {
                 continue;
             }
             let provider: IServiceProvider = browser.cast().ok()?;
