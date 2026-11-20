@@ -97,15 +97,16 @@ mod platform {
     const SELECTION_GRACE: u32 = 10;
     /// How long the Explorer window stays on screen after the reveal is handed
     /// over, before it is hidden. The program that asked for the reveal
-    /// (`SHOpenFolderAndSelectItems`, `explorer /select,…`) is still inside its
-    /// shell call, and a window taken away under that call leaves the caller
-    /// blocked until its own timeout: QQ and WeChat show that as a minute-long
-    /// freeze on the next "open folder". Once the caller has returned, hiding
-    /// takes the window out of sight and the close below finishes it off.
-    const HIDE_DELAY: Duration = Duration::from_millis(1500);
+    /// (`SHOpenFolderAndSelectItems`, `explorer /select,…`, Electron's
+    /// `shell.showItemInFolder`) is still inside its shell call, and a window
+    /// taken away under that call leaves the caller blocked until its own
+    /// timeout: QQ and WeChat show that as a minute-long freeze on the next
+    /// "open folder". Hiding keeps the window alive for that call while taking
+    /// the flash out of sight.
+    const HIDE_DELAY: Duration = Duration::from_millis(400);
     /// How long the hidden window is left before the close; the shell may
-    /// still be dropping its references for a moment.
-    const CLOSE_DELAY: Duration = Duration::from_millis(800);
+    /// still be holding references to it for a moment.
+    const CLOSE_DELAY: Duration = Duration::from_millis(2500);
     /// How long the graceful close is given before the window is closed the
     /// hard way instead.
     const CLOSE_WAIT: Duration = Duration::from_millis(1500);
