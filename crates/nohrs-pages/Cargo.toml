@@ -73,6 +73,11 @@ windows = { version = "0.61", features = [
   "Win32_System_Ole",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  # The foreground fix in foreground.rs: an Alt keypress through the input queue
+  # is what lets a background process take the foreground on some builds.
+  "Win32_UI_Input_KeyboardAndMouse",
+  # The bar under other programs' dialogs sizes itself in physical pixels.
+  "Win32_UI_HiDpi",
   "Win32_UI_Accessibility",
   # The shell-window registration (shell_windows.rs) implements IShellView,
   # whose bindings include the property-sheet methods.

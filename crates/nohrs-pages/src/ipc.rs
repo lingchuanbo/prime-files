@@ -316,6 +316,7 @@ impl RootView {
             Request::Ping => json!({ "ok": true }),
             Request::Show => {
                 window.activate_window();
+                crate::foreground::bring_to_front(window);
                 json!({ "ok": true })
             }
             Request::Open { path } => match folder_and_selection(Path::new(&path)) {
@@ -323,6 +324,7 @@ impl RootView {
                     self.show_explorer(cx);
                     explorer.update(cx, |page, cx| page.open_path(folder, select, window, cx));
                     window.activate_window();
+                    crate::foreground::bring_to_front(window);
                     json!({ "ok": true })
                 }
                 None => json!({ "ok": false, "error": "no such path" }),

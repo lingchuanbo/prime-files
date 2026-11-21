@@ -1,25 +1,47 @@
-//! Picking files for a browser's "Open" dialog from Nohrs.
+//! Picking files for another program's "Open" or "Save" dialog from Nohrs.
 //!
-//! The dialog itself cannot be replaced: it runs inside the browser, and
-//! browsers refuse injected code. So Nohrs watches for one to come up (a
-//! WinEvent hook, the same mechanism screen readers and Listary use), comes
-//! forward with a banner, and when a file is chosen here writes its path into
-//! the dialog's file name box and presses Open, as a person typing it would.
+//! The dialog itself cannot be replaced: it runs inside the other program, and
+//! most programs refuse injected code. So Nohrs watches for the foreground to
+//! become a program's standard file dialog, comes forward with a banner, and
+//! when a file is chosen here writes its path into the dialog's file name box
+//! and presses Open, as a person typing it would.
+//!
+//! On by default and switched off by `explorer.file_dialog_assist` (Settings ›
+//! integrations).
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::{AsyncWindowContext, Context, WeakEntity, Window};
 
 use crate::root::RootView;
 
-/// A browser file dialog waiting for Nohrs to choose for it.
+/// Whether another program's dialogs are answered here at all
+/// (`explorer.file_dialog_assist`).
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Turns the takeover on or off. Off, a dialog that is already being picked for
+/// is given back untouched and no new one is taken.
+pub fn set_enabled(enabled: bool) {
+    tracing::debug!("file dialog assist enabled: {enabled}");
+    ENABLED.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        set_picking(None);
+    }
+}
+
+fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
+/// A program's file dialog waiting for Nohrs to choose for it.
 #[derive(Clone, Debug)]
 pub struct Dialog {
     hwnd: isize,
     /// The dialog's title ("Open", "Abrir"…), for the banner.
     pub title: String,
-    /// The browser's executable name, for the banner.
+    /// The program's executable name, for the banner.
     pub browser: String,
 }
 
@@ -46,6 +68,8 @@ pub fn deliver(paths: &[String]) -> bool {
         return false;
     };
     set_picking(None);
+    // The dialog is about to close: do not pick it up again in between.
+    platform::skip(dialog.hwnd);
     !paths.is_empty() && platform::fill_and_open(dialog.hwnd, paths)
 }
 
@@ -53,12 +77,13 @@ pub fn deliver(paths: &[String]) -> bool {
 pub fn cancel() {
     if let Some(dialog) = picking() {
         set_picking(None);
+        platform::skip(dialog.hwnd);
         platform::bring_forward(dialog.hwnd);
     }
 }
 
-/// Starts watching for browser file dialogs. While one is open Nohrs is in
-/// picking mode; the banner and the poll that ends it run on the root view.
+/// Starts watching for other programs' file dialogs. While one is open Nohrs is
+/// in picking mode; the banner and the poll that ends it run on the root view.
 pub fn watch(window: &mut Window, cx: &mut Context<RootView>) {
     let (sender, receiver) = async_channel::unbounded::<Dialog>();
     if !platform::start_hook(sender) {
@@ -74,6 +99,7 @@ pub fn watch(window: &mut Window, cx: &mut Context<RootView>) {
                 let arrived = next_dialog_or_tick(&receiver, cx).await;
                 let changed = match arrived {
                     Some(dialog) => {
+                        tracing::debug!("picking for {} \"{}\"", dialog.browser, dialog.title);
                         set_picking(Some(dialog));
                         true
                     }
@@ -89,7 +115,10 @@ pub fn watch(window: &mut Window, cx: &mut Context<RootView>) {
                     let updated = this.update_in(cx, |root, window, cx| {
                         root.show_explorer(cx);
                         if picking().is_some() {
-                            window.activate_window();
+                            // The program whose dialog opened owns the
+                            // foreground; this is what lets the window come
+                            // over it instead of staying behind.
+                            crate::foreground::bring_to_front(window);
                         }
                         cx.notify();
                     });
@@ -136,22 +165,21 @@ async fn first_of(
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod platform {
-    //! The hook and the dialog automation. `unsafe` is confined here: none of
-    //! this has a safe binding.
+    //! The watch thread and the dialog automation. `unsafe` is confined here:
+    //! none of this has a safe binding.
 
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
 
     use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
         QueryFullProcessImageNameW,
     };
-    use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
     use windows::Win32::UI::WindowsAndMessaging::{
-        BN_CLICKED, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, FindWindowExW, GetClassNameW,
-        GetDlgItem, GetMessageW, GetWindowTextW, GetWindowThreadProcessId, IDOK, IsWindow, MSG,
-        SendMessageW, SetForegroundWindow, TranslateMessage, WINEVENT_OUTOFCONTEXT,
-        WINEVENT_SKIPOWNPROCESS, WM_COMMAND, WM_SETTEXT,
+        BN_CLICKED, FindWindowExW, GetClassNameW, GetDlgItem, GetForegroundWindow, GetWindowTextW,
+        GetWindowThreadProcessId, IDOK, IsWindow, SendMessageW, SetForegroundWindow, WM_COMMAND,
+        WM_SETTEXT,
     };
     use windows::core::{PCWSTR, PWSTR, w};
 
@@ -164,95 +192,89 @@ mod platform {
     /// The file name edit box of the older dialog layout (`edt1`).
     const FILE_NAME_EDIT: i32 = 1152;
 
-    /// Browsers whose file dialogs Nohrs answers. Helium and other Chromium
-    /// builds run as `chrome.exe`.
-    const BROWSERS: &[&str] = &[
-        "chrome.exe",
-        "msedge.exe",
-        "zen.exe",
-        "firefox.exe",
-        "brave.exe",
-        "opera.exe",
-        "vivaldi.exe",
-        "floorp.exe",
-        "librewolf.exe",
-        "thorium.exe",
-        "arc.exe",
-    ];
+    /// How often the foreground is looked at. A dialog box takes the foreground
+    /// before its controls exist, so a single event would arrive too early; the
+    /// poll costs nothing and sees the finished dialog within a moment.
+    const POLL: Duration = Duration::from_millis(120);
+
+    /// Processes whose dialogs are not taken: the shell's own windows (their
+    /// dialogs are about the desktop, not a folder to pick from) and this app's
+    /// own dialogs. Every other program's standard Open/Save dialog is answered
+    /// while `explorer.file_dialog_assist` is on.
+    const IGNORED_APPS: &[&str] = &["explorer.exe", "searchapp.exe", "lumafiles.exe"];
 
     static SENDER: OnceLock<async_channel::Sender<Dialog>> = OnceLock::new();
-
-    /// More programs to answer, from `NOHRS_FILE_DIALOG_APPS` (executable names
-    /// separated by commas, e.g. `Adobe Premiere Pro.exe,powershell.exe`).
-    /// Read once: the hook runs for the life of the process.
-    fn extra_apps() -> &'static [String] {
-        static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
-        EXTRA.get_or_init(|| {
-            std::env::var("NOHRS_FILE_DIALOG_APPS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|name| name.trim().to_lowercase())
-                .filter(|name| !name.is_empty())
-                .collect()
-        })
-    }
+    /// Dialogs the person sent back to their program; the watcher leaves them
+    /// alone until they close.
+    static SKIPPED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 
     pub fn start_hook(sender: async_channel::Sender<Dialog>) -> bool {
         if SENDER.set(sender).is_err() {
             return false;
         }
-        // An out-of-context hook calls back on the thread that set it, from its
-        // message loop, so it gets a thread of its own for the whole run.
         std::thread::Builder::new()
             .name("nohrs-file-dialogs".into())
-            .spawn(|| unsafe {
-                let hook = SetWinEventHook(
-                    EVENT_SYSTEM_FOREGROUND,
-                    EVENT_SYSTEM_FOREGROUND,
-                    None,
-                    Some(on_foreground),
-                    0,
-                    0,
-                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-                );
-                if hook.is_invalid() {
-                    tracing::warn!("file dialog watch disabled: SetWinEventHook failed");
-                    return;
-                }
-                let mut message = MSG::default();
-                while GetMessageW(&mut message, None, 0, 0).as_bool() {
-                    _ = TranslateMessage(&message);
-                    DispatchMessageW(&message);
+            .spawn(|| {
+                tracing::debug!("file dialog watch started");
+                loop {
+                    std::thread::sleep(POLL);
+                    if !super::enabled() {
+                        continue;
+                    }
+                    let hwnd = unsafe { GetForegroundWindow() };
+                    if hwnd.is_invalid() {
+                        continue;
+                    }
+                    let Some(dialog) = answered_file_dialog(hwnd) else {
+                        continue;
+                    };
+                    // Already being picked for (the user came back to the
+                    // dialog), or handed back to the program: leave it alone.
+                    if super::picking().is_some_and(|picking| picking.hwnd == dialog.hwnd) {
+                        continue;
+                    }
+                    if skipped(dialog.hwnd) {
+                        continue;
+                    }
+                    deliver(dialog);
                 }
             })
             .is_ok()
     }
 
-    unsafe extern "system" fn on_foreground(
-        _hook: HWINEVENTHOOK,
-        _event: u32,
-        hwnd: HWND,
-        _object: i32,
-        _child: i32,
-        _thread: u32,
-        _time: u32,
-    ) {
-        if let Some(dialog) = browser_file_dialog(hwnd)
-            && let Some(sender) = SENDER.get()
-        {
+    fn skipped(hwnd: isize) -> bool {
+        let mut skipped = SKIPPED.lock().unwrap_or_else(|error| error.into_inner());
+        skipped.retain(|open| is_open(*open));
+        skipped.contains(&hwnd)
+    }
+
+    /// Leaves the dialog `hwnd` to its program for the rest of its life.
+    pub fn skip(hwnd: isize) {
+        let mut skipped = SKIPPED.lock().unwrap_or_else(|error| error.into_inner());
+        if !skipped.contains(&hwnd) {
+            skipped.push(hwnd);
+        }
+    }
+
+    fn deliver(dialog: Dialog) {
+        tracing::debug!(
+            "file dialog found: {} \"{}\" for {}",
+            dialog.hwnd,
+            dialog.title,
+            dialog.browser
+        );
+        if let Some(sender) = SENDER.get() {
             sender.try_send(dialog).ok();
         }
     }
 
-    fn browser_file_dialog(hwnd: HWND) -> Option<Dialog> {
-        let mut class = [0u16; 32];
-        let length = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
-        if String::from_utf16_lossy(&class[..length]) != "#32770" {
+    fn answered_file_dialog(hwnd: HWND) -> Option<Dialog> {
+        if window_class(hwnd) != "#32770" {
             return None;
         }
         unsafe { GetDlgItem(Some(hwnd), FILE_NAME_COMBO) }.ok()?;
         let browser = process_name(hwnd)?;
-        if !BROWSERS.contains(&browser.as_str()) && !extra_apps().contains(&browser) {
+        if IGNORED_APPS.contains(&browser.as_str()) {
             return None;
         }
         let mut title = [0u16; 256];
@@ -262,6 +284,12 @@ mod platform {
             title: String::from_utf16_lossy(&title[..length]),
             browser,
         })
+    }
+
+    fn window_class(hwnd: HWND) -> String {
+        let mut class = [0u16; 32];
+        let length = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+        String::from_utf16_lossy(&class[..length])
     }
 
     fn process_name(hwnd: HWND) -> Option<String> {
@@ -369,6 +397,7 @@ mod platform {
     pub fn start_hook(_sender: async_channel::Sender<Dialog>) -> bool {
         false
     }
+    pub fn skip(_hwnd: isize) {}
     pub fn is_open(_hwnd: isize) -> bool {
         false
     }

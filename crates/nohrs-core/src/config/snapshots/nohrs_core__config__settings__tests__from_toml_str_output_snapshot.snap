@@ -36,6 +36,10 @@ expression: parsed
             synced_panes: false,
             restore_tabs: true,
             reveal_from_other_apps: true,
+            file_dialog_assist: true,
+            file_dialog_bar: true,
+            file_dialog_auto_jump: true,
+            file_dialog_bar_size: Auto,
         },
         compact: Compact {
             enabled: false,

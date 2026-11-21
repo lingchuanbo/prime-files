@@ -26,16 +26,16 @@ pub const SCHEMA_URL: &str =
 ///
 /// Models the P1 surface (`theme` / `ui`) plus the P2 sections: `[indexing]`,
 /// `[search]`, `[launcher]`, and `[diagnostics]`. `[keybindings]` and
-/// `[plugins]` are reserved here as forward-compatible drafts — their types are
+/// `[plugins]` are reserved here as forward-compatible drafts 鈥?their types are
 /// defined and parsed leniently so files can adopt them now, but the values do
 /// not drive behaviour yet (keybindings land in P3, plugins in P4; see
-/// `docs/config.md` §2/§5).
+/// `docs/config.md` 搂2/搂5).
 ///
 /// Only `theme`, `ui`, and `diagnostics` are consumed at runtime today. The
 /// remaining sections (`keybindings`, `plugins`, `indexing`, `search`,
 /// `launcher`) are accepted and validated now so files and editor completion can
 /// adopt them, but editing them has no effect until the matching subsystem is
-/// wired in a later phase — see the per-section notes and `docs/config.md` §5.
+/// wired in a later phase 鈥?see the per-section notes and `docs/config.md` 搂5.
 ///
 /// Every field is `#[serde(default)]`: the loader starts from
 /// [`Config::default`] and overlays only the keys present in the file, so a
@@ -118,7 +118,7 @@ pub struct SpaceMap {
     /// How tiles are coloured: by how much they weigh, or by what they hold.
     pub color: SpaceMapColor,
     /// Thresholds in gigabytes, largest first. `[10, 5, 1]` means 10 GB and up
-    /// takes the first colour, 5–10 GB the second, 1–5 GB the third, and
+    /// takes the first colour, 5鈥?0 GB the second, 1鈥? GB the third, and
     /// anything smaller the fourth.
     pub bands_gb: [u32; 3],
     /// One `#rrggbb` colour per band, plus the one for what is under the
@@ -188,7 +188,7 @@ pub enum SpaceMapColor {
     Kind,
 }
 
-/// Settings for unpacking archives ("解压到同名文件夹").
+/// Settings for unpacking archives ("瑙ｅ帇鍒板悓鍚嶆枃浠跺す").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Archive {
@@ -307,7 +307,7 @@ pub struct Ui {
     /// (`Microsoft YaHei UI`); empty keeps the system's own.
     pub font_family: String,
     /// Most lines a name takes under an icon in the icons view, the last
-    /// one ending in "…" when the name needs more; 0 = no limit.
+    /// one ending in "鈥? when the name needs more; 0 = no limit.
     pub name_lines: u32,
     /// How smoothly the mouse wheel scrolls the listing, 0..=100: 0 moves
     /// in steps, 100 glides for longest.
@@ -426,7 +426,7 @@ impl Ui {
     }
 }
 
-/// Split-view and pane settings (see `docs/explorer-essentials.md` §3).
+/// Split-view and pane settings (see `docs/explorer-essentials.md` 搂3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Explorer {
@@ -434,11 +434,21 @@ pub struct Explorer {
     pub split_direction: SplitDirection,
     /// When enabled, navigating in one pane mirrors the path into the others.
     pub synced_panes: bool,
-    /// When enabled, the previous session's tabs are restored on restart (§4).
+    /// When enabled, the previous session's tabs are restored on restart (搂4).
     pub restore_tabs: bool,
     /// Whether "show in folder" from other programs (Premiere's Reveal in
     /// Explorer, a browser's Show in folder) opens here instead of Explorer.
     pub reveal_from_other_apps: bool,
+    /// Whether another program's standard Open/Save dialog is answered by
+    /// LumaFiles: a slim jump bar under it, and a newly opened dialog moved to
+    /// the folder LumaFiles shows.
+    pub file_dialog_assist: bool,
+    /// Whether the jump bar under other programs' dialogs is drawn.
+    pub file_dialog_bar: bool,
+    /// Whether a newly opened dialog goes to LumaFiles' current folder once.
+    pub file_dialog_auto_jump: bool,
+    /// How big the jump bar under other programs' dialogs is drawn.
+    pub file_dialog_bar_size: BarSize,
 }
 
 impl Default for Explorer {
@@ -448,6 +458,10 @@ impl Default for Explorer {
             synced_panes: false,
             restore_tabs: true,
             reveal_from_other_apps: true,
+            file_dialog_assist: true,
+            file_dialog_bar: true,
+            file_dialog_auto_jump: true,
+            file_dialog_bar_size: BarSize::Auto,
         }
     }
 }
@@ -653,23 +667,48 @@ impl SplitDirection {
     }
 }
 
-/// Keybinding overrides (config.md §2, draft for P3).
+/// How big the jump bar under other programs' dialogs is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BarSize {
+    /// Follow the scale of the monitor the dialog is on.
+    #[default]
+    Auto,
+    /// Slightly smaller than that scale.
+    Small,
+    /// Slightly larger than that scale.
+    Large,
+}
+
+impl BarSize {
+    /// Parse the `config.toml` spelling (`auto`/`small`/`large`).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "small" => Some(Self::Small),
+            "large" => Some(Self::Large),
+            _ => None,
+        }
+    }
+}
+
+/// Keybinding overrides (config.md 搂2, draft for P3).
 ///
 /// A draft surface: a map of action identifier to key chord (e.g.
-/// `"quit" = "ctrl-q"`). An empty map — the default — means the built-in keymap
+/// `"quit" = "ctrl-q"`). An empty map 鈥?the default 鈥?means the built-in keymap
 /// is used. The action vocabulary and live re-binding are defined in P3; until
 /// then values are stored and validated but not applied (hot reload is a
-/// restart, config.md §5), so arbitrary action names are accepted without
+/// restart, config.md 搂5), so arbitrary action names are accepted without
 /// warning to keep forward compatibility.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Keybindings {
-    /// Action identifier → key chord. Empty means "use the built-in keymap".
+    /// Action identifier 鈫?key chord. Empty means "use the built-in keymap".
     #[serde(flatten)]
     pub bindings: BTreeMap<String, String>,
 }
 
-/// Plugin selection (config.md §2, reserved for P4).
+/// Plugin selection (config.md 搂2, reserved for P4).
 ///
 /// Type definition / reservation only: the lists are parsed and stored, but no
 /// plugin host loads them yet (that lands in P4).
@@ -813,7 +852,7 @@ impl Default for Launcher {
     }
 }
 
-/// Diagnostics / performance-logging settings (see `docs/persistence.md` §5).
+/// Diagnostics / performance-logging settings (see `docs/persistence.md` 搂5).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Diagnostics {
@@ -1220,6 +1259,11 @@ impl Config {
              split_direction = \"vertical\"   # \"vertical\" (left/right) | \"horizontal\" (top/bottom)\n\
              synced_panes = false            # when true, panes mirror the same path\n\
              restore_tabs = true             # restore the previous session's tabs on restart\n\
+             file_dialog_assist = true       # jump bar under other programs' Open/Save dialogs
+             file_dialog_bar = true          # draw that bar
+             file_dialog_auto_jump = true    # a new dialog opens in the folder shown here\n\
+             file_dialog_bar_size = \"auto\"  # auto / small / large\n\
+             \n\
              \n\
              [compact]\n\
              enabled = false        # hide the bars below until the pointer reaches their edge\n\
@@ -1252,9 +1296,9 @@ impl Config {
              paths = []   # reserved\n\
              globs = []   # reserved\n\
              \n\
-             # Parsed and validated, but not yet applied at runtime — it takes\n\
+             # Parsed and validated, but not yet applied at runtime 鈥?it takes\n\
              # effect when its subsystem is wired in a later phase\n\
-             # (docs/config.md §5). It is here so files and editor completion can\n\
+             # (docs/config.md 搂5). It is here so files and editor completion can\n\
              # adopt the shape early.\n\
              [search]\n\
              backend = \"auto\"   # \"tantivy\" | \"ripgrep\" | \"auto\"\n\
@@ -1264,7 +1308,7 @@ impl Config {
              position_remember = true\n\
              \n\
              # Store performance logging for analysis; all off by default.\n\
-             # Output via tracing (RUST_LOG), see docs/persistence.md §5.\n\
+             # Output via tracing (RUST_LOG), see docs/persistence.md 搂5.\n\
              [diagnostics]\n\
              runtime_log = false\n\
              \n\
@@ -1276,14 +1320,14 @@ impl Config {
              # The space map's tiles: their colour says how much each entry\n\
              # weighs (color = \"size\") or what it holds (\"kind\"). By size,\n\
              # bands_gb are the thresholds, largest first: 10 GB and up takes\n\
-             # colors[0], 5–10 GB colors[1], 1–5 GB colors[2], and anything\n\
+             # colors[0], 5鈥?0 GB colors[1], 1鈥? GB colors[2], and anything\n\
              # smaller colors[3].\n\
              [space_map]\n\
              color = \"size\"   # \"size\" | \"kind\"\n\
              bands_gb = [10, 5, 1]\n\
              colors = [\"#ef4444\", \"#f97316\", \"#fb923c\", \"#22c55e\"]\n\
              \n\
-             # Unpacking an archive (\"解压到同名文件夹\"): the bundled HatchZip\n\
+             # Unpacking an archive (\"瑙ｅ帇鍒板悓鍚嶆枃浠跺す\"): the bundled HatchZip\n\
              # (tools\\HatchZip) reads zip, 7z, rar and the tar family in one\n\
              # pass; \"sevenzip\" is the installed 7-Zip. Whichever is missing\n\
              # falls back to the other, and bz2/zst/cab/iso always take 7-Zip.\n\
@@ -1570,9 +1614,54 @@ fn read_explorer(table: &toml::Table, explorer: &mut Explorer, diagnostics: &mut
             ))),
         }
     }
+    if let Some(value) = table.get("file_dialog_assist") {
+        match value.as_bool() {
+            Some(flag) => explorer.file_dialog_assist = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid explorer.file_dialog_assist {value}; using {}",
+                explorer.file_dialog_assist
+            ))),
+        }
+    }
+    if let Some(value) = table.get("file_dialog_bar") {
+        match value.as_bool() {
+            Some(flag) => explorer.file_dialog_bar = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid explorer.file_dialog_bar {value}; using {}",
+                explorer.file_dialog_bar
+            ))),
+        }
+    }
+    if let Some(value) = table.get("file_dialog_auto_jump") {
+        match value.as_bool() {
+            Some(flag) => explorer.file_dialog_auto_jump = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid explorer.file_dialog_auto_jump {value}; using {}",
+                explorer.file_dialog_auto_jump
+            ))),
+        }
+    }
+    if let Some(value) = table.get("file_dialog_bar_size") {
+        match value.as_str().and_then(BarSize::parse) {
+            Some(size) => explorer.file_dialog_bar_size = size,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid explorer.file_dialog_bar_size {value}; using {:?}",
+                explorer.file_dialog_bar_size
+            ))),
+        }
+    }
     warn_unknown_keys(
         table,
-        &["split_direction", "synced_panes", "restore_tabs", "reveal_from_other_apps"],
+        &[
+            "split_direction",
+            "synced_panes",
+            "restore_tabs",
+            "reveal_from_other_apps",
+            "file_dialog_assist",
+            "file_dialog_bar",
+            "file_dialog_auto_jump",
+            "file_dialog_bar_size",
+        ],
         "explorer.",
         diagnostics,
     );
@@ -1715,7 +1804,7 @@ fn read_keybindings(
     keybindings: &mut Keybindings,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Draft: accept any action name → chord. Unknown actions are not warned
+    // Draft: accept any action name 鈫?chord. Unknown actions are not warned
     // about (the action vocabulary is defined in P3); only non-string values are.
     for (action, value) in table {
         match value.as_str() {
@@ -1834,7 +1923,7 @@ fn read_launcher(table: &toml::Table, launcher: &mut Launcher, diagnostics: &mut
 }
 
 /// Read a TOML array of strings, warning about (and skipping) any non-string
-/// element. Returns `None` — with a warning — when the value is not an array,
+/// element. Returns `None` 鈥?with a warning 鈥?when the value is not an array,
 /// so the caller keeps its current value.
 fn read_string_array(
     value: &toml::Value,

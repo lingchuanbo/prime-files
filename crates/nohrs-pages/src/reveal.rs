@@ -57,7 +57,8 @@ impl RootView {
         self.show_explorer(cx);
         self.explorer_entity()
             .update(cx, |page, cx| page.open_path(folder, select, window, cx));
-        window.activate_window();
+        // Explorer held the foreground; the reveal has to come over it.
+        crate::foreground::bring_to_front(window);
     }
 }
 

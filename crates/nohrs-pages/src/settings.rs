@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
-use nohrs_core::config::{self, Config, DockSide, FileTypeColorRule, IndexSource, SortOrder, SplitDirection, TabWidthMode, ThemeMode};
+use nohrs_core::config::{self, BarSize, Config, DockSide, FileTypeColorRule, IndexSource, SortOrder, SplitDirection, TabWidthMode, ThemeMode};
 use nohrs_core::i18n::{self, Lang, tr};
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::shortcuts::{self, Action, Chord};
@@ -2159,48 +2159,99 @@ impl SettingsPage {
 
     fn integrations(&self, cx: &mut Context<Self>) -> Vec<Group> {
         let reveal = self.config.explorer.reveal_from_other_apps;
-        vec![Group::new(vec![
-            Row::hint(
-                t!("\"Mostrar na pasta\" abre aqui"),
-                t!("Premiere (Revelar no Explorador), Chrome, Edge e Firefox (Mostrar na pasta, depois de baixar) e o menu Iniciar (Abrir local do arquivo) abrem a pasta no LumaFiles, com o arquivo selecionado e piscando em destaque."),
-                self.switch("reveal-from-other-apps", reveal, ("explorer", "reveal_from_other_apps"), cx),
-            )
-            .reset(("explorer", "reveal_from_other_apps"), reveal, "true"),
-            Row::hint(
-                t!("Iniciar com o Windows"),
-                t!("Abre minimizado quando você entra no Windows, para que \"Mostrar na pasta\" de qualquer programa caia aqui na hora."),
-                match self.starts_with_windows {
-                    Some(on) => self.switch_pick("start-with-windows", on, Pick::StartWithWindows(!on), cx).into_any_element(),
-                    None => checking().into_any_element(),
-                },
-            ),
-            Row::hint(
-                t!("Explorador padrão do Windows"),
-                t!("Pastas, drives, Win+E e o ícone do Explorador na barra de tarefas abrem no LumaFiles. Só neste usuário do Windows; desligar devolve tudo ao Explorador."),
-                match self.default_explorer {
-                    Some(is_default) => {
-                        self.switch_pick("default-explorer", is_default, Pick::DefaultExplorer(!is_default), cx).into_any_element()
-                    }
-                    None => checking().into_any_element(),
-                },
-            ),
-            Row::hint(
-                "Listary",
-                t!("Pastas abertas pelo Listary abrem no LumaFiles. O Listary é reiniciado ao mudar."),
-                match self.listary {
-                    None => checking().into_any_element(),
-                    Some(crate::listary::State::NotInstalled) => div()
-                        .text_xs()
-                        .text_color(rgb(theme::fg_secondary()))
-                        .child(t!("Não instalado"))
-                        .into_any_element(),
-                    Some(state) => {
-                        let ours = state == crate::listary::State::Ours;
-                        self.switch_pick("listary", ours, Pick::Listary(!ours), cx).into_any_element()
-                    }
-                },
-            ),
-        ])]
+        let dialog_assist = self.config.explorer.file_dialog_assist;
+        let dialog_bar = self.config.explorer.file_dialog_bar;
+        let dialog_auto = self.config.explorer.file_dialog_auto_jump;
+        let dialog_size = self.config.explorer.file_dialog_bar_size;
+        let dialogs = Group::titled(
+            t!("Janelas de abrir e salvar"),
+            vec![
+                Row::hint(
+                    t!("Escolher arquivos nas janelas \"Abrir\" e \"Salvar\" de outros programas"),
+                    t!("Uma faixa logo abaixo do diálogo de outro programa mostra a pasta atual e as abas abertas do LumaFiles; clicar leva o diálogo até elas, e Ctrl+G vai à pasta atual. Desligado, tudo volta ao normal."),
+                    self.switch("file-dialog-assist", dialog_assist, ("explorer", "file_dialog_assist"), cx),
+                )
+                .reset(("explorer", "file_dialog_assist"), dialog_assist, "true"),
+                Row::hint(
+                    t!("Barra de saltos sob o diálogo"),
+                    t!("A faixa mostra a pasta atual e as abas abertas; clicar numa delas navega o diálogo do outro programa até a pasta."),
+                    self.switch("file-dialog-bar", dialog_bar, ("explorer", "file_dialog_bar"), cx),
+                )
+                .reset(("explorer", "file_dialog_bar"), dialog_bar, "true"),
+                Row::hint(
+                    t!("Tamanho da barra de saltos"),
+                    t!("Automático segue a escala do monitor do diálogo; pequeno e grande partem dela."),
+                    self.config_choice(
+                        "file-dialog-bar-size",
+                        &[
+                            (t!("Automático"), dialog_size == BarSize::Auto, "\"auto\""),
+                            (t!("Pequeno"), dialog_size == BarSize::Small, "\"small\""),
+                            (t!("Grande"), dialog_size == BarSize::Large, "\"large\""),
+                        ],
+                        ("explorer", "file_dialog_bar_size"),
+                        cx,
+                    ),
+                )
+                .reset(("explorer", "file_dialog_bar_size"), dialog_size == BarSize::Auto, "\"auto\""),
+                Row::hint(
+                    t!("Abrir o diálogo na pasta atual"),
+                    t!("Uma vez, quando o diálogo aparece; depois de mudar de pasta à mão, não mexe mais."),
+                    self.switch("file-dialog-auto-jump", dialog_auto, ("explorer", "file_dialog_auto_jump"), cx),
+                )
+                .reset(("explorer", "file_dialog_auto_jump"), dialog_auto, "true"),
+            ],
+        );
+        let opening = Group::titled(
+            t!("Onde as pastas abrem"),
+            vec![
+                Row::hint(
+                    t!("\"Mostrar na pasta\" abre aqui"),
+                    t!("Premiere (Revelar no Explorador), Chrome, Edge e Firefox (Mostrar na pasta, depois de baixar) e o menu Iniciar (Abrir local do arquivo) abrem a pasta no LumaFiles, com o arquivo selecionado e piscando em destaque."),
+                    self.switch("reveal-from-other-apps", reveal, ("explorer", "reveal_from_other_apps"), cx),
+                )
+                .reset(("explorer", "reveal_from_other_apps"), reveal, "true"),
+                Row::hint(
+                    t!("Explorador padrão do Windows"),
+                    t!("Pastas, drives, Win+E e o ícone do Explorador na barra de tarefas abrem no LumaFiles. Só neste usuário do Windows; desligar devolve tudo ao Explorador."),
+                    match self.default_explorer {
+                        Some(is_default) => {
+                            self.switch_pick("default-explorer", is_default, Pick::DefaultExplorer(!is_default), cx).into_any_element()
+                        }
+                        None => checking().into_any_element(),
+                    },
+                ),
+            ],
+        );
+        let startup = Group::titled(
+            t!("Iniciar e outros programas"),
+            vec![
+                Row::hint(
+                    t!("Iniciar com o Windows"),
+                    t!("Abre minimizado quando você entra no Windows, para que \"Mostrar na pasta\" de qualquer programa caia aqui na hora."),
+                    match self.starts_with_windows {
+                        Some(on) => self.switch_pick("start-with-windows", on, Pick::StartWithWindows(!on), cx).into_any_element(),
+                        None => checking().into_any_element(),
+                    },
+                ),
+                Row::hint(
+                    "Listary",
+                    t!("Pastas abertas pelo Listary abrem no LumaFiles. O Listary é reiniciado ao mudar."),
+                    match self.listary {
+                        None => checking().into_any_element(),
+                        Some(crate::listary::State::NotInstalled) => div()
+                            .text_xs()
+                            .text_color(rgb(theme::fg_secondary()))
+                            .child(t!("Não instalado"))
+                            .into_any_element(),
+                        Some(state) => {
+                            let ours = state == crate::listary::State::Ours;
+                            self.switch_pick("listary", ours, Pick::Listary(!ours), cx).into_any_element()
+                        }
+                    },
+                ),
+            ],
+        );
+        vec![dialogs, opening, startup]
     }
 
     fn shortcuts(&self, cx: &mut Context<Self>) -> Vec<Group> {

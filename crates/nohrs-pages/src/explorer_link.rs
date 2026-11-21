@@ -57,5 +57,6 @@ impl RootView {
         self.explorer_entity()
             .update(cx, |page, cx| page.open_path(folder, select, window, cx));
         window.activate_window();
+        crate::foreground::bring_to_front(window);
     }
 }

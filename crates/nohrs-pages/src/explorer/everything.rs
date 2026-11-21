@@ -4103,6 +4103,7 @@ pub(crate) enum WholeComputerError {
 /// globals on the UI thread so the search itself can run on a background
 /// thread. This is what the standalone search window uses: the same names and
 /// the same source choice as the Explorer's Everything mode, without a pane.
+#[derive(Clone)]
 pub(crate) struct WholeComputerSearch {
     source: Source,
     /// The indexer service holds the names and searches them itself.

@@ -77,6 +77,10 @@ pub struct RootView {
     // The font family `ui.font_family` names, applied to the whole window;
     // empty keeps the system's own.
     font_family: SharedString,
+    // The name index the jump bar's search box queries, prepared on first use.
+    dialog_search: Option<crate::explorer::everything::WholeComputerSearch>,
+    // How many "not ready" retries the current jump-bar query has spent.
+    dialog_search_attempt: u32,
 }
 
 impl RootView {
@@ -133,13 +137,19 @@ impl RootView {
             config_status: None,
             _config_watcher: None,
             font_family: SharedString::default(),
+            dialog_search: None,
+            dialog_search_attempt: 0,
         };
         view.start_progress_loop(window, cx);
         view.apply_config(config, config_error, window, cx);
         view.start_config_watch(window, cx);
         crate::ipc::serve(window, cx);
         crate::explorer_link::install(window, cx);
-        crate::file_dialog::watch(window, cx);
+        // The dialog takeover is Pulse's jump-bar design: the native dialog
+        // stays, a bar under it offers LumaFiles' folders, and a new dialog can
+        // open in the current folder. (The old "pick here, fill there" watcher
+        // is left in `file_dialog` but no longer started.)
+        crate::dialog_jump::start();
         crate::reveal::watch(window, cx);
         crate::shell_windows::watch(window, cx);
         view.start_shell_windows(window, cx);
@@ -149,7 +159,8 @@ impl RootView {
 
     /// Keeps the shell's view of the open tabs current: the folders another
     /// program's "show in folder" can find, and select in, without an Explorer
-    /// window opening. Polled rather than pushed from every navigation so all
+    /// window opening. Also publishes what the jump bar under other programs'
+    /// dialogs shows. Polled rather than pushed from every navigation so all
     /// the paths that move a tab are covered by one place.
     fn start_shell_windows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(
@@ -161,28 +172,71 @@ impl RootView {
                         .timer(Duration::from_millis(300))
                         .await;
                     let published = this.update_in(&mut cx, |root, window, cx| {
-                        // Off, the shell is left with Explorer's own windows.
-                        if !root.config.explorer.reveal_from_other_apps {
-                            return Vec::new();
-                        }
-                        let Some(hwnd) = crate::ipc::window_hwnd(window) else {
-                            return Vec::new();
+                        let hwnd = crate::ipc::window_hwnd(window).unwrap_or(0);
+                        let explorer = root.explorer.read(cx);
+                        let entries = if root.config.explorer.reveal_from_other_apps && hwnd != 0 {
+                            explorer
+                                .shell_entries(cx)
+                                .into_iter()
+                                .map(|(key, path)| crate::shell_windows::Entry {
+                                    key,
+                                    path,
+                                    hwnd: hwnd as isize,
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
                         };
-                        root.explorer
-                            .read(cx)
+                        let folders = explorer
                             .shell_entries(cx)
                             .into_iter()
-                            .map(|(key, path)| crate::shell_windows::Entry {
-                                key,
+                            .filter(|(_, path)| !path.is_empty())
+                            .map(|(_, path)| crate::dialog_jump::Folder {
+                                label: std::path::Path::new(&path)
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone()),
                                 path,
-                                hwnd: hwnd as isize,
                             })
-                            .collect()
+                            .collect();
+                        let jump = crate::dialog_jump::Context {
+                            enabled: root.config.explorer.file_dialog_assist,
+                            bar: root.config.explorer.file_dialog_bar,
+                            auto_jump: root.config.explorer.file_dialog_auto_jump,
+                            current: explorer.current_shell_folder(cx).unwrap_or_default(),
+                            places: explorer
+                                .jump_places(cx)
+                                .into_iter()
+                                .map(|(path, label)| crate::dialog_jump::Folder { path, label })
+                                .collect(),
+                            folders,
+                            hint: t!("Ctrl+G: pasta atual").to_string(),
+                            placeholder: t!("Buscar pastas…").to_string(),
+                            size: root.config.explorer.file_dialog_bar_size,
+                            bg: theme::bg() & 0xFFFFFF,
+                            fg: theme::fg() & 0xFFFFFF,
+                            accent: theme::accent() & 0xFFFFFF,
+                        };
+                        (entries, jump)
                     });
                     match published {
-                        Ok(entries) => crate::shell_windows::publish(entries),
+                        Ok((entries, jump)) => {
+                            crate::shell_windows::publish(entries);
+                            crate::dialog_jump::publish(jump);
+                        }
                         // The view (and window) is gone.
                         Err(_) => return,
+                    }
+                    // Answers a query typed into the jump bar's search box; the
+                    // index search runs on the background executor.
+                    let query = this.update_in(&mut cx, |root, _window, cx| {
+                        let query = crate::dialog_jump::take_query();
+                        if let Some((id, text)) = &query {
+                            root.search_for_dialog(*id, text.clone(), cx);
+                        }
+                    });
+                    if query.is_err() {
+                        return;
                     }
                 }
             },
@@ -190,6 +244,73 @@ impl RootView {
         .detach();
     }
 
+    /// Runs the jump bar's search box against the same name index the
+    /// whole-computer search uses, and hands the answers back to the bar.
+    fn search_for_dialog(&mut self, id: u64, text: String, cx: &mut Context<Self>) {
+        tracing::debug!("jump bar search: {text:?}");
+        if text.trim().is_empty() {
+            crate::dialog_jump::set_results(id, Vec::new());
+            return;
+        }
+        self.dialog_search_attempt = 0;
+        self.search_for_dialog_once(id, text, cx);
+    }
+
+    // One round of the search. The index source may still be choosing itself
+    // (Everything against LumaFiles' own names) on the first query, so a "not
+    // ready" answer asks for a fresh view of the index and tries again.
+    fn search_for_dialog_once(&mut self, id: u64, text: String, cx: &mut Context<Self>) {
+        let search = self
+            .dialog_search
+            .get_or_insert_with(|| crate::explorer::everything::prepare(cx))
+            .clone();
+        cx.spawn(async move |this, cx| {
+            let mut cx = cx.clone();
+            let query = text.clone();
+            let outcome = cx
+                .background_spawn(async move { search.search(&query, 8) })
+                .await;
+            match outcome {
+                Ok(hits) => {
+                    let found: Vec<crate::dialog_jump::Found> = hits
+                        .into_iter()
+                        .map(|hit| crate::dialog_jump::Found {
+                            label: std::path::Path::new(&hit.path)
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| hit.path.clone()),
+                            path: hit.path,
+                            dir: hit.is_dir,
+                        })
+                        .collect();
+                    crate::dialog_jump::set_results(id, found);
+                }
+                Err(crate::explorer::everything::WholeComputerError::NotReady) => {
+                    let retry = this.update(&mut cx, |root, cx| {
+                        if root.dialog_search_attempt >= 10 {
+                            return None;
+                        }
+                        root.dialog_search_attempt += 1;
+                        root.dialog_search = Some(crate::explorer::everything::prepare(cx));
+                        Some((id, text.clone()))
+                    });
+                    match retry {
+                        Ok(Some((id, text))) => {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                            this.update(&mut cx, |root, cx| {
+                                root.search_for_dialog_once(id, text, cx);
+                            })
+                            .ok();
+                        }
+                        Ok(None) => crate::dialog_jump::set_results(id, Vec::new()),
+                        Err(_) => {}
+                    }
+                }
+                Err(_) => crate::dialog_jump::set_results(id, Vec::new()),
+            }
+        })
+        .detach();
+    }
     // Looks for an update a few seconds after the window is up (so it never
     // competes with the first listing), and says so when one is ready.
     fn start_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -286,6 +407,7 @@ impl RootView {
         });
 
         crate::reveal::set_enabled(config.explorer.reveal_from_other_apps);
+        crate::file_dialog::set_enabled(config.explorer.file_dialog_assist);
         // Where the whole-computer search gets its names may have changed;
         // the explorer's index state follows the file like any other setting.
         crate::explorer::everything::set_engine(config.indexing.source, cx);
@@ -542,6 +664,7 @@ impl Drop for RootView {
         // Explorer holds references to the objects registered for each tab;
         // take them back before this process goes away.
         crate::shell_windows::shutdown();
+        crate::dialog_jump::stop();
     }
 }
 

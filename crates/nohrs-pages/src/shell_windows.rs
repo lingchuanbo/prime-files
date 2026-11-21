@@ -70,7 +70,9 @@ pub fn watch(window: &mut Window, cx: &mut Context<RootView>) {
                     });
                     if shown {
                         root.show_explorer(cx);
-                        window.activate_window();
+                        // The program that asked for the reveal has the
+                        // foreground; take it so the selection is seen.
+                        crate::foreground::bring_to_front(window);
                     }
                 });
                 if shown.is_err() {

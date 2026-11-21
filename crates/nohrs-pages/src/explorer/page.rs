@@ -1060,6 +1060,49 @@ impl ExplorerPage {
             .collect()
     }
 
+    /// The active tab's folder in the form the shell and the dialog jump bar
+    /// use: a drive or UNC path, or empty for This PC. `None` for a view with no
+    /// folder a shell can be told about.
+    pub fn current_shell_folder(&self, cx: &App) -> Option<String> {
+        shell_folder(&self.group.active_pane().read(cx).cwd)
+    }
+
+    /// Folders the dialog jump bar offers for instant searching: the sidebar's
+    /// quick access and drives, then the active tab's subfolders.
+    pub fn jump_places(&self, cx: &App) -> Vec<(String, String)> {
+        let pane = self.group.active_pane().read(cx);
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        let mut offer = |path: &str, label: &str| {
+            if out.len() >= 300 {
+                return;
+            }
+            let Some(path) = shell_folder(path) else {
+                return;
+            };
+            if path.is_empty() || seen.iter().any(|known| known.eq_ignore_ascii_case(&path)) {
+                return;
+            }
+            seen.push(path.clone());
+            out.push((path, label.to_owned()));
+        };
+        if let Some(places) = &pane.sidebar.places {
+            for place in places.quick_access.iter().chain(places.drives.iter()) {
+                if let Some(path) = &place.path {
+                    offer(path, &place.name);
+                }
+            }
+        }
+        for entry in pane
+            .filtered_entries
+            .iter()
+            .filter(|entry| entry.kind == "dir")
+        {
+            offer(&entry.path, &entry.name);
+        }
+        out
+    }
+
     /// Shows the item `item` in the tab whose entity id is `tab_id`, the way
     /// the Windows shell asks when another program reveals a file: the tab is
     /// activated and its folder shown with the item selected. Returns whether

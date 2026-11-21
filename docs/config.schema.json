@@ -1,7 +1,7 @@
 {
   "$defs": {
     "Archive": {
-      "description": "Settings for unpacking archives (\"解压到同名文件夹\").",
+      "description": "Settings for unpacking archives (\"瑙ｅ帇鍒板悓鍚嶆枃浠跺す\").",
       "properties": {
         "tool": {
           "$ref": "#/$defs/ArchiveTool",
@@ -22,6 +22,26 @@
         {
           "const": "sevenzip",
           "description": "The 7-Zip installed on the machine.",
+          "type": "string"
+        }
+      ]
+    },
+    "BarSize": {
+      "description": "How big the jump bar under other programs' dialogs is drawn.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Follow the scale of the monitor the dialog is on.",
+          "type": "string"
+        },
+        {
+          "const": "small",
+          "description": "Slightly smaller than that scale.",
+          "type": "string"
+        },
+        {
+          "const": "large",
+          "description": "Slightly larger than that scale.",
           "type": "string"
         }
       ]
@@ -98,7 +118,7 @@
       "type": "object"
     },
     "Diagnostics": {
-      "description": "Diagnostics / performance-logging settings (see `docs/persistence.md` §5).",
+      "description": "Diagnostics / performance-logging settings (see `docs/persistence.md` 搂5).",
       "properties": {
         "runtime_log": {
           "default": false,
@@ -165,11 +185,31 @@
       ]
     },
     "Explorer": {
-      "description": "Split-view and pane settings (see `docs/explorer-essentials.md` §3).",
+      "description": "Split-view and pane settings (see `docs/explorer-essentials.md` 搂3).",
       "properties": {
+        "file_dialog_assist": {
+          "default": true,
+          "description": "Whether another program's standard Open/Save dialog is answered by\nLumaFiles: a slim jump bar under it, and a newly opened dialog moved to\nthe folder LumaFiles shows.",
+          "type": "boolean"
+        },
+        "file_dialog_auto_jump": {
+          "default": true,
+          "description": "Whether a newly opened dialog goes to LumaFiles' current folder once.",
+          "type": "boolean"
+        },
+        "file_dialog_bar": {
+          "default": true,
+          "description": "Whether the jump bar under other programs' dialogs is drawn.",
+          "type": "boolean"
+        },
+        "file_dialog_bar_size": {
+          "$ref": "#/$defs/BarSize",
+          "default": "auto",
+          "description": "How big the jump bar under other programs' dialogs is drawn."
+        },
         "restore_tabs": {
           "default": true,
-          "description": "When enabled, the previous session's tabs are restored on restart (§4).",
+          "description": "When enabled, the previous session's tabs are restored on restart (搂4).",
           "type": "boolean"
         },
         "reveal_from_other_apps": {
@@ -296,7 +336,7 @@
       "additionalProperties": {
         "type": "string"
       },
-      "description": "Keybinding overrides (config.md §2, draft for P3).\n\nA draft surface: a map of action identifier to key chord (e.g.\n`\"quit\" = \"ctrl-q\"`). An empty map — the default — means the built-in keymap\nis used. The action vocabulary and live re-binding are defined in P3; until\nthen values are stored and validated but not applied (hot reload is a\nrestart, config.md §5), so arbitrary action names are accepted without\nwarning to keep forward compatibility.",
+      "description": "Keybinding overrides (config.md 搂2, draft for P3).\n\nA draft surface: a map of action identifier to key chord (e.g.\n`\"quit\" = \"ctrl-q\"`). An empty map 鈥?the default 鈥?means the built-in keymap\nis used. The action vocabulary and live re-binding are defined in P3; until\nthen values are stored and validated but not applied (hot reload is a\nrestart, config.md 搂5), so arbitrary action names are accepted without\nwarning to keep forward compatibility.",
       "type": "object"
     },
     "Launcher": {
@@ -373,7 +413,7 @@
       "type": "object"
     },
     "Plugins": {
-      "description": "Plugin selection (config.md §2, reserved for P4).\n\nType definition / reservation only: the lists are parsed and stored, but no\nplugin host loads them yet (that lands in P4).",
+      "description": "Plugin selection (config.md 搂2, reserved for P4).\n\nType definition / reservation only: the lists are parsed and stored, but no\nplugin host loads them yet (that lands in P4).",
       "properties": {
         "community": {
           "default": [],
@@ -459,7 +499,7 @@
             5,
             1
           ],
-          "description": "Thresholds in gigabytes, largest first. `[10, 5, 1]` means 10 GB and up\ntakes the first colour, 5–10 GB the second, 1–5 GB the third, and\nanything smaller the fourth.",
+          "description": "Thresholds in gigabytes, largest first. `[10, 5, 1]` means 10 GB and up\ntakes the first colour, 5鈥?0 GB the second, 1鈥? GB the third, and\nanything smaller the fourth.",
           "items": {
             "minimum": 0,
             "type": "integer"
@@ -647,7 +687,7 @@
         },
         "name_lines": {
           "default": 0,
-          "description": "Most lines a name takes under an icon in the icons view, the last\none ending in \"…\" when the name needs more; 0 = no limit.",
+          "description": "Most lines a name takes under an icon in the icons view, the last\none ending in \"鈥? when the name needs more; 0 = no limit.",
           "minimum": 0,
           "type": "integer"
         },
@@ -693,7 +733,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "The fully merged, validated configuration.\n\nModels the P1 surface (`theme` / `ui`) plus the P2 sections: `[indexing]`,\n`[search]`, `[launcher]`, and `[diagnostics]`. `[keybindings]` and\n`[plugins]` are reserved here as forward-compatible drafts — their types are\ndefined and parsed leniently so files can adopt them now, but the values do\nnot drive behaviour yet (keybindings land in P3, plugins in P4; see\n`docs/config.md` §2/§5).\n\nOnly `theme`, `ui`, and `diagnostics` are consumed at runtime today. The\nremaining sections (`keybindings`, `plugins`, `indexing`, `search`,\n`launcher`) are accepted and validated now so files and editor completion can\nadopt them, but editing them has no effect until the matching subsystem is\nwired in a later phase — see the per-section notes and `docs/config.md` §5.\n\nEvery field is `#[serde(default)]`: the loader starts from\n[`Config::default`] and overlays only the keys present in the file, so a\nmissing section is filled with its default rather than rejected. The\ngenerated schema therefore has no `required` properties, matching the\nloader (an empty `config.toml` is valid).",
+  "description": "The fully merged, validated configuration.\n\nModels the P1 surface (`theme` / `ui`) plus the P2 sections: `[indexing]`,\n`[search]`, `[launcher]`, and `[diagnostics]`. `[keybindings]` and\n`[plugins]` are reserved here as forward-compatible drafts 鈥?their types are\ndefined and parsed leniently so files can adopt them now, but the values do\nnot drive behaviour yet (keybindings land in P3, plugins in P4; see\n`docs/config.md` 搂2/搂5).\n\nOnly `theme`, `ui`, and `diagnostics` are consumed at runtime today. The\nremaining sections (`keybindings`, `plugins`, `indexing`, `search`,\n`launcher`) are accepted and validated now so files and editor completion can\nadopt them, but editing them has no effect until the matching subsystem is\nwired in a later phase 鈥?see the per-section notes and `docs/config.md` 搂5.\n\nEvery field is `#[serde(default)]`: the loader starts from\n[`Config::default`] and overlays only the keys present in the file, so a\nmissing section is filled with its default rather than rejected. The\ngenerated schema therefore has no `required` properties, matching the\nloader (an empty `config.toml` is valid).",
   "properties": {
     "archive": {
       "$ref": "#/$defs/Archive",
@@ -735,6 +775,10 @@
     "explorer": {
       "$ref": "#/$defs/Explorer",
       "default": {
+        "file_dialog_assist": true,
+        "file_dialog_auto_jump": true,
+        "file_dialog_bar": true,
+        "file_dialog_bar_size": "auto",
         "restore_tabs": true,
         "reveal_from_other_apps": true,
         "split_direction": "vertical",

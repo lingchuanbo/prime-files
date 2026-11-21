@@ -1964,4 +1964,79 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Modification date (no groups)",
         "Fecha de modificación (sin grupos)",
     ),
+    (
+        "Escolher arquivos nas janelas \"Abrir\" e \"Salvar\" de outros programas",
+        "Pick files for other programs' \"Open\" and \"Save\" dialogs",
+        "Elegir archivos en las ventanas \"Abrir\" y \"Guardar\" de otros programas",
+    ),
+    (
+        "Uma faixa logo abaixo do diálogo de outro programa mostra a pasta atual e as abas abertas do LumaFiles; clicar leva o diálogo até elas, e Ctrl+G vai à pasta atual. Desligado, tudo volta ao normal.",
+        "A strip just below another program's dialog shows the current folder and the tabs open in LumaFiles; clicking one takes the dialog there, and Ctrl+G goes to the current folder. Turned off, everything goes back to normal.",
+        "Una franja justo debajo de la ventana de otro programa muestra la carpeta actual y las pestañas abiertas en LumaFiles; al hacer clic, la ventana va hasta ellas, y Ctrl+G va a la carpeta actual. Desactivado, todo vuelve a la normalidad.",
+    ),
+    (
+        "Ctrl+G: pasta atual",
+        "Ctrl+G: current folder",
+        "Ctrl+G: carpeta actual",
+    ),
+    (
+        "Barra de saltos sob o diálogo",
+        "Jump bar under the dialog",
+        "Barra de saltos bajo la ventana",
+    ),
+    (
+        "A faixa mostra a pasta atual e as abas abertas; clicar numa delas navega o diálogo do outro programa até a pasta.",
+        "The strip shows the current folder and the open tabs; clicking one moves the other program's dialog to that folder.",
+        "La franja muestra la carpeta actual y las pestañas abiertas; al hacer clic, la ventana del otro programa va a esa carpeta.",
+    ),
+    (
+        "Abrir o diálogo na pasta atual",
+        "Open the dialog in the current folder",
+        "Abrir la ventana en la carpeta actual",
+    ),
+    (
+        "Uma vez, quando o diálogo aparece; depois de mudar de pasta à mão, não mexe mais.",
+        "Once, when the dialog appears; after you move it by hand, it is left alone.",
+        "Una vez, cuando aparece la ventana; después de cambiarla a mano, no se toca más.",
+    ),
+    (
+        "Buscar pastas…",
+        "Search folders…",
+        "Buscar carpetas…",
+    ),
+    (
+        "Janelas de abrir e salvar",
+        "Open and save dialogs",
+        "Ventanas Abrir y Guardar",
+    ),
+    (
+        "Onde as pastas abrem",
+        "Where folders open",
+        "Dónde se abren las carpetas",
+    ),
+    (
+        "Iniciar e outros programas",
+        "Startup and other programs",
+        "Inicio y otros programas",
+    ),
+    (
+        "Tamanho da barra de saltos",
+        "Jump bar size",
+        "Tamaño de la barra de saltos",
+    ),
+    (
+        "Automático segue a escala do monitor do diálogo; pequeno e grande partem dela.",
+        "Automatic follows the dialog's monitor scale; small and large adjust from it.",
+        "Automático sigue la escala del monitor de la ventana; pequeño y grande se ajustan a partir de ella.",
+    ),
+    (
+        "Pequeno",
+        "Small",
+        "Pequeño",
+    ),
+    (
+        "Grande",
+        "Large",
+        "Grande",
+    ),
 ];
