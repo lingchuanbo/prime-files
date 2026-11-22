@@ -23,8 +23,9 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
 use nohrs_core::config::{
-    self, BarSize, Config, DockSide, DoubleClickEmpty, FileTypeColorRule, IconMode, IndexSource,
-    ListRowHeight, SortMethod, SortOrder, SplitDirection, TabWidthMode, ThemeMode, TrayIcon,
+    self, BarSize, Config, DirectoryMenuPosition, DockSide, DoubleClickEmpty, FileTypeColorRule,
+    IconMode, IndexSource, ListRowHeight, SortMethod, SortOrder, SplitDirection, TabWidthMode,
+    ThemeMode, TrayIcon,
 };
 use nohrs_core::i18n::{self, Lang, tr};
 use nohrs_core::shortcuts::{self, Action, Chord};
@@ -2455,6 +2456,21 @@ impl SettingsPage {
                 self.switch("confirm-permanent-delete", ui.confirm_permanent_delete, ("ui", "confirm_permanent_delete"), cx),
             )
             .reset(("ui", "confirm_permanent_delete"), ui.confirm_permanent_delete, "true"),
+            Row::hint(
+                t!("Posição do menu de favoritos"),
+                t!("Onde o menu do Ctrl+D abre: sob o cursor, como um menu de contexto, ou no canto superior esquerdo da lista, sempre no mesmo lugar."),
+                self.config_choice(
+                    "directory-menu-position",
+                    &[
+                        (t!("Sob o cursor"), ui.directory_menu_position == DirectoryMenuPosition::Cursor, "\"cursor\""),
+                        (t!("Canto da lista"), ui.directory_menu_position == DirectoryMenuPosition::ListTopLeft, "\"list_top_left\""),
+                    ],
+                    ("ui", "directory_menu_position"),
+                    cx,
+                ),
+            )
+            .wide()
+            .reset(("ui", "directory_menu_position"), ui.directory_menu_position == DirectoryMenuPosition::Cursor, "\"cursor\""),
         ]), Group::titled(t!("Regras de cor por tipo de arquivo"), vec![Row::hint(
             t!("Cor por tipo de arquivo"),
             t!("As cores pintam o nome, o selo do tipo, o tamanho e a data. Use padrões sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*; as regras anteriores têm prioridade e o que nenhuma cobrir usa a paleta do programa."),

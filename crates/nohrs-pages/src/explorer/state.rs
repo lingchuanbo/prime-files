@@ -120,6 +120,8 @@ pub struct ExplorerPane {
     pub(crate) drag_copies: bool,
     /// A permanent delete asks before it runs; `ui.confirm_permanent_delete`.
     pub(crate) confirm_permanent_delete: bool,
+    /// Where the Ctrl+D directory menu opens; `ui.directory_menu_position`.
+    pub(crate) directory_menu_position: config::DirectoryMenuPosition,
     /// Height of a Details row in pixels; driven by `ui.list_row_height`.
     pub(crate) row_height: f32,
     /// Alternating row backgrounds in Details; driven by `ui.zebra_rows`.
@@ -661,6 +663,7 @@ impl ExplorerPane {
             icon_mode: nohrs_core::config::Ui::default().icon_mode,
             drag_copies: false,
             confirm_permanent_delete: true,
+            directory_menu_position: nohrs_core::config::Ui::default().directory_menu_position,
             row_height: nohrs_core::config::ListRowHeight::default().row_height(),
             zebra_rows: false,
             selection_outline: false,
@@ -1509,6 +1512,7 @@ impl ExplorerPane {
         }
         self.drag_copies = ui.drag_copies;
         self.confirm_permanent_delete = ui.confirm_permanent_delete;
+        self.directory_menu_position = ui.directory_menu_position;
         // The row height is part of the rows' size table, so a change re-measures
         // them; the rest are read while rendering.
         let row_height = ui.list_row_height.row_height();

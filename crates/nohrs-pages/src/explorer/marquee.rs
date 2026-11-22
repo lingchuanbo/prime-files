@@ -58,7 +58,8 @@ impl HitBoxes {
         }
     }
 
-    fn listing(&self) -> Option<Bounds<Pixels>> {
+    /// The listing's bounds on screen, once it has been drawn.
+    pub(crate) fn listing(&self) -> Option<Bounds<Pixels>> {
         self.0.borrow().listing
     }
 

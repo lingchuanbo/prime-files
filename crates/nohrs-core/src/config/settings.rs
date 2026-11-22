@@ -343,6 +343,8 @@ pub struct Ui {
     pub drag_copies: bool,
     /// A permanent delete asks before it runs; false deletes at once.
     pub confirm_permanent_delete: bool,
+    /// Where the Ctrl+D directory menu opens.
+    pub directory_menu_position: DirectoryMenuPosition,
     /// Whether sound files show their waveform instead of their icon in the
     /// icons view.
     pub audio_waveforms: bool,
@@ -465,6 +467,7 @@ impl Default for Ui {
             icon_mode: IconMode::Associated,
             drag_copies: false,
             confirm_permanent_delete: true,
+            directory_menu_position: DirectoryMenuPosition::Cursor,
             audio_waveforms: false,
             preview_autoplay: false,
             welcome_done: false,
@@ -970,6 +973,36 @@ impl IconMode {
             "associated" => Some(Self::Associated),
             "standard" => Some(Self::Standard),
             "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+/// Where the Ctrl+D directory menu opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryMenuPosition {
+    /// At the pointer, as a context menu does.
+    #[default]
+    Cursor,
+    /// At the top-left corner of the listing, where it always lands.
+    ListTopLeft,
+}
+
+impl DirectoryMenuPosition {
+    /// The setting's name in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cursor => "cursor",
+            Self::ListTopLeft => "list_top_left",
+        }
+    }
+
+    /// Reads a `ui.directory_menu_position` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "cursor" => Some(Self::Cursor),
+            "list_top_left" => Some(Self::ListTopLeft),
             _ => None,
         }
     }
@@ -1574,6 +1607,7 @@ impl Config {
              icon_mode = \"associated\"       # \"associated\" (the Shell's icons) | \"standard\" | \"none\"\n\
              drag_copies = false             # dragging with the mouse copies the files instead of moving them\n\
              confirm_permanent_delete = true # a permanent delete asks before it runs\n\
+             directory_menu_position = \"cursor\"   # Ctrl+D menu: \"cursor\" | \"list_top_left\"\n\
              \n\
              [explorer]\n\
              split_direction = \"vertical\"   # \"vertical\" (left/right) | \"horizontal\" (top/bottom)\n\
@@ -1994,6 +2028,15 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             ))),
         }
     }
+    if let Some(value) = table.get("directory_menu_position") {
+        match value.as_str().and_then(DirectoryMenuPosition::parse) {
+            Some(position) => ui.directory_menu_position = position,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.directory_menu_position {value}; using {:?}",
+                ui.directory_menu_position
+            ))),
+        }
+    }
     if let Some(value) = table.get("ignore_list") {
         match value.as_array() {
             Some(entries) => {
@@ -2077,6 +2120,7 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             "icon_mode",
             "drag_copies",
             "confirm_permanent_delete",
+            "directory_menu_position",
             "audio_waveforms",
             "preview_autoplay",
             "hover_audio",
@@ -2930,6 +2974,10 @@ mod tests {
         assert_eq!(config.ui.icon_mode, IconMode::Associated);
         assert!(!config.ui.drag_copies);
         assert!(config.ui.confirm_permanent_delete);
+        assert_eq!(
+            config.ui.directory_menu_position,
+            DirectoryMenuPosition::Cursor
+        );
         assert_eq!(config.indexing.source, IndexSource::Auto);
     }
 
@@ -2944,6 +2992,7 @@ mod tests {
             icon_mode = "standard"
             drag_copies = true
             confirm_permanent_delete = false
+            directory_menu_position = "list_top_left"
         "#;
         let (config, diagnostics) = Config::from_toml_str(toml);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -2954,6 +3003,10 @@ mod tests {
         assert_eq!(config.ui.icon_mode, IconMode::Standard);
         assert!(config.ui.drag_copies);
         assert!(!config.ui.confirm_permanent_delete);
+        assert_eq!(
+            config.ui.directory_menu_position,
+            DirectoryMenuPosition::ListTopLeft
+        );
     }
 
     #[test]

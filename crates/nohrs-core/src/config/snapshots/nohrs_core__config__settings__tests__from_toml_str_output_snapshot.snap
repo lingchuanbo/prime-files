@@ -45,6 +45,7 @@ expression: parsed
             icon_mode: Associated,
             drag_copies: false,
             confirm_permanent_delete: true,
+            directory_menu_position: Cursor,
             audio_waveforms: false,
             preview_autoplay: false,
             welcome_done: false,

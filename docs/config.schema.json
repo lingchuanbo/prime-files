@@ -159,6 +159,21 @@
       },
       "type": "object"
     },
+    "DirectoryMenuPosition": {
+      "description": "Where the Ctrl+D directory menu opens.",
+      "oneOf": [
+        {
+          "const": "cursor",
+          "description": "At the pointer, as a context menu does.",
+          "type": "string"
+        },
+        {
+          "const": "list_top_left",
+          "description": "At the top-left corner of the listing, where it always lands.",
+          "type": "string"
+        }
+      ]
+    },
     "DockSide": {
       "description": "A side of the area a panel docks to.",
       "oneOf": [
@@ -812,6 +827,11 @@
           "description": "Whether that default runs from Z to A, largest or newest first.",
           "type": "boolean"
         },
+        "directory_menu_position": {
+          "$ref": "#/$defs/DirectoryMenuPosition",
+          "default": "cursor",
+          "description": "Where the Ctrl+D directory menu opens."
+        },
         "double_click_empty": {
           "$ref": "#/$defs/DoubleClickEmpty",
           "default": "none",
@@ -1141,6 +1161,7 @@
         "confirm_permanent_delete": true,
         "default_sort": "name",
         "default_sort_descending": false,
+        "directory_menu_position": "cursor",
         "double_click_empty": "none",
         "drag_copies": false,
         "file_type_colors": [],

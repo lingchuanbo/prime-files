@@ -1560,6 +1560,45 @@ async fn toggle_sidebar_is_independent_per_pane(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn the_directory_menu_can_anchor_to_the_listings_corner(cx: &mut TestAppContext) {
+    use crate::explorer::context_menu::MenuPurpose;
+
+    let (pane, cx) = new_explorer_visual(cx);
+    cx.run_until_parked();
+    let listing = pane
+        .read_with(cx, |pane, _cx| pane.hit_boxes.listing())
+        .expect("the listing has been drawn");
+    let corner = pane
+        .read_with(cx, |pane, _cx| pane.listing_top_left())
+        .expect("its corner");
+
+    // The corner is the listing's, below the header while that stays on top.
+    assert_eq!(corner.x, listing.origin.x);
+    assert_eq!(
+        corner.y,
+        listing.origin.y + px(crate::explorer::view::listing::list::HEADER_HEIGHT)
+    );
+
+    // And the directory menu opens there when the settings say so.
+    pane.update(cx, |pane, cx| {
+        pane.apply_config_ui(
+            &config::Ui {
+                directory_menu_position: config::DirectoryMenuPosition::ListTopLeft,
+                ..config::Ui::default()
+            },
+            cx,
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let position = cx.update(|window, cx| {
+        let pane = pane.read(cx);
+        pane.menu_position(&MenuPurpose::FavoritesMenu, window)
+    });
+    assert_eq!(position, corner);
+}
+
+#[gpui::test]
 async fn close_pane_keeps_subscriptions_aligned(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let shared = dir.path().join("shared");

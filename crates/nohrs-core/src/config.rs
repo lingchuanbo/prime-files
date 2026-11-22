@@ -24,12 +24,12 @@ pub use loader::{
 };
 pub use settings::{
     Archive, ArchiveTool, BarSize, CURRENT_SCHEMA_VERSION, Compact, Config, ConfigOverride,
-    Diagnostic, DiagnosticLevel, Diagnostics, DiagnosticsStore, DockSide, DoubleClickEmpty,
-    Explorer, FileTypeColorRule, IconMode, IndexSource, Indexing, IndexingExclude, IndexingMode,
-    Keybindings, Launcher, Layout, ListRowHeight, Plugins, SCHEMA_URL, Search, SearchBackend,
-    SortMethod, SortOrder, SpaceMap, SpaceMapColor, SplitDirection, Storage, TabWidthMode, Theme,
-    ThemeMode, TrayIcon, Ui, Updates, json_schema_string, load_from_files, load_from_path,
-    name_is_ignored, report_diagnostics,
+    Diagnostic, DiagnosticLevel, Diagnostics, DiagnosticsStore, DirectoryMenuPosition, DockSide,
+    DoubleClickEmpty, Explorer, FileTypeColorRule, IconMode, IndexSource, Indexing,
+    IndexingExclude, IndexingMode, Keybindings, Launcher, Layout, ListRowHeight, Plugins,
+    SCHEMA_URL, Search, SearchBackend, SortMethod, SortOrder, SpaceMap, SpaceMapColor,
+    SplitDirection, Storage, TabWidthMode, Theme, ThemeMode, TrayIcon, Ui, Updates,
+    json_schema_string, load_from_files, load_from_path, name_is_ignored, report_diagnostics,
 };
 pub use watcher::ConfigWatcher;
 
