@@ -1,4 +1,4 @@
-//! The OS-global summon key.
+//! The OS-global shortcut registry.
 //!
 //! docs/launcher.md §2: the launcher answers a key pressed *anywhere*, not only
 //! while nohrs is the front application. That is outside GPUI's keymap, which
@@ -14,18 +14,29 @@
 //! * The **desktop portal** on Wayland, where a grab does not exist by design.
 //!   The compositor owns the binding and the user approves it. See [`portal`].
 //!
-//! [`install`] picks between them. The in-app `Cmd+K` binding is the other half
-//! of §2 and lives in the binary; this one works with nohrs in the background.
+//! [`install`] picks between them for the launcher. The in-app `Cmd+K` binding
+//! is the other half of §2 and lives in the binary; this one works with nohrs in
+//! the background.
+//!
+//! The grab side is a **registry**: one [`GlobalHotKeyManager`] and one polling
+//! loop for the whole process, with presses dispatched by id
+//! (docs/QuickDock-技术实现方案与边界约定.md §10). It used to hold a single
+//! chord, and asking for a second one replaced the manager, silently
+//! unregistering the first — so the Launcher's key and the quick-launch key
+//! could not both exist.
+//!
+//! [`GlobalHotKeyManager`]: global_hotkey::GlobalHotKeyManager
 
 /// The Wayland path to a global shortcut.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub mod portal;
 
+use std::collections::BTreeMap;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::rc::Rc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 // Only the portal backend reaches for `background_spawn`; the grab backend uses
@@ -42,17 +53,185 @@ use gpui::{App, Global};
 /// 100ms budget of docs/launcher.md §12 at the cost of one cheap wake-up per
 /// interval. The portal backend needs no equivalent: its activations arrive as
 /// D-Bus signals that wake the task on their own.
+///
+/// One loop serves every registered chord, so adding a second chord does not add
+/// a second timer (§16.2 of the quick-launch specification).
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
+
+/// Identifies one registered chord, for [`unregister`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HotkeyId(u32);
+
+impl HotkeyId {
+    /// The chord's own id, which is what the OS channel reports.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Rebuilds an id from the number it was reported as, for a caller that
+    /// keeps it in its own state (the quick-launch window does, which cannot
+    /// depend on this crate).
+    #[must_use]
+    pub fn from_raw(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+/// What a registered chord runs when it fires.
+type PressHandler = std::rc::Rc<dyn Fn(&mut App)>;
+
+/// One chord and what to run when it fires.
+struct Entry {
+    hotkey: HotKey,
+    on_press: PressHandler,
+}
 
 /// Holds the grab registration for the process's lifetime.
 ///
-/// Dropping the manager unregisters the key with the OS, so it is parked in a
-/// GPUI global rather than left to fall off the end of the installing function.
+/// Dropping the manager unregisters every chord with the OS, so it is parked in
+/// a GPUI global rather than left to fall off the end of the installing
+/// function. The entries are kept apart from the manager so that a chord can be
+/// removed without rebuilding either.
+#[derive(Default)]
 struct Registration {
-    _manager: GlobalHotKeyManager,
+    manager: Option<GlobalHotKeyManager>,
+    entries: BTreeMap<u32, Entry>,
 }
 
 impl Global for Registration {}
+
+impl Registration {
+    /// The handlers that `fired` names, skipping ids that are no longer
+    /// registered (a chord can be unregistered while a poll is in flight).
+    fn handlers_for(&self, fired: &[u32]) -> Vec<PressHandler> {
+        fired
+            .iter()
+            .filter_map(|id| self.entries.get(id).map(|entry| entry.on_press.clone()))
+            .collect()
+    }
+}
+
+/// Registers `hotkey` and calls `on_press` on the edge into "pressed".
+///
+/// The first call creates the manager and starts the one polling loop; later
+/// calls reuse both, which is what lets the launcher's chord and the
+/// quick-launch chord coexist. A chord the OS already holds — by another
+/// application, or by this one — is an error, and nothing is registered.
+pub fn register(
+    cx: &mut App,
+    hotkey: HotKey,
+    on_press: impl Fn(&mut App) + 'static,
+) -> Result<HotkeyId> {
+    if let Some(previous) = cx.try_global::<Registration>() {
+        if previous.entries.contains_key(&hotkey.id()) {
+            return Err(anyhow!(
+                "the hotkey {} is already registered",
+                describe_hotkey(&hotkey)
+            ));
+        }
+    } else {
+        let manager =
+            GlobalHotKeyManager::new().context("could not reach the OS global-hotkey service")?;
+        cx.set_global(Registration {
+            manager: Some(manager),
+            entries: BTreeMap::new(),
+        });
+        start_poll_loop(cx);
+    }
+
+    let registration = cx.global_mut::<Registration>();
+    let manager = registration
+        .manager
+        .as_ref()
+        .ok_or_else(|| anyhow!("the global-hotkey manager is gone"))?;
+    manager.register(hotkey).with_context(|| {
+        format!(
+            "could not register the global hotkey {}",
+            describe_hotkey(&hotkey)
+        )
+    })?;
+    registration.entries.insert(
+        hotkey.id(),
+        Entry {
+            hotkey,
+            on_press: std::rc::Rc::new(on_press),
+        },
+    );
+    Ok(HotkeyId(hotkey.id()))
+}
+
+/// Removes a chord registered with [`register`].
+///
+/// An id that is not registered is not an error: the caller is usually reacting
+/// to a configuration change, and "it is no longer there" is the state it asked
+/// for.
+pub fn unregister(cx: &mut App, id: HotkeyId) -> Result<()> {
+    let Some(registration) = cx.try_global::<Registration>() else {
+        return Ok(());
+    };
+    let Some(entry) = registration.entries.get(&id.0) else {
+        return Ok(());
+    };
+    let hotkey = entry.hotkey;
+    let manager = registration.manager.as_ref();
+    if let Some(manager) = manager {
+        manager
+            .unregister(hotkey)
+            .with_context(|| format!("could not unregister {}", describe_hotkey(&hotkey)))?;
+    }
+    cx.global_mut::<Registration>().entries.remove(&id.0);
+    Ok(())
+}
+
+/// Whether a chord is currently registered.
+#[must_use]
+pub fn is_registered(cx: &App, id: HotkeyId) -> bool {
+    cx.try_global::<Registration>()
+        .is_some_and(|registration| registration.entries.contains_key(&id.0))
+}
+
+/// Starts the process's single poll loop for the grab backend.
+fn start_poll_loop(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let mut held: BTreeMap<u32, bool> = BTreeMap::new();
+        loop {
+            cx.background_executor().timer(POLL_INTERVAL).await;
+
+            let drained: Vec<GlobalHotKeyEvent> =
+                std::iter::from_fn(|| GlobalHotKeyEvent::receiver().try_recv().ok()).collect();
+            if drained.is_empty() {
+                continue;
+            }
+            let clicked = cx.update(|cx| {
+                let registered: Vec<u32> = cx
+                    .try_global::<Registration>()
+                    .map(|registration| registration.entries.keys().copied().collect())
+                    .unwrap_or_default();
+                let mut fired = Vec::new();
+                for id in registered {
+                    let down = held.entry(id).or_insert(false);
+                    let events = drained.iter().filter(|event| event.id == id).cloned();
+                    if fold_presses(down, id, events) {
+                        fired.push(id);
+                    }
+                }
+                let handlers = cx
+                    .try_global::<Registration>()
+                    .map(|registration| registration.handlers_for(&fired))
+                    .unwrap_or_default();
+                for handler in handlers {
+                    handler(cx);
+                }
+            });
+            if clicked.is_err() {
+                // The application is gone; nothing left to summon into.
+                break;
+            }
+        }
+    })
+    .detach();
+}
 
 /// Reports, on the foreground, whether the global shortcut is actually in
 /// place. Boxed because the portal path carries it across an await.
@@ -101,7 +280,8 @@ pub fn default_chord() -> Chord {
     }
 }
 
-/// Registers the global summon key and calls `on_summon` whenever it fires.
+/// Registers the launcher's global summon key and calls `on_summon` whenever it
+/// fires.
 ///
 /// A Wayland session gets the portal and nothing else. Falling back to a grab
 /// there would be worse than failing: made from an XWayland client it binds
@@ -131,37 +311,9 @@ pub fn install(
         return Ok(Backend::Portal);
     }
 
-    install_grab(cx, chord, on_summon)?;
+    register(cx, chord.hotkey, on_summon)?;
     on_outcome(cx, Ok(()));
     Ok(Backend::Grab)
-}
-
-/// Registers the chord with `global-hotkey` and polls its channel.
-fn install_grab(cx: &mut App, chord: Chord, on_summon: impl Fn(&mut App) + 'static) -> Result<()> {
-    let manager =
-        GlobalHotKeyManager::new().context("could not reach the OS global-hotkey service")?;
-    manager
-        .register(chord.hotkey)
-        .with_context(|| format!("could not register the global hotkey {}", describe(&chord)))?;
-    cx.set_global(Registration { _manager: manager });
-
-    let hotkey_id = chord.hotkey.id();
-    cx.spawn(async move |cx| {
-        let mut held = false;
-        loop {
-            cx.background_executor().timer(POLL_INTERVAL).await;
-
-            let drained = std::iter::from_fn(|| GlobalHotKeyEvent::receiver().try_recv().ok());
-            if fold_presses(&mut held, hotkey_id, drained) && cx.update(|cx| on_summon(cx)).is_err()
-            {
-                // The application is gone; nothing left to summon into.
-                break;
-            }
-        }
-    })
-    .detach();
-
-    Ok(())
 }
 
 /// Folds one poll's worth of grab events into whether to summon.
@@ -192,6 +344,16 @@ fn fold_presses(
         }
     }
     summoned
+}
+
+/// The chord a configuration string names, in the `global-hotkey` syntax
+/// (`ctrl+alt+Space`).
+///
+/// The crate has its own `FromStr`, which is used rather than a parser of our
+/// own so that a chord is read exactly the way the OS registration writes it.
+pub fn parse(text: &str) -> Result<HotKey> {
+    text.parse::<HotKey>()
+        .map_err(|error| anyhow!("could not read the hotkey {text:?}: {error}"))
 }
 
 /// Starts the portal conversation and forwards its activations.
@@ -258,32 +420,34 @@ fn install_portal(
 
 /// Renders a chord the way its platform's keyboards label it, for logs and UI.
 pub fn describe(chord: &Chord) -> String {
+    describe_hotkey(&chord.hotkey)
+}
+
+/// [`describe`] for a chord that has no portal spelling, as a configured one
+/// does not until it is registered.
+pub fn describe_hotkey(chord: &HotKey) -> String {
     let mut parts: Vec<&str> = Vec::new();
-    if chord
-        .hotkey
-        .mods
-        .intersects(Modifiers::SUPER | Modifiers::META)
-    {
+    if chord.mods.intersects(Modifiers::SUPER | Modifiers::META) {
         parts.push(if cfg!(target_os = "macos") {
             "Cmd"
         } else {
             "Super"
         });
     }
-    if chord.hotkey.mods.contains(Modifiers::CONTROL) {
+    if chord.mods.contains(Modifiers::CONTROL) {
         parts.push("Ctrl");
     }
-    if chord.hotkey.mods.contains(Modifiers::ALT) {
+    if chord.mods.contains(Modifiers::ALT) {
         parts.push(if cfg!(target_os = "macos") {
             "Option"
         } else {
             "Alt"
         });
     }
-    if chord.hotkey.mods.contains(Modifiers::SHIFT) {
+    if chord.mods.contains(Modifiers::SHIFT) {
         parts.push("Shift");
     }
-    let key = match chord.hotkey.key {
+    let key = match chord.key {
         Code::Space => "Space".to_string(),
         other => format!("{other:?}"),
     };
@@ -377,6 +541,23 @@ mod tests {
     /// hotkey arriving on the same process-wide channel.
     const CHORD_ID: u32 = 7;
 
+    /// The ids that fired in one poll, the way [`start_poll_loop`] asks.
+    fn fold_all(
+        held: &mut BTreeMap<u32, bool>,
+        registered: &[u32],
+        drained: &[GlobalHotKeyEvent],
+    ) -> Vec<u32> {
+        let mut fired = Vec::new();
+        for id in registered {
+            let down = held.entry(*id).or_insert(false);
+            let events = drained.iter().filter(|event| event.id == *id).cloned();
+            if fold_presses(down, *id, events) {
+                fired.push(*id);
+            }
+        }
+        fired
+    }
+
     #[test]
     fn a_press_summons_the_launcher() {
         let mut held = false;
@@ -469,5 +650,73 @@ mod tests {
         } else {
             assert_eq!(describe(&chord), "Super+Ctrl+Alt+Shift+KeyK");
         }
+    }
+
+    #[test]
+    fn a_configured_chord_is_read_the_way_the_registration_writes_it() {
+        let chord = parse("ctrl+alt+Space").expect("the default quick-launch chord parses");
+        assert!(chord.mods.contains(Modifiers::CONTROL));
+        assert!(chord.mods.contains(Modifiers::ALT));
+        assert!(!chord.mods.contains(Modifiers::SHIFT));
+        assert_eq!(chord.key, Code::Space);
+        assert_eq!(describe_hotkey(&chord), "Ctrl+Alt+Space");
+
+        // The launcher's own chord cannot be typed in by mistake as the same
+        // thing with different capitals: both spellings produce one chord id.
+        let upper = parse("Ctrl+Shift+Space").expect("the launcher chord parses");
+        assert_eq!(upper.id(), default_chord().hotkey.id());
+
+        assert!(parse("ctrl+shift+").is_err());
+        assert!(parse("nao existe").is_err());
+    }
+
+    #[test]
+    fn two_chords_fire_independently() {
+        let mut held = BTreeMap::new();
+        let both = [CHORD_ID, CHORD_ID + 1];
+        // Pressing both in one poll fires both, which is what a single loop
+        // dispatching by id has to do.
+        assert_eq!(
+            fold_all(&mut held, &both, &[press(CHORD_ID), press(CHORD_ID + 1)]),
+            vec![CHORD_ID, CHORD_ID + 1]
+        );
+        // Auto-repeat of the first while the second is drawn out fires neither.
+        assert_eq!(
+            fold_all(&mut held, &both, &[press(CHORD_ID), press(CHORD_ID + 1)]),
+            Vec::<u32>::new()
+        );
+        // Releasing only the first re-arms only the first.
+        assert_eq!(
+            fold_all(&mut held, &both, &[release(CHORD_ID), press(CHORD_ID)]),
+            vec![CHORD_ID]
+        );
+    }
+
+    #[test]
+    fn holding_one_chord_does_not_fire_the_other() {
+        let mut held = BTreeMap::new();
+        let both = [CHORD_ID, CHORD_ID + 1];
+        assert!(fold_all(&mut held, &both, &[press(CHORD_ID)]).contains(&CHORD_ID));
+        assert!(
+            fold_all(&mut held, &both, &[press(CHORD_ID)]).is_empty(),
+            "the held chord must not fire again, and the other one was never pressed"
+        );
+    }
+
+    #[test]
+    fn an_unregistered_chord_stops_firing() {
+        // What `unregister` leaves behind: the id is gone from the registry, so
+        // a press that arrived on the way out has no handler to run.
+        let mut registration = Registration::default();
+        registration.entries.insert(
+            CHORD_ID,
+            Entry {
+                hotkey: HotKey::new(Some(Modifiers::CONTROL), Code::KeyK),
+                on_press: std::rc::Rc::new(|_cx: &mut App| {}),
+            },
+        );
+        assert_eq!(registration.handlers_for(&[CHORD_ID]).len(), 1);
+        registration.entries.remove(&CHORD_ID);
+        assert!(registration.handlers_for(&[CHORD_ID]).is_empty());
     }
 }

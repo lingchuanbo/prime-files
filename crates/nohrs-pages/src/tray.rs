@@ -14,6 +14,8 @@ use nohrs_core::config::settings::TrayIcon;
 /// A request from the tray menu, waiting for the UI thread.
 static SHOW: AtomicBool = AtomicBool::new(false);
 static QUIT: AtomicBool = AtomicBool::new(false);
+/// A request to show (or hide) the quick-launch window.
+static QUICK_LAUNCH: AtomicBool = AtomicBool::new(false);
 /// Whether the main window is hidden in the tray.
 static HIDDEN: AtomicBool = AtomicBool::new(false);
 /// 0 = always, 1 = only while hidden, 2 = never.
@@ -72,6 +74,25 @@ pub fn take_quit() -> bool {
     QUIT.swap(false, Ordering::SeqCst)
 }
 
+/// Whether the tray asked for the quick-launch window to be shown.
+pub fn take_quick_launch() -> bool {
+    QUICK_LAUNCH.swap(false, Ordering::SeqCst)
+}
+
+/// Asks the UI thread to bring the main window back.
+///
+/// The quick-launch window's own menu has no `Window` of the main window to
+/// act on, so it asks the way the tray does: set the flag the publisher loop
+/// already reads. A second loop is not needed for it.
+pub(crate) fn request_show() {
+    SHOW.store(true, Ordering::SeqCst);
+}
+
+/// Asks the UI thread to quit, the way the tray's "Sair" does.
+pub(crate) fn request_quit() {
+    QUIT.store(true, Ordering::SeqCst);
+}
+
 /// Brings the window back, from the tray menu or from a second launch.
 pub fn show(window: &gpui::Window) {
     if let Some(hwnd) = crate::ipc::window_hwnd(window) {
@@ -90,7 +111,7 @@ pub fn hide(window: &gpui::Window) {
 }
 
 #[cfg(not(windows))]
-mod platform {
+pub(crate) mod platform {
     pub fn run() {}
     pub fn stop() {}
     pub fn sync() {}
@@ -100,7 +121,7 @@ mod platform {
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
-mod platform {
+pub(crate) mod platform {
     //! The icon, its hidden window and its menu. `unsafe` stays here.
 
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -121,7 +142,7 @@ mod platform {
     };
     use windows::core::{PCWSTR, w};
 
-    use super::{HIDDEN, MAIN, MODE, QUIT, SHOW};
+    use super::{HIDDEN, MAIN, MODE, QUICK_LAUNCH, QUIT, SHOW};
 
     const TIP: &str = "LumaFiles";
     const TRAY_CLASS: windows::core::PCWSTR = w!("LumaFiles.Tray");
@@ -131,6 +152,7 @@ mod platform {
     const WM_SYNC: u32 = WM_APP + 2;
     const MENU_SHOW: usize = 1;
     const MENU_QUIT: usize = 2;
+    const MENU_QUICK_LAUNCH: usize = 3;
 
     static WINDOW: AtomicIsize = AtomicIsize::new(0);
     /// The notification area is told about the icon once, then updated.
@@ -247,6 +269,9 @@ mod platform {
             WM_COMMAND => {
                 match wparam.0 & 0xFFFF {
                     MENU_SHOW => show_main(),
+                    MENU_QUICK_LAUNCH => {
+                        QUICK_LAUNCH.store(true, Ordering::SeqCst);
+                    }
                     MENU_QUIT => {
                         QUIT.store(true, Ordering::SeqCst);
                     }
@@ -285,12 +310,23 @@ mod platform {
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
+        let quick_launch: Vec<u16> = nohrs_core::t!("Inicialização rápida")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let quit: Vec<u16> = nohrs_core::t!("Sair")
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
         unsafe {
             AppendMenuW(menu, MF_STRING, MENU_SHOW, PCWSTR(show.as_ptr())).ok();
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                MENU_QUICK_LAUNCH,
+                PCWSTR(quick_launch.as_ptr()),
+            )
+            .ok();
             AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()).ok();
             AppendMenuW(menu, MF_STRING, MENU_QUIT, PCWSTR(quit.as_ptr())).ok();
             let mut point = POINT::default();

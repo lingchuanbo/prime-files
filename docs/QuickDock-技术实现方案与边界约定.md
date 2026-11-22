@@ -1,6 +1,7 @@
-# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.1
+# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.2
 
 > v2.1（2026-11-22）：写入 Q1–Q5 的确认结果，新增 §15.0（主程序常驻）和 §15.1（常驻模式）。
+> v2.2（2026-11-22，M1 验收后）：§8.4 改为启动、图标两条线程。M1 的具体问题见 `docs/QuickLaunch-M1-验收报告.md`。
 
 > 这是一份**实现规格**，执行方（DeepSeek）按它写代码。写着“必须 / 禁止”的条款不能自行改动；没写到的情况按 §19 处理。
 > 需求见 `docs/LumaFiles-快速启动工具方案.md`。两份文档有冲突时，**以本文为准**。
@@ -293,8 +294,12 @@ pub struct LaunchRegistry { … }   // with_builtins() / register() 重复 kind 
 
 ### 8.4 线程、COM、unsafe（硬性要求）
 - `launch()`、`health()`、图标提取**不能在 gpui 前台线程执行**。
-- `launch()` 和图标提取在一条**专用线程**上运行（由 pages 层持有，`std::thread::Builder::new().name("quick-launch")`），通过 channel 接收请求、返回结果。原因：Shell 调用可能卡在网络路径或休眠的硬盘上，不能占用 gpui 的后台线程池，理由同 `PERFORMANCE.md` §1。
-- 这条线程启动时调用 `CoInitializeEx(COINIT_APARTMENTTHREADED)`，图标提取再调用 `thumbnails::init_thread()`；线程结束时 `CoUninitialize`，用 RAII guard 包住。
+- **v2.2 修订（M1 验收 B3）：两条专用线程，不共用。**由 pages 层持有，通过 channel 接收请求、返回结果。原因是 Shell 调用可能卡在网络路径或休眠的硬盘上，不能占用 gpui 的后台线程池，理由同 `PERFORMANCE.md` §1；同时两类请求不能互相阻塞：
+  - `quick-launch`：只处理启动请求。
+  - `quick-launch-icons`：只处理图标请求。请求在**队列中**等待超过 2 s 就直接丢弃，不再执行。这条线程卡住时，界面继续显示占位图标，**启动不受任何影响**。
+  - v2.1 的“一条线程同时处理启动和图标”作废：首次打开时几十个图标请求会排在点击之前，网络盘上一个卡住的图标也会让所有启动挂起。
+  - 验收：用一个会阻塞的假图标提取器卡住图标线程，启动请求仍然要在 100 ms 内得到回复。
+- 两条线程启动时都调用 `CoInitializeEx(COINIT_APARTMENTTHREADED)`，图标线程再调用 `thumbnails::init_thread()`。线程结束时调用 `CoUninitialize`，用 RAII guard 包住。
 - 每个请求都包在 `std::panic::catch_unwind` 里，panic 转成 `LaunchError::Internal`，线程继续运行。
 - 请求带上代次号，过期的结果直接丢弃。
 - `unsafe` 只能出现在 `launch/windows.rs` 和 `quick_launch.rs` 的窗口显示/隐藏函数里。每处都写**逐项** `#[allow(unsafe_code)]`，并在前面加 `// SAFETY:` 说明。

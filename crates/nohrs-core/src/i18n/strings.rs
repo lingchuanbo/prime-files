@@ -2378,4 +2378,38 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Ask before deleting for good. Off, permanent deletes happen at once.",
         "Preguntar antes de borrar para siempre. Desactivado, la eliminación permanente ocurre al momento.",
     ),
+    (
+        "Posição do menu de favoritos",
+        "Favourite folders menu position",
+        "Posición del menú de favoritos",
+    ),
+    (
+        "Onde o menu do Ctrl+D abre: sob o cursor, como um menu de contexto, ou no canto superior esquerdo da lista, sempre no mesmo lugar.",
+        "Where the Ctrl+D menu opens: under the cursor, like a context menu, or in the list's top-left corner, always in the same place.",
+        "Dónde se abre el menú de Ctrl+D: bajo el cursor, como un menú contextual, o en la esquina superior izquierda de la lista, siempre en el mismo sitio.",
+    ),
+    ("Sob o cursor", "Under the cursor", "Bajo el cursor"),
+    ("Canto da lista", "List corner", "Esquina de la lista"),
+    ("Inicialização rápida", "Quick launch", "Inicio rápido"),
+    ("Sair do LumaFiles", "Quit LumaFiles", "Salir de LumaFiles"),
+    (
+        "Nenhum item neste grupo",
+        "No items in this group",
+        "No hay elementos en este grupo",
+    ),
+    (
+        "Não foi possível iniciar {name}: {error}",
+        "Could not start {name}: {error}",
+        "No se pudo iniciar {name}: {error}",
+    ),
+    (
+        "Não foi possível ler quicklaunch.toml: {error}",
+        "Could not read quicklaunch.toml: {error}",
+        "No se pudo leer quicklaunch.toml: {error}",
+    ),
+    (
+        "Tipo não suportado",
+        "Unsupported type",
+        "Tipo no compatible",
+    ),
 ];

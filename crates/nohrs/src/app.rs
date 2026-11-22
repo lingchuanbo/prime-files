@@ -85,6 +85,7 @@ impl NohrsApp {
             launcher.install_global_hotkey(app);
             install_in_app_launcher_key(launcher.clone(), app);
             install_standalone_search_key(app);
+            install_quick_launch_action(app);
 
             if launcher_only {
                 // Resident mode: nohrs is a background process whose only job is
@@ -112,6 +113,12 @@ impl NohrsApp {
             // (docs/persistence.md §3). Failure is non-fatal: the app starts
             // without session persistence rather than crashing.
             let store: Option<Arc<dyn KvStore>> = open_host_store();
+
+            // Quick launch: its state, its file watcher and the chord that
+            // summons it (docs/QuickDock-… §5, §10, §15.0). The store is shared
+            // with the tabs: the window position and the last group live there
+            // (§6).
+            nohrs_pages::quick_launch::init(app, store.clone(), QUICK_LAUNCH_HOTKEY);
 
             // The trash ledger, on the platforms whose OS trash records nothing
             // (macOS). Without it the explorer's Delete is a one-way door: the
@@ -209,6 +216,14 @@ fn install_in_app_launcher_key(launcher: LauncherIndex, app: &mut App) {
     });
 }
 
+/// Answers the `ToggleQuickLaunch` action, which is how the tray menu and (from
+/// M3) the settings page ask for the window.
+fn install_quick_launch_action(app: &mut App) {
+    app.on_action(|_: &nohrs_pages::ToggleQuickLaunch, cx: &mut App| {
+        nohrs_pages::quick_launch::toggle(cx);
+    });
+}
+
 fn install_standalone_search_key(app: &mut App) {
     // The launcher already owns Ctrl+Shift+Space as its OS-level shortcut.
     app.bind_keys([KeyBinding::new("ctrl-shift-f", OpenStandaloneSearch, None)]);
@@ -217,6 +232,39 @@ fn install_standalone_search_key(app: &mut App) {
             tracing::error!("failed to toggle standalone search window: {error}");
         }
     });
+}
+
+/// The quick launch's own chord, as the window's state asks for it (§10).
+///
+/// The registration itself lives here because `nohrs-pages` cannot depend on
+/// `nohrs-launcher` (§3.4): the window decides *which* chord, this side owns the
+/// mechanism. It is registered and re-registered from the read of
+/// `quicklaunch.toml`, which the window does off the foreground thread (§5.1).
+const QUICK_LAUNCH_HOTKEY: nohrs_pages::quick_launch::HotkeyHooks =
+    nohrs_pages::quick_launch::HotkeyHooks {
+        register: register_quick_launch_hotkey,
+        unregister: unregister_quick_launch_hotkey,
+    };
+
+fn register_quick_launch_hotkey(cx: &mut App, text: &str) -> Result<u64, String> {
+    let chord = nohrs_launcher::parse_hotkey(text).map_err(|error| error.to_string())?;
+    // The Launcher's own chord is refused with a reason instead of letting the
+    // OS report it as taken (§10).
+    if chord.id() == nohrs_launcher::hotkey::default_chord().hotkey.id() {
+        return Err(format!(
+            "{text} is the Launcher's own shortcut ({}), which it already owns",
+            nohrs_launcher::describe_hotkey(&chord)
+        ));
+    }
+    let id = nohrs_launcher::register(cx, chord, |cx| nohrs_pages::quick_launch::toggle(cx))
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(u64::from(id.get()))
+}
+
+fn unregister_quick_launch_hotkey(cx: &mut App, id: u64) -> Result<(), String> {
+    let raw = u32::try_from(id).map_err(|_| format!("{id} is not a hotkey id"))?;
+    nohrs_launcher::unregister(cx, nohrs_launcher::HotkeyId::from_raw(raw))
+        .map_err(|error| format!("{error:#}"))
 }
 
 /// Opens the host KV store at `<data_dir>/state.redb`, creating the data

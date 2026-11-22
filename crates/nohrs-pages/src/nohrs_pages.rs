@@ -4,6 +4,16 @@
 
 use gpui::AnyElement;
 
+use gpui::actions;
+
+actions!(
+    quick_launch,
+    [
+        /// Show the quick-launch window, or hide it if it is already showing.
+        ToggleQuickLaunch
+    ]
+);
+
 /// A reusable 2-way split/tab container shared across pages.
 pub mod compact;
 /// Making Nohrs the folder handler of the Windows user.
@@ -29,6 +39,8 @@ pub mod listary;
 /// Which language "auto" means on this machine.
 pub mod locale;
 pub mod pane_group;
+/// The quick-launch panel: its state, its window and its view.
+pub mod quick_launch;
 /// Other programs' "show in folder", answered by Nohrs.
 pub mod reveal;
 /// The application root view that hosts the sidebar and active page.

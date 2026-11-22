@@ -43,6 +43,9 @@ pub use crate::window::{
     LAUNCHER_HEIGHT, LAUNCHER_WIDTH, launcher_bounds, launcher_window_options,
     open_keep_alive_window, open_launcher, toggle_launcher,
 };
+pub use hotkey::{
+    HotkeyId, describe_hotkey, is_registered, parse as parse_hotkey, register, unregister,
+};
 
 actions!(
     launcher,

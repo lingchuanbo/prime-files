@@ -175,6 +175,25 @@ pub fn search_file() -> PathBuf {
     active_config_dir().join("search.toml")
 }
 
+/// Full path to `quicklaunch.toml`, at the root of the active configuration
+/// directory beside `config.toml`.
+///
+/// It is a file of its own rather than a `[quick_launch]` section: the launcher
+/// rewrites it whenever an item is edited, and a separate file keeps the
+/// hand-written comments in `config.toml` out of that path.
+pub fn quick_launch_file() -> PathBuf {
+    active_config_dir().join("quicklaunch.toml")
+}
+
+/// Where extracted quick-launch icons are cached.
+///
+/// Under the cache directory, not the data directory: the files are derived
+/// from what is already on disk (`path` + size + mtime), so losing them costs
+/// one re-extraction and nothing else.
+pub fn quick_launch_icon_dir() -> PathBuf {
+    cache_dir().join("quick_launch_icons")
+}
+
 /// Selects the split configuration file for a section and key.
 pub fn config_file_for(section: &str, key: &str) -> PathBuf {
     let directory = active_config_dir();
@@ -314,6 +333,40 @@ mod tests {
             assert!(data_dir().ends_with("nohrs"));
             assert!(cache_dir().ends_with("nohrs"));
             assert_eq!(config_file(), config_dir().join("config.toml"));
+        }
+    }
+
+    #[test]
+    fn the_quick_launch_file_sits_beside_config_toml() {
+        let _guard = env_lock();
+        assert_eq!(
+            quick_launch_file(),
+            active_config_dir().join("quicklaunch.toml")
+        );
+        // Portable mode relocates both files together, which is what makes a
+        // copied `userdata` an installation.
+        if portable_mode_enabled() {
+            assert_eq!(
+                quick_launch_file(),
+                portable_config_dir().join("quicklaunch.toml")
+            );
+        }
+    }
+
+    #[test]
+    fn quick_launch_icons_live_in_the_cache_directory() {
+        let _guard = env_lock();
+        assert_eq!(
+            quick_launch_icon_dir(),
+            cache_dir().join("quick_launch_icons")
+        );
+        if portable_mode_enabled() {
+            assert_eq!(
+                quick_launch_icon_dir(),
+                portable_config_dir().join("cache/quick_launch_icons")
+            );
+        } else {
+            assert!(quick_launch_icon_dir().ends_with("nohrs/quick_launch_icons"));
         }
     }
 }

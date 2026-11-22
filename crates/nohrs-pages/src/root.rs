@@ -160,12 +160,27 @@ impl RootView {
         // back or quit for real.
         crate::tray::start(crate::ipc::window_hwnd(window).unwrap_or(0));
         let close_to_tray = view.close_to_tray.clone();
-        window.on_window_should_close(cx, move |window, _cx| {
-            if !close_to_tray.load(std::sync::atomic::Ordering::SeqCst) {
-                return true;
+        window.on_window_should_close(cx, move |window, cx| {
+            let requested = close_to_tray.load(std::sync::atomic::Ordering::SeqCst);
+            match crate::quick_launch::close_action(requested, crate::quick_launch::resident(cx)) {
+                // The window goes and the process with it, which is what happens
+                // when the quick launch has nothing to stay resident for.
+                crate::quick_launch::CloseAction::Close => true,
+                // Hidden, not destroyed: the RootView, the IPC server and the
+                // host KV all keep running, so the quick launch can still open
+                // folders and a second `LumaFiles.exe` wakes this window
+                // (docs/QuickDock-… §15.0).
+                crate::quick_launch::CloseAction::HideToTray => {
+                    crate::tray::hide(window);
+                    false
+                }
+                crate::quick_launch::CloseAction::Quit => {
+                    crate::quick_launch::flush_pending_save(cx);
+                    crate::quick_launch::shutdown(cx);
+                    cx.quit();
+                    false
+                }
             }
-            crate::tray::hide(window);
-            false
         });
         crate::dialog_jump::start();
         crate::reveal::watch(window, cx);
@@ -249,13 +264,17 @@ impl RootView {
                     // index search runs on the background executor.
                     let query = this.update_in(&mut cx, |root, window, cx| {
                         // The tray's menu runs on its own thread; these are its
-                        // two requests.
+                        // requests.
                         if crate::tray::take_show() {
                             crate::tray::show(window);
+                        }
+                        if crate::tray::take_quick_launch() {
+                            crate::quick_launch::toggle(cx);
                         }
                         if crate::tray::take_quit() {
                             root.close_to_tray
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
+                            crate::quick_launch::flush_pending_save(cx);
                             cx.quit();
                         }
                         let query = crate::dialog_jump::take_query();
@@ -637,6 +656,12 @@ impl RootView {
                         if disconnected {
                             break;
                         }
+                        // The quick launch reloads on the same tick: one timer
+                        // serves both files (§5.3 forbids a second one).
+                        this.update_in(&mut cx, |_this, _window, cx| {
+                            crate::quick_launch::poll_reload(cx);
+                        })
+                        .ok();
                         if !changed {
                             continue;
                         }

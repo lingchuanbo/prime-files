@@ -13,6 +13,8 @@ use std::time::Duration;
 
 pub mod loader;
 pub mod paths;
+/// The `quicklaunch.toml` model.
+pub mod quick_launch;
 pub mod settings;
 /// Portable-profile data migration and directory preparation.
 pub mod storage;
