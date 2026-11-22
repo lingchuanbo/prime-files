@@ -358,17 +358,25 @@ impl QuickLaunchView {
                 Ok(Ok(Some(paths))) => paths,
                 _ => return,
             };
+            // S1: the kind of each picked path is decided on a background task;
+            // the items are placed once the answers are in (and B1 keeps them off
+            // the slots that are taken).
+            let items = cx
+                .background_spawn(async move {
+                    picked
+                        .iter()
+                        .map(|path| {
+                            let is_dir = super::path_is_directory(path);
+                            super::item_for_path(path, 0, is_dir)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
             this.update_in(cx, |_view, _window, cx| {
-                // B1: the picked files take the next free slots, from the one the
-                // menu was opened on; an item already there is never replaced.
-                let items: Vec<nohrs_core::config::quick_launch::Item> = picked
-                    .iter()
-                    .map(|path| super::item_from_path(path, 0))
-                    .collect();
                 super::place_items(cx, group, slot, items);
                 cx.notify();
             })
-            .ok();
+            .log_err();
         })
         .detach();
     }
@@ -544,12 +552,28 @@ impl QuickLaunchView {
         if !super::editable(cx) || paths.is_empty() {
             return;
         }
-        let items: Vec<nohrs_core::config::quick_launch::Item> = paths
-            .iter()
-            .map(|path| super::item_from_path(path, 0))
-            .collect();
-        super::place_items(cx, group, slot, items);
-        cx.notify();
+        // S1: whether each path is a folder needs the disk, so it is asked on a
+        // background task and the items are placed once the answers are in.
+        let paths = paths.to_vec();
+        cx.spawn(async move |this, cx| {
+            let items = cx
+                .background_spawn(async move {
+                    paths
+                        .iter()
+                        .map(|path| {
+                            let is_dir = super::path_is_directory(path);
+                            super::item_for_path(path, 0, is_dir)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |_view, cx| {
+                super::place_items(cx, group, slot, items);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
     }
 
     /// An item dragged onto another slot: they swap when it is taken (§12.2).

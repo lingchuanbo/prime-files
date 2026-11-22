@@ -1485,11 +1485,14 @@ fn first_free_slot(group: &Group) -> u32 {
 
 /// The item a path picked or dropped into `slot` becomes (§12.3): an executable
 /// or shortcut is an `app`, a folder a `folder`, everything else a `file`.
-pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
+///
+/// `is_dir` comes from the caller: whether the path is a folder needs the disk,
+/// and the window may not wait for a network path (S1).
+pub(crate) fn item_for_path(path: &Path, slot: u32, is_dir: bool) -> Item {
     let extension = path
         .extension()
         .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
-    let kind = if path.is_dir() {
+    let kind = if is_dir {
         "folder"
     } else if matches!(
         extension.as_deref(),
@@ -1516,6 +1519,23 @@ pub(crate) fn next_free_slot(cx: &App, group: usize) -> u32 {
     state(cx)
         .and_then(|state| state.config.groups.get(group))
         .map_or(0, first_free_slot)
+}
+
+/// Whether `path` is a folder, read off the foreground (S1).
+///
+/// A path the disk cannot answer for is treated as a file, which is what the
+/// item then is: something the Shell has to be asked to open.
+pub(crate) fn path_is_directory(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// The item a path becomes, with the folder question answered on this thread.
+///
+/// Only the tests use this: the window asks [`path_is_directory`] on a background
+/// task and then builds the item with [`item_for_path`] (S1).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
+    item_for_path(path, slot, path.is_dir())
 }
 
 /// The KV key of one item's usage record (§6).
@@ -3099,6 +3119,20 @@ mod tests {
         group.items.push(Item::new(2, "app", "C"));
         assert_eq!(first_free_slot(&group), 4);
         assert_eq!(first_free_slot(&group_of(0)), 0);
+    }
+
+    /// §12.3, S1: the kind comes from the metadata the caller read on a background
+    /// task, and the reader answers about paths that are not there.
+    #[test]
+    fn a_kind_comes_from_the_metadata_the_caller_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("Uma pasta");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(path_is_directory(&folder));
+        assert!(!path_is_directory(&folder.join("nao-existe")));
+        // The flag decides, not a second look at the disk.
+        assert_eq!(item_for_path(&folder, 0, true).kind, "folder");
+        assert_eq!(item_for_path(&folder, 0, false).kind, "file");
     }
 
     /// §12.3: what a picked or dropped path becomes.
