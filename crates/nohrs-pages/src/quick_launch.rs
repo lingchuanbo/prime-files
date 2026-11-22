@@ -202,6 +202,13 @@ const ICON_QUEUE_LIMIT: Duration = Duration::from_secs(2);
 /// How long the exit path waits for the dedicated threads (§15.x).
 const WORKER_STOP_LIMIT: Duration = Duration::from_millis(500);
 
+/// How many items one health batch checks (§12.1).
+const HEALTH_BATCH: usize = 32;
+
+/// How long the health pass waits between batches, so it stays in the window's
+/// idle time (§12.1).
+const HEALTH_PAUSE: Duration = Duration::from_millis(250);
+
 /// One start request for the `quick-launch` thread.
 struct StartRequest {
     // Boxed because the item is by far the largest thing a worker receives.
@@ -210,6 +217,14 @@ struct StartRequest {
     on_running: OnRunning,
     /// Echoed back so a reply the window has moved on from is dropped (§8.4).
     generation: u64,
+}
+
+/// One health request for the `quick-launch-icons` thread.
+struct HealthRequest {
+    /// The group id the item belongs to: a renamed group keeps its answers.
+    group: String,
+    slot: u32,
+    item: Box<Item>,
 }
 
 /// One icon request for the `quick-launch-icons` thread.
@@ -231,6 +246,11 @@ enum WorkerReply {
     Icon {
         key: IconKey,
         image: Option<Arc<RenderImage>>,
+    },
+    Health {
+        group: String,
+        slot: u32,
+        health: Health,
     },
 }
 
@@ -301,11 +321,18 @@ impl<Request: Send + 'static> Worker<Request> {
     }
 }
 
+/// What the `quick-launch-icons` thread does: extract one icon, or check the
+/// health of one item (§12.1).
+enum IconWorkerRequest {
+    Icon(IconRequest),
+    Health(HealthRequest),
+}
+
 /// The two dedicated threads (§8.4). Starting and extracting never share one, so
 /// a Shell call stuck on a dead network path cannot hold up a launch.
 struct Workers {
     launch: Worker<StartRequest>,
-    icons: Worker<IconRequest>,
+    icons: Worker<IconWorkerRequest>,
 }
 
 impl Workers {
@@ -330,7 +357,11 @@ impl Workers {
     }
 
     fn send_icon(&self, request: IconRequest) {
-        self.icons.send(request);
+        self.icons.send(IconWorkerRequest::Icon(request));
+    }
+
+    fn send_health(&self, request: HealthRequest) {
+        self.icons.send(IconWorkerRequest::Health(request));
     }
 
     /// Stops both threads within one `limit` (§15.x).
@@ -384,34 +415,57 @@ fn run_launch_worker(
 /// The `quick-launch-icons` thread: extracts icons, dropping the ones that waited
 /// too long in the queue (§8.4).
 fn run_icon_worker(
-    receiver: std_mpsc::Receiver<IconRequest>,
+    receiver: std_mpsc::Receiver<IconWorkerRequest>,
     replies: async_channel::Sender<WorkerReply>,
     extract: impl Fn(&ExpandContext, &str, u32) -> Option<Arc<RenderImage>>,
 ) {
     let _com = ComApartment::enter();
     let context = ExpandContext::current();
+    // The same registry the launch thread uses, so an item is judged by the
+    // action that would start it (§12.1).
+    let registry = LaunchRegistry::with_builtins();
     while let Ok(request) = receiver.recv() {
-        let waited = request.queued.elapsed();
-        if waited >= ICON_QUEUE_LIMIT {
-            // The window gave up on this one two seconds ago; running it now
-            // would only delay the requests behind it.
-            tracing::debug!(
-                target: "quick_launch",
-                path = %request.path,
-                waited_ms = waited.as_millis(),
-                "dropping an icon request that waited too long"
-            );
-            continue;
+        match request {
+            IconWorkerRequest::Health(request) => {
+                let health = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    registry.health(&request.item, &context)
+                }))
+                .unwrap_or_else(|panic| {
+                    tracing::error!(target: "quick_launch", "health: {}", panic_message(panic));
+                    Health::Unknown
+                });
+                replies
+                    .try_send(WorkerReply::Health {
+                        group: request.group,
+                        slot: request.slot,
+                        health,
+                    })
+                    .log_err();
+            }
+            IconWorkerRequest::Icon(request) => {
+                let waited = request.queued.elapsed();
+                if waited >= ICON_QUEUE_LIMIT {
+                    // The window gave up on this one two seconds ago; running it
+                    // now would only delay the requests behind it.
+                    tracing::debug!(
+                        target: "quick_launch",
+                        path = %request.path,
+                        waited_ms = waited.as_millis(),
+                        "dropping an icon request that waited too long"
+                    );
+                    continue;
+                }
+                let key = request.key;
+                let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    extract(&context, &request.path, key.edge)
+                }))
+                .unwrap_or_else(|panic| {
+                    tracing::error!(target: "quick_launch", "icon: {}", panic_message(panic));
+                    None
+                });
+                replies.try_send(WorkerReply::Icon { key, image }).log_err();
+            }
         }
-        let key = request.key;
-        let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            extract(&context, &request.path, key.edge)
-        }))
-        .unwrap_or_else(|panic| {
-            tracing::error!(target: "quick_launch", "icon: {}", panic_message(panic));
-            None
-        });
-        replies.try_send(WorkerReply::Icon { key, image }).log_err();
     }
 }
 
@@ -777,6 +831,8 @@ pub(crate) struct QuickLaunch {
     health: HashMap<(String, u32), Health>,
     /// Whether the health pass has been scheduled for this session.
     health_started: bool,
+    /// The items still to check (§12.1).
+    health_queue: VecDeque<(String, u32, Item)>,
 }
 
 impl Global for QuickLaunch {}
@@ -853,6 +909,76 @@ pub(crate) fn health_of(cx: &App, group: usize, slot: u32) -> Option<Health> {
     let state = state(cx)?;
     let id = state.config.groups.get(group)?.id.as_str();
     state.health.get(&(id.to_string(), slot)).cloned()
+}
+
+/// Starts the health pass once, after the window has been shown (§12.1).
+///
+/// Items are checked a batch at a time on the icon thread, between two idle
+/// ticks, so the foreground never waits on a disk or a dead network path.
+fn start_health_check(cx: &mut App) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    if quick_launch.health_started {
+        return;
+    }
+    quick_launch.health_started = true;
+    quick_launch.health_queue = quick_launch
+        .config
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .items
+                .iter()
+                .map(|item| (group.id.clone(), item.slot, item.clone()))
+        })
+        .collect();
+    if quick_launch.health_queue.is_empty() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(HEALTH_PAUSE).await;
+            let batch = cx.update(|cx| {
+                let Some(quick_launch) = state_mut(cx) else {
+                    return None;
+                };
+                let mut sent = 0usize;
+                while sent < HEALTH_BATCH {
+                    let Some((group, slot, item)) = quick_launch.health_queue.pop_front() else {
+                        break;
+                    };
+                    if let Some(workers) = quick_launch.workers.as_ref() {
+                        workers.send_health(HealthRequest {
+                            group,
+                            slot,
+                            item: Box::new(item),
+                        });
+                        sent = sent.saturating_add(1);
+                    } else {
+                        return None;
+                    }
+                }
+                (sent > 0).then_some(sent)
+            });
+            match batch {
+                Ok(Some(_)) => continue,
+                _ => return,
+            }
+        }
+    })
+    .detach();
+}
+
+/// Records one answer, so the view can grey the item (§12.1).
+fn apply_health(cx: &mut App, group: String, slot: u32, health: Health) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    quick_launch.health.insert((group, slot), health);
+    quick_launch.touch();
+    cx.refresh_windows();
 }
 
 /// Whether one item is known to be broken, so the view can grey it (§12.1).
@@ -1305,6 +1431,7 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
         filter: String::new(),
         health: HashMap::new(),
         health_started: false,
+        health_queue: VecDeque::new(),
     });
 
     // One task answers everything the worker says, for the process's lifetime.
@@ -2148,6 +2275,11 @@ fn icon(cx: &mut App, path: &str, edge: u32) -> Option<Arc<RenderImage>> {
 /// Puts what the worker said into the state.
 fn apply_reply(cx: &mut App, reply: WorkerReply) {
     match reply {
+        WorkerReply::Health {
+            group,
+            slot,
+            health,
+        } => apply_health(cx, group, slot, health),
         WorkerReply::Icon { key, image } => {
             if let Some(quick_launch) = state_mut(cx) {
                 let timed_out = quick_launch
@@ -2700,7 +2832,33 @@ mod tests {
     }
 
     /// §5.2, §12.3: a read-only file refuses every edit.
-    /// """ + S + """12.2: typing filters the current group by name and tags, and the
+    /// §12.1: a broken item is greyed by the view, and one that is fine is
+    /// not. The answers live in the state, never in the file.
+    #[gpui::test]
+    fn health_marks_only_the_broken_items(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(2);
+            group.id = "general".to_string();
+            install(cx, vec![group]);
+            assert!(!is_missing(cx, 0, 0), "nothing is checked yet");
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            assert!(is_missing(cx, 0, 0));
+            apply_health(cx, "general".to_string(), 1, Health::Ok);
+            assert!(!is_missing(cx, 0, 1));
+            assert_eq!(health_of(cx, 0, 0), Some(Health::Missing));
+            assert_eq!(
+                state(cx).map(|state| state.health.len()),
+                Some(2),
+                "the answers are kept beside the configuration"
+            );
+            assert!(
+                state(cx).is_some_and(|state| state.config.groups[0].items.len() == 2),
+                "the file still has its items"
+            );
+        });
+    }
+
+    /// §12.2: typing filters the current group by name and tags, and the
     /// arrow keys walk only what is left.
     #[gpui::test]
     fn typing_filters_the_group_by_name_and_tags(cx: &mut gpui::TestAppContext) {
@@ -2733,7 +2891,7 @@ mod tests {
         });
     }
 
-    /// """ + S + """12.2: the arrow keys step through the filtered slots only.
+    /// §12.2: the arrow keys step through the filtered slots only.
     #[gpui::test]
     fn the_arrow_keys_walk_the_filtered_slots(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -3011,7 +3169,7 @@ mod tests {
         let icons = Worker::start("test-icons", {
             let replies = replies.clone();
             let blocked = blocked.clone();
-            move |receiver: std_mpsc::Receiver<IconRequest>| {
+            move |receiver: std_mpsc::Receiver<IconWorkerRequest>| {
                 run_icon_worker(receiver, replies, move |_context, _path, _edge| {
                     let (lock, condvar) = &*blocked;
                     let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
@@ -3034,11 +3192,11 @@ mod tests {
         });
 
         // One icon request, which the icon thread takes and then hangs on.
-        icons.send(IconRequest {
+        icons.send(IconWorkerRequest::Icon(IconRequest {
             key: IconKey::new("bloqueado", 32),
             path: "C:\\nao\\existe".to_string(),
             queued: Instant::now(),
-        });
+        }));
         std::thread::sleep(Duration::from_millis(50));
 
         // The launch must be answered within 100 ms even though the icon thread
@@ -3065,7 +3223,7 @@ mod tests {
                 assert_eq!(generation, 7);
                 assert_eq!(outcome, Ok(LaunchOutcome::Started));
             }
-            WorkerReply::Icon { .. } => panic!("the icon thread answered first"),
+            _ => panic!("the icon thread answered first"),
         }
 
         // Let the icon thread go, then stop both as the exit path does.
@@ -3371,6 +3529,7 @@ mod tests {
             filter: String::new(),
             health: HashMap::new(),
             health_started: false,
+            health_queue: VecDeque::new(),
         }
     }
 
