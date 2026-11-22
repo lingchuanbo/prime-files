@@ -2414,10 +2414,7 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                 record_usage(cx, &group, slot);
             }
             if let Some(path) = folder {
-                match state(cx).map_or(Mode::Main, |quick_launch| quick_launch.mode) {
-                    Mode::Main => open_folder_in_main_window(path),
-                    Mode::Standalone => open_folder_without_explorer(cx, path),
-                }
+                open_in_explorer(cx, path);
             }
             if close_after_launch {
                 hide(cx);
@@ -2435,10 +2432,21 @@ fn counts_as_usage(outcome: &std::result::Result<LaunchOutcome, LaunchError>) ->
     )
 }
 
-/// Opens a folder in this process's Explorer (§15.0): the main window
-/// may be hidden in the tray, and Q5 makes that the normal case, so the tray
-/// is asked to show it first.
-fn open_folder_in_main_window(path: PathBuf) {
+/// Shows a path in LumaFiles: a folder to open, or a file to select in its
+/// folder (§12.2, B2).
+///
+/// One function for the folder items and for `Shift`+click, because both have
+/// the same two cases: the Explorer is in this process but its window may be
+/// hidden in the tray, or there is no Explorer here at all (§15.1).
+pub(crate) fn open_in_explorer(cx: &mut App, path: PathBuf) {
+    match state(cx).map_or(Mode::Main, |quick_launch| quick_launch.mode) {
+        Mode::Main => open_in_main_window(path),
+        Mode::Standalone => open_without_explorer(cx, path),
+    }
+}
+
+/// The Explorer is here: show its window first, then hand it the path.
+fn open_in_main_window(path: PathBuf) {
     // The same request the tray's own menu sends, handled by the existing
     // publisher loop; the quick launch does not touch the tray state itself.
     crate::tray::request_show();
@@ -2451,13 +2459,13 @@ fn open_folder_in_main_window(path: PathBuf) {
     }
 }
 
-/// Opens a folder with no Explorer in this process (§15.1): the main
-/// program takes it through the IPC, and when it is not running a copy of this
-/// executable is started with the path, which opens it the way the shell does.
+/// No Explorer here (§15.1): the main program takes it through the IPC,
+/// and when it is not running a copy of this executable is started with the
+/// path, which opens or selects it the way the shell does.
 ///
 /// The spawn happens on a background task: a process call on the foreground is
 /// what §18 forbids.
-fn open_folder_without_explorer(cx: &mut App, path: PathBuf) {
+fn open_without_explorer(cx: &mut App, path: PathBuf) {
     cx.background_spawn(async move {
         if crate::ipc::request_open(&path) {
             return;
@@ -2622,7 +2630,7 @@ fn ensure_selection(cx: &mut App) {
 ///
 /// The path is expanded here because the Explorer needs the real one; the
 /// expansion is string work, not a filesystem read.
-pub(crate) fn reveal_item(cx: &App, slot: u32) -> bool {
+pub(crate) fn reveal_item(cx: &mut App, slot: u32) -> bool {
     let Some(state) = state(cx) else {
         return false;
     };
@@ -2637,7 +2645,8 @@ pub(crate) fn reveal_item(cx: &App, slot: u32) -> bool {
     let Some(path) = expanded_path(cx, item) else {
         return false;
     };
-    crate::explorer_link::request(path)
+    open_in_explorer(cx, path);
+    true
 }
 
 /// The text the "copy" entry puts on the clipboard: the item's path (§12.2).
