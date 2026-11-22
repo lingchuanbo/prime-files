@@ -1091,6 +1091,58 @@ fn sync_topmost(cx: &mut App, topmost: bool) {
     cx.refresh_windows();
 }
 
+/// Re-judges the kind of an edited item from its new path, off the foreground
+/// (S4).
+///
+/// Only `app`, `file` and `folder` are re-judged: the other kinds are not built
+/// from a path by this milestone, and a path that does not exist keeps its kind
+/// so the health check can report it.
+fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str) {
+    if !matches!(previous_kind, "app" | "file" | "folder") {
+        return;
+    }
+    let Some(item) = item_at(cx, group, slot) else {
+        return;
+    };
+    let Some(path) = expanded_path(cx, &item) else {
+        return;
+    };
+    let kind = previous_kind.to_string();
+    cx.spawn(async move |cx| {
+        let judged = cx
+            .background_spawn(async move {
+                let is_dir = path_is_directory(&path);
+                path.is_file()
+                    .then(|| item_for_path(&path, slot, is_dir).kind)
+                    .or_else(|| is_dir.then(|| "folder".to_string()))
+            })
+            .await;
+        let Some(judged) = judged else {
+            return;
+        };
+        if judged == kind {
+            return;
+        }
+        cx.update(|cx| {
+            let Some(state) = state_mut(cx) else {
+                return;
+            };
+            let Some(target) = state.config.groups.get_mut(group) else {
+                return;
+            };
+            let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
+                return;
+            };
+            item.kind = judged;
+            state.touch();
+            mark_dirty(cx);
+            recheck_health(cx, group, slot);
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
 /// Whether one item is known to be broken, so the view can grey it (§12.1).
 pub(crate) fn is_missing(cx: &App, group: usize, slot: u32) -> bool {
     health_of(cx, group, slot).is_some_and(|health| health != Health::Ok)
@@ -1215,6 +1267,7 @@ pub(crate) fn edit_item(
     let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
         return false;
     };
+    let previous_kind = item.kind.clone();
     item.name = name.to_string();
     item.path = Some(path.to_string());
     let args = args.trim();
@@ -1223,6 +1276,9 @@ pub(crate) fn edit_item(
     state.touch();
     mark_dirty(cx);
     recheck_health(cx, group, slot);
+    // S4: a path that now points at a folder (or a program) changes the kind, so
+    // the item keeps working after the edit.
+    retype_after_edit(cx, group, slot, &previous_kind);
     true
 }
 
@@ -3441,6 +3497,53 @@ mod tests {
             );
             assert!(is_locked(cx), "the button follows the file");
         });
+    }
+
+    /// §12.3, S4: a path edited to a folder turns the item into a folder, and one that
+    /// points nowhere keeps the kind it had.
+    #[gpui::test]
+    fn an_edited_path_judges_the_kind_again(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("Uma pasta");
+        std::fs::create_dir(&folder).unwrap();
+        let folder_text = folder.to_string_lossy().to_string();
+        // A program that is already there: the sandbox refuses to create an .exe.
+        let program_text = "C:\\Windows\\System32\\cmd.exe".to_string();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            let mut item = Item::new(0, "app", "A");
+            item.path = Some(program_text.clone());
+            group.items = vec![item];
+            install(cx, vec![group]);
+            // A program edited to a folder becomes a folder.
+            assert!(edit_item(cx, 0, 0, "A", &folder_text, "", false));
+        });
+        cx.run_until_parked();
+        let kind = cx.update(|cx| item_at(cx, 0, 0).map(|item| item.kind));
+        assert_eq!(kind, Some("folder".to_string()));
+        cx.update(|cx| {
+            // A folder edited back to a program becomes an app again.
+            assert!(edit_item(cx, 0, 0, "A", &program_text, "", false));
+        });
+        cx.run_until_parked();
+        let kind = cx.update(|cx| item_at(cx, 0, 0).map(|item| item.kind));
+        assert_eq!(kind, Some("app".to_string()));
+        cx.update(|cx| {
+            // A path that is not there keeps the kind: the health check reports it.
+            assert!(edit_item(
+                cx,
+                0,
+                0,
+                "A",
+                "C:\\nao\\existe\\nada.exe",
+                "",
+                false
+            ));
+        });
+        cx.run_until_parked();
+        let kind = cx.update(|cx| item_at(cx, 0, 0).map(|item| item.kind));
+        assert_eq!(kind, Some("app".to_string()));
     }
 
     /// §7, S2: the context is state, not something the foreground reads a file for.
