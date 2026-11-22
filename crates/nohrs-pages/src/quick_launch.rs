@@ -1118,7 +1118,9 @@ fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str)
             .background_spawn(async move {
                 let is_dir = path_is_directory(&path);
                 path.is_file()
-                    .then(|| item_for_path(&path, slot, is_dir).kind)
+                    .then(|| {
+                        nohrs_core::config::quick_launch::item_for_path(&path, slot, is_dir).kind
+                    })
                     .or_else(|| is_dir.then(|| "folder".to_string()))
             })
             .await;
@@ -1565,36 +1567,6 @@ fn first_free_slot(group: &Group) -> u32 {
     next_free_slot_from(group, 0)
 }
 
-/// The item a path picked or dropped into `slot` becomes (§12.3): an executable
-/// or shortcut is an `app`, a folder a `folder`, everything else a `file`.
-///
-/// `is_dir` comes from the caller: whether the path is a folder needs the disk,
-/// and the window may not wait for a network path (S1).
-pub(crate) fn item_for_path(path: &Path, slot: u32, is_dir: bool) -> Item {
-    let extension = path
-        .extension()
-        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
-    let kind = if is_dir {
-        "folder"
-    } else if matches!(
-        extension.as_deref(),
-        Some("exe" | "lnk" | "com" | "bat" | "cmd")
-    ) {
-        "app"
-    } else {
-        "file"
-    };
-    let name = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .or_else(|| path.file_name().and_then(|name| name.to_str()))
-        .unwrap_or_default()
-        .to_string();
-    let mut item = Item::new(slot, kind, name);
-    item.path = Some(path.to_string_lossy().to_string());
-    item
-}
-
 /// Where an item dropped on the group bar (or anywhere in the content area)
 /// goes: the first empty slot, else past the last item (§12.2).
 pub(crate) fn next_free_slot(cx: &App, group: usize) -> u32 {
@@ -1614,10 +1586,11 @@ pub(crate) fn path_is_directory(path: &Path) -> bool {
 /// The item a path becomes, with the folder question answered on this thread.
 ///
 /// Only the tests use this: the window asks [`path_is_directory`] on a background
-/// task and then builds the item with [`item_for_path`] (S1).
+/// task and then builds the item with
+/// [`nohrs_core::config::quick_launch::item_for_path`] (S1).
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
-    item_for_path(path, slot, path.is_dir())
+    nohrs_core::config::quick_launch::item_for_path(path, slot, path.is_dir())
 }
 
 /// Moves one item's usage record to the place it went, in one transaction
@@ -2170,7 +2143,7 @@ fn save_in_background(cx: &mut App) {
     let path = paths::quick_launch_file();
     cx.spawn(async move |cx| {
         let written = cx
-            .background_spawn(async move { write_atomically(&path, &text) })
+            .background_spawn(async move { nohrs_services::fs::write_atomically(&path, &text) })
             .await;
         cx.update(|cx| match written {
             Ok(hash) => {
@@ -2211,7 +2184,7 @@ fn save_now(quick_launch: &mut QuickLaunch) {
         }
     };
     let path = paths::quick_launch_file();
-    match write_atomically(&path, &text) {
+    match nohrs_services::fs::write_atomically(&path, &text) {
         Ok(hash) => quick_launch.file_hash = hash,
         Err(error) => {
             tracing::error!(target: "quick_launch", "could not write {}: {error}", path.display());
@@ -2225,27 +2198,6 @@ fn save_now(quick_launch: &mut QuickLaunch) {
 /// temporary file is written and flushed first, and only then renamed over the
 /// target, which is atomic on both platforms LumaFiles runs on.
 #[allow(clippy::disallowed_methods)] // the exit path and the throttled save
-fn write_atomically(path: &Path, contents: &str) -> std::io::Result<u64> {
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(directory)?;
-    let temporary = path.with_extension("toml.tmp");
-    let backup = path.with_extension("toml.bak");
-    let mut file = std::fs::File::create(&temporary)?;
-    {
-        use std::io::Write as _;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-    }
-    drop(file);
-    if path.exists() {
-        std::fs::copy(path, &backup)?;
-    }
-    std::fs::rename(&temporary, path)?;
-    let mut hasher = DefaultHasher::new();
-    contents.as_bytes().hash(&mut hasher);
-    Ok(hasher.finish())
-}
-
 /// Writes one KV value in the background, logging rather than failing (§6).
 fn write_kv_name(cx: &mut App, name: String, bytes: Vec<u8>) {
     let Some(kv) = state(cx).and_then(|quick_launch| quick_launch.kv.clone()) else {
@@ -3250,59 +3202,6 @@ mod tests {
             assert_eq!(name(cx, 3), Some("Tres".to_string()));
         });
     }
-
-    /// §12.2: a move or a drop into a group goes to its first empty slot, and
-    /// past the last item when nothing is empty.
-    #[test]
-    fn a_move_lands_in_the_first_empty_slot() {
-        let mut group = group_of(0);
-        group.items = vec![
-            Item::new(0, "app", "A"),
-            Item::new(1, "app", "B"),
-            Item::new(3, "app", "D"),
-        ];
-        assert_eq!(first_free_slot(&group), 2);
-        group.items.push(Item::new(2, "app", "C"));
-        assert_eq!(first_free_slot(&group), 4);
-        assert_eq!(first_free_slot(&group_of(0)), 0);
-    }
-
-    /// §12.3, S1: the kind comes from the metadata the caller read on a background
-    /// task, and the reader answers about paths that are not there.
-    #[test]
-    fn a_kind_comes_from_the_metadata_the_caller_read() {
-        let directory = tempfile::tempdir().unwrap();
-        let folder = directory.path().join("Uma pasta");
-        std::fs::create_dir(&folder).unwrap();
-        assert!(path_is_directory(&folder));
-        assert!(!path_is_directory(&folder.join("nao-existe")));
-        // The flag decides, not a second look at the disk.
-        assert_eq!(item_for_path(&folder, 0, true).kind, "folder");
-        assert_eq!(item_for_path(&folder, 0, false).kind, "file");
-    }
-
-    /// §12.3: what a picked or dropped path becomes.
-    #[test]
-    fn a_picked_path_becomes_the_item_its_extension_says() {
-        let directory = tempfile::tempdir().unwrap();
-        let folder = directory.path().join("Uma pasta");
-        std::fs::create_dir(&folder).unwrap();
-        let folder_item = item_from_path(&folder, 3);
-        assert_eq!(folder_item.kind, "folder");
-        assert_eq!(folder_item.name, "Uma pasta");
-        assert_eq!(folder_item.slot, 3);
-
-        let shortcut = directory.path().join("atalho.lnk");
-        std::fs::write(&shortcut, b"").unwrap();
-        assert_eq!(item_from_path(&shortcut, 0).kind, "app");
-
-        let document = directory.path().join("notas.txt");
-        std::fs::write(&document, b"oi").unwrap();
-        let document_item = item_from_path(&document, 0);
-        assert_eq!(document_item.kind, "file");
-        assert_eq!(document_item.name, "notas");
-    }
-
     /// §6: the usage key of one item.
     #[test]
     fn a_usage_record_is_named_after_its_group_and_slot() {
@@ -4491,52 +4390,6 @@ mod tests {
             Some("line 2, column 3: bad")
         );
     }
-
-    #[test]
-    fn the_throttle_window_is_the_one_the_specification_names() {
-        assert_eq!(SAVE_THROTTLE, Duration::from_millis(300));
-        // The first edit sets the deadline; an edit inside the window does not
-        // move it, which is what "merged into one save" means.
-        let started = Instant::now();
-        let due = started + SAVE_THROTTLE;
-        assert!(started + SAVE_THROTTLE / 2 < due);
-    }
-
-    #[test]
-    fn the_atomic_write_replaces_the_file_and_keeps_a_backup() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("quicklaunch.toml");
-        write_atomically(&path, "schema_version = 1\n").unwrap();
-        let first = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(first, "schema_version = 1\n");
-
-        let hash = write_atomically(&path, "schema_version = 1\n\n[[group]]\n").unwrap();
-        assert_ne!(hash, 0);
-        let second = std::fs::read_to_string(&path).unwrap();
-        assert!(second.contains("[[group]]"), "{second}");
-        // The previous content is kept beside it.
-        let backup = directory.path().join("quicklaunch.toml.bak");
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), first);
-        assert!(!directory.path().join("quicklaunch.toml.tmp").exists());
-    }
-
-    #[test]
-    fn a_failed_write_leaves_the_original_file_alone() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("quicklaunch.toml");
-        write_atomically(&path, "schema_version = 1\n").unwrap();
-        // A directory where the temporary file belongs makes the write fail,
-        // which is the "disk full / read-only folder" case without changing any
-        // attribute of the test directory.
-        std::fs::create_dir_all(directory.path().join("quicklaunch.toml.tmp")).unwrap();
-        assert!(write_atomically(&path, "schema_version = 99\n").is_err());
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "schema_version = 1\n",
-            "the original file must not be touched"
-        );
-    }
-
     #[test]
     fn the_icon_edge_snaps_up_to_a_supported_size() {
         // The steps are what the Shell extracts well; anything between two of

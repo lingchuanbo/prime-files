@@ -8,6 +8,8 @@
 //! [`Warning`] rather than staying silent: the file is hand-written, so a value
 //! that was quietly ignored is a value the author believes is in effect.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 /// Version of the `quicklaunch.toml` schema this build understands.
@@ -252,6 +254,37 @@ impl Item {
             ActionKind::Command | ActionKind::Plugin(_)
         )
     }
+}
+
+/// The item a path becomes (§12.3): a folder is a `folder`, an executable or
+/// shortcut is an `app`, everything else a `file`.
+///
+/// `is_dir` comes from the caller: whether the path is a folder needs the disk,
+/// and the window may not wait for a network path (M2 S1). Keeping the disk out of
+/// this function is also what lets the CLI and the window agree on the rule.
+pub fn item_for_path(path: &Path, slot: u32, is_dir: bool) -> Item {
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+    let kind = if is_dir {
+        "folder"
+    } else if matches!(
+        extension.as_deref(),
+        Some("exe" | "lnk" | "com" | "bat" | "cmd")
+    ) {
+        "app"
+    } else {
+        "file"
+    };
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or_default()
+        .to_string();
+    let mut item = Item::new(slot, kind, name);
+    item.path = Some(path.to_string_lossy().to_string());
+    item
 }
 
 /// The whole file.
@@ -887,6 +920,36 @@ fn truncate_name(name: &mut String, owner: &str, warnings: &mut Vec<Warning>) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    /// §12.3: the kind of an item follows the metadata and the extension.
+    #[test]
+    fn an_item_takes_its_kind_from_the_path_and_the_metadata() {
+        let program = item_for_path(Path::new("C:/x/programa.exe"), 4, false);
+        assert_eq!(program.kind, "app");
+        assert_eq!(program.name, "programa");
+        assert_eq!(program.slot, 4);
+        assert_eq!(
+            item_for_path(Path::new("C:/x/atalho.lnk"), 0, false).kind,
+            "app"
+        );
+        assert_eq!(
+            item_for_path(Path::new("C:/x/notas.txt"), 0, false).kind,
+            "file"
+        );
+        assert_eq!(
+            item_for_path(Path::new("C:/x/notas.txt"), 0, false).name,
+            "notas"
+        );
+        // The flag wins: something without an extension is a folder when the
+        // caller says so.
+        assert_eq!(
+            item_for_path(Path::new("C:/x/Pasta"), 0, true).kind,
+            "folder"
+        );
+        assert_eq!(
+            item_for_path(Path::new("C:/x/Pasta"), 0, false).kind,
+            "file"
+        );
+    }
 
     fn parse_ok(text: &str) -> Parsed {
         parse(text).expect("the document should parse")
