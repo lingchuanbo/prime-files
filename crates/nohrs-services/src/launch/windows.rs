@@ -242,6 +242,8 @@ fn process_id_for(executable: &Path) -> Option<u32> {
     let mut process = None;
     while found {
         if std::time::Instant::now() >= deadline {
+            // §8.3: past the budget the caller starts a new instance instead.
+            tracing::debug!(target: "launch", "the already-running scan hit the 100 ms budget");
             break;
         }
         if let Some(path) = process_image(entry.th32ProcessID)
@@ -311,18 +313,23 @@ fn activate_main_window(process_id: u32) -> bool {
     };
     // SAFETY: the callback only reads the two values it is given and stores one
     // handle in `search`, which outlives the call.
-    let enumerated = unsafe {
+    // `EnumWindows` answers FALSE when the callback stopped it, which is how a
+    // successful search ends (it returns `BOOL(0)` once the window is stored);
+    // windows-rs reports that FALSE as `Err`. Only `search.window` says whether
+    // a window was found, so the result is logged and otherwise ignored.
+    if let Err(error) = unsafe {
         EnumWindows(
             Some(enum_window),
             LPARAM((&mut search as *mut WindowSearch).cast::<core::ffi::c_void>() as isize),
         )
-    };
-    if enumerated.is_err() {
-        return false;
+    } {
+        tracing::debug!(target: "launch", process = process_id, "the window enumeration ended: {error}");
     }
     let Some(window) = search.window else {
+        tracing::debug!(target: "launch", process = process_id, "no visible, ownerless window for the process");
         return false;
     };
+    tracing::debug!(target: "launch", process = process_id, hwnd = window.0 as isize, "activating the window");
     // SAFETY: `window` came from `EnumWindows` and is still a handle Windows
     // knows; the calls take no buffers.
     unsafe {
