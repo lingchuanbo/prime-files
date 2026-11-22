@@ -1560,6 +1560,46 @@ async fn toggle_sidebar_is_independent_per_pane(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn a_sidebar_toggle_in_a_split_stays_in_that_pane(cx: &mut TestAppContext) {
+    let window = new_explorer_page(cx);
+    window
+        .update(cx, |page, window, cx| {
+            // The window opening: the file's layout reaches every pane.
+            page.apply_config_layout(&config::Layout::default(), cx);
+            page.split(SplitDirection::Vertical, window, cx);
+            assert!(page.pane(0).read(cx).sidebar_visible);
+            assert!(
+                !page.pane(1).read(cx).sidebar_visible,
+                "a split pane starts with its sidebar collapsed"
+            );
+
+            // Ctrl+B in pane 0 hides its sidebar; the toggle is written to
+            // `[layout]` and the watcher applies that file back.
+            page.pane(0).update(cx, |pane, cx| pane.toggle_sidebar(cx));
+            let mut hidden = config::Layout::default();
+            hidden.sidebar_visible = false;
+            page.apply_config_layout(&hidden, cx);
+            assert!(!page.pane(0).read(cx).sidebar_visible);
+            assert!(!page.pane(1).read(cx).sidebar_visible);
+
+            // Ctrl+B in pane 1 shows it there. The reload that follows must not
+            // show it in pane 0 as well.
+            page.set_active(1, window, cx);
+            page.pane(1).update(cx, |pane, cx| pane.toggle_sidebar(cx));
+            page.apply_config_layout(&config::Layout::default(), cx);
+            assert!(
+                page.pane(1).read(cx).sidebar_visible,
+                "the toggled pane shows its sidebar"
+            );
+            assert!(
+                !page.pane(0).read(cx).sidebar_visible,
+                "the other pane of the split keeps its own state"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 async fn the_directory_menu_can_anchor_to_the_listings_corner(cx: &mut TestAppContext) {
     use crate::explorer::context_menu::MenuPurpose;
 

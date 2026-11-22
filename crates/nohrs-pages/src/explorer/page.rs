@@ -289,6 +289,10 @@ pub struct ExplorerPage {
     preview_visible: bool,
     /// Whether the sidebar starts shown; written when it is toggled.
     sidebar_visible: bool,
+    /// Whether the `[layout]` values have been applied once. The first
+    /// application is the window opening, which sets every pane; later ones
+    /// come from a toggle in the active pane and must not reach the others.
+    layout_applied: bool,
     /// New tabs open beside the current one.
     new_tab_next_to_current: bool,
     // Last-applied `[ui]` settings, replayed onto tabs opened later so they match
@@ -383,6 +387,7 @@ impl ExplorerPage {
             synced_panes: false,
             preview_visible: true,
             sidebar_visible: true,
+            layout_applied: false,
             new_tab_next_to_current: true,
             ui: Ui::default(),
             space_map: SpaceMap::default(),
@@ -1247,24 +1252,25 @@ impl ExplorerPage {
     /// and the terminal dock, and the tabs' layout.
     pub fn apply_config_layout(&mut self, layout: &Layout, cx: &mut Context<Self>) {
         super::view::panels::set_sides(layout.sidebar, layout.preview);
+        // Opening the window is the one time the file's layout reaches every
+        // pane (they are made before the config is read). Afterwards a change
+        // here is the watcher echoing a toggle the user made in the active
+        // pane of a split: it must stay in that pane, not show the panel in
+        // all of them.
+        let opening = !self.layout_applied;
+        self.layout_applied = true;
         // The preview the window was left with: shown or hidden as it was.
-        // Panes made from here on start that way (`configure_tab`), and the
-        // ones already open take it too — the panes of a restored window are
-        // made before the config is read.
+        // Panes made from here on start that way (`configure_tab`).
         if self.preview_visible != layout.preview_visible {
             self.preview_visible = layout.preview_visible;
-            for tab in self.group.active_tabs() {
-                let visible = layout.preview_visible;
-                tab.update(cx, |pane, _| pane.preview_visible = visible);
-            }
+            let visible = layout.preview_visible;
+            self.apply_visibility_to_tabs(opening, move |pane| pane.preview_visible = visible, cx);
         }
         // The sidebar it was left with, the same way.
         if self.sidebar_visible != layout.sidebar_visible {
             self.sidebar_visible = layout.sidebar_visible;
-            for tab in self.group.active_tabs() {
-                let visible = layout.sidebar_visible;
-                tab.update(cx, |pane, _| pane.sidebar_visible = visible);
-            }
+            let visible = layout.sidebar_visible;
+            self.apply_visibility_to_tabs(opening, move |pane| pane.sidebar_visible = visible, cx);
         }
         self.terminal_side = layout.terminal;
         self.group.set_vertical_tabs(layout.vertical_tabs);
@@ -1288,6 +1294,28 @@ impl ExplorerPage {
         }
         self.new_tab_next_to_current = layout.new_tab_next_to_current;
         super::view::panels::set_move_grips(layout.move_grips);
+        cx.notify();
+    }
+
+    /// Applies a `[layout]` panel's visibility to the tabs it should reach:
+    /// one per pane when the window opens, and only the active pane's tab after
+    /// that — the pane whose panel was toggled.
+    fn apply_visibility_to_tabs(
+        &mut self,
+        every_pane: bool,
+        apply: impl Fn(&mut ExplorerPane),
+        cx: &mut Context<Self>,
+    ) {
+        let tabs = if every_pane {
+            self.group.active_tabs()
+        } else {
+            let pane = self.group.active();
+            let tab = self.group.active_tab(pane);
+            self.group.tab(pane, tab).into_iter().collect()
+        };
+        for tab in tabs {
+            tab.update(cx, |tab, _cx| apply(tab));
+        }
         cx.notify();
     }
 
