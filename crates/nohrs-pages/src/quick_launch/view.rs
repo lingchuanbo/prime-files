@@ -52,7 +52,23 @@ pub(crate) struct QuickLaunchView {
     /// which is what a quick return of the focus needs.
     hide_task: Option<Task<()>>,
     scroll_handle: UniformListScrollHandle,
+    /// What the last frame drew, kept until the state's revision says it
+    /// changed (S6). Rebuilding it clones the group's items, so it is not done
+    /// per frame.
+    frame: Option<Frame>,
     _activation: Subscription,
+}
+
+/// Everything a frame draws that does not change from frame to frame.
+struct Frame {
+    revision: u64,
+    icon_edge: u32,
+    groups: Rc<Vec<(String, bool)>>,
+    drawn: Rc<Vec<Drawn>>,
+    view: View,
+    columns: usize,
+    cell_size: f32,
+    list_columns: usize,
 }
 
 impl QuickLaunchView {
@@ -76,6 +92,7 @@ impl QuickLaunchView {
             focus,
             hide_task: None,
             scroll_handle: UniformListScrollHandle::new(),
+            frame: None,
             _activation: subscription,
         }
     }
@@ -179,52 +196,93 @@ impl QuickLaunchView {
 
 impl Render for QuickLaunchView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(quick_launch) = super::state(cx) else {
+        let Some((revision, selected, configured_icon_size)) = super::state(cx)
+            .map(|state| (state.revision, state.slot, state.config().window.icon_size))
+        else {
             return div().size_full();
         };
-        let config = quick_launch.config().clone();
         let loading = super::is_loading(cx);
         let read_only = super::read_only_reason(cx).map(str::to_string);
         let message = super::message(cx).map(str::to_string);
-        let group_index = quick_launch
-            .group
-            .min(config.groups.len().saturating_sub(1));
-        let selected = quick_launch.slot;
-        let groups: Vec<(String, bool)> = config
-            .groups
-            .iter()
-            .enumerate()
-            .map(|(index, group)| (group.name.clone(), index == group_index))
-            .collect();
-        let items: Vec<Item> = config
-            .groups
-            .get(group_index)
-            .map(|group| group.items.clone())
-            .unwrap_or_default();
-        let view = config.window.view;
-        let columns = usize::from(config.window.columns.max(1));
-        let cell_size = f32::from(config.window.cell_size);
-        let icon_edge = super::icon_edge(window, config.window.icon_size);
-        let list_columns = usize::from(config.window.list_columns.max(1));
+        let icon_edge = super::icon_edge(window, configured_icon_size);
 
-        // The icons are asked for here, once per item, because `super::icon`
-        // needs the mutable state; the renderer then draws from what it got.
-        let drawn: Vec<Drawn> = items
-            .iter()
-            .map(|item| {
-                let source = item
-                    .icon
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|icon| !icon.is_empty())
-                    .or(item.path.as_deref());
-                let image = source.and_then(|source| super::icon(cx, source, icon_edge));
-                Drawn {
-                    item: item.clone(),
-                    image,
-                }
-            })
-            .collect();
+        // A frame is rebuilt when the state says what it draws changed, or when
+        // the window's scale asks for a different icon size (S6).
+        let stale = self
+            .frame
+            .as_ref()
+            .is_none_or(|frame| frame.revision != revision || frame.icon_edge != icon_edge);
+        if stale {
+            // Read inside the borrow, then drop it: `super::icon` needs the
+            // state mutably.
+            let planned = {
+                let Some(state) = super::state(cx) else {
+                    return div().size_full();
+                };
+                let config = state.config();
+                let current = state.group;
+                let names: Vec<(String, bool)> = config
+                    .groups
+                    .iter()
+                    .enumerate()
+                    .map(|(index, group)| (group.name.clone(), index == current))
+                    .collect();
+                let groups: Rc<Vec<(String, bool)>> = Rc::new(names);
+                let items: Vec<Item> = config
+                    .groups
+                    .get(current)
+                    .map(|group| group.items.clone())
+                    .unwrap_or_default();
+                (
+                    groups,
+                    items,
+                    config.window.view,
+                    usize::from(config.window.columns.max(1)),
+                    f32::from(config.window.cell_size),
+                    usize::from(config.window.list_columns.max(1)),
+                )
+            };
+            let (groups, items, view, columns, cell_size, list_columns) = planned;
+            // The icons are asked for here, once per rebuild, because
+            // `super::icon` needs the mutable state.
+            let drawn: Rc<Vec<Drawn>> = Rc::new(
+                items
+                    .iter()
+                    .map(|item| {
+                        let source = item
+                            .icon
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|icon| !icon.is_empty())
+                            .or(item.path.as_deref());
+                        let image = source.and_then(|source| super::icon(cx, source, icon_edge));
+                        Drawn {
+                            item: item.clone(),
+                            image,
+                        }
+                    })
+                    .collect(),
+            );
+            self.frame = Some(Frame {
+                revision,
+                icon_edge,
+                groups,
+                drawn,
+                view,
+                columns,
+                cell_size,
+                list_columns,
+            });
+        }
+        let Some(frame) = self.frame.as_ref() else {
+            return div().size_full();
+        };
+        let groups = frame.groups.clone();
+        let drawn = frame.drawn.clone();
+        let view = frame.view;
+        let columns = frame.columns;
+        let cell_size = frame.cell_size;
+        let list_columns = frame.list_columns;
 
         let title_bar = self.render_title_bar();
         let group_bar = render_group_bar(&groups, cx);
