@@ -48,6 +48,23 @@ pub trait PaneItem: Render + Focusable + 'static {
     /// gesture of its own can ask for one. Called on every render of the
     /// active tab; defaults to ignoring it.
     fn set_split_available(&mut self, _available: bool) {}
+
+    /// Tells the item whether it shares the window with another pane. Called on
+    /// every render of the active tab; defaults to ignoring it.
+    fn set_multi_pane(&mut self, _multi: bool) {}
+
+    /// Tells the item whether its pane is the active one in a split, so its
+    /// address bar can carry the sign. Called on every render of the active
+    /// tab; defaults to ignoring it.
+    fn set_pane_active(&mut self, _active: bool) {}
+
+    /// Hands the item the other pane's tab, for a preview drawn there.
+    /// Called on every render of the active tab; defaults to ignoring it.
+    fn set_sibling_pane(&mut self, _sibling: Option<Entity<Self>>)
+    where
+        Self: Sized,
+    {
+    }
 }
 
 /// Width of the column of vertical tabs as a fresh window opens.
@@ -162,9 +179,38 @@ type PaneHook<V> = Rc<dyn Fn(&mut V, usize, &mut Window, &mut Context<V>)>;
 type TabHook<V> = Rc<dyn Fn(&mut V, usize, usize, &mut Window, &mut Context<V>)>;
 /// A tab-reorder render hook: `(view, pane, from, to, window, cx)`.
 type ReorderHook<V> = Rc<dyn Fn(&mut V, usize, usize, usize, &mut Window, &mut Context<V>)>;
+/// A tab moved onto another pane: `(view, from pane, from tab, to pane, to tab, window, cx)`.
+type MoveTabHook<V> = Rc<dyn Fn(&mut V, usize, usize, usize, usize, &mut Window, &mut Context<V>)>;
 /// A press that starts one of the group's drags: `(view, drag, window, cx)`.
 type ContextHook<V> = Rc<dyn Fn(&mut V, usize, usize, Point<Pixels>, &mut Window, &mut Context<V>)>;
 type DragHook<V> = Rc<dyn Fn(&mut V, GroupDrag, &mut Window, &mut Context<V>)>;
+
+/// How tab titles are drawn, from `[layout]` in the config.
+#[derive(Debug, Clone, Copy)]
+pub struct TabDisplaySettings {
+    /// Longest title in characters; 0 keeps it whole.
+    pub title_limit: u32,
+    /// Show the folder icon.
+    pub show_icons: bool,
+    /// Put a `*` before a locked tab's title.
+    pub asterisk_locked: bool,
+    /// A double click on a tab closes it.
+    pub close_on_double_click: bool,
+    /// Clicking a tab makes its pane the one in use.
+    pub click_activates_pane: bool,
+}
+
+impl Default for TabDisplaySettings {
+    fn default() -> Self {
+        Self {
+            title_limit: 15,
+            show_icons: true,
+            asterisk_locked: true,
+            close_on_double_click: true,
+            click_activates_pane: false,
+        }
+    }
+}
 
 /// The view-state hooks a [`PaneGroup`] needs to render its interactive chrome.
 /// Bundled into one struct because the tab bar wires up six distinct actions;
@@ -183,6 +229,9 @@ pub struct PaneGroupCallbacks<V: 'static> {
     pub on_close_tab: TabHook<V>,
     /// A tab was dragged onto another within the same pane: `(pane, from, to)`.
     pub on_reorder_tab: ReorderHook<V>,
+    /// A tab was dragged onto a tab of the other pane:
+    /// `(from pane, from tab, to pane, to tab)`.
+    pub on_move_tab: MoveTabHook<V>,
     /// A tab was right-clicked at a window position.
     pub on_tab_context: ContextHook<V>,
     /// The divider or the tab column's edge was pressed: the embedder hands
@@ -201,6 +250,7 @@ impl<V: 'static> Clone for PaneGroupCallbacks<V> {
             on_activate_tab: self.on_activate_tab.clone(),
             on_close_tab: self.on_close_tab.clone(),
             on_reorder_tab: self.on_reorder_tab.clone(),
+            on_move_tab: self.on_move_tab.clone(),
             on_tab_context: self.on_tab_context.clone(),
             on_group_drag: self.on_group_drag.clone(),
         }
@@ -267,6 +317,8 @@ pub struct PaneGroup<T: PaneItem> {
     tab_width: f32,
     /// Whether horizontal tabs show their Alt+number prefix.
     show_tab_numbers: bool,
+    /// How tab titles and icons are drawn.
+    tab_display: TabDisplaySettings,
 }
 
 impl<T: PaneItem> PaneGroup<T> {
@@ -292,6 +344,7 @@ impl<T: PaneItem> PaneGroup<T> {
             tab_width_mode: TabWidthMode::Adaptive,
             tab_width: 160.0,
             show_tab_numbers: true,
+            tab_display: TabDisplaySettings::default(),
         };
         (group, first)
     }
@@ -577,6 +630,73 @@ impl<T: PaneItem> PaneGroup<T> {
         true
     }
 
+    /// Moves the tab at `from_tab` of `from_pane` into `to_pane` at `to_tab`,
+    /// keeping it active there. The entity, its metadata and its running
+    /// state move with it. A pane left without tabs is removed by the caller.
+    pub fn move_tab(
+        &mut self,
+        from_pane: usize,
+        from_tab: usize,
+        to_pane: usize,
+        to_tab: usize,
+    ) -> bool {
+        if from_pane == to_pane
+            || from_pane >= self.panes.len()
+            || to_pane >= self.panes.len()
+        {
+            return false;
+        }
+        if from_tab >= self.panes[from_pane].tabs.len() {
+            return false;
+        }
+        let tab = self.panes[from_pane].tabs.remove(from_tab);
+        {
+            let source = &mut self.panes[from_pane];
+            if !source.tabs.is_empty() && source.active_tab >= source.tabs.len() {
+                source.active_tab = source.tabs.len() - 1;
+            }
+        }
+        let target = &mut self.panes[to_pane];
+        let at = to_tab.min(target.tabs.len());
+        target.tabs.insert(at, tab);
+        target.active_tab = at;
+        // The tab that arrived is the one shown in the other pane.
+        self.active = to_pane;
+        true
+    }
+
+    /// Puts the two panes the other way round: their tabs and each tab's state
+    /// move with them, the pane in use follows its tabs to the other side, and
+    /// the split ratio flips so both keep the size they had.
+    pub fn swap_panes(&mut self) -> bool {
+        if self.panes.len() < 2 {
+            return false;
+        }
+        self.panes.swap(0, 1);
+        self.active = self.panes.len() - 1 - self.active;
+        self.ratio = 1.0 - self.ratio;
+        true
+    }
+
+    /// A tab title as `[layout]` asks for it: the locked `*` and the length limit.
+    fn decorated_tab_title(&self, title: String, tab: EntityId) -> String {
+        let metadata = self.tab_metadata(tab);
+        let mut title = title;
+        if self.tab_display.asterisk_locked && metadata.locked {
+            title.insert(0, '*');
+        }
+        let limit = self.tab_display.title_limit as usize;
+        if limit > 0 && title.chars().count() > limit {
+            title = title.chars().take(limit).collect::<String>();
+            title.push('…');
+        }
+        title
+    }
+
+    /// Sets how tab titles and icons are drawn (`[layout]`).
+    pub fn set_tab_display(&mut self, tab_display: TabDisplaySettings) {
+        self.tab_display = tab_display;
+    }
     /// Sets the orientation a split renders with.
     pub fn set_direction(&mut self, direction: SplitDirection) {
         self.direction = direction;
@@ -824,7 +944,18 @@ impl<T: PaneItem> PaneGroup<T> {
         let is_active = split && pane_index == self.active;
         let on_activate_pane = callbacks.on_activate_pane.clone();
         let split_available = self.panes.len() < MAX_PANES;
-        content.update(cx, |item, _| item.set_split_available(split_available));
+        let multi = self.panes.len() > 1;
+        let sibling = if split {
+            Some(self.panes[1 - pane_index].active().clone())
+        } else {
+            None
+        };
+        content.update(cx, |item, _| {
+            item.set_split_available(split_available);
+            item.set_multi_pane(multi);
+            item.set_pane_active(is_active);
+            item.set_sibling_pane(sibling);
+        });
         if self.vertical_tabs {
             // The column stays out in compact mode: its edge is the
             // sidebar's to slide from.
@@ -843,8 +974,6 @@ impl<T: PaneItem> PaneGroup<T> {
                 row.child(column).child(body)
             };
             return row
-                .when(is_active, |this| this.border_t_2().border_color(rgb(theme::accent())))
-                .when(split && !is_active, |this| this.border_t_2().border_color(rgb(theme::bg())))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _event, window, cx| on_activate_pane(this, pane_index, window, cx)),
@@ -871,12 +1000,6 @@ impl<T: PaneItem> PaneGroup<T> {
             .size_full()
             .min_w(px(0.0))
             .min_h(px(0.0))
-            .when(is_active, |this| {
-                this.border_t_2().border_color(rgb(theme::accent()))
-            })
-            .when(split && !is_active, |this| {
-                this.border_t_2().border_color(rgb(theme::bg()))
-            })
             // Clicking anywhere in a pane makes it the active one.
             .on_mouse_down(
                 MouseButton::Left,
@@ -884,6 +1007,17 @@ impl<T: PaneItem> PaneGroup<T> {
                     on_activate_pane(this, pane_index, window, cx)
                 }),
             )
+            // A tab dragged anywhere onto this pane joins it, which is more
+            // forgiving than having to hit a tab of the other pane exactly.
+            .on_drop(cx.listener({
+                let on_move_tab = callbacks.on_move_tab.clone();
+                let tabs = self.panes[pane_index].tabs.len();
+                move |this, drag: &TabDrag, window, cx| {
+                    if drag.pane != pane_index {
+                        on_move_tab(this, drag.pane, drag.tab, pane_index, tabs, window, cx);
+                    }
+                }
+            }))
             .relative()
             .children(in_flow)
             .child(
@@ -989,7 +1123,7 @@ impl<T: PaneItem> PaneGroup<T> {
             .map(|(tab_index, tab)| {
                 let (title, icon) = {
                     let item = tab.read(cx);
-                    (item.tab_title(cx), item.tab_icon(cx))
+                    (self.decorated_tab_title(item.tab_title(cx), tab.entity_id()), item.tab_icon(cx))
                 };
                 self.render_tab(
                     pane_index,
@@ -1184,15 +1318,20 @@ impl<T: PaneItem> PaneGroup<T> {
             .map(|(tab_index, tab)| {
                 let (title, icon) = {
                     let item = tab.read(cx);
-                    (item.tab_title(cx), item.tab_icon(cx))
+                    (self.decorated_tab_title(item.tab_title(cx), tab.entity_id()), item.tab_icon(cx))
                 };
                 let metadata = self.tab_metadata(tab.entity_id());
                 let is_active = tab_index == active_tab;
                 let on_context = callbacks.on_tab_context.clone();
                 let on_activate_tab = callbacks.on_activate_tab.clone();
+        let on_activate_pane = callbacks.on_activate_pane.clone();
+        let close_on_double = self.tab_display.close_on_double_click;
+        let click_activates = self.tab_display.click_activates_pane;
                 let on_close_tab = callbacks.on_close_tab.clone();
+                let on_close_click = callbacks.on_close_tab.clone();
                 let on_middle_close = callbacks.on_close_tab.clone();
                 let on_reorder_tab = callbacks.on_reorder_tab.clone();
+        let on_move_tab = callbacks.on_move_tab.clone();
                 let drag_title = SharedString::from(title.clone());
                 let tooltip_title = title.clone();
                 let group = SharedString::from(format!("vtab-group-{pane_index}-{tab_index}"));
@@ -1230,8 +1369,15 @@ impl<T: PaneItem> PaneGroup<T> {
                         cx.stop_propagation();
                         on_context(this, pane_index, tab_index, event.position, window, cx);
                     }))
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        on_activate_tab(this, pane_index, tab_index, window, cx)
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if close_on_double && event.click_count() >= 2 {
+                            on_close_click(this, pane_index, tab_index, window, cx);
+                        } else {
+                            if click_activates {
+                                on_activate_pane(this, pane_index, window, cx);
+                            }
+                            on_activate_tab(this, pane_index, tab_index, window, cx);
+                        }
                     }))
                     .when(show_close, |this| {
                         this.on_mouse_down(
@@ -1256,14 +1402,18 @@ impl<T: PaneItem> PaneGroup<T> {
                     .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
                         if drag.pane == pane_index {
                             on_reorder_tab(this, pane_index, drag.tab, tab_index, window, cx);
+                        } else {
+                            on_move_tab(this, drag.pane, drag.tab, pane_index, tab_index, window, cx);
                         }
                     }))
-                    .child(
-                        Icon::new(icon.unwrap_or(IconName::Folder))
-                            .size_4()
-                            .flex_shrink_0()
-                            .text_color(rgb(metadata.color.unwrap_or(if is_active { theme::accent() } else { theme::muted() }))),
-                    )
+                    .when(self.tab_display.show_icons, |this| {
+                        this.child(
+                            Icon::new(icon.unwrap_or(IconName::Folder))
+                                .size_4()
+                                .flex_shrink_0()
+                                .text_color(rgb(metadata.color.unwrap_or(if is_active { theme::accent() } else { theme::muted() }))),
+                        )
+                    })
                     .when(labels && !metadata.resident, |this| {
                         this.child(
                             div()
@@ -1448,8 +1598,13 @@ impl<T: PaneItem> PaneGroup<T> {
         let metadata = self.tab(pane_index, tab_index).map(|tab| self.tab_metadata(tab.entity_id())).unwrap_or_default();
         let show_close = show_close && !metadata.pinned && !metadata.resident && !metadata.locked;
         let on_activate_tab = callbacks.on_activate_tab.clone();
+        let on_activate_pane = callbacks.on_activate_pane.clone();
+        let close_on_double = self.tab_display.close_on_double_click;
+        let click_activates = self.tab_display.click_activates_pane;
         let on_close_tab = callbacks.on_close_tab.clone();
+        let on_close_click = callbacks.on_close_tab.clone();
         let on_reorder_tab = callbacks.on_reorder_tab.clone();
+        let on_move_tab = callbacks.on_move_tab.clone();
         let drag_title = SharedString::from(title.clone());
         let on_middle_close = callbacks.on_close_tab.clone();
         let group = SharedString::from(format!("tab-group-{pane_index}-{tab_index}"));
@@ -1505,8 +1660,15 @@ impl<T: PaneItem> PaneGroup<T> {
                 cx.stop_propagation();
                 on_context(this, pane_index, tab_index, event.position, window, cx);
             }))
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                on_activate_tab(this, pane_index, tab_index, window, cx)
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if close_on_double && event.click_count() >= 2 {
+                    on_close_click(this, pane_index, tab_index, window, cx);
+                } else {
+                    if click_activates {
+                        on_activate_pane(this, pane_index, window, cx);
+                    }
+                    on_activate_tab(this, pane_index, tab_index, window, cx);
+                }
             }))
             // Middle click closes, as in every tabbed browser and Explorer.
             .when(show_close, |this| {
@@ -1534,6 +1696,8 @@ impl<T: PaneItem> PaneGroup<T> {
             .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
                 if drag.pane == pane_index {
                     on_reorder_tab(this, pane_index, drag.tab, tab_index, window, cx);
+                } else {
+                    on_move_tab(this, drag.pane, drag.tab, pane_index, tab_index, window, cx);
                 }
             }))
             .when(self.show_tab_numbers && tab_index < 10, |this| {

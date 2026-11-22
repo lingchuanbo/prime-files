@@ -380,8 +380,94 @@ impl ExplorerPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // In a split, Alt+Q puts the preview in the other pane: every row the
+        // person clicks here is shown there instead, as Total Commander does.
+        if self.preview_in_sibling {
+            self.show_in_sibling(path, window, cx);
+            return;
+        }
         self.preview_back.clear();
         self.load_preview(path, window, cx);
+    }
+
+    /// Shows `path` large in the other pane of a split.
+    pub(crate) fn show_in_sibling(
+        &mut self,
+        path: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sibling) = self.sibling_pane.clone() else {
+            return;
+        };
+        // The window the preview needs is only available while the other pane
+        // renders, so the path waits in `preview_request` for that render.
+        sibling.update(cx, move |other, cx| {
+            other.preview_full = true;
+            other.quick_look = false;
+            other.preview_visible = false;
+            other.preview_follow = None;
+            other.preview_request = Some(path);
+            cx.notify();
+        });
+    }
+
+    /// Alt+Q in a split: shows the selected entry large in the other pane, or
+    /// closes that preview when it is already open. The other pane's state is
+    /// read live, so a preview closed over there cannot leave this pane
+    /// thinking it is still open.
+    pub(crate) fn toggle_preview_in_other_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Pressed from the pane showing the preview: close it here, and tell
+        // the other pane to stop tracking it.
+        if self.preview_full {
+            self.preview_full = false;
+            self.preview_visible = true;
+            if let Some(sibling) = self.sibling_pane.clone() {
+                sibling.update(cx, |other, cx| {
+                    other.preview_in_sibling = false;
+                    cx.notify();
+                });
+            }
+            cx.notify();
+            return;
+        }
+        let sibling_open = self
+            .sibling_pane
+            .as_ref()
+            .is_some_and(|sibling| sibling.read(cx).preview_full);
+        if sibling_open || self.preview_in_sibling {
+            self.leave_sibling_preview(cx);
+            return;
+        }
+        let Some(path) = self
+            .active_row()
+            .and_then(|row| self.filtered_entries.get(row))
+            .filter(|entry| entry.kind == "file" || entry.kind == "dir")
+            .map(|entry| entry.path.clone())
+        else {
+            return;
+        };
+        self.preview_in_sibling = true;
+        self.show_in_sibling(path, window, cx);
+    }
+
+    /// Closes the preview drawn in the other pane, if there is one there.
+    pub(crate) fn leave_sibling_preview(&mut self, cx: &mut Context<Self>) {
+        self.preview_in_sibling = false;
+        let Some(sibling) = self.sibling_pane.clone() else {
+            return;
+        };
+        sibling.update(cx, |other, cx| {
+            other.preview_full = false;
+            other.preview_visible = true;
+            other.preview_request = None;
+            other.close_quick_look(cx);
+            cx.notify();
+        });
     }
 
     /// Previews `path`, clicked inside the preview's folder listing; the

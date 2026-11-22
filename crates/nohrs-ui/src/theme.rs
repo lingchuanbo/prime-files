@@ -164,6 +164,20 @@ pub mod theme {
         if is_dark() { mix(base, 0xFFFFFF, 0.12) } else { mix(base, 0x000000, 0.18) }
     }
 
+    /// A file-type colour as the listing paints it: the same hue, shaded
+    /// toward the palette's text colour so a colour rule (or the built-in type
+    /// palette) reads on both themes.
+    pub fn type_color(base: u32) -> u32 {
+        shaded_accent(base)
+    }
+
+    /// The fill behind a type badge: the type colour laid over the surface
+    /// instead of an alpha blend, so the badge reads the same over a zebra
+    /// stripe or a selected row as over plain background.
+    pub fn type_badge_bg(base: u32) -> u32 {
+        mix(bg(), type_color(base), if is_dark() { 0.22 } else { 0.14 })
+    }
+
     struct Palette {
         gray_50: u32,
         gray_100: u32,
@@ -194,6 +208,7 @@ pub mod theme {
         accent_fg: u32,
         danger: u32,
         warning: u32,
+        success: u32,
         preview_backdrop: u32,
     }
 
@@ -230,6 +245,8 @@ pub mod theme {
         accent_fg: 0xFFFFFF,
         danger: 0xDC2626,
         warning: 0xB45309,
+        // A green dark enough to read as text on white.
+        success: 0x15803D,
         preview_backdrop: 0x1F2937,
     };
 
@@ -271,6 +288,9 @@ pub mod theme {
         accent_fg: 0x171A21,
         danger: 0xF07171,
         warning: 0xE0A33A,
+        // Lighter than the light palette's green: on graphite, a dark green
+        // reads as a smudge.
+        success: 0x4ADE80,
         preview_backdrop: 0x101218,
     };
 
@@ -355,6 +375,9 @@ pub mod theme {
         /// from `danger` is the whole point, since the two say opposite things
         /// about whether the thing the user asked for happened.
         warning;
+        /// Success color, for a file that is new to its version control or kept in
+        /// the cloud: nothing is wrong with it and nothing needs doing.
+        success;
         /// Backdrop behind an image preview; deliberately dark so transparent
         /// and light-colored images stay legible.
         preview_backdrop;

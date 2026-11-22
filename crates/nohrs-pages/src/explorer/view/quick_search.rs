@@ -40,8 +40,18 @@ pub(super) fn render(
     } else if recursive {
         page.search_subfolders(typed, cx);
     } else if typed != page.name_filter {
-        page.name_filter = typed;
+        // Typing narrows the listing; a key that leaves nothing to match is
+        // not taken, as Explorer's type-ahead does: the field stays where the
+        // last match was instead of going blank.
+        let previous = page.name_filter.clone();
+        let adding = typed.len() > previous.len() && typed.starts_with(&previous);
+        page.name_filter = typed.clone();
         page.apply_filter();
+        if adding && page.filtered_entries.is_empty() && !page.entries.is_empty() {
+            page.name_filter = previous.clone();
+            page.apply_filter();
+            input.update(cx, |state, cx| state.set_value(previous, window, cx));
+        }
     }
     div()
         .id("directory-search")

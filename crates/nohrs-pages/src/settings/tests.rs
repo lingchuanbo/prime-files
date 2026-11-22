@@ -133,6 +133,88 @@ fn wheel_brightness_responds_at_its_visible_position(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn list_appearance_rows_sit_in_appearance_and_reset_to_their_defaults(cx: &mut TestAppContext) {
+    fn reset_of(groups: &[Group], label: &'static str) -> Option<Pick> {
+        groups
+            .iter()
+            .flat_map(|group| &group.rows)
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("{label} setting"))
+            .reset
+            .clone()
+    }
+
+    let page = cx.new(SettingsPage::new);
+    page.update(cx, |page, cx| {
+        // At their defaults there is nothing to reset.
+        let groups = page.appearance(cx);
+        assert!(reset_of(&groups, t!("Altura das linhas")).is_none());
+        assert!(reset_of(&groups, t!("Linhas zebradas")).is_none());
+        assert!(reset_of(&groups, t!("Contorno da seleção")).is_none());
+        assert!(reset_of(&groups, t!("Duplo clique no espaço vazio")).is_none());
+
+        page.config.ui.list_row_height = ListRowHeight::Relaxed;
+        page.config.ui.zebra_rows = true;
+        page.config.ui.selection_outline = true;
+        page.config.ui.double_click_empty = DoubleClickEmpty::Up;
+        let groups = page.appearance(cx);
+        assert!(matches!(
+            reset_of(&groups, t!("Altura das linhas")),
+            Some(Pick::Config("ui", "list_row_height", value)) if value.as_ref() == "\"standard\""
+        ));
+        assert!(matches!(
+            reset_of(&groups, t!("Linhas zebradas")),
+            Some(Pick::Config("ui", "zebra_rows", value)) if value.as_ref() == "false"
+        ));
+        assert!(matches!(
+            reset_of(&groups, t!("Contorno da seleção")),
+            Some(Pick::Config("ui", "selection_outline", value)) if value.as_ref() == "false"
+        ));
+        assert!(matches!(
+            reset_of(&groups, t!("Duplo clique no espaço vazio")),
+            Some(Pick::Config("ui", "double_click_empty", value)) if value.as_ref() == "\"none\""
+        ));
+    });
+}
+
+#[gpui::test]
+fn file_status_rows_sit_in_files_and_reset_to_off(cx: &mut TestAppContext) {
+    let page = cx.new(SettingsPage::new);
+    page.update(cx, |page, cx| {
+        let groups = page.files(cx);
+        let group = groups
+            .iter()
+            .find(|group| group.title == Some(t!("Estado dos arquivos")))
+            .expect("file status group");
+        assert_eq!(group.rows.len(), 2);
+        assert!(group.rows.iter().all(|row| row.reset.is_none()));
+
+        page.config.ui.show_sync_status = true;
+        page.config.ui.show_vcs_status = true;
+        let groups = page.files(cx);
+        let group = groups
+            .iter()
+            .find(|group| group.title == Some(t!("Estado dos arquivos")))
+            .expect("file status group");
+        let reset_of = |label: &'static str| {
+            group
+                .rows
+                .iter()
+                .find(|row| row.label == label)
+                .and_then(|row| row.reset.clone())
+        };
+        assert!(matches!(
+            reset_of(t!("Mostrar estado de sincronização")),
+            Some(Pick::Config("ui", "show_sync_status", value)) if value.as_ref() == "false"
+        ));
+        assert!(matches!(
+            reset_of(t!("Mostrar estado do Git/SVN")),
+            Some(Pick::Config("ui", "show_vcs_status", value)) if value.as_ref() == "false"
+        ));
+    });
+}
+
 #[test]
 fn search_ignores_case_and_accents() {
     assert_eq!(super::fold("Áudio nos ÍCONES"), "audio nos icones");

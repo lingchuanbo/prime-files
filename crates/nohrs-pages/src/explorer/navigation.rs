@@ -455,12 +455,18 @@ impl ExplorerPane {
                     self.preview_editor_changes = None;
                     // Its file belonged to the folder left behind.
                     self.quick_look = false;
+                    self.leave_sibling_preview(cx);
                 }
                 self.entries = entries;
                 self.apply_filter();
                 self.update_item_sizes();
                 self.listed_cwd = Some(self.cwd.clone());
                 self.clear_status();
+                // The checkout and the cloud state of the rows just read:
+                // both answer per folder, and a paste or a delete has changed
+                // what they must say. A refresh of the same folder keeps the
+                // old badges until the new answer, so they do not blink.
+                self.refresh_status(refresh, cx);
                 if let Some(path) = self.reveal_after_listing.take() {
                     self.reveal(&path);
                 }
@@ -478,6 +484,9 @@ impl ExplorerPane {
                 // selected by nobody.
                 self.prune_selection();
                 self.update_item_sizes();
+                // No rows, so no badges: drop the last folder's.
+                self.vcs_status = None;
+                self.sync_states.clear();
                 self.set_status(
                     StatusLevel::Error,
                     format!("Cannot open '{}': {}", self.cwd, e),
@@ -568,6 +577,17 @@ impl ExplorerPane {
             return;
         };
         self.change_dir(parent, window, cx);
+    }
+
+    /// Acts on a double click on the listing's empty space, as `ui` chooses.
+    /// The listing itself decides when the click was on empty space; this is
+    /// only what the click then means.
+    pub(crate) fn double_click_empty_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.double_click_empty {
+            config::DoubleClickEmpty::None => {}
+            config::DoubleClickEmpty::Back => self.go_back(window, cx),
+            config::DoubleClickEmpty::Up => self.go_up(window, cx),
+        }
     }
 
     pub(crate) fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {

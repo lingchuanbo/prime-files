@@ -72,6 +72,18 @@ struct SessionSnapshot {
     direction: SplitDirection,
 }
 
+/// A split collapsed with the keyboard, kept in memory so the same two panes
+/// come back when it is opened again.
+#[derive(Debug, Clone)]
+struct ShelvedSplit {
+    pane: PaneSnapshot,
+    pane_index: usize,
+    active_pane: usize,
+}
+
+/// One heading of the shortcuts sheet and its rows of (name, keys).
+type ShortcutGroup = (String, Vec<(String, String)>);
+
 actions!(
     explorer_panes,
     [
@@ -87,6 +99,24 @@ actions!(
         FocusNextPane,
         /// Move focus to the previous pane, wrapping around.
         FocusPrevPane,
+        /// Send the active tab of the pane in use to the right pane.
+        MoveTabToRightPane,
+        /// Send the active tab of the pane in use to the left pane.
+        MoveTabToLeftPane,
+        /// Open the pane in use's folder in the right pane.
+        OpenFolderInRightPane,
+        /// Open the pane in use's folder in the left pane.
+        OpenFolderInLeftPane,
+        /// Swap the two panes' places.
+        SwapPanes,
+        /// Show the tab after the active one.
+        NextTab,
+        /// Show the tab before the active one.
+        PreviousTab,
+        /// Open the active tab's context menu.
+        TabMenu,
+        /// Show every shortcut in one sheet.
+        ShowShortcuts,
         /// Open a new tab in the active pane, rooted at home.
         NewTab,
         /// Close the active tab (closing the pane if it was its last tab).
@@ -120,6 +150,14 @@ fn bind_pane_keys(cx: &mut App) {
             KeyBinding::new("ctrl-]", NoAction, Some(TERMINAL_CONTEXT)),
             KeyBinding::new("ctrl-\\", NoAction, Some(TERMINAL_CONTEXT)),
         ]);
+        // A split key that works from whichever pane has the keyboard: the
+        // context-specific bindings below cover the explorer's own focus, and
+        // these catch the cases where focus sits somewhere that does not carry
+        // that context. The terminal's NoAction above is deeper and still wins.
+        cx.bind_keys(vec![
+            KeyBinding::new("ctrl-\\", SplitVertical, None),
+            KeyBinding::new("ctrl-shift-\\", SplitHorizontal, None),
+        ]);
     });
     rebind_shortcuts(cx);
 }
@@ -144,6 +182,15 @@ pub fn rebind_shortcuts(cx: &mut App) {
         Action::PreviousPane,
         Action::ToggleSidebar,
         Action::ToggleTerminal,
+        Action::MoveTabToRightPane,
+        Action::MoveTabToLeftPane,
+        Action::OpenFolderInRightPane,
+        Action::OpenFolderInLeftPane,
+        Action::SwapPanes,
+        Action::NextTab,
+        Action::PreviousTab,
+        Action::TabMenu,
+        Action::ShowShortcuts,
     ];
     let wanted: Vec<(String, Action)> = page_actions
         .into_iter()
@@ -176,6 +223,17 @@ pub fn rebind_shortcuts(cx: &mut App) {
             Action::NextPane => KeyBinding::new(keys, FocusNextPane, context),
             Action::PreviousPane => KeyBinding::new(keys, FocusPrevPane, context),
             Action::ToggleSidebar => KeyBinding::new(keys, ToggleSidebar, context),
+            Action::MoveTabToRightPane => KeyBinding::new(keys, MoveTabToRightPane, context),
+            Action::MoveTabToLeftPane => KeyBinding::new(keys, MoveTabToLeftPane, context),
+            Action::OpenFolderInRightPane => {
+                KeyBinding::new(keys, OpenFolderInRightPane, context)
+            }
+            Action::OpenFolderInLeftPane => KeyBinding::new(keys, OpenFolderInLeftPane, context),
+            Action::SwapPanes => KeyBinding::new(keys, SwapPanes, context),
+            Action::NextTab => KeyBinding::new(keys, NextTab, context),
+            Action::PreviousTab => KeyBinding::new(keys, PreviousTab, context),
+            Action::TabMenu => KeyBinding::new(keys, TabMenu, context),
+            Action::ShowShortcuts => KeyBinding::new(keys, ShowShortcuts, context),
             _ => KeyBinding::new(keys, ToggleTerminal, context),
         });
     }
@@ -219,6 +277,8 @@ pub struct ExplorerPage {
     // Navigation-event subscriptions, one per live tab, keyed by tab entity id.
     tab_subscriptions: HashMap<EntityId, Subscription>,
     tab_menu: Option<(EntityId, Point<Pixels>)>,
+    /// The tab menu's recently-closed list is open.
+    tab_menu_recent: bool,
     tab_list_menu: Option<Point<Pixels>>,
     recently_closed: Vec<ClosedTab>,
     /// Whether navigation in one pane mirrors into the others (§3.2).
@@ -226,6 +286,10 @@ pub struct ExplorerPage {
     /// Whether the preview shows in panes made from here on: the `[layout]`
     /// value, so a window closed with it hidden opens that way.
     preview_visible: bool,
+    /// Whether the sidebar starts shown; written when it is toggled.
+    sidebar_visible: bool,
+    /// New tabs open beside the current one.
+    new_tab_next_to_current: bool,
     // Last-applied `[ui]` settings, replayed onto tabs opened later so they match
     // config rather than reverting to pane defaults.
     ui: Ui,
@@ -258,6 +322,11 @@ pub struct ExplorerPage {
     // A restarted terminal takes the focus the old one had, on the next
     // render, which is where the window is at hand.
     focus_terminal_on_next_render: Option<Entity<TerminalView>>,
+    // The pane a Ctrl+\ collapse took away: its tabs are kept, and put back
+    // when the split is opened again, so toggling the split loses nothing.
+    shelved_split: Option<ShelvedSplit>,
+    // The "all shortcuts" sheet is up.
+    shortcuts_help: bool,
 }
 
 impl Focusable for ExplorerPage {
@@ -308,9 +377,12 @@ impl ExplorerPage {
             tab_subscriptions: HashMap::new(),
             tab_menu: None,
             tab_list_menu: None,
+            tab_menu_recent: false,
             recently_closed: Vec::new(),
             synced_panes: false,
             preview_visible: true,
+            sidebar_visible: true,
+            new_tab_next_to_current: true,
             ui: Ui::default(),
             space_map: SpaceMap::default(),
             store,
@@ -325,6 +397,8 @@ impl ExplorerPage {
             terminal_drag: None,
             page_bounds: Rc::default(),
             focus_terminal_on_next_render: None,
+            shelved_split: None,
+            shortcuts_help: false,
         };
         page.subscribe_tab(&first_tab, cx);
         // The root pane's tab shows its sidebar; tabs opened later default to
@@ -492,11 +566,21 @@ impl ExplorerPage {
             .tab(pane_index, self.group.active_tab(pane_index))
             .map(|tab| tab.read(cx).sidebar_visible)
             .unwrap_or(false);
+        let active_before = self.group.active_tab(pane_index);
         let Some(tab) = self.group.add_tab(pane_index, window, cx) else {
             return;
         };
+        let last = self.group.tab_count(pane_index).saturating_sub(1);
+        let beside = self.new_tab_next_to_current && active_before + 1 < last;
+        if beside {
+            self.group.reorder_tab(pane_index, last, active_before + 1);
+        }
         self.subscribe_tab(&tab, cx);
         self.configure_tab(&tab, Some(home_dir()), sidebar_visible, cx);
+        if beside {
+            self.group
+                .set_active_tab(pane_index, active_before + 1, window, cx);
+        }
         // Make the pane active and focus its new (now active) tab.
         self.group.set_active(pane_index, window, cx);
         self.group.focus_active(window, cx);
@@ -601,6 +685,128 @@ impl ExplorerPage {
         }
     }
 
+    /// Whether a listing (not a text field or the preview) has the keyboard.
+    fn listing_focused(&self, window: &Window, cx: &App) -> bool {
+        (0..self.group.pane_count()).any(|pane| {
+            (0..self.group.tab_count(pane)).any(|tab| {
+                self.group
+                    .tab(pane, tab)
+                    .is_some_and(|tab| tab.read(cx).focus_handle.is_focused(window))
+            })
+        })
+    }
+
+    /// Moves the tab at `from_tab` of `from_pane` into `to_pane`, dropped at
+    /// `to_tab`, and makes it the pane in use.
+    fn move_tab_to_pane(
+        &mut self,
+        from_pane: usize,
+        from_tab: usize,
+        to_pane: usize,
+        to_tab: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.group.move_tab(from_pane, from_tab, to_pane, to_tab) {
+            return;
+        }
+        // Moving the only tab of a pane leaves it empty: the two panes become
+        // one, the pane the tab landed in.
+        if self.group.tab_count(from_pane) == 0 {
+            self.remove_pane_and_cleanup(from_pane, window, cx);
+            let target = if from_pane < to_pane { to_pane - 1 } else { to_pane };
+            let active_tab =
+                to_tab.min(self.group.tab_count(target).saturating_sub(1));
+            self.group.set_active(target, window, cx);
+            self.group.set_active_tab(target, active_tab, window, cx);
+            self.group.focus_active(window, cx);
+            self.schedule_save(cx);
+            cx.notify();
+            return;
+        }
+        let active_tab = to_tab.min(self.group.tab_count(to_pane).saturating_sub(1));
+        self.group.set_active(to_pane, window, cx);
+        self.group.set_active_tab(to_pane, active_tab, window, cx);
+        self.group.focus_active(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Shift+] / Shift+[: the next or previous tab of the pane in use.
+    fn step_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.group.active();
+        let count = self.group.tab_count(pane);
+        if count < 2 {
+            return;
+        }
+        let current = self.group.active_tab(pane) as isize;
+        let next = (current + delta).rem_euclid(count as isize) as usize;
+        self.activate_tab(pane, next, window, cx);
+    }
+
+    /// Ctrl+P: the active tab's context menu, where its tab row is.
+    fn open_tab_menu_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.group.active();
+        let tab = self.group.active_tab(pane);
+        let Some(tab) = self.group.tab(pane, tab) else {
+            return;
+        };
+        let position = window.mouse_position();
+        self.tab_menu = Some((tab.entity_id(), position));
+        self.tab_list_menu = None;
+        cx.notify();
+    }
+
+    /// Ctrl+Tab: the two panes trade places; the pane in use goes with its tabs.
+    fn swap_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.group.swap_panes() {
+            self.group.focus_active(window, cx);
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// Ctrl+Shift+Right / Ctrl+Shift+Left: the pane in use's folder opens in
+    /// that pane, which takes the keyboard.
+    fn open_active_folder_in(&mut self, to_pane: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // In a text field Ctrl+Shift+arrows select words, so the shortcut only
+        // acts from a listing.
+        if !self.listing_focused(window, cx) {
+            return;
+        }
+        if self.group.pane_count() < 2 || to_pane >= self.group.pane_count() {
+            return;
+        }
+        let from_pane = self.group.active();
+        if from_pane == to_pane {
+            return;
+        }
+        let cwd = self.group.active_pane().read(cx).cwd.clone();
+        let Some(tab) = self.group.active_tabs().get(to_pane).cloned() else {
+            return;
+        };
+        self.group.set_active(to_pane, window, cx);
+        self.navigate_tab(tab.entity_id().as_u64(), cwd, None, window, cx);
+        self.group.focus_active(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Ctrl+Right / Ctrl+Left: the tab in use goes to that pane, which takes
+    /// the keyboard with it. Asking for the pane it is already in does nothing.
+    fn send_active_tab_to(&mut self, to_pane: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.group.pane_count() < 2 || to_pane >= self.group.pane_count() {
+            return;
+        }
+        let from_pane = self.group.active();
+        if from_pane == to_pane {
+            return;
+        }
+        let from_tab = self.group.active_tab(from_pane);
+        let to_tab = self.group.tab_count(to_pane);
+        self.move_tab_to_pane(from_pane, from_tab, to_pane, to_tab, window, cx);
+    }
+
     // Mirrors a tab's navigation into the other panes while syncing is enabled.
     fn on_pane_event(
         &mut self,
@@ -674,6 +880,8 @@ impl ExplorerPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A new split starts empty of the last one's shelved pane.
+        self.shelved_split = None;
         self.group.set_direction(direction);
         if self.group.pane_count() < 2 {
             let cwd = self.group.active_pane().read(cx).cwd.clone();
@@ -697,14 +905,80 @@ impl ExplorerPage {
         cx: &mut Context<Self>,
     ) {
         if self.group.pane_count() >= 2 {
-            let other = if self.group.active() == 0 { 1 } else { 0 };
-            self.close_pane(other, window, cx);
+            let active = self.group.active();
+            let other = if active == 0 { 1 } else { 0 };
+            // Keep the pane being closed, tabs and all, so the next split
+            // brings back the same two panes.
+            let pane = self.pane_snapshot(other, cx);
+            self.shelved_split = Some(ShelvedSplit {
+                pane,
+                pane_index: other,
+                active_pane: active,
+            });
+            self.collapse_pane(other, window, cx);
             self.group.set_direction(direction);
             self.schedule_save(cx);
             cx.notify();
+        } else if let Some(shelved) = self.shelved_split.take() {
+            self.restore_shelved_split(shelved, direction, window, cx);
         } else {
             self.split(direction, window, cx);
         }
+    }
+
+    /// The pane's tabs as a snapshot, for putting them back after a collapse.
+    fn pane_snapshot(&self, index: usize, cx: &App) -> PaneSnapshot {
+        let mut tabs = Vec::new();
+        let mut tab_metadata = Vec::new();
+        for tab_index in 0..self.group.tab_count(index) {
+            if let Some(tab) = self.group.tab(index, tab_index) {
+                tabs.push(tab.read(cx).cwd.clone());
+                tab_metadata.push(self.group.tab_metadata(tab.entity_id()));
+            }
+        }
+        PaneSnapshot {
+            tabs,
+            active_tab: self.group.active_tab(index),
+            tab_metadata,
+        }
+    }
+
+    /// Opens the split again with the pane a collapse took away.
+    fn restore_shelved_split(
+        &mut self,
+        shelved: ShelvedSplit,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.group.set_direction(direction);
+        let Some((index, first_tab)) = self.group.add_pane_at(shelved.pane_index, window, cx)
+        else {
+            return;
+        };
+        self.subscribe_tab(&first_tab, cx);
+        let first_cwd = shelved.pane.tabs.first().cloned();
+        self.configure_tab(&first_tab, first_cwd, false, cx);
+        for cwd in shelved.pane.tabs.iter().skip(1) {
+            if let Some(tab) = self.group.add_tab(index, window, cx) {
+                self.subscribe_tab(&tab, cx);
+                self.configure_tab(&tab, Some(cwd.clone()), false, cx);
+            }
+        }
+        for (tab_index, meta) in shelved.pane.tab_metadata.iter().copied().enumerate() {
+            if let Some(tab) = self.group.tab(index, tab_index) {
+                self.group.set_tab_metadata(tab.entity_id(), meta);
+                let open_new = meta.open_folders_in_new_tab;
+                tab.update(cx, |pane, _| pane.open_folders_in_new_tab = open_new);
+            }
+        }
+        let active_tab = clamp_index(shelved.pane.active_tab, self.group.tab_count(index));
+        self.group.set_active_tab(index, active_tab, window, cx);
+        let active_pane = clamp_index(shelved.active_pane, self.group.pane_count());
+        self.group.set_active(active_pane, window, cx);
+        self.group.focus_active(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     /// Opens a second pane out of the `side` edge a pane was dragged by,
@@ -798,6 +1072,23 @@ impl ExplorerPage {
         if protected {
             return;
         }
+        self.remove_pane_and_cleanup(index, window, cx);
+    }
+
+    /// Collapses the split by removing `index`, as Ctrl+\ does. This is the
+    /// person asking for one pane, so the guards that keep a single tab from
+    /// being closed (resident, pinned, locked) do not hold the split open: the
+    /// pane goes, and the pane in use stays, whichever side it is on.
+    fn collapse_pane(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.remove_pane_and_cleanup(index, window, cx);
+    }
+
+    fn remove_pane_and_cleanup(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let removed = self.group.remove_pane(index, window, cx);
         if removed.is_empty() {
             return;
@@ -899,10 +1190,30 @@ impl ExplorerPage {
                 tab.update(cx, |pane, _| pane.preview_visible = visible);
             }
         }
+        // The sidebar it was left with, the same way.
+        if self.sidebar_visible != layout.sidebar_visible {
+            self.sidebar_visible = layout.sidebar_visible;
+            for tab in self.group.active_tabs() {
+                let visible = layout.sidebar_visible;
+                tab.update(cx, |pane, _| pane.sidebar_visible = visible);
+            }
+        }
         self.terminal_side = layout.terminal;
         self.group.set_vertical_tabs(layout.vertical_tabs);
         self.group.set_vertical_tabs_side(layout.vertical_tabs_side);
         self.group.set_tab_layout(layout.tab_width_mode, layout.tab_width, layout.show_tab_numbers);
+        self.group.set_tab_display(crate::pane_group::TabDisplaySettings {
+            title_limit: layout.tab_title_limit,
+            show_icons: layout.show_tab_icons,
+            asterisk_locked: layout.asterisk_locked_tabs,
+            close_on_double_click: layout.close_tab_on_double_click,
+            click_activates_pane: layout.tab_click_activates_pane,
+        });
+        for tab in self.group.active_tabs() {
+            let show = layout.show_drive_letter_on_tabs;
+            tab.update(cx, |pane, _| pane.show_drive_letter = show);
+        }
+        self.new_tab_next_to_current = layout.new_tab_next_to_current;
         super::view::panels::set_move_grips(layout.move_grips);
         cx.notify();
     }
@@ -1220,8 +1531,15 @@ impl ExplorerPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The recently-closed list opens inside the menu instead of lengthening it.
+        if action == 18 {
+            self.tab_menu_recent = !self.tab_menu_recent;
+            cx.notify();
+            return;
+        }
         let position = self.tab_menu.map(|(_, position)| position);
         self.tab_menu = None;
+        self.tab_menu_recent = false;
         let Some((pane, index)) = self.group.locate_tab(id) else { cx.notify(); return; };
         if action >= 2000 {
             if let Some(tab) = self.group.all_tabs().get(action - 2000)
@@ -1294,7 +1612,13 @@ impl ExplorerPage {
             .count();
         let viewport = window.viewport_size();
         let width = 220.0_f32;
-        let height = if self.tab_list_menu.is_some() { 360.0_f32 } else { 340.0 + self.recently_closed.len().min(8) as f32 * 28.0 };
+        let height = if self.tab_list_menu.is_some() {
+            360.0_f32
+        } else if self.tab_menu_recent {
+            340.0 + self.recently_closed.len().min(8) as f32 * 28.0
+        } else {
+            368.0
+        };
         let x = f32::from(position.x)
             .min((f32::from(viewport.width) - width - 8.0).max(0.0))
             .max(0.0);
@@ -1344,13 +1668,34 @@ impl ExplorerPage {
                     .child(name)
             }).collect();
         }
-        rows.extend(self.recently_closed.iter().enumerate().take(8).map(|(index, closed)| {
-            let name = std::path::Path::new(&closed.cwd).file_name().and_then(|part| part.to_str()).unwrap_or(&closed.cwd).to_string();
-            div().id(("recent-tab-item", index)).h(px(28.0)).px(px(10.0)).flex().items_center().rounded(px(5.0))
-                .cursor_pointer().text_sm().text_color(rgb(theme::fg_secondary())).hover(|s| s.bg(rgb(theme::toolbar_hover())))
-                .on_click(cx.listener(move |page, _, window, cx| page.perform_tab_menu(id, 1000 + index, window, cx)))
-                .child(format!("最近关闭 · {name}"))
-        }));
+        // "Recently closed" is a fly-out to the right, so the menu itself stays
+        // short whatever the list holds.
+        let recent_heading = if !self.tab_menu_recent && self.tab_list_menu.is_some() {
+            None
+        } else if self.recently_closed.is_empty() || self.tab_list_menu.is_some() {
+            None
+        } else {
+            Some(rows.len())
+        };
+        if recent_heading.is_some() {
+            rows.push(
+                div()
+                    .id("tab-menu-recent")
+                    .h(px(28.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .rounded(px(5.0))
+                    .text_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(theme::fg()))
+                    .hover(|s| s.bg(rgb(theme::toolbar_hover())))
+                    .on_click(cx.listener(move |page, _, window, cx| page.perform_tab_menu(id, 18, window, cx)))
+                    .child(format!("最近关闭 ({})", self.recently_closed.len().min(8)))
+                    .child(if self.tab_menu_recent { "▾" } else { "▸" }),
+            );
+        }
         let colors = [
             theme::muted(),
             0xe4ad5b,
@@ -1360,6 +1705,38 @@ impl ExplorerPage {
             0x69aee9,
             0x70c5a0,
         ];
+        let recent_rows: Vec<Stateful<Div>> = if self.tab_menu_recent {
+            self.recently_closed
+                .iter()
+                .enumerate()
+                .take(8)
+                .map(|(index, closed)| {
+                    let name = std::path::Path::new(&closed.cwd)
+                        .file_name()
+                        .and_then(|part| part.to_str())
+                        .unwrap_or(&closed.cwd)
+                        .to_string();
+                    div()
+                        .id(("recent-tab-item", index))
+                        .h(px(28.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.0))
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(rgb(theme::fg_secondary()))
+                        .hover(|s| s.bg(rgb(theme::toolbar_hover())))
+                        .on_click(cx.listener(move |page, _, window, cx| {
+                            page.perform_tab_menu(id, 1000 + index, window, cx)
+                        }))
+                        .child(format!("最近关闭 · {name}"))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let heading_at = recent_heading.unwrap_or(0);
         let swatches = colors
             .into_iter()
             .enumerate()
@@ -1377,8 +1754,7 @@ impl ExplorerPage {
                     }))
             })
             .collect::<Vec<_>>();
-        Some(
-            deferred(
+        let menu = deferred(
                 anchored()
                     .position_mode(AnchoredPositionMode::Window)
                     .position(point(px(0.0), px(0.0)))
@@ -1413,7 +1789,7 @@ impl ExplorerPage {
                                     .absolute()
                                     .left(px(x))
                                     .top(px(y))
-                                    .max_h(px((f32::from(viewport.height) - 16.0).max(120.0)))
+                                                                        .max_h(px((f32::from(viewport.height) - 16.0).max(120.0)))
                                     .overflow_y_scrollbar()
                                     .w(px(width))
                                     .p(px(5.0))
@@ -1447,8 +1823,52 @@ impl ExplorerPage {
                     ),
             )
             .with_priority(10)
-            .into_any_element(),
-        )
+            .into_any_element();
+        let flyout = if self.tab_menu_recent
+            && !recent_rows.is_empty()
+            && self.tab_list_menu.is_none()
+        {
+            let flyout_left = if x + width + 6.0 + 260.0 > f32::from(viewport.width) {
+                (x - 266.0).max(0.0)
+            } else {
+                x + width + 6.0
+            };
+            let flyout_top = y + 5.0 + heading_at as f32 * 28.0;
+            Some(
+                deferred(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Window)
+                        .position(point(px(0.0), px(0.0)))
+                        .child(
+                            div()
+                                .w(viewport.width)
+                                .h(viewport.height)
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(flyout_left))
+                                        .top(px(flyout_top))
+                                        .w(px(260.0))
+                                        .p(px(5.0))
+                                        .flex()
+                                        .flex_col()
+                                        .rounded(px(8.0))
+                                        .border_1()
+                                        .border_color(rgb(theme::border()))
+                                        .bg(rgb(theme::bg_secondary()))
+                                        .shadow_xl()
+                                        .occlude()
+                                        .children(recent_rows),
+                                ),
+                        ),
+                )
+                .with_priority(11)
+                .into_any_element(),
+            )
+        } else {
+            None
+        };
+        Some(div().child(menu).children(flyout).into_any_element())
     }
 
     // Builds the render callbacks routing every tab/pane interaction back here.
@@ -1472,10 +1892,16 @@ impl ExplorerPage {
             on_reorder_tab: Rc::new(|this: &mut Self, pane, from, to, _window, cx| {
                 this.reorder_tab(pane, from, to, cx)
             }),
+            on_move_tab: Rc::new(
+                |this: &mut Self, from_pane, from_tab, to_pane, to_tab, window, cx| {
+                    this.move_tab_to_pane(from_pane, from_tab, to_pane, to_tab, window, cx);
+                },
+            ),
             on_tab_context: Rc::new(|this: &mut Self, pane, tab, position, _window, cx| {
                 if let Some(tab) = this.group.tab(pane, tab) {
                     this.tab_menu = Some((tab.entity_id(), position));
                     this.tab_list_menu = None;
+                    this.tab_menu_recent = false;
                     cx.notify();
                 }
             }),
@@ -2095,9 +2521,171 @@ fn shell_folder(cwd: &str) -> Option<String> {
     (drive || path.starts_with(r"\\")).then_some(path)
 }
 
+impl ExplorerPage {
+    /// The sheet the shortcuts key opens: every command with the keys it
+    /// answers to now, grouped as the shortcut table groups them.
+    fn shortcuts_overlay(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use nohrs_core::shortcuts::{ACTIONS, chords};
+        if !self.shortcuts_help {
+            return None;
+        }
+        let mut groups: Vec<ShortcutGroup> = Vec::new();
+        for info in ACTIONS {
+            let mut keys = chords(info.action)
+                .iter()
+                .map(|chord| chord.display())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            if keys.is_empty() {
+                keys = "—".to_string();
+            }
+            let label = nohrs_core::i18n::tr(info.label).to_string();
+            let group_title = nohrs_core::i18n::tr(info.group).to_string();
+            match groups.iter_mut().find(|(title, _)| *title == group_title) {
+                Some((_, rows)) => rows.push((label, keys)),
+                None => groups.push((group_title, vec![(label, keys)])),
+            }
+        }
+        // Three columns of about the same height; a group stays in one piece.
+        let total_rows: usize = groups.iter().map(|(_, rows)| rows.len()).sum();
+        let target = total_rows.div_ceil(3);
+        let mut columns: Vec<Vec<ShortcutGroup>> = vec![Vec::new(); 3];
+        let mut index = 0usize;
+        let mut used = 0usize;
+        for (title, rows) in groups {
+            let count = rows.len();
+            if index < 2 && !columns[index].is_empty() && used + count > target {
+                index += 1;
+                used = 0;
+            }
+            used += count;
+            columns[index].push((title, rows));
+        }
+        let columns = columns.into_iter();
+        let column = |groups: Vec<ShortcutGroup>| {
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .children(groups.into_iter().map(|(title, rows)| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme::accent()))
+                                .mb(px(4.0))
+                                .child(title),
+                        )
+                        .children(rows.into_iter().map(|(label, keys)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(18.0))
+                                .py(px(2.0))
+                                .text_sm()
+                                .child(div().text_color(rgb(theme::fg())).child(label))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px(px(7.0))
+                                        .py(px(1.0))
+                                        .rounded(px(5.0))
+                                        .border_1()
+                                        .border_color(rgb(theme::border()))
+                                        .bg(rgb(theme::toolbar_bg()))
+                                        .text_color(rgb(theme::muted()))
+                                        .child(keys),
+                                )
+                        }))
+                }))
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(hsla(0.0, 0.0, 0.0, 0.55))
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.shortcuts_help = false;
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(40.0))
+                        .bottom(px(40.0))
+                        .left(px(48.0))
+                        .right(px(48.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(16.0))
+                        .p(px(24.0))
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .bg(rgb(theme::bg()))
+                        .shadow_lg()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _event, _window, cx| cx.stop_propagation()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xl()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme::fg()))
+                                        .child(nohrs_core::i18n::tr("Todos os atalhos")),
+                                )
+                                .child(
+                                    div()
+                                        .id("shortcuts-help-close")
+                                        .px(px(8.0))
+                                        .py(px(2.0))
+                                        .rounded(px(6.0))
+                                        .cursor_pointer()
+                                        .text_color(rgb(theme::muted()))
+                                        .hover(|style| style.bg(rgb(theme::toolbar_bg())))
+                                        .child("✕")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.shortcuts_help = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("shortcuts-sheet-scroll")
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .flex()
+                                .gap(px(48.0))
+                                .overflow_y_scroll()
+                                .children(columns.map(column)),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for ExplorerPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let callbacks = Self::pane_callbacks();
+        let shortcuts_sheet = self.shortcuts_overlay(cx);
         self.group.set_title_bar_allowed(!self.terminal_beside());
         // The listing's edges offer the terminal while it is closed.
         let terminal_open = self.terminal_open;
@@ -2146,6 +2734,12 @@ impl Render for ExplorerPage {
             .key_context(PANES_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.shortcuts_help {
+                    this.shortcuts_help = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if event.keystroke.key == "escape" && (this.tab_menu.take().is_some() || this.tab_list_menu.take().is_some()) {
                     this.tab_list_menu = None;
                     cx.stop_propagation();
@@ -2176,7 +2770,12 @@ impl Render for ExplorerPage {
                 this.set_active(1, window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusNextPane, window, cx| {
-                this.focus_next(window, cx);
+                // Tab is this shortcut too; from a text field it would pull the
+                // keyboard out of what is being typed, so the listing has to
+                // have it.
+                if this.listing_focused(window, cx) {
+                    this.focus_next(window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &FocusPrevPane, window, cx| {
                 this.focus_prev(window, cx);
@@ -2192,6 +2791,35 @@ impl Render for ExplorerPage {
             }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveTabToRightPane, window, cx| {
+                this.send_active_tab_to(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveTabToLeftPane, window, cx| {
+                this.send_active_tab_to(0, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenFolderInRightPane, window, cx| {
+                this.open_active_folder_in(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenFolderInLeftPane, window, cx| {
+                this.open_active_folder_in(0, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPanes, window, cx| {
+                this.swap_panes(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                this.step_tab(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousTab, window, cx| {
+                this.step_tab(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TabMenu, window, cx| {
+                this.open_tab_menu_shortcut(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowShortcuts, window, cx| {
+                this.shortcuts_help = !this.shortcuts_help;
+                let _ = window;
+                cx.notify();
             }))
             .when(
                 self.terminal_drag.is_some() || self.group.dragging(),
@@ -2233,6 +2861,7 @@ impl Render for ExplorerPage {
             }))
             .child(arranged)
             .children(tab_menu)
+            .children(shortcuts_sheet)
     }
 }
 

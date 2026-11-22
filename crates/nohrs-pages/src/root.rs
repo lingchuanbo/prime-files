@@ -81,6 +81,9 @@ pub struct RootView {
     dialog_search: Option<crate::explorer::everything::WholeComputerSearch>,
     // How many "not ready" retries the current jump-bar query has spent.
     dialog_search_attempt: u32,
+    // Whether closing the window keeps the app in the tray; the close callback
+    // reads it from any thread.
+    close_to_tray: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RootView {
@@ -139,6 +142,7 @@ impl RootView {
             font_family: SharedString::default(),
             dialog_search: None,
             dialog_search_attempt: 0,
+            close_to_tray: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         view.start_progress_loop(window, cx);
         view.apply_config(config, config_error, window, cx);
@@ -149,6 +153,18 @@ impl RootView {
         // stays, a bar under it offers LumaFiles' folders, and a new dialog can
         // open in the current folder. (The old "pick here, fill there" watcher
         // is left in `file_dialog` but no longer started.)
+        // The tray icon and the "close to tray" behaviour: the close callback
+        // hides the window instead of letting it go, and the tray can bring it
+        // back or quit for real.
+        crate::tray::start(crate::ipc::window_hwnd(window).unwrap_or(0));
+        let close_to_tray = view.close_to_tray.clone();
+        window.on_window_should_close(cx, move |window, _cx| {
+            if !close_to_tray.load(std::sync::atomic::Ordering::SeqCst) {
+                return true;
+            }
+            crate::tray::hide(window);
+            false
+        });
         crate::dialog_jump::start();
         crate::reveal::watch(window, cx);
         crate::shell_windows::watch(window, cx);
@@ -229,7 +245,17 @@ impl RootView {
                     }
                     // Answers a query typed into the jump bar's search box; the
                     // index search runs on the background executor.
-                    let query = this.update_in(&mut cx, |root, _window, cx| {
+                    let query = this.update_in(&mut cx, |root, window, cx| {
+                        // The tray's menu runs on its own thread; these are its
+                        // two requests.
+                        if crate::tray::take_show() {
+                            crate::tray::show(window);
+                        }
+                        if crate::tray::take_quit() {
+                            root.close_to_tray
+                                .store(false, std::sync::atomic::Ordering::SeqCst);
+                            cx.quit();
+                        }
                         let query = crate::dialog_jump::take_query();
                         if let Some((id, text)) = &query {
                             root.search_for_dialog(*id, text.clone(), cx);
@@ -445,6 +471,11 @@ impl RootView {
         crate::updater::updater(cx).update(cx, |updater, cx| updater.set_automatic(automatic, cx));
 
         self.config = config;
+        self.close_to_tray.store(
+            self.config.ui.close_to_tray,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        crate::tray::set_mode(self.config.ui.tray_icon);
         cx.notify();
     }
 
@@ -665,6 +696,7 @@ impl Drop for RootView {
         // take them back before this process goes away.
         crate::shell_windows::shutdown();
         crate::dialog_jump::stop();
+        crate::tray::stop();
     }
 }
 

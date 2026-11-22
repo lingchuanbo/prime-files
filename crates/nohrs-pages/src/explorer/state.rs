@@ -100,6 +100,27 @@ pub struct ExplorerPane {
     pub(crate) name_lines: u32,
     /// How long a wheel glide takes, 0 = none; driven by `ui.scroll_smoothness`.
     pub(crate) scroll_smoothness: u32,
+    /// Height of a Details row in pixels; driven by `ui.list_row_height`.
+    pub(crate) row_height: f32,
+    /// Alternating row backgrounds in Details; driven by `ui.zebra_rows`.
+    pub(crate) zebra_rows: bool,
+    /// An accent outline around the selected rows; `ui.selection_outline`.
+    pub(crate) selection_outline: bool,
+    /// What a double click on the listing's empty space does;
+    /// `ui.double_click_empty`.
+    pub(crate) double_click_empty: config::DoubleClickEmpty,
+    /// Whether cloud-sync badges are drawn; driven by `ui.show_sync_status`.
+    pub(crate) show_sync_status: bool,
+    /// Whether Git/SVN badges are drawn; driven by `ui.show_vcs_status`.
+    pub(crate) show_vcs_status: bool,
+    /// The checkout state of the folder on screen, once its scan answered.
+    pub(crate) vcs_status: Option<super::status::VcsStatus>,
+    /// Cloud state per lowercased path, for the entries on screen.
+    pub(crate) sync_states: std::collections::HashMap<String, super::status::SyncState>,
+    /// The tasks of the status scan on screen; replacing them cancels them.
+    pub(crate) status_tasks: Vec<gpui::Task<()>>,
+    /// Bumped by every scan; an answer stamped with an older one is dropped.
+    pub(crate) status_generation: u64,
     /// Whole size of the listing on screen, for its scrollbar.
     pub(crate) listing_extent: gpui::Size<gpui::Pixels>,
     /// The wheel glide under way in the listing.
@@ -166,6 +187,8 @@ pub struct ExplorerPane {
     pub view_mode: ViewMode,
     /// Whether the left quick-access sidebar is shown (toggled with `Cmd/Ctrl+B`).
     pub sidebar_visible: bool,
+    /// `D:` instead of the drive's label on a tab rooted at a drive.
+    pub show_drive_letter: bool,
     /// What the sidebar lists and which of its nodes are open.
     pub(crate) sidebar: super::places::SidebarState,
 
@@ -246,6 +269,12 @@ pub struct ExplorerPane {
     /// Whether the window has room for another pane, so a free edge of the
     /// listing drags one out. Set by the pane group on every render.
     pub(crate) split_available: bool,
+    /// Whether this pane shares the window with another pane (a split view):
+    /// the header then drops the buttons beside the address bar.
+    pub(crate) multi_pane: bool,
+    /// Whether this is the active pane of a split: its address bar carries the
+    /// accent border.
+    pub(crate) pane_active: bool,
     /// Whether the page's terminal is open; while it is not, an edge of the
     /// listing offers it. Set by the page on every render.
     pub(crate) terminal_shown: bool,
@@ -374,6 +403,19 @@ pub struct ExplorerPane {
     /// Space's quick look is open: the preview drawn large over the pane
     /// (`view::preview::render_quick_look`), whatever the side panel shows.
     pub(crate) quick_look: bool,
+    /// Alt+Q in a split: the selected file is previewed large in the *other*
+    /// pane, which is what Total Commander's quick view does.
+    pub(crate) preview_in_sibling: bool,
+    /// The other pane of the split, when there is one.
+    pub(crate) sibling_pane: Option<gpui::Entity<ExplorerPane>>,
+    /// This pane shows the other pane's selection as a preview, filling it.
+    pub(crate) preview_full: bool,
+    /// A preview the active pane asked this one to show, taken on its next
+    /// render (opening one needs the window, which only render has).
+    pub(crate) preview_request: Option<String>,
+    /// The side panel's visibility before a preview was sent to the other
+    /// pane; put back when that preview closes, so only one preview shows.
+    pub(crate) preview_visible_before: bool,
     /// The bottom bar's zoom menu is open.
     pub(crate) zoom_menu_open: bool,
     /// Closes the zoom menu shown by a wheel or key zoom (`flash_zoom_menu`);
@@ -455,6 +497,15 @@ impl EventEmitter<PaneEvent> for ExplorerPane {}
 
 impl crate::pane_group::PaneItem for ExplorerPane {
     fn tab_title(&self, cx: &gpui::App) -> String {
+        if self.show_drive_letter {
+            let bytes = self.cwd.as_bytes();
+            let rooted = bytes.len() >= 2
+                && bytes[1] == b':'
+                && (bytes.len() == 2 || (bytes.len() == 3 && matches!(bytes[2], b'\\' | b'/')));
+            if rooted {
+                return self.cwd[..2].to_uppercase();
+            }
+        }
         if let Some(name) = self.location_name(cx) {
             return name;
         }
@@ -466,6 +517,32 @@ impl crate::pane_group::PaneItem for ExplorerPane {
 
     fn set_split_available(&mut self, available: bool) {
         self.split_available = available;
+    }
+
+    fn set_multi_pane(&mut self, multi: bool) {
+        self.multi_pane = multi;
+        if multi {
+            // A split previews in the other pane: its own side panel steps
+            // aside, and stays aside when the split closes (the split's state
+            // is inherited), until Alt+Q turns it back on.
+            self.preview_visible = false;
+        }
+    }
+
+    fn set_pane_active(&mut self, active: bool) {
+        self.pane_active = active;
+    }
+
+    fn set_sibling_pane(&mut self, sibling: Option<gpui::Entity<ExplorerPane>>) {
+        if sibling.is_none() {
+            // The split went away: nothing is previewed on the other side, and
+            // a pane that was showing that preview goes back to its listing.
+            self.preview_in_sibling = false;
+            self.preview_full = false;
+            self.preview_request = None;
+            self.quick_look = false;
+        }
+        self.sibling_pane = sibling;
     }
 
     fn attach_compact(
@@ -552,6 +629,16 @@ impl ExplorerPane {
             icon_pack: "default".to_string(),
             name_lines: 0,
             scroll_smoothness: nohrs_core::config::Ui::default().scroll_smoothness,
+            row_height: nohrs_core::config::ListRowHeight::default().row_height(),
+            zebra_rows: false,
+            selection_outline: false,
+            double_click_empty: config::DoubleClickEmpty::None,
+            show_sync_status: false,
+            show_vcs_status: false,
+            vcs_status: None,
+            sync_states: std::collections::HashMap::new(),
+            status_tasks: Vec::new(),
+            status_generation: 0,
             smooth_scroll: None,
             listing_extent: Default::default(),
             search_query: String::new(),
@@ -582,6 +669,7 @@ impl ExplorerPane {
             // Hidden by default; the root pane is revealed by `ExplorerPage::new`,
             // split-created panes stay collapsed (issue #164, §2).
             sidebar_visible: false,
+        show_drive_letter: true,
             sidebar: Default::default(),
 
             // Search
@@ -618,6 +706,8 @@ impl ExplorerPane {
             dock_drag: None,
             columns_bounds: Default::default(),
             split_available: false,
+        multi_pane: false,
+        pane_active: false,
             terminal_shown: false,
             preview_pdf_bounds: Default::default(),
             preview_sharp: None,
@@ -669,6 +759,11 @@ impl ExplorerPane {
             context_menu: None,
             preview_visible: true,
             quick_look: false,
+        preview_in_sibling: false,
+        sibling_pane: None,
+        preview_full: false,
+        preview_request: None,
+        preview_visible_before: true,
             zoom_menu_open: false,
             zoom_menu_flash: None,
             workspace: None,
@@ -712,6 +807,12 @@ impl ExplorerPane {
     /// `toggle_search` open/close pattern.
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        // The window opens with the sidebar as it was left.
+        super::view::panels::save_layout(
+            "sidebar_visible",
+            self.sidebar_visible.to_string(),
+            cx,
+        );
         cx.notify();
     }
 
@@ -1155,7 +1256,7 @@ impl ExplorerPane {
                     0
                 };
                 let total_height =
-                    config::BASE_ROW_HEIGHT + (snippet_count as f32 * config::SNIPPET_ROW_HEIGHT);
+                    self.row_height + (snippet_count as f32 * config::SNIPPET_ROW_HEIGHT);
                 size(px(total_width), px(total_height))
             })
             .collect();
@@ -1250,14 +1351,27 @@ impl ExplorerPane {
         self.apply_filter();
     }
 
+    /// Whether the list view shows the ".." row: only for a real folder, and
+    /// not while a filter or a search narrows the entries (the parent of a
+    /// result set is not a place to go).
+    pub(crate) fn has_parent_row(&self) -> bool {
+        self.search_query.is_empty()
+            && self.search_results.is_none()
+            && crate::explorer::navigation::parent_location(&self.cwd).is_some()
+    }
+
     /// The list row (counting the column header as row 0) and the grid row
     /// that show entry `index`, once group headers are taken into account.
     pub(crate) fn visual_rows_of(&self, index: usize) -> (usize, usize) {
         let groups = self.groups();
-        let list = super::grouping::list_rows(groups, self.filtered_entries.len())
-            .iter()
-            .position(|row| *row == super::grouping::ListRow::Entry(index))
-            .map_or(index + 1, |row| row + 1);
+        let list = super::grouping::list_rows_with_parent(
+            groups,
+            self.filtered_entries.len(),
+            self.has_parent_row(),
+        )
+        .iter()
+        .position(|row| *row == super::grouping::ListRow::Entry(index))
+        .map_or(index + 1, |row| row + 1);
         let grid = super::grouping::grid_rows(groups, self.filtered_entries.len(), self.grid_columns)
             .iter()
             .position(|row| matches!(row, super::grouping::GridRow::Tiles { first, end } if (*first..*end).contains(&index)))
@@ -1307,6 +1421,24 @@ impl ExplorerPane {
             changed = true;
         }
         self.scroll_smoothness = ui.scroll_smoothness;
+        // The row height is part of the rows' size table, so a change re-measures
+        // them; the rest are read while rendering.
+        let row_height = ui.list_row_height.row_height();
+        if self.row_height != row_height {
+            self.row_height = row_height;
+            self.update_item_sizes();
+            cx.notify();
+        }
+        self.zebra_rows = ui.zebra_rows;
+        self.selection_outline = ui.selection_outline;
+        self.double_click_empty = ui.double_click_empty;
+        let status_changed = (self.show_sync_status, self.show_vcs_status)
+            != (ui.show_sync_status, ui.show_vcs_status);
+        self.show_sync_status = ui.show_sync_status;
+        self.show_vcs_status = ui.show_vcs_status;
+        if status_changed {
+            self.refresh_status(false, cx);
+        }
         self.preview_autoplay = ui.preview_autoplay;
         self.hover_audio_delay_ms = ui.hover_audio_delay_ms;
         if self.hover_audio_enabled != ui.hover_audio {
@@ -1333,6 +1465,89 @@ impl ExplorerPane {
     /// The configured filename colour, if a rule matches this entry.
     pub fn file_type_color(&self, file_name: &str) -> Option<u32> {
         self.applied_ui.as_ref()?.file_type_color(file_name)
+    }
+
+    /// The colour the listing paints a file's name with: its type's colour,
+    /// from the user's rules first and the built-in palette after them.
+    /// `None` for folders and links, whose names stay in the plain text
+    /// colour.
+    pub(crate) fn file_name_color(&self, name: &str, kind: &str) -> Option<u32> {
+        if kind != "file" {
+            return None;
+        }
+        let color = super::type_style::TypeStyle::of(name, kind, self.file_type_color(name)).color?;
+        Some(nohrs_ui::theme::theme::type_color(color))
+    }
+
+    /// Reads the version-control and cloud state of what is on screen and
+    /// keeps the answers for the rows to draw.
+    ///
+    /// Off the foreground thread: a `git status` walks the checkout and the
+    /// cloud state stats every entry. Called after each folder read (an edit,
+    /// a paste or a delete changes what the badges must say) and when the
+    /// settings that show them change. `keep_until_answer` leaves the previous
+    /// badges on screen while the new scan runs, so the refresh the disk
+    /// watcher fires after a save does not blink them out.
+    pub(crate) fn refresh_status(&mut self, keep_until_answer: bool, cx: &mut Context<Self>) {
+        // A new scan makes any answer still on its way obsolete.
+        self.status_generation += 1;
+        self.status_tasks.clear();
+        let want_vcs = self.show_vcs_status;
+        let want_sync = self.show_sync_status;
+        // This PC and the like have no filesystem path to scan.
+        let folder = std::path::Path::new(&self.cwd);
+        if (!want_vcs && !want_sync) || !folder.is_dir() {
+            self.vcs_status = None;
+            self.sync_states.clear();
+            cx.notify();
+            return;
+        }
+        let generation = self.status_generation;
+        let cwd = self.cwd.clone();
+        let paths: Vec<String> = self.entries.iter().map(|entry| entry.path.clone()).collect();
+        if !keep_until_answer {
+            self.vcs_status = None;
+            self.sync_states.clear();
+            cx.notify();
+        }
+        let work = cx.background_spawn(async move {
+            let vcs = want_vcs.then(|| super::status::scan(std::path::Path::new(&cwd))).flatten();
+            let sync = if want_sync {
+                super::status::scan_sync(&paths)
+            } else {
+                std::collections::HashMap::new()
+            };
+            (vcs, sync)
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let (vcs, sync) = work.await;
+            this.update(cx, |pane, cx| {
+                if pane.status_generation == generation {
+                    pane.vcs_status = vcs;
+                    pane.sync_states = sync;
+                    cx.notify();
+                }
+            })
+            .ok();
+        });
+        self.status_tasks = vec![task];
+    }
+
+    /// The Git/SVN state of `path`, while its badge is being drawn.
+    pub(crate) fn vcs_state(&self, path: &str) -> Option<super::status::VcsState> {
+        if !self.show_vcs_status {
+            return None;
+        }
+        self.vcs_status.as_ref()?.state_of(path)
+    }
+
+    /// The cloud state of `path`, while its badge is being drawn.
+    pub(crate) fn sync_state(&self, path: &str) -> Option<super::status::SyncState> {
+        if !self.show_sync_status {
+            return None;
+        }
+        let key = super::status::normalize(path);
+        self.sync_states.get(&key).copied()
     }
 
     /// Sorts by `key` in the given direction, as the context menu chooses it.

@@ -34,6 +34,8 @@ pub mod reveal;
 pub mod shell_windows;
 /// The jump bar under other programs' Open/Save dialogs.
 pub(crate) mod dialog_jump;
+/// The tray icon and its menu.
+pub(crate) mod tray;
 /// Taking the foreground back when another program's window has it.
 pub(crate) mod foreground;
 /// The standalone, indexed full-computer search window.

@@ -135,21 +135,30 @@ impl ExplorerPane {
     /// Explorer's "Size column to fit". Text is measured by an average glyph
     /// width: close enough for a column, and needs no text layout.
     pub(crate) fn fit_column(&mut self, column: usize) {
-        use nohrs_ui::components::file_list::{format_date, get_file_type, human_bytes};
+        use nohrs_ui::components::file_list::{format_date, human_bytes};
         const GLYPH: f32 = 7.2;
         const PADDING: f32 = 20.0;
         if !self.column_visible(column) {
             return;
         }
-        let longest = |text: String| text.chars().count();
         let widest = self
             .filtered_entries
             .iter()
             .map(|entry| match column {
-                0 => longest(entry.name.clone()),
-                1 => longest(get_file_type(&entry.name, &entry.kind)),
-                2 => longest(human_bytes(entry.size)),
-                _ => longest(format_date(&entry.modified)),
+                0 => entry.name.chars().count(),
+                // The type cell is the badge (its extension, plus the tag's
+                // padding) and the type's name after it.
+                1 => {
+                    let style = super::type_style::TypeStyle::of(&entry.name, &entry.kind, None);
+                    let badge = if style.extension.is_empty() {
+                        0
+                    } else {
+                        style.extension.chars().count() + 3
+                    };
+                    badge + style.label.chars().count() + 1
+                }
+                2 => human_bytes(entry.size).chars().count(),
+                _ => format_date(&entry.modified).chars().count(),
             })
             .max()
             .unwrap_or(0);

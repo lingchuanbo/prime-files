@@ -312,6 +312,19 @@ pub struct Ui {
     /// How smoothly the mouse wheel scrolls the listing, 0..=100: 0 moves
     /// in steps, 100 glides for longest.
     pub scroll_smoothness: u32,
+    /// How tall a row of the Details list is.
+    pub list_row_height: ListRowHeight,
+    /// Whether alternating rows of the Details list get a faint background.
+    pub zebra_rows: bool,
+    /// Whether the selected rows get an outline in the accent colour.
+    pub selection_outline: bool,
+    /// What a double click on the Details list's empty space does.
+    pub double_click_empty: DoubleClickEmpty,
+    /// Whether files show a badge for their cloud sync state (OneDrive and
+    /// cloud providers that use the same file attributes).
+    pub show_sync_status: bool,
+    /// Whether files show a badge for their Git or SVN state.
+    pub show_vcs_status: bool,
     /// Whether sound files show their waveform instead of their icon in the
     /// icons view.
     pub audio_waveforms: bool,
@@ -323,6 +336,11 @@ pub struct Ui {
     pub hover_audio: bool,
     /// How long the mouse rests on a sound file before it plays, in ms.
     pub hover_audio_delay_ms: u32,
+    /// Whether closing the window keeps LumaFiles in the tray, with copies and
+    /// other work still running, instead of quitting.
+    pub close_to_tray: bool,
+    /// When the tray icon is shown.
+    pub tray_icon: TrayIcon,
     /// Ordered file-name glob rules and their text colours; the first match wins.
     pub file_type_colors: Vec<FileTypeColorRule>,
 }
@@ -409,11 +427,19 @@ impl Default for Ui {
             font_family: String::new(),
             name_lines: 0,
             scroll_smoothness: 50,
+            list_row_height: ListRowHeight::Standard,
+            zebra_rows: false,
+            selection_outline: false,
+            double_click_empty: DoubleClickEmpty::None,
+            show_sync_status: false,
+            show_vcs_status: false,
             audio_waveforms: false,
             preview_autoplay: false,
             welcome_done: false,
             hover_audio: true,
             hover_audio_delay_ms: 400,
+            close_to_tray: false,
+            tray_icon: TrayIcon::Always,
             file_type_colors: Vec::new(),
         }
     }
@@ -545,12 +571,29 @@ pub struct Layout {
     /// Whether the preview panel is shown. Written whenever the preview is
     /// toggled, so a window closed with it hidden opens that way again.
     pub preview_visible: bool,
+    /// Whether the sidebar with the places is shown. Written when it is
+    /// toggled, so a window closed with it hidden opens that way again.
+    pub sidebar_visible: bool,
     /// Width policy for horizontal tabs.
     pub tab_width_mode: TabWidthMode,
     /// Width in pixels when horizontal tabs use fixed sizing.
     pub tab_width: u32,
     /// Whether horizontal tabs show their Alt+number shortcut prefix.
     pub show_tab_numbers: bool,
+    /// Longest tab title in characters (0 keeps the whole title).
+    pub tab_title_limit: u32,
+    /// A double click on a tab closes it.
+    pub close_tab_on_double_click: bool,
+    /// Clicking a tab makes its pane the one in use.
+    pub tab_click_activates_pane: bool,
+    /// Folder icons before the tab titles.
+    pub show_tab_icons: bool,
+    /// A `*` before the title of a locked tab.
+    pub asterisk_locked_tabs: bool,
+    /// `D:` and the like on a tab rooted at a drive.
+    pub show_drive_letter_on_tabs: bool,
+    /// A new tab opens beside the current one instead of at the end.
+    pub new_tab_next_to_current: bool,
 }
 
 impl Default for Layout {
@@ -563,9 +606,17 @@ impl Default for Layout {
             vertical_tabs_side: DockSide::Left,
             move_grips: false,
             preview_visible: true,
+            sidebar_visible: true,
             tab_width_mode: TabWidthMode::Adaptive,
             tab_width: 160,
             show_tab_numbers: true,
+            tab_title_limit: 15,
+            close_tab_on_double_click: true,
+            tab_click_activates_pane: false,
+            show_tab_icons: true,
+            asterisk_locked_tabs: true,
+            show_drive_letter_on_tabs: true,
+            new_tab_next_to_current: true,
         }
     }
 }
@@ -688,6 +739,109 @@ impl BarSize {
             "small" => Some(Self::Small),
             "large" => Some(Self::Large),
             _ => None,
+        }
+    }
+}
+
+/// When the tray icon is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TrayIcon {
+    /// Whenever LumaFiles runs.
+    #[default]
+    Always,
+    /// Only while the window is hidden in the tray.
+    Background,
+    /// Never.
+    Never,
+}
+
+impl TrayIcon {
+    /// Parse the `config.toml` spelling (`always`/`background`/`never`).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "always" => Some(Self::Always),
+            "background" => Some(Self::Background),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+}
+
+/// What a double click on the Details list's empty space does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DoubleClickEmpty {
+    /// Nothing; the click only clears the selection.
+    #[default]
+    None,
+    /// Goes back to the folder before this one.
+    Back,
+    /// Goes up to the folder holding this one.
+    Up,
+}
+
+impl DoubleClickEmpty {
+    /// The setting's name in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Back => "back",
+            Self::Up => "up",
+        }
+    }
+
+    /// Reads a `ui.double_click_empty` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "none" => Some(Self::None),
+            "back" => Some(Self::Back),
+            "up" => Some(Self::Up),
+            _ => None,
+        }
+    }
+}
+
+/// Height of a row in the Details list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ListRowHeight {
+    /// Tighter rows, so more of the folder fits on screen.
+    Compact,
+    /// The default.
+    #[default]
+    Standard,
+    /// Taller rows, easier to scan.
+    Relaxed,
+}
+
+impl ListRowHeight {
+    /// The setting's name in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Standard => "standard",
+            Self::Relaxed => "relaxed",
+        }
+    }
+
+    /// Reads a `ui.list_row_height` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "compact" => Some(Self::Compact),
+            "standard" => Some(Self::Standard),
+            "relaxed" => Some(Self::Relaxed),
+            _ => None,
+        }
+    }
+
+    /// How tall the row is drawn, in logical pixels. `Standard` is the height
+    /// every row had before this setting existed.
+    pub fn row_height(self) -> f32 {
+        match self {
+            Self::Compact => 26.0,
+            Self::Standard => super::BASE_ROW_HEIGHT,
+            Self::Relaxed => 40.0,
         }
     }
 }
@@ -1244,6 +1398,7 @@ impl Config {
              vertical_tabs_side = \"left\"  # the column's side: \"left\" | \"right\"\n\
              move_grips = false           # a grip on each panel's edge to drag it elsewhere\n\
              preview_visible = true       # whether the preview panel starts shown; written when it is toggled\n\
+             sidebar_visible = true       # whether the sidebar starts shown; written when it is toggled\n\
              \n\
              [ui]\n\
              language = \"zh-CN\"   # \"zh-CN\" (default) | \"auto\" (Windows region) | \"pt-BR\" | \"en\" | \"es\" | \"fr\" | \"de\" | \"it\" | \"ru\" | \"ja\"\n\
@@ -1254,6 +1409,14 @@ impl Config {
              icon_pack = \"default\"\n\
              font_family = \"\"   # any installed font, by name (e.g. \"Microsoft YaHei UI\"); empty = the system's\n\
              file_type_colors = []   # ordered filename glob(s), separated by ;, and hex colour rules\n\
+             close_to_tray = false   # closing the window keeps LumaFiles in the tray\n\
+             tray_icon = \"always\"      # \"always\" | \"background\" | \"never\"\n\
+             list_row_height = \"standard\"   # Details rows: \"compact\" | \"standard\" | \"relaxed\"\n\
+             zebra_rows = false              # alternating backgrounds in Details\n\
+             selection_outline = false       # an accent outline around the selected rows\n\
+             double_click_empty = \"none\"     # double click on empty list space: \"none\" | \"back\" | \"up\"\n\
+             show_sync_status = false        # a badge with each file's cloud state (OneDrive and the like)\n\
+             show_vcs_status = false         # a badge with each file's Git or SVN state\n\
              \n\
              [explorer]\n\
              split_direction = \"vertical\"   # \"vertical\" (left/right) | \"horizontal\" (top/bottom)\n\
@@ -1479,6 +1642,60 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             ))),
         }
     }
+    if let Some(value) = table.get("list_row_height") {
+        match value.as_str().and_then(ListRowHeight::parse) {
+            Some(height) => ui.list_row_height = height,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.list_row_height {value}; using {:?}",
+                ui.list_row_height
+            ))),
+        }
+    }
+    if let Some(value) = table.get("zebra_rows") {
+        match value.as_bool() {
+            Some(flag) => ui.zebra_rows = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.zebra_rows {value}; using {}",
+                ui.zebra_rows
+            ))),
+        }
+    }
+    if let Some(value) = table.get("selection_outline") {
+        match value.as_bool() {
+            Some(flag) => ui.selection_outline = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.selection_outline {value}; using {}",
+                ui.selection_outline
+            ))),
+        }
+    }
+    if let Some(value) = table.get("double_click_empty") {
+        match value.as_str().and_then(DoubleClickEmpty::parse) {
+            Some(action) => ui.double_click_empty = action,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.double_click_empty {value}; using {:?}",
+                ui.double_click_empty
+            ))),
+        }
+    }
+    if let Some(value) = table.get("show_sync_status") {
+        match value.as_bool() {
+            Some(flag) => ui.show_sync_status = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.show_sync_status {value}; using {}",
+                ui.show_sync_status
+            ))),
+        }
+    }
+    if let Some(value) = table.get("show_vcs_status") {
+        match value.as_bool() {
+            Some(flag) => ui.show_vcs_status = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.show_vcs_status {value}; using {}",
+                ui.show_vcs_status
+            ))),
+        }
+    }
     if let Some(value) = table.get("audio_waveforms") {
         match value.as_bool() {
             Some(flag) => ui.audio_waveforms = flag,
@@ -1524,6 +1741,24 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             ))),
         }
     }
+    if let Some(value) = table.get("close_to_tray") {
+        match value.as_bool() {
+            Some(flag) => ui.close_to_tray = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.close_to_tray {value}; using {}",
+                ui.close_to_tray
+            ))),
+        }
+    }
+    if let Some(value) = table.get("tray_icon") {
+        match value.as_str().and_then(TrayIcon::parse) {
+            Some(icon) => ui.tray_icon = icon,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.tray_icon {value}; using {:?}",
+                ui.tray_icon
+            ))),
+        }
+    }
     if let Some(value) = table.get("file_type_colors") {
         match value.as_array() {
             Some(rules) => {
@@ -1565,11 +1800,19 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             "font_family",
             "name_lines",
             "scroll_smoothness",
+            "list_row_height",
+            "zebra_rows",
+            "selection_outline",
+            "double_click_empty",
+            "show_sync_status",
+            "show_vcs_status",
             "audio_waveforms",
             "preview_autoplay",
             "hover_audio",
             "hover_audio_delay_ms",
             "welcome_done",
+            "close_to_tray",
+            "tray_icon",
             "file_type_colors",
         ],
         "ui.",
@@ -1759,7 +2002,14 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
         ("vertical_tabs", &mut layout.vertical_tabs),
         ("move_grips", &mut layout.move_grips),
         ("preview_visible", &mut layout.preview_visible),
+        ("sidebar_visible", &mut layout.sidebar_visible),
         ("show_tab_numbers", &mut layout.show_tab_numbers),
+        ("close_tab_on_double_click", &mut layout.close_tab_on_double_click),
+        ("tab_click_activates_pane", &mut layout.tab_click_activates_pane),
+        ("show_tab_icons", &mut layout.show_tab_icons),
+        ("asterisk_locked_tabs", &mut layout.asterisk_locked_tabs),
+        ("show_drive_letter_on_tabs", &mut layout.show_drive_letter_on_tabs),
+        ("new_tab_next_to_current", &mut layout.new_tab_next_to_current),
     ] {
         if let Some(value) = table.get(key) {
             match value.as_bool() {
@@ -1770,7 +2020,7 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
     }
     warn_unknown_keys(
         table,
-        &["sidebar", "preview", "terminal", "vertical_tabs", "vertical_tabs_side", "move_grips", "preview_visible", "tab_width_mode", "tab_width", "show_tab_numbers"],
+        &["sidebar", "preview", "terminal", "vertical_tabs", "vertical_tabs_side", "move_grips", "preview_visible", "sidebar_visible", "tab_width_mode", "tab_width", "show_tab_numbers", "tab_title_limit", "close_tab_on_double_click", "tab_click_activates_pane", "show_tab_icons", "asterisk_locked_tabs", "show_drive_letter_on_tabs", "new_tab_next_to_current"],
         "layout.",
         diagnostics,
     );
@@ -1794,6 +2044,15 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
             None => diagnostics.push(Diagnostic::warn(format!(
                 "invalid layout.tab_width {value}; using {}",
                 layout.tab_width
+            ))),
+        }
+    }
+    if let Some(value) = table.get("tab_title_limit") {
+        match value.as_integer().and_then(|value| u32::try_from(value).ok()).filter(|value| *value <= 200) {
+            Some(limit) => layout.tab_title_limit = limit,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid layout.tab_title_limit {value}; using {}",
+                layout.tab_title_limit
             ))),
         }
     }
@@ -2307,7 +2566,72 @@ mod tests {
         assert_eq!(config.ui.default_sort, SortOrder::Name);
         assert!(!config.ui.show_hidden);
         assert_eq!(config.ui.icon_pack, "default");
+        assert_eq!(config.ui.list_row_height, ListRowHeight::Standard);
+        assert!(!config.ui.zebra_rows);
+        assert!(!config.ui.selection_outline);
+        assert_eq!(config.ui.double_click_empty, DoubleClickEmpty::None);
+        assert!(!config.ui.show_sync_status);
+        assert!(!config.ui.show_vcs_status);
         assert_eq!(config.indexing.source, IndexSource::Auto);
+    }
+
+    #[test]
+    fn list_appearance_and_status_settings_parse() {
+        let toml = r#"
+            [ui]
+            list_row_height = "relaxed"
+            zebra_rows = true
+            selection_outline = true
+            double_click_empty = "back"
+            show_sync_status = true
+            show_vcs_status = true
+        "#;
+        let (config, diagnostics) = Config::from_toml_str(toml);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(config.ui.list_row_height, ListRowHeight::Relaxed);
+        assert!(config.ui.zebra_rows);
+        assert!(config.ui.selection_outline);
+        assert_eq!(config.ui.double_click_empty, DoubleClickEmpty::Back);
+        assert!(config.ui.show_sync_status);
+        assert!(config.ui.show_vcs_status);
+    }
+
+    #[test]
+    fn invalid_list_appearance_settings_warn_and_keep_the_defaults() {
+        let toml = r#"
+            [ui]
+            list_row_height = "huge"
+            double_click_empty = "double"
+        "#;
+        let (config, diagnostics) = Config::from_toml_str(toml);
+        assert_eq!(config.ui.list_row_height, ListRowHeight::Standard);
+        assert_eq!(config.ui.double_click_empty, DoubleClickEmpty::None);
+        let warnings: Vec<&str> = diagnostics
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Warning)
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(warnings.iter().any(|m| m.contains("ui.list_row_height")), "{warnings:?}");
+        assert!(warnings.iter().any(|m| m.contains("ui.double_click_empty")), "{warnings:?}");
+    }
+
+    #[test]
+    fn row_heights_run_compact_standard_relaxed() {
+        assert_eq!(ListRowHeight::Standard.row_height(), crate::config::BASE_ROW_HEIGHT);
+        assert!(ListRowHeight::Compact.row_height() < ListRowHeight::Standard.row_height());
+        assert!(ListRowHeight::Standard.row_height() < ListRowHeight::Relaxed.row_height());
+    }
+
+    #[test]
+    fn double_click_empty_round_trips_through_its_names() {
+        for action in [DoubleClickEmpty::None, DoubleClickEmpty::Back, DoubleClickEmpty::Up] {
+            assert_eq!(DoubleClickEmpty::parse(action.as_str()), Some(action));
+        }
+        assert_eq!(DoubleClickEmpty::parse("double"), None);
+        for height in [ListRowHeight::Compact, ListRowHeight::Standard, ListRowHeight::Relaxed] {
+            assert_eq!(ListRowHeight::parse(height.as_str()), Some(height));
+        }
+        assert_eq!(ListRowHeight::parse("huge"), None);
     }
 
     #[test]

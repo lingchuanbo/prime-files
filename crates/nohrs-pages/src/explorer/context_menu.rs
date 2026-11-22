@@ -1539,7 +1539,7 @@ impl ExplorerPane {
         }
     }
 
-    fn write_config(
+    pub(crate) fn write_config(
         &mut self,
         section: &'static str,
         key: &'static str,

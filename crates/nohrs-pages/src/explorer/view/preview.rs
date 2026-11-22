@@ -165,6 +165,7 @@ pub fn render_quick_look(
     if !page.quick_look {
         return None;
     }
+    tracing::debug!("quick look drawn in {}", page.cwd);
     let content = render(page, window, cx);
     // Inset rather than a percentage: a percentage size under a centring
     // parent comes out 0 in this layout engine.

@@ -147,10 +147,10 @@ fn render_item(
     let preview_item = item.clone();
     let activation_item = item.clone();
     let is_dir = item.kind == "dir";
-    let name_color = if selected || !matches!(item.kind.as_str(), "file") {
+    let name_color = if selected {
         theme::fg()
     } else {
-        page.file_type_color(&item.name).unwrap_or_else(theme::fg)
+        page.file_name_color(&item.name, &item.kind).unwrap_or_else(theme::fg)
     };
     let highlight = page.highlight_query();
 
@@ -167,6 +167,9 @@ fn render_item(
         .rounded(px(4.0))
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
+        .when(selected && page.selection_outline, |this| {
+            this.border_1().border_color(rgb(theme::accent()))
+        })
         .when(!selected, |this| {
             this.hover(|this| this.bg(rgb(theme::bg_hover())))
         })
@@ -245,6 +248,7 @@ fn render_item(
                             &item.name, &highlight,
                         )),
                 )
+                .children(super::row::status_badges(page, &item))
                 .when_some(page.hit_folder(&item.path), |this, folder| {
                     this.child(crate::explorer::view::hit_folder_label(folder))
                 })

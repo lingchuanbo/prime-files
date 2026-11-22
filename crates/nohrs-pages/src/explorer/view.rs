@@ -74,6 +74,10 @@ pub fn render(
         page.open_preview(path, window, cx);
     }
     page.update_editor_search(window, cx);
+    // A preview the other pane asked for; render is where the window is.
+    if let Some(path) = page.preview_request.take() {
+        page.open_preview(path, window, cx);
+    }
     if !page.focus_requested {
         page.focus_requested = true;
         cx.focus_self(window);
@@ -126,6 +130,12 @@ pub fn render(
                 cx.stop_propagation();
                 return;
             }
+            // Escape closes the preview the other pane is showing for this one.
+            if key_lc == "escape" && this.preview_full {
+                this.toggle_preview_in_other_pane(window, cx);
+                cx.stop_propagation();
+                return;
+            }
             // Escape while a browser waits on Nohrs hands its dialog back.
             if key_lc == "escape" && crate::file_dialog::picking().is_some() {
                 crate::file_dialog::cancel();
@@ -174,6 +184,22 @@ pub fn render(
                 &key_lc,
             ) && this.run_shortcut(action, window, cx)
             {
+                cx.stop_propagation();
+                return;
+            }
+            // Shift+letter goes to that drive (Shift+D to D:), one key per
+            // drive as Total Commander's drive list. Only from the listing, so
+            // typing with Shift in the filter field is left alone.
+            if modifiers.shift
+                && !with_modifier
+                && !modifiers.alt
+                && !modifiers.platform
+                && this.focus_handle.is_focused(window)
+                && key_lc.len() == 1
+                && let Some(letter) = key_lc.chars().next()
+                && letter.is_ascii_alphabetic()
+            {
+                this.open_drive(letter, cx);
                 cx.stop_propagation();
                 return;
             }
@@ -242,18 +268,34 @@ pub fn render(
                 // Enter opens the active entry on Windows, as in Explorer: a
                 // folder is entered, a file opened (or sent to a waiting
                 // browser dialog). macOS keeps Enter for rename, below.
-                // Only with the listing itself focused: Enter in the search or
-                // filter field bubbles up here too, and means something else.
+                // It also opens from the quick filter field: typing there is
+                // how a name is found, and Enter means "that one".
                 "enter"
                     if !cfg!(target_os = "macos")
                         && !with_modifier
-                        && this.focus_handle.is_focused(window) =>
+                        && (this.focus_handle.is_focused(window)
+                            || this
+                                .quick_input(window, cx)
+                                .read(cx)
+                                .focus_handle(cx)
+                                .is_focused(window)) =>
                 {
+                    let from_filter = this
+                        .quick_input(window, cx)
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window);
                     if let Some(item) = this
                         .active_row()
                         .and_then(|index| this.filtered_entries.get(index).cloned())
                     {
                         this.close_quick_look(cx);
+                        if from_filter {
+                            // The filter found the entry; once it is chosen the
+                            // field has done its job, and the folder opened
+                            // shows whole.
+                            this.clear_quick_input(window, cx);
+                        }
                         this.activate_entry(item, window, cx);
                     }
                     cx.stop_propagation();
@@ -547,16 +589,26 @@ fn render_body(
     // same paths: what it holds is the folders, and what a listing would show
     // is what is inside each of them, row after row. The space map takes the
     // listing's place while it is up.
-    let listing = match super::tags::tag_of_location(&page.cwd) {
-        Some(tag) if page.view_mode == super::types::ViewMode::Grid => page.workspace_page(tag, cx),
-        Some(_) => listing::render(page, window, cx),
-        None if page.space_map_open() => space_map::render(page, window, cx),
-        None => listing::render(page, window, cx),
+    let listing = if page.preview_full {
+        // This pane is the other pane's preview: the panel fills it, address
+        // bar and all, as Total Commander's quick view panel does.
+        preview::render(page, window, cx).into_any_element()
+    } else {
+        match super::tags::tag_of_location(&page.cwd) {
+            Some(tag) if page.view_mode == super::types::ViewMode::Grid => page.workspace_page(tag, cx),
+            Some(_) => listing::render(page, window, cx),
+            None if page.space_map_open() => space_map::render(page, window, cx),
+            None => listing::render(page, window, cx),
+        }
     };
     // While Space's quick look shows the preview over everything, the side
     // panel keeps its room, empty, so the listing behind does not reflow
-    // twice; in compact mode it stays in its edge.
-    let preview = if page.quick_look {
+    // twice; in compact mode it stays in its edge. A split has no side preview
+    // at all: the preview there is the other pane's, opened with Alt+Q, so
+    // both listings keep their room.
+    let preview = if page.preview_full || (page.multi_pane && !page.quick_look) {
+        None
+    } else if page.quick_look {
         (page.preview_visible && !chrome.preview)
             .then(|| div().size_full().bg(rgb(theme::bg())).into_any_element())
     } else if page.preview_visible {
@@ -905,7 +957,14 @@ fn compact_chrome(
         .name_filter_input
         .as_ref()
         .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window));
+    // The bar must stay while its field has text, even if focus is moving for
+    // a moment: unmounting the field would lose the keystrokes being typed.
+    let filter_has_text = page
+        .name_filter_input
+        .as_ref()
+        .is_some_and(|input| !input.read(cx).value().is_empty());
     let filtering = filter_focused
+        || filter_has_text
         || page.quick_recursive
         || page.everything_on()
         || !page.name_filter.is_empty();

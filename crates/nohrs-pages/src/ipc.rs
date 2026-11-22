@@ -315,7 +315,7 @@ impl RootView {
         match request {
             Request::Ping => json!({ "ok": true }),
             Request::Show => {
-                window.activate_window();
+                crate::tray::show(window);
                 crate::foreground::bring_to_front(window);
                 json!({ "ok": true })
             }
@@ -323,7 +323,7 @@ impl RootView {
                 Some((folder, select)) => {
                     self.show_explorer(cx);
                     explorer.update(cx, |page, cx| page.open_path(folder, select, window, cx));
-                    window.activate_window();
+                    crate::tray::show(window);
                     crate::foreground::bring_to_front(window);
                     json!({ "ok": true })
                 }

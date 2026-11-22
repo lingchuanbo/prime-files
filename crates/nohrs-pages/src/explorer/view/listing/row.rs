@@ -1,12 +1,15 @@
 use super::truncate_middle;
 
 use crate::explorer::ExplorerPane;
+use crate::explorer::status::{SyncState, VcsState};
+use crate::explorer::type_style::TypeStyle;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::Sizable as _;
 use gpui_component::input::Input;
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, IconName};
+use nohrs_core::t;
 use nohrs_services::fs::listing::FileEntryDto;
 use nohrs_ui::theme::theme;
 
@@ -31,7 +34,7 @@ pub fn render(
     shell_icon: Option<std::sync::Arc<gpui::RenderImage>>,
     cx: &mut Context<ExplorerPane>,
 ) -> impl IntoElement + use<> {
-    use nohrs_ui::components::file_list::{format_date, get_file_type, human_bytes};
+    use nohrs_ui::components::file_list::{format_date, human_bytes};
 
     let icon_name = match item.kind.as_str() {
         "dir" => IconName::Folder,
@@ -43,10 +46,15 @@ pub fn render(
     };
 
     let is_selected = page.is_selected(ix);
+    // The type decides the colour of the name, the type badge, the size and
+    // the date: one hue per kind of file, from the user's rules first and the
+    // built-in palette after them.
+    let type_style = TypeStyle::of(&item.name, &item.kind, page.file_type_color(&item.name));
+    let type_color = type_style.color.map(theme::type_color);
     let name_color = if is_selected || item.kind != "file" {
         theme::fg()
     } else {
-        page.file_type_color(&item.name).unwrap_or_else(theme::fg)
+        type_color.unwrap_or_else(theme::fg)
     };
     let tree_view = page.view_mode == crate::explorer::types::ViewMode::Tree;
     let depth = if tree_view {
@@ -56,8 +64,6 @@ pub fn render(
     };
     let tree_folder = tree_view && item.kind == "dir";
     let tree_open = tree_folder && page.tree_open(&item.path);
-
-    let file_type = get_file_type(&item.name, &item.kind);
 
     // Budget only the space the name actually gets: the column minus the
     // chevron gutter, icon and gaps that precede it (see `NAME_INDENT`).
@@ -168,11 +174,13 @@ pub fn render(
         .child(
             ListItem::new(("file-row", ix))
                 .w(px(total_width))
-                .h(px(32.0))
+                .h(px(page.row_height))
                 .pr(px(24.0))
-                // A flush-left accent bar carries the selection instead of the
-                // former zebra striping, which fought with the selected color.
+                // A flush-left accent bar carries the selection; with the
+                // outline setting on, the same accent closes a frame around the
+                // row instead of leaving it open on three sides.
                 .border_l_2()
+                .when(is_selected && page.selection_outline, |this| this.border_1().border_l_2())
                 .border_color(rgb(if is_selected {
                     theme::accent()
                 } else {
@@ -182,11 +190,7 @@ pub fn render(
                 // `ListItem` paints its own hover fill, which also covers a
                 // selected row's tint; the accent bar above is what keeps the
                 // selection legible while the pointer is over it.
-                .bg(rgb(if is_selected {
-                    theme::accent_subtle()
-                } else {
-                    theme::bg()
-                }))
+                .bg(rgb(row_background(is_selected, ix, page)))
                 .on_click(
                     cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                         if let gpui::ClickEvent::Mouse(mouse) = event
@@ -362,6 +366,7 @@ pub fn render(
                                                 .whitespace_nowrap()
                                                 .child(styled_name),
                                         )
+                                        .children(status_badges(page, &item))
                                         .when(!tag_colors.is_empty(), |this| {
                                             this.child(
                                                 div()
@@ -390,13 +395,28 @@ pub fn render(
                             div()
                                 .w(px(page.col_type_width))
                                 .pl(px(CELL_INSET))
+                                .pr(px(8.0))
                                 .flex_shrink_0()
-                                .text_sm()
-                                .text_color(rgb(theme::fg_secondary()))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
                                 .overflow_hidden()
-                                .text_ellipsis()
                                 .whitespace_nowrap()
-                                .child(file_type),
+                                // The extension as a short tag, then the type's
+                                // name: the tag carries the colour, the name
+                                // stays quiet so a column of them reads.
+                                .when_some(type_badge(&type_style), |this, badge| this.child(badge))
+                                .child(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .flex_shrink()
+                                        .text_sm()
+                                        .text_color(rgb(theme::fg_secondary()))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(type_style.label),
+                                ),
                         )
                         .child(
                             div()
@@ -406,7 +426,7 @@ pub fn render(
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_sm()
-                                .text_color(rgb(theme::fg_secondary()))
+                                .text_color(rgb(type_color.unwrap_or_else(theme::fg_secondary)))
                                 .child(match item.kind.as_str() {
                                     "file" => human_bytes(item.size),
                                     // A folder found by the whole-computer
@@ -424,7 +444,7 @@ pub fn render(
                                 .pl(px(CELL_INSET))
                                 .flex_shrink_0()
                                 .text_sm()
-                                .text_color(rgb(theme::fg_secondary()))
+                                .text_color(rgb(type_color.unwrap_or_else(theme::fg_secondary)))
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
@@ -482,5 +502,114 @@ pub fn render(
     match folder {
         Some(folder) => crate::explorer::drag::drop_into(row, &folder, cx),
         None => row,
+    }
+}
+
+/// The fill behind one row: the selection tint, the zebra stripe when the
+/// setting asks for it, or the plain surface. A selected row keeps its tint:
+/// the stripe is there to follow a row across the columns, and a selected row
+/// is already followed by the eye.
+fn row_background(is_selected: bool, ix: usize, page: &ExplorerPane) -> u32 {
+    if is_selected {
+        theme::accent_subtle()
+    } else if page.zebra_rows && ix % 2 == 1 {
+        theme::gray_50()
+    } else {
+        theme::bg()
+    }
+}
+
+/// The marks between a file's name and its tags: the cloud state and the
+/// Git/SVN state, each only while the settings ask for it and the state is
+/// one worth showing.
+pub(crate) fn status_badges(page: &ExplorerPane, item: &FileEntryDto) -> Vec<AnyElement> {
+    let mut badges = Vec::with_capacity(2);
+    if let Some(state) = page.sync_state(&item.path) {
+        let (icon, color, label) = match state {
+            SyncState::CloudOnly => ("icons/cloud-download.svg", theme::gray_500(), t!("Só na nuvem")),
+            SyncState::Pinned => ("icons/pin.svg", theme::accent(), t!("Fixado neste dispositivo")),
+        };
+        badges.push(
+            div()
+                .id(SharedString::from(format!("sync-badge-{}", item.path)))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .ml(px(4.0))
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(label).build(window, cx))
+                .child(Icon::new(Icon::empty()).path(icon).size_3().text_color(rgb(color)))
+                .into_any_element(),
+        );
+    }
+    if let Some(state) = page.vcs_state(&item.path) {
+        // The checkout and its root tell which repository the badge is about:
+        // a folder can sit in one of several nested checkouts.
+        let context = page
+            .vcs_status
+            .as_ref()
+            .map(|status| format!("{} · {}", status.kind.name(), status.root))
+            .unwrap_or_default();
+        let label = SharedString::from(format!("{} ({context})", vcs_label(state)));
+        badges.push(
+            div()
+                .id(SharedString::from(format!("vcs-badge-{}", item.path)))
+                .flex_shrink_0()
+                .ml(px(4.0))
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(vcs_color(state)))
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx))
+                .child(state.letter())
+                .into_any_element(),
+        );
+    }
+    badges
+}
+
+/// The extension badge of a type: the extension in the type's colour on a
+/// fill of that colour laid over the surface, as the type column's short tag.
+fn type_badge(style: &TypeStyle) -> Option<AnyElement> {
+    let color = style.color?;
+    if style.extension.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .flex_shrink_0()
+            .px(px(5.0))
+            .py(px(1.0))
+            .rounded(px(4.0))
+            .bg(rgb(theme::type_badge_bg(color)))
+            .text_xs()
+            .font_weight(gpui::FontWeight::BOLD)
+            .text_color(rgb(theme::type_color(color)))
+            .child(style.extension.clone())
+            .into_any_element(),
+    )
+}
+
+/// The colour that reads a state at a glance: amber for what was edited,
+/// green for what is new, red for what is gone or fights, the accent for what
+/// moved.
+fn vcs_color(state: VcsState) -> u32 {
+    match state {
+        VcsState::Modified | VcsState::Replaced => theme::warning(),
+        VcsState::Added | VcsState::Untracked => theme::success(),
+        VcsState::Deleted | VcsState::Conflicted => theme::danger(),
+        VcsState::Renamed | VcsState::Copied => theme::accent(),
+    }
+}
+
+/// The tooltip's wording for a state.
+fn vcs_label(state: VcsState) -> &'static str {
+    match state {
+        VcsState::Modified => t!("Modificado"),
+        VcsState::Added | VcsState::Replaced => t!("Novo"),
+        VcsState::Untracked => t!("Não versionado"),
+        VcsState::Deleted => t!("Apagado"),
+        VcsState::Conflicted => t!("Em conflito"),
+        VcsState::Renamed => t!("Renomeado"),
+        VcsState::Copied => t!("Copiado"),
     }
 }

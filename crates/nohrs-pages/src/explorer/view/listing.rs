@@ -107,6 +107,9 @@ pub fn group_header(group: &crate::explorer::grouping::Group, width: f32) -> Div
         .flex()
         .items_end()
         .pb(px(6.0))
+        // Filled space, not the listing's blank part: the double-click gesture
+        // for empty space must not fire on a heading.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
             div()
                 .flex()
@@ -163,9 +166,15 @@ fn with_wheel_zoom(
         // was on empty space.
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                if this.drag_candidate.is_none() && this.marquee.is_none() {
-                    this.start_marquee(event.position, event.modifiers, None, cx);
+            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if this.drag_candidate.is_none()
+                    && this.marquee.is_none()
+                    && this.start_marquee(event.position, event.modifiers, None, cx)
+                    && event.click_count >= 2
+                {
+                    // Back or up, as the settings choose; the second press of
+                    // the double click is the one that carries count 2.
+                    this.double_click_empty_space(window, cx);
                 }
             }),
         )

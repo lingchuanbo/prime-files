@@ -271,12 +271,113 @@ async fn apply_config_ui_reflects_ui_section(cx: &mut TestAppContext) {
                 hover_audio: false,
                 hover_audio_delay_ms: 400,
                 file_type_colors: Vec::new(),
+                ..config::Ui::default()
             };
             page.apply_config_ui(&ui, cx);
             assert!(page.show_hidden);
             assert!(page.sort_key == SortKey::Size);
         })
         .unwrap();
+}
+
+#[gpui::test]
+async fn apply_config_ui_applies_list_appearance_settings(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window
+        .update(cx, |page, _window, cx| {
+            page.entries = vec![file("a.txt", "file", 3), file("b.txt", "file", 4)];
+            page.apply_filter();
+            let ui = config::Ui {
+                list_row_height: config::ListRowHeight::Relaxed,
+                zebra_rows: true,
+                selection_outline: true,
+                double_click_empty: config::DoubleClickEmpty::Up,
+                ..config::Ui::default()
+            };
+            page.apply_config_ui(&ui, cx);
+            assert_eq!(page.row_height, config::ListRowHeight::Relaxed.row_height());
+            // The rows' heights are part of their size table, not of the render.
+            assert_eq!(page.item_sizes.len(), 2);
+            assert_eq!(page.item_sizes[0].height, px(page.row_height));
+            assert!(page.zebra_rows);
+            assert!(page.selection_outline);
+            assert_eq!(page.double_click_empty, config::DoubleClickEmpty::Up);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn double_click_on_empty_space_goes_back_or_up_as_configured(cx: &mut TestAppContext) {
+    let outer = tempfile::tempdir().unwrap();
+    let inner = outer.path().join("inner");
+    let first = outer.path().join("first");
+    let second = outer.path().join("second");
+    for folder in [&inner, &first, &second] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    let outer_path = outer.path().to_string_lossy().into_owned();
+    let inner_path = inner.to_string_lossy().into_owned();
+    let first_path = first.to_string_lossy().into_owned();
+    let second_path = second.to_string_lossy().into_owned();
+
+    let window = new_explorer(cx);
+    window
+        .update(cx, |page, window, cx| {
+            // The default does nothing at all.
+            page.cwd = inner_path.clone();
+            page.double_click_empty = config::DoubleClickEmpty::None;
+            page.double_click_empty_space(window, cx);
+            assert_eq!(page.cwd, inner_path);
+
+            // "Back" goes to the folder before this one in the history.
+            page.cwd = second_path.clone();
+            page.history = vec![first_path.clone(), second_path.clone()];
+            page.history_index = 1;
+            page.double_click_empty = config::DoubleClickEmpty::Back;
+            page.double_click_empty_space(window, cx);
+            assert_eq!(page.cwd, first_path);
+
+            // "Up" goes to the folder holding this one.
+            page.cwd = inner_path.clone();
+            page.double_click_empty = config::DoubleClickEmpty::Up;
+            page.double_click_empty_space(window, cx);
+            assert_eq!(page.cwd, outer_path);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn rows_draw_their_type_cell_and_colours(cx: &mut TestAppContext) {
+    let (pane, cx) = new_explorer_visual(cx);
+    pane.update(cx, |pane, cx| {
+        pane.entries = vec![
+            file("setup.exe", "file", 1),
+            file("config.ini", "file", 2),
+            file("backup.7z", "file", 3),
+            file("README", "file", 4),
+            file("src", "dir", 0),
+        ];
+        // A rule wins over the built-in palette, as in a folder someone tuned.
+        pane.apply_config_ui(
+            &config::Ui {
+                file_type_colors: vec![config::FileTypeColorRule {
+                    pattern: "*.ini".to_string(),
+                    color: "#38bdf8".to_string(),
+                }],
+                ..config::Ui::default()
+            },
+            cx,
+        );
+        pane.zebra_rows = true;
+        pane.selection_outline = true;
+        pane.select_single(0);
+        cx.notify();
+    });
+    // Drawing the frame is the assertion: the type cell (the extension badge,
+    // the type's name, the coloured size and date) must lay out for every
+    // kind, including the rule-coloured file, the extensionless one and the
+    // folder, whose row carries no badge.
+    cx.run_until_parked();
 }
 
 #[gpui::test]
@@ -297,8 +398,8 @@ async fn grouping_counts_headers_when_scrolling_to_an_entry(cx: &mut TestAppCont
                 .collect();
             assert_eq!(names, ["docs", "a.png", "b.png"]);
             assert_eq!(page.groups().len(), 2);
-            // List: column header, "Pastas", docs, "Imagens", a.png, b.png.
-            assert_eq!(page.visual_rows_of(2).0, 5);
+            // List: column header, "..", "Pastas", docs, "Imagens", a.png, b.png.
+            assert_eq!(page.visual_rows_of(2).0, 6);
             // Search results replace the entries without grouping them.
             page.search_results = Some(Vec::new());
             assert!(page.groups().is_empty());
@@ -328,6 +429,7 @@ async fn config_reload_keeps_a_sort_chosen_in_the_session(cx: &mut TestAppContex
                 hover_audio: false,
                 hover_audio_delay_ms: 400,
                 file_type_colors: Vec::new(),
+                ..config::Ui::default()
             };
             page.apply_config_ui(&ui, cx);
             page.set_sort(SortKey::Modified, false, cx);
@@ -1087,6 +1189,7 @@ async fn synced_panes_mirror_navigation(cx: &mut TestAppContext) {
                 synced_panes: true,
                 restore_tabs: true,
                 reveal_from_other_apps: true,
+                ..config::Explorer::default()
             };
             page.apply_config_explorer(&synced, cx);
             assert!(page.is_synced());
@@ -1125,6 +1228,7 @@ async fn synced_navigation_clears_stale_search_state(cx: &mut TestAppContext) {
                 synced_panes: true,
                 restore_tabs: true,
                 reveal_from_other_apps: true,
+                ..config::Explorer::default()
             };
             page.apply_config_explorer(&synced, cx);
 
@@ -1176,6 +1280,7 @@ async fn split_pane_inherits_applied_ui_config(cx: &mut TestAppContext) {
                 hover_audio: false,
                 hover_audio_delay_ms: 400,
                 file_type_colors: Vec::new(),
+                ..config::Ui::default()
             };
             page.apply_config_ui(&ui, cx);
 
@@ -1300,6 +1405,7 @@ async fn close_pane_keeps_subscriptions_aligned(cx: &mut TestAppContext) {
                 synced_panes: true,
                 restore_tabs: true,
                 reveal_from_other_apps: true,
+                ..config::Explorer::default()
             };
             page.apply_config_explorer(&synced, cx);
             page.pane(0)
@@ -3313,6 +3419,7 @@ async fn each_folder_opens_with_the_zoom_and_sort_it_was_left_with(cx: &mut Test
                 hover_audio: false,
                 hover_audio_delay_ms: 400,
                 file_type_colors: Vec::new(),
+                ..config::Ui::default()
             };
             page.apply_config_ui(&ui, cx);
 

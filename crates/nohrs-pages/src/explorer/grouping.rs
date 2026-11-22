@@ -167,6 +167,8 @@ fn group_of(entry: &FileEntryDto, by: GroupBy, clock: &Clock) -> (u8, &'static s
 /// One row of the list view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListRow {
+    /// The ".." row that goes up to the parent folder.
+    Parent,
     /// The header of `groups[index]`.
     Group(usize),
     /// `filtered_entries[index]`.
@@ -174,11 +176,26 @@ pub enum ListRow {
 }
 
 /// The list's rows: every entry, with a header before each group.
+#[cfg(test)]
 pub fn list_rows(groups: &[Group], entries: usize) -> Vec<ListRow> {
-    if groups.is_empty() {
-        return (0..entries).map(ListRow::Entry).collect();
+    list_rows_with_parent(groups, entries, false)
+}
+
+/// [`list_rows`], with a ".." row first when the folder has a parent.
+pub fn list_rows_with_parent(
+    groups: &[Group],
+    entries: usize,
+    parent: bool,
+) -> Vec<ListRow> {
+    let offset = usize::from(parent);
+    let mut rows = Vec::with_capacity(entries + groups.len() + offset);
+    if parent {
+        rows.push(ListRow::Parent);
     }
-    let mut rows = Vec::with_capacity(entries + groups.len());
+    if groups.is_empty() {
+        rows.extend((0..entries).map(ListRow::Entry));
+        return rows;
+    }
     for (index, group) in groups.iter().enumerate() {
         rows.push(ListRow::Group(index));
         rows.extend((group.start..group.start + group.len).map(ListRow::Entry));

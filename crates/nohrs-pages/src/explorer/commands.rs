@@ -58,15 +58,20 @@ impl ExplorerPane {
             Action::DirectoryMenu => self.open_favorites_menu(window, cx),
             // The preview pane, on the side of the listing: the same key
             // shows it and hides it again, and the choice is kept for the
-            // next start (the header's button does the same).
+            // next start (the header's button does the same). In a split, the
+            // preview goes to the other pane instead, as Total Commander does.
             Action::TogglePreview => {
-                self.preview_visible = !self.preview_visible;
-                super::view::panels::save_layout(
-                    "preview_visible",
-                    self.preview_visible.to_string(),
-                    cx,
-                );
-                cx.notify();
+                if self.multi_pane {
+                    self.toggle_preview_in_other_pane(window, cx);
+                } else {
+                    self.preview_visible = !self.preview_visible;
+                    super::view::panels::save_layout(
+                        "preview_visible",
+                        self.preview_visible.to_string(),
+                        cx,
+                    );
+                    cx.notify();
+                }
             }
             Action::SelectAll => {
                 self.select_all();
@@ -102,6 +107,27 @@ impl ExplorerPane {
             Action::CompressZipMax => self.compress_active(super::archive_ops::Format::ZipMax, cx),
             Action::CompressSelection7z => self.compress_selection(cx),
             Action::ExtractArchive => self.extract_active_and_navigate(window, cx),
+            Action::DeselectAll => self.clear_selection_and_notify(cx),
+            Action::InvertSelection => self.invert_selection(cx),
+            Action::SelectSameExtension => self.select_same_extension(cx),
+            Action::TypeFilter => self.open_type_filter(window, cx),
+            Action::ToggleHiddenFiles => self.toggle_hidden_files(cx),
+            Action::SortByName => self.sort_by(super::types::SortKey::Name, cx),
+            Action::SortByExtension => self.sort_by(super::types::SortKey::Type, cx),
+            Action::SortBySize => self.sort_by(super::types::SortKey::Size, cx),
+            Action::SortByModified => self.sort_by(super::types::SortKey::Modified, cx),
+            Action::CopyToOtherPane => self.transfer_selection_to_other_pane(true, cx),
+            Action::MoveToOtherPane => self.transfer_selection_to_other_pane(false, cx),
+            Action::CopyNameAndPath => self.copy_selected_text(CopyText::NameAndPath, cx),
+            Action::CopyName => self.copy_selected_text(CopyText::Name, cx),
+            Action::CopyNameWithoutExtension => {
+                self.copy_selected_text(CopyText::NameWithoutExtension, cx)
+            }
+            Action::CopyPath => self.copy_selected_text(CopyText::Path, cx),
+            Action::CopyCustomColumns => self.copy_custom_columns(cx),
+            Action::FocusAddressBar => self.focus_address_bar(window, cx),
+            Action::OpenDesktop => self.open_desktop(cx),
+            Action::ColumnMenu => self.open_column_menu(None, window, cx),
             Action::NewTab
             | Action::CloseTab
             | Action::SplitVertical
@@ -111,6 +137,15 @@ impl ExplorerPane {
             | Action::NextPane
             | Action::PreviousPane
             | Action::ToggleSidebar
+            | Action::MoveTabToRightPane
+            | Action::MoveTabToLeftPane
+            | Action::OpenFolderInRightPane
+            | Action::OpenFolderInLeftPane
+            | Action::SwapPanes
+            | Action::NextTab
+            | Action::PreviousTab
+            | Action::TabMenu
+            | Action::ShowShortcuts
             | Action::ToggleTerminal => return false,
         }
         true
@@ -312,5 +347,204 @@ impl ExplorerPane {
                 .border_color(outline)
                 .into_any_element(),
         )
+    }
+}
+
+/// What a copy-name shortcut puts on the clipboard.
+#[derive(Clone, Copy)]
+enum CopyText {
+    NameAndPath,
+    Name,
+    NameWithoutExtension,
+    Path,
+}
+
+impl ExplorerPane {
+    fn clear_selection_and_notify(&mut self, cx: &mut Context<Self>) {
+        self.clear_selection();
+        cx.notify();
+    }
+
+    fn invert_selection(&mut self, cx: &mut Context<Self>) {
+        let all: Vec<String> = self
+            .filtered_entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.selection = all
+            .into_iter()
+            .filter(|path| !self.selection.contains(path))
+            .collect();
+        self.selection_anchor = None;
+        cx.notify();
+    }
+
+    fn select_same_extension(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active_path.clone() else {
+            return;
+        };
+        let Some(extension) = std::path::Path::new(&active)
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_lowercase())
+        else {
+            return;
+        };
+        self.selection = self
+            .filtered_entries
+            .iter()
+            .filter(|entry| {
+                std::path::Path::new(&entry.path)
+                    .extension()
+                    .map(|candidate| candidate.to_string_lossy().to_lowercase())
+                    .as_deref()
+                    == Some(extension.as_str())
+            })
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.selection_anchor = Some(active);
+        cx.notify();
+    }
+
+    fn toggle_hidden_files(&mut self, cx: &mut Context<Self>) {
+        self.show_hidden = !self.show_hidden;
+        let value = self.show_hidden.to_string();
+        self.write_config("ui", "show_hidden", value, cx);
+        self.apply_filter();
+        cx.notify();
+    }
+
+    fn open_type_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_quick_input(Some("*."), window, cx);
+    }
+
+    fn sort_by(&mut self, key: super::types::SortKey, cx: &mut Context<Self>) {
+        self.set_sort_key(key, cx);
+        cx.notify();
+    }
+
+    fn copy_selected_text(&mut self, kind: CopyText, cx: &mut Context<Self>) {
+        let mut paths = self.selected_paths();
+        if paths.is_empty()
+            && let Some(active) = self.active_path.clone()
+        {
+            paths.push(active);
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let text = paths
+            .iter()
+            .map(|path| {
+                let path_buf = std::path::Path::new(path);
+                let name = path_buf
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                match kind {
+                    CopyText::NameAndPath => format!("{name}\t{path}"),
+                    CopyText::Name => name,
+                    CopyText::NameWithoutExtension => path_buf
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().to_string())
+                        .unwrap_or(name),
+                    CopyText::Path => path.clone(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    }
+
+    fn copy_custom_columns(&mut self, cx: &mut Context<Self>) {
+        let mut paths = self.selected_paths();
+        if paths.is_empty()
+            && let Some(active) = self.active_path.clone()
+        {
+            paths.push(active);
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let text = paths
+            .iter()
+            .map(|path| {
+                match self
+                    .filtered_entries
+                    .iter()
+                    .find(|entry| &entry.path == path)
+                {
+                    Some(entry) => format!(
+                        "{}\t{}\t{}\t{}",
+                        entry.name, entry.kind, entry.size, entry.modified
+                    ),
+                    None => path.clone(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    }
+
+    fn transfer_selection_to_other_pane(&mut self, copy: bool, cx: &mut Context<Self>) {
+        let Some(sibling) = self.sibling_pane.clone() else {
+            return;
+        };
+        let dest = PathBuf::from(sibling.read(cx).cwd.clone());
+        let sources: Vec<PathBuf> = self
+            .selected_paths()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        if sources.is_empty() {
+            return;
+        }
+        let mode = if copy {
+            super::file_ops::ClipMode::Copy
+        } else {
+            super::file_ops::ClipMode::Cut
+        };
+        if self.prepare_transfer(mode, sources, dest, false) {
+            while self.resolve_current_conflict(
+                nohrs_services::fs::ops::ConflictResolution::Rename,
+                cx,
+            ) {}
+        }
+        self.execute_paste_plan(cx);
+        cx.notify();
+    }
+
+    fn focus_address_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.path_edit.is_none() {
+            self.begin_path_edit(window, cx);
+        }
+    }
+
+    fn open_desktop(&mut self, cx: &mut Context<Self>) {
+        let desktop = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .map(|home| home.join("Desktop"))
+            .filter(|desktop| desktop.is_dir());
+        let Some(desktop) = desktop else {
+            return;
+        };
+        self.navigate_to_synced(desktop.to_string_lossy().to_string(), cx);
+    }
+
+    /// Shift+D and the like: opens that drive, or says why it cannot.
+    pub(crate) fn open_drive(&mut self, letter: char, cx: &mut Context<Self>) {
+        let letter = letter.to_ascii_uppercase();
+        let root = format!("{letter}:\\");
+        if std::path::Path::new(&root).exists() {
+            self.navigate_to_synced(root, cx);
+        } else {
+            self.set_status(
+                StatusLevel::Error,
+                tf!(
+                    "Não foi possível abrir o drive {letter}:",
+                    letter = letter
+                ),
+            );
+            cx.notify();
+        }
     }
 }

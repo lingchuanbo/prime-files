@@ -184,6 +184,26 @@
         }
       ]
     },
+    "DoubleClickEmpty": {
+      "description": "What a double click on the Details list's empty space does.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Nothing; the click only clears the selection.",
+          "type": "string"
+        },
+        {
+          "const": "back",
+          "description": "Goes back to the folder before this one.",
+          "type": "string"
+        },
+        {
+          "const": "up",
+          "description": "Goes up to the folder holding this one.",
+          "type": "string"
+        }
+      ]
+    },
     "Explorer": {
       "description": "Split-view and pane settings (see `docs/explorer-essentials.md` 搂3).",
       "properties": {
@@ -358,9 +378,24 @@
     "Layout": {
       "description": "Where the window's panels sit and how the tabs are laid out. Each panel\ndocks to one side of what it accompanies: the sidebar and the preview to a\nside of the listing, the terminal to a side of the panes.",
       "properties": {
+        "asterisk_locked_tabs": {
+          "default": true,
+          "description": "A `*` before the title of a locked tab.",
+          "type": "boolean"
+        },
+        "close_tab_on_double_click": {
+          "default": true,
+          "description": "A double click on a tab closes it.",
+          "type": "boolean"
+        },
         "move_grips": {
           "default": false,
           "description": "A grip in the middle of each panel's edge that carries the panel to\nanother side. Off by default: dragging it was not obvious, and the\nsides are also chosen here and from the bubbles of the listing's edges.",
+          "type": "boolean"
+        },
+        "new_tab_next_to_current": {
+          "default": true,
+          "description": "A new tab opens beside the current one instead of at the end.",
           "type": "boolean"
         },
         "preview": {
@@ -373,6 +408,16 @@
           "description": "Whether the preview panel is shown. Written whenever the preview is\ntoggled, so a window closed with it hidden opens that way again.",
           "type": "boolean"
         },
+        "show_drive_letter_on_tabs": {
+          "default": true,
+          "description": "`D:` and the like on a tab rooted at a drive.",
+          "type": "boolean"
+        },
+        "show_tab_icons": {
+          "default": true,
+          "description": "Folder icons before the tab titles.",
+          "type": "boolean"
+        },
         "show_tab_numbers": {
           "default": true,
           "description": "Whether horizontal tabs show their Alt+number shortcut prefix.",
@@ -382,6 +427,22 @@
           "$ref": "#/$defs/DockSide",
           "default": "left",
           "description": "The side the sidebar with the places docks to."
+        },
+        "sidebar_visible": {
+          "default": true,
+          "description": "Whether the sidebar with the places is shown. Written when it is\ntoggled, so a window closed with it hidden opens that way again.",
+          "type": "boolean"
+        },
+        "tab_click_activates_pane": {
+          "default": false,
+          "description": "Clicking a tab makes its pane the one in use.",
+          "type": "boolean"
+        },
+        "tab_title_limit": {
+          "default": 15,
+          "description": "Longest tab title in characters (0 keeps the whole title).",
+          "minimum": 0,
+          "type": "integer"
         },
         "tab_width": {
           "default": 160,
@@ -411,6 +472,26 @@
         }
       },
       "type": "object"
+    },
+    "ListRowHeight": {
+      "description": "Height of a row in the Details list.",
+      "oneOf": [
+        {
+          "const": "compact",
+          "description": "Tighter rows, so more of the folder fits on screen.",
+          "type": "string"
+        },
+        {
+          "const": "standard",
+          "description": "The default.",
+          "type": "string"
+        },
+        {
+          "const": "relaxed",
+          "description": "Taller rows, easier to scan.",
+          "type": "string"
+        }
+      ]
     },
     "Plugins": {
       "description": "Plugin selection (config.md 搂2, reserved for P4).\n\nType definition / reservation only: the lists are parsed and stored, but no\nplugin host loads them yet (that lands in P4).",
@@ -628,6 +709,26 @@
         }
       ]
     },
+    "TrayIcon": {
+      "description": "When the tray icon is shown.",
+      "oneOf": [
+        {
+          "const": "always",
+          "description": "Whenever LumaFiles runs.",
+          "type": "string"
+        },
+        {
+          "const": "background",
+          "description": "Only while the window is hidden in the tray.",
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Never.",
+          "type": "string"
+        }
+      ]
+    },
     "Ui": {
       "description": "Explorer / view settings.",
       "properties": {
@@ -641,6 +742,11 @@
           "description": "Whether sound files show their waveform instead of their icon in the\nicons view.",
           "type": "boolean"
         },
+        "close_to_tray": {
+          "default": false,
+          "description": "Whether closing the window keeps LumaFiles in the tray, with copies and\nother work still running, instead of quitting.",
+          "type": "boolean"
+        },
         "default_sort": {
           "$ref": "#/$defs/SortOrder",
           "default": "name",
@@ -650,6 +756,11 @@
           "default": false,
           "description": "Whether that default runs from Z to A, largest or newest first.",
           "type": "boolean"
+        },
+        "double_click_empty": {
+          "$ref": "#/$defs/DoubleClickEmpty",
+          "default": "none",
+          "description": "What a double click on the Details list's empty space does."
         },
         "file_type_colors": {
           "default": [],
@@ -685,6 +796,11 @@
           "description": "Interface language: `\"auto\"` follows the Windows regional format\n(then the country), or one of `\"pt-BR\"`, `\"en\"`, `\"es\"`, `\"fr\"`, `\"de\"`,\n`\"it\"`, `\"ru\"`, `\"ja\"`, `\"zh-CN\"`.",
           "type": "string"
         },
+        "list_row_height": {
+          "$ref": "#/$defs/ListRowHeight",
+          "default": "standard",
+          "description": "How tall a row of the Details list is."
+        },
         "name_lines": {
           "default": 0,
           "description": "Most lines a name takes under an icon in the icons view, the last\none ending in \"鈥? when the name needs more; 0 = no limit.",
@@ -702,6 +818,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "selection_outline": {
+          "default": false,
+          "description": "Whether the selected rows get an outline in the accent colour.",
+          "type": "boolean"
+        },
         "show_hidden": {
           "default": false,
           "description": "Whether dotfiles are shown in listings.",
@@ -712,9 +833,29 @@
           "description": "Whether the sidebar starts with the Windows Quick access section (the\nfolders pinned and found frequent in Explorer).",
           "type": "boolean"
         },
+        "show_sync_status": {
+          "default": false,
+          "description": "Whether files show a badge for their cloud sync state (OneDrive and\ncloud providers that use the same file attributes).",
+          "type": "boolean"
+        },
+        "show_vcs_status": {
+          "default": false,
+          "description": "Whether files show a badge for their Git or SVN state.",
+          "type": "boolean"
+        },
+        "tray_icon": {
+          "$ref": "#/$defs/TrayIcon",
+          "default": "always",
+          "description": "When the tray icon is shown."
+        },
         "welcome_done": {
           "default": false,
           "description": "Whether the welcome screen was gone through; false shows it on start.",
+          "type": "boolean"
+        },
+        "zebra_rows": {
+          "default": false,
+          "description": "Whether alternating rows of the Details list get a faint background.",
           "type": "boolean"
         }
       },
@@ -814,11 +955,19 @@
     "layout": {
       "$ref": "#/$defs/Layout",
       "default": {
+        "asterisk_locked_tabs": true,
+        "close_tab_on_double_click": true,
         "move_grips": false,
+        "new_tab_next_to_current": true,
         "preview": "right",
         "preview_visible": true,
+        "show_drive_letter_on_tabs": true,
+        "show_tab_icons": true,
         "show_tab_numbers": true,
         "sidebar": "left",
+        "sidebar_visible": true,
+        "tab_click_activates_pane": false,
+        "tab_title_limit": 15,
         "tab_width": 160,
         "tab_width_mode": "adaptive",
         "terminal": "bottom",
@@ -887,20 +1036,28 @@
       "default": {
         "app_name": "",
         "audio_waveforms": false,
+        "close_to_tray": false,
         "default_sort": "name",
         "default_sort_descending": false,
+        "double_click_empty": "none",
         "file_type_colors": [],
         "font_family": "",
         "hover_audio": true,
         "hover_audio_delay_ms": 400,
         "icon_pack": "default",
         "language": "zh-CN",
+        "list_row_height": "standard",
         "name_lines": 0,
         "preview_autoplay": false,
         "scroll_smoothness": 50,
+        "selection_outline": false,
         "show_hidden": false,
         "show_quick_access": true,
-        "welcome_done": false
+        "show_sync_status": false,
+        "show_vcs_status": false,
+        "tray_icon": "always",
+        "welcome_done": false,
+        "zebra_rows": false
       },
       "description": "Explorer / view settings."
     },

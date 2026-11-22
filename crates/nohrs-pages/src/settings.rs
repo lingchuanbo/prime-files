@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
-use nohrs_core::config::{self, BarSize, Config, DockSide, FileTypeColorRule, IndexSource, SortOrder, SplitDirection, TabWidthMode, ThemeMode};
+use nohrs_core::config::{self, BarSize, Config, DockSide, DoubleClickEmpty, FileTypeColorRule, IndexSource, ListRowHeight, SortOrder, SplitDirection, TabWidthMode, ThemeMode, TrayIcon};
 use nohrs_core::i18n::{self, Lang, tr};
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::shortcuts::{self, Action, Chord};
@@ -1043,6 +1043,59 @@ impl SettingsPage {
                     t!("Mostra números nas dez primeiras abas; use Alt+número para alternar."),
                     self.switch("tab-numbers", layout.show_tab_numbers, ("layout", "show_tab_numbers"), cx),
                 ).reset(("layout", "show_tab_numbers"), layout.show_tab_numbers, "true"),
+                Row::new(
+                    t!("Limite de caracteres no título da aba"),
+                    None,
+                    self.config_choice(
+                        "tab-title-limit",
+                        &[
+                            ("10", layout.tab_title_limit == 10, "10"),
+                            ("15", layout.tab_title_limit == 15, "15"),
+                            ("20", layout.tab_title_limit == 20, "20"),
+                            ("30", layout.tab_title_limit == 30, "30"),
+                            ("∞", layout.tab_title_limit == 0, "0"),
+                        ],
+                        ("layout", "tab_title_limit"),
+                        cx,
+                    ),
+                )
+                .reset(("layout", "tab_title_limit"), layout.tab_title_limit == 15, "15"),
+                Row::new(
+                    t!("Fechar a aba com dois cliques"),
+                    None,
+                    self.switch("double-click-close-tab", layout.close_tab_on_double_click, ("layout", "close_tab_on_double_click"), cx),
+                )
+                .reset(("layout", "close_tab_on_double_click"), layout.close_tab_on_double_click, "true"),
+                Row::new(
+                    t!("Clicar na aba ativa o painel"),
+                    None,
+                    self.switch("tab-click-activates-pane", layout.tab_click_activates_pane, ("layout", "tab_click_activates_pane"), cx),
+                )
+                .reset(("layout", "tab_click_activates_pane"), !layout.tab_click_activates_pane, "false"),
+                Row::new(
+                    t!("Mostrar ícones nas abas"),
+                    None,
+                    self.switch("tab-icons", layout.show_tab_icons, ("layout", "show_tab_icons"), cx),
+                )
+                .reset(("layout", "show_tab_icons"), layout.show_tab_icons, "true"),
+                Row::new(
+                    t!("Marcar abas bloqueadas com *"),
+                    None,
+                    self.switch("tab-locked-marker", layout.asterisk_locked_tabs, ("layout", "asterisk_locked_tabs"), cx),
+                )
+                .reset(("layout", "asterisk_locked_tabs"), layout.asterisk_locked_tabs, "true"),
+                Row::new(
+                    t!("Mostrar a letra da unidade nas abas"),
+                    None,
+                    self.switch("tab-drive-letter", layout.show_drive_letter_on_tabs, ("layout", "show_drive_letter_on_tabs"), cx),
+                )
+                .reset(("layout", "show_drive_letter_on_tabs"), layout.show_drive_letter_on_tabs, "true"),
+                Row::new(
+                    t!("Abrir a nova aba ao lado da atual"),
+                    None,
+                    self.switch("new-tab-next-to-current", layout.new_tab_next_to_current, ("layout", "new_tab_next_to_current"), cx),
+                )
+                .reset(("layout", "new_tab_next_to_current"), layout.new_tab_next_to_current, "true"),
             ],
         )]
     }
@@ -1140,6 +1193,32 @@ impl SettingsPage {
                         self.switch("move-grips", layout.move_grips, ("layout", "move_grips"), cx),
                     )
                     .reset(("layout", "move_grips"), !layout.move_grips, "false"),
+                ],
+            ),
+            Group::titled(
+                t!("Janela e bandeja"),
+                vec![
+                    Row::hint(
+                        t!("Continuar em segundo plano ao fechar"),
+                        t!("Ao fechar a janela, o LumaFiles fica na bandeja e as cópias e outras tarefas continuam; abrir o LumaFiles de novo traz a janela de volta."),
+                        self.switch("close-to-tray", ui.close_to_tray, ("ui", "close_to_tray"), cx),
+                    )
+                    .reset(("ui", "close_to_tray"), ui.close_to_tray, "false"),
+                    Row::hint(
+                        t!("Ícone na bandeja"),
+                        t!("Sempre visível, só enquanto a janela está oculta, ou nunca."),
+                        self.config_choice(
+                            "tray-icon",
+                            &[
+                                (t!("Sempre visível"), ui.tray_icon == TrayIcon::Always, "\"always\""),
+                                (t!("Só em segundo plano"), ui.tray_icon == TrayIcon::Background, "\"background\""),
+                                (t!("Não mostrar"), ui.tray_icon == TrayIcon::Never, "\"never\""),
+                            ],
+                            ("ui", "tray_icon"),
+                            cx,
+                        ),
+                    )
+                    .reset(("ui", "tray_icon"), ui.tray_icon == TrayIcon::Always, "\"always\""),
                 ],
             ),
         ]
@@ -1629,6 +1708,48 @@ impl SettingsPage {
             t!("Lista"),
             vec![
                 Row::hint(
+                    t!("Altura das linhas"),
+                    t!("A altura de cada linha da lista de detalhes."),
+                    self.config_choice(
+                        "list-row-height",
+                        &[
+                            (t!("Compacta"), ui.list_row_height == ListRowHeight::Compact, "\"compact\""),
+                            (t!("Padrão"), ui.list_row_height == ListRowHeight::Standard, "\"standard\""),
+                            (t!("Ampla"), ui.list_row_height == ListRowHeight::Relaxed, "\"relaxed\""),
+                        ],
+                        ("ui", "list_row_height"),
+                        cx,
+                    ),
+                )
+                .reset(("ui", "list_row_height"), ui.list_row_height == ListRowHeight::Standard, "\"standard\""),
+                Row::hint(
+                    t!("Linhas zebradas"),
+                    t!("As linhas alternam um fundo levemente diferente, o que ajuda a seguir uma linha até as colunas da direita."),
+                    self.switch("zebra-rows", ui.zebra_rows, ("ui", "zebra_rows"), cx),
+                )
+                .reset(("ui", "zebra_rows"), !ui.zebra_rows, "false"),
+                Row::hint(
+                    t!("Contorno da seleção"),
+                    t!("Os itens selecionados ganham uma borda na cor de destaque, além do fundo."),
+                    self.switch("selection-outline", ui.selection_outline, ("ui", "selection_outline"), cx),
+                )
+                .reset(("ui", "selection_outline"), !ui.selection_outline, "false"),
+                Row::hint(
+                    t!("Duplo clique no espaço vazio"),
+                    t!("O que fazer ao clicar duas vezes num espaço vazio da lista."),
+                    self.config_choice(
+                        "double-click-empty",
+                        &[
+                            (t!("Nada"), ui.double_click_empty == DoubleClickEmpty::None, "\"none\""),
+                            (t!("Voltar"), ui.double_click_empty == DoubleClickEmpty::Back, "\"back\""),
+                            (t!("Subir um nível"), ui.double_click_empty == DoubleClickEmpty::Up, "\"up\""),
+                        ],
+                        ("ui", "double_click_empty"),
+                        cx,
+                    ),
+                )
+                .reset(("ui", "double_click_empty"), ui.double_click_empty == DoubleClickEmpty::None, "\"none\""),
+                Row::hint(
                     t!("Rolagem suave"),
                     t!("Quanto a roda do mouse desliza a lista em vez de pular. Desligada rola em degraus."),
                     self.config_choice(
@@ -1857,9 +1978,22 @@ impl SettingsPage {
                 ),
             )
             .reset(("archive", "tool"), self.config.archive.tool == config::ArchiveTool::HatchZip, "\"hatchzip\""),
+        ]), Group::titled(t!("Estado dos arquivos"), vec![
+            Row::hint(
+                t!("Mostrar estado de sincronização"),
+                t!("Uma marca ao lado do nome mostra se o arquivo está só na nuvem ou fixado neste dispositivo (OneDrive e serviços parecidos)."),
+                self.switch("show-sync-status", ui.show_sync_status, ("ui", "show_sync_status"), cx),
+            )
+            .reset(("ui", "show_sync_status"), !ui.show_sync_status, "false"),
+            Row::hint(
+                t!("Mostrar estado do Git/SVN"),
+                t!("Uma letra colorida ao lado do nome mostra o estado do arquivo no Git ou no SVN da pasta: modificado, novo, apagado ou em conflito."),
+                self.switch("show-vcs-status", ui.show_vcs_status, ("ui", "show_vcs_status"), cx),
+            )
+            .reset(("ui", "show_vcs_status"), !ui.show_vcs_status, "false"),
         ]), Group::titled(t!("Regras de cor por tipo de arquivo"), vec![Row::hint(
-            t!("Cor dos nomes por tipo de arquivo"),
-            t!("Use padrões de nome sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*. As regras anteriores têm prioridade."),
+            t!("Cor por tipo de arquivo"),
+            t!("As cores pintam o nome, o selo do tipo, o tamanho e a data. Use padrões sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*; as regras anteriores têm prioridade e o que nenhuma cobrir usa a paleta do programa."),
             self.file_type_color_editor(cx),
         ).wide()]), Group::titled(t!("Mapa de espaço"), vec![Row::hint(
             t!("Cor dos blocos"),

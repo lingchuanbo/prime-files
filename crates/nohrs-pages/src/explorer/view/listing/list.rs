@@ -71,22 +71,25 @@ fn render_table_with_header(
         page.rows_generation,
         page.filtered_entries.len(),
         table_width.to_bits(),
+        page.has_parent_row(),
     );
     let ListLayout {
         rows, all_sizes, ..
     } = match page.list_layout.as_ref().filter(|layout| layout.key == key) {
         Some(layout) => layout.clone(),
         None => {
-            let rows = Rc::new(grouping::list_rows(
+            let rows = Rc::new(grouping::list_rows_with_parent(
                 page.groups(),
                 page.filtered_entries.len(),
+                page.has_parent_row(),
             ));
             let mut all_sizes = vec![gpui::size(px(table_width), px(HEADER_HEIGHT))];
             all_sizes.extend(rows.iter().map(|row| match row {
+                ListRow::Parent => gpui::size(px(table_width), px(page.row_height)),
                 ListRow::Group(_) => gpui::size(px(table_width), px(super::GROUP_HEADER_HEIGHT)),
                 ListRow::Entry(index) => {
                     page.item_sizes.get(*index).copied().unwrap_or_else(|| {
-                        gpui::size(px(table_width), px(nohrs_core::config::BASE_ROW_HEIGHT))
+                        gpui::size(px(table_width), px(page.row_height))
                     })
                 }
             }));
@@ -129,6 +132,9 @@ fn render_table_with_header(
                             )
                         } else {
                             match rows.get(ix - 1)? {
+                                ListRow::Parent => {
+                                    Some(render_parent_row(view, table_width, col_name, col_type, col_size, col_modified, col_action, cx).into_any_element())
+                                }
                                 ListRow::Group(group) => {
                                     let group = view.groups().get(*group)?;
                                     Some(super::group_header(group, table_width).into_any_element())
@@ -403,11 +409,72 @@ fn render_column_header(
     )
 }
 
+/// The ".." row: the first line of a folder's listing, going up to its parent
+/// when clicked, as in Total Commander.
+#[allow(clippy::too_many_arguments)]
+fn render_parent_row(
+    page: &ExplorerPane,
+    table_width: f32,
+    col_name: f32,
+    col_type: f32,
+    col_size: f32,
+    col_modified: f32,
+    col_action: f32,
+    cx: &mut Context<ExplorerPane>,
+) -> Div {
+    use gpui_component::Icon;
+    let _ = (col_type, col_size, col_modified, col_action);
+    div()
+        .w(px(table_width))
+        .h(px(page.row_height))
+        // The ".." row is filled, not blank space: the empty-space double
+        // click must not fire on it (it has its own click, going up).
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            gpui_component::list::ListItem::new("list-parent")
+                .w(px(table_width))
+                .h(px(page.row_height))
+                .pr(px(24.0))
+                .border_l_2()
+                .border_color(rgb(theme::bg()))
+                .pl(px(22.0))
+                .bg(rgb(theme::bg()))
+                .on_click(cx.listener(|this, _event: &gpui::ClickEvent, window, cx| {
+                    this.go_up(window, cx);
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .h_full()
+                        .child(
+                            div()
+                                .w(px(col_name))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .flex_shrink_0()
+                                // The chevron gutter every entry row leaves empty; the
+                                // arrow then sits in the same column as the file icons.
+                                .child(div().w(px(20.0)).flex_shrink_0())
+                                .child(
+                                    Icon::new(Icon::empty())
+                                        .path("icons/arrow-up.svg")
+                                        .size_4()
+                                        .text_color(rgb(theme::fg_secondary())),
+                                ),
+                        )
+                        .child(div().flex_1()),
+                ),
+        )
+}
 /// The list's rows and sizes, with what they were built for: the rows'
-/// generation, how many there are, and the table's width.
+/// generation, how many there are, the table's width, and whether the ".."
+/// row is shown.
 #[derive(Clone)]
 pub(crate) struct ListLayout {
-    key: (u64, usize, u32),
+    key: (u64, usize, u32, bool),
     rows: Rc<Vec<ListRow>>,
     all_sizes: Rc<Vec<gpui::Size<Pixels>>>,
 }

@@ -286,10 +286,10 @@ fn render_grid_item(
     };
 
     let is_dir = item.kind == "dir";
-    let name_color = if selected || item.kind != "file" {
+    let name_color = if selected {
         theme::fg()
     } else {
-        page.file_type_color(&item.name).unwrap_or_else(theme::fg)
+        page.file_name_color(&item.name, &item.kind).unwrap_or_else(theme::fg)
     };
     // A sound file with waveforms on asks for its waveform and, until it
     // arrives or if it cannot be had, the type's icon: one image shared by
@@ -309,6 +309,7 @@ fn render_grid_item(
     let waveform_shown = waveform.is_some();
     let activation_item = item.clone();
     let preview_item = item.clone();
+    let status_badges = super::row::status_badges(page, &item);
 
     let bg_color = if selected {
         rgb(theme::accent_subtle())
@@ -345,6 +346,19 @@ fn render_grid_item(
         .items_center()
         .text_center()
         .gap_1()
+        // The state marks sit in the tile's corner, out of the way of the
+        // picture and the name.
+        .when(!status_badges.is_empty(), |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(px(6.0))
+                    .right(px(6.0))
+                    .flex()
+                    .items_center()
+                    .children(status_badges),
+            )
+        })
         .on_mouse_down(
             gpui::MouseButton::Right,
             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {

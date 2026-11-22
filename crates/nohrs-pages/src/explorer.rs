@@ -40,9 +40,12 @@ mod search;
 mod smooth_scroll;
 pub(crate) mod space_map;
 mod state;
+/// Git/SVN and cloud-sync state shown beside the file names.
+pub(crate) mod status;
 pub(crate) mod tags;
 pub(crate) mod thumbnails;
 mod tree;
+mod type_style;
 mod types;
 /// Rendering of a single explorer pane: header, sidebar, listing, and preview.
 pub mod view;

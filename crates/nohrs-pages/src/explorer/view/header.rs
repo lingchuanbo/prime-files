@@ -8,7 +8,7 @@ use gpui_component::input::Input;
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, IconName};
 use nohrs_core::i18n;
-use nohrs_core::{k, t};
+use nohrs_core::t;
 use nohrs_ui::theme::theme;
 
 /// Renders the explorer header with navigation buttons, the breadcrumb path
@@ -114,7 +114,15 @@ pub fn render(
 
     // Store search_visible for use in search toggle style
     let preview_visible = page.preview_visible;
-    let entry_count = page.filtered_entries.len();
+
+    // The "open in another program" button and the recent-folders chevron live
+    // inside the address bar, instead of beside it.
+    let open_in = render_open_in(page, cx).into_any_element();
+    let recent = render_recent(page, cx).into_any_element();
+
+    // A split view leaves each pane half the room: the buttons beside the
+    // address bar step aside and the bar takes the whole row.
+    let narrow = page.multi_pane;
 
     let framed = page.framed.header;
     let navigation = div()
@@ -126,7 +134,7 @@ pub fn render(
         .px(px(16.0))
         .py(px(12.0))
         .gap_2()
-        .child(
+        .when(!narrow, |this| this.child(
             div()
                 .flex()
                 .items_center()
@@ -203,7 +211,7 @@ pub fn render(
                         .bg(rgb(theme::border()))
                         .mx(px(6.0)),
                 ),
-        )
+        ))
         .child(match &page.path_edit {
             Some(state) => div()
                 .flex_1()
@@ -216,21 +224,37 @@ pub fn render(
                 .id("path-bar")
                 .flex_1()
                 .h(px(34.0))
-                .px(px(10.0))
+                .pl(px(10.0))
+                .pr(px(6.0))
                 .rounded(px(8.0))
                 .bg(rgb(theme::bg_secondary()))
                 .border_1()
-                .border_color(rgb(theme::border()))
+                // The active pane of a split is marked by this border rather
+                // than by a line above the tab row.
+                .border_color(rgb(if page.pane_active {
+                    theme::accent()
+                } else {
+                    theme::border()
+                }))
                 .flex()
                 .items_center()
-                .overflow_hidden()
                 .min_w(px(0.0))
                 .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
                     if event.click_count() >= 2 {
                         this.begin_path_edit(window, cx);
                     }
                 }))
-                .child(bc)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .items_center()
+                        .overflow_hidden()
+                        .child(bc),
+                )
+                .child(div().flex_shrink_0().pr(px(2.0)).child(open_in))
+                .child(div().flex_shrink_0().child(recent))
                 .into_any_element(),
         });
     let actions = div().flex().items_center().flex_shrink_0().child(
@@ -239,16 +263,6 @@ pub fn render(
             .items_center()
             .gap_2()
             .flex_shrink_0()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme::fg_secondary()))
-                    .whitespace_nowrap()
-                    .mr(px(4.0))
-                    .child(i18n::plural(entry_count, k!("{n} item"), k!("{n} itens"))),
-            )
-            .child(render_recent(page, cx))
-            .child(render_open_in(page, cx))
             .child(filter_button(page, cx))
             .child(new_folder_button(cx))
             .child(render_view_mode_toggle(page, cx))
@@ -285,7 +299,7 @@ pub fn render(
     navigation
         .flex_shrink_0()
         .when(!framed, |style| style.border_b_1())
-        .child(actions)
+        .when(!narrow, |this| this.child(actions))
 }
 
 fn new_folder_button(cx: &mut Context<ExplorerPane>) -> impl IntoElement + use<> {
@@ -331,18 +345,9 @@ fn render_recent(
     use nohrs_core::shortcuts::{Action, display};
     let recent = super::super::recent::RecentFolders::all(cx);
     let open = page.recent_menu;
-    // What the tooltip shows: the few newest, which is what one reaches for.
-    let preview: String = recent
-        .iter()
-        .take(6)
-        .map(|folder| folder.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let tooltip = if preview.is_empty() {
-        t!("Nenhuma pasta visitada ainda").to_string()
-    } else {
-        format!("{}\n\n{preview}", t!("Pastas recentes"))
-    };
+    // The hover tooltip says only what the button is; the list itself is what
+    // the click (or Alt+Down) opens, so nothing is drawn twice over it.
+    let tooltip = t!("Pastas recentes").to_string();
     let shortcut = display(Action::RecentFolders);
 
     div()
@@ -357,8 +362,13 @@ fn render_recent(
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(theme::bg_hover())))
                 .when(open, |style| style.bg(rgb(theme::bg_hover())))
-                .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                .when(!open, {
+                    let tooltip = tooltip.clone();
+                    move |style| {
+                        style.tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                        })
+                    }
                 })
                 .on_click(cx.listener(|page, _, _, cx| {
                     page.recent_menu = !page.recent_menu;
