@@ -8,7 +8,9 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use nohrs_cli::{Cli, Command, Invocation, RmCli, doctor, ledger, log, rm, shim, trash};
+use nohrs_cli::{
+    Cli, Command, Invocation, RmCli, doctor, ledger, log, quick_launch, rm, shim, trash,
+};
 use nohrs_core::telemetry::logging::{FileLogConfig, init_logging_with_file};
 
 fn main() -> ExitCode {
@@ -52,6 +54,7 @@ fn run_command(command: &Command) -> io::Result<u8> {
             run_trash(|session| session.purge(&args))
         }
         Command::Log(command) => run_log(command),
+        Command::QuickLaunch(command) => run_quick_launch(command),
         Command::Doctor => {
             let checks = doctor::check(&doctor::Environment::detect());
             doctor::report(&checks, &mut io::stdout().lock())
@@ -78,6 +81,15 @@ fn run_log(command: &log::Command) -> io::Result<u8> {
     let mut output = io::stdout().lock();
     let summary = log::Session::new(&directory, &mut output).run(command)?;
     Ok(summary.exit_code())
+}
+
+/// Manage `quicklaunch.toml` from the terminal. The file is resolved with the
+/// same function the GUI uses, so portable mode finds the same one (§17.1 C).
+fn run_quick_launch(command: &quick_launch::Command) -> io::Result<u8> {
+    let path = nohrs_core::config::paths::quick_launch_file();
+    let mut output = io::stdout().lock();
+    let mut errors = io::stderr().lock();
+    quick_launch::Session::new(&path, &mut output, &mut errors).run(command)
 }
 
 fn run_rm(args: &rm::Args) -> io::Result<u8> {

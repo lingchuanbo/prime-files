@@ -32,6 +32,13 @@ clap_complete.workspace = true
 serde_json.workspace = true
 dirs = "6"
 
+[target.'cfg(windows)'.dependencies]
+# `noh quick-launch run` has to enter a COM apartment itself before handing an
+# item to the Shell: the CLI cannot depend on `nohrs-pages` (which owns the
+# existing apartment code) and `nohrs-services` exposes no way to enter one.
+# Pinned to the version the rest of the workspace links.
+windows = { version = "0.61", features = ["Win32_System_Com"] }
+
 [dev-dependencies]
 tempfile = "3"
 
