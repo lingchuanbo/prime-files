@@ -1,7 +1,8 @@
-# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.2
+# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.3
 
 > v2.1（2026-11-22）：写入 Q1–Q5 的确认结果，新增 §15.0（主程序常驻）和 §15.1（常驻模式）。
 > v2.2（2026-11-22，M1 验收后）：§8.4 改为启动、图标两条线程。M1 的具体问题见 `docs/QuickLaunch-M1-验收报告.md`。
+> v2.3（2026-11-22，M1 复查后）：§8.5 失败提示改为窗口底部一行；§4.2 补充 BOM 的处理。
 
 > 这是一份**实现规格**，执行方（DeepSeek）按它写代码。写着“必须 / 禁止”的条款不能自行改动；没写到的情况按 §19 处理。
 > 需求见 `docs/LumaFiles-快速启动工具方案.md`。两份文档有冲突时，**以本文为准**。
@@ -190,6 +191,7 @@ pub fn migrate(config: QuickLaunchConfig) -> QuickLaunchConfig;  // 目前只有
 | 语法错误、类型错误、未知字段 | `Err(Parse { line, column, message })`，行列号从 toml 错误的 span 换算 |
 | `schema_version` 大于当前版本 | `Err(UnsupportedVersion(found))`；调用方之后**禁止写回** |
 | `schema_version` 等于 0 或字段缺失 | 当作 1 处理 |
+| 文件以 UTF-8 BOM（U+FEFF）开头 | 去掉 BOM 后正常解析（v2.3；PowerShell 5.1 和旧版记事本会写入 BOM） |
 | 数值越界 | 夹到合法范围内，并报 warning |
 | 分组 id 重复、同组 slot 重复、条目 id 重复 | 保留第一个，丢弃后面的，并报 warning |
 | 超过 `MAX_*` 限制 | 截断，并报 warning |
@@ -311,7 +313,7 @@ pub struct LaunchRegistry { … }   // with_builtins() / register() 重复 kind 
 pub enum LaunchError { NotFound(PathBuf), Expand(#[from] ExpandError), Unsupported(String),
     Blocked(String), Os { code: u32, message: String }, Internal(String) }
 ```
-界面上只用底部 toast 显示一行翻译后的文字，详情写进日志，**不弹模态框**。M4 里 command 的首次确认是唯一例外。
+界面上只在窗口底部显示一行翻译后的文字（v2.3：M1 验收时确认用底部一行代替 gpui-component 的通知层，因为通知层会触发 gpui 的嵌套更新并 abort），详情写进日志，**不弹模态框**。M4 里 command 的首次确认是唯一例外。
 
 ---
 
