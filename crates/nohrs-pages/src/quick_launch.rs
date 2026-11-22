@@ -47,6 +47,8 @@ use nohrs_services::launch::{
     ExpandContext, Health, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
 };
 use nohrs_store::{KvKey, KvOp, KvStore};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config as MatchConfig, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
 
 use crate::explorer::thumbnails;
@@ -835,6 +837,62 @@ pub(crate) fn is_missing(cx: &App, group: usize, slot: u32) -> bool {
     health_of(cx, group, slot).is_some_and(|health| health != Health::Ok)
 }
 
+/// The slots of the current group the filter keeps, in slot order (§12.2).
+///
+/// Empty when nothing matches, and every slot when there is no filter. The
+/// view packs these into the grid, so this is also the order the arrow keys
+/// walk.
+pub(crate) fn filtered_slots(cx: &App) -> Vec<u32> {
+    let Some(state) = state(cx) else {
+        return Vec::new();
+    };
+    let Some(group) = state.config.groups.get(state.group) else {
+        return Vec::new();
+    };
+    if state.filter.trim().is_empty() {
+        let mut slots: Vec<u32> = group.items.iter().map(|item| item.slot).collect();
+        slots.sort_unstable();
+        return slots;
+    }
+    let mut matcher = Matcher::new(MatchConfig::DEFAULT.match_paths());
+    let pattern = Pattern::parse(
+        state.filter.trim(),
+        CaseMatching::Smart,
+        Normalization::Smart,
+    );
+    let mut buffer = Vec::new();
+    group
+        .items
+        .iter()
+        .filter(|item| matches(&pattern, item, &mut matcher, &mut buffer))
+        .map(|item| item.slot)
+        .collect()
+}
+
+/// Whether one item matches the typed filter: by name or by any of its tags.
+fn matches(pattern: &Pattern, item: &Item, matcher: &mut Matcher, buffer: &mut Vec<char>) -> bool {
+    let mut haystack = item.name.clone();
+    for tag in &item.tags {
+        haystack.push(' ');
+        haystack.push_str(tag);
+    }
+    pattern
+        .score(Utf32Str::new(&haystack, buffer), matcher)
+        .is_some()
+}
+
+/// The click that asked for a launch, as the keyboard and the mouse both express
+/// it (§12.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClickKind {
+    /// A plain click or `Enter`.
+    Plain,
+    /// `Ctrl`+click or `Ctrl+Enter`: elevated, whatever the item says.
+    Admin,
+    /// `Shift`+click: show the item's place in LumaFiles instead of starting it.
+    Reveal,
+}
+
 /// The item in `slot` of the group at `group`, if the slot is taken.
 pub(crate) fn item_at(cx: &App, group: usize, slot: u32) -> Option<Item> {
     let state = state(cx)?;
@@ -1130,6 +1188,14 @@ pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
     let mut item = Item::new(slot, kind, name);
     item.path = Some(path.to_string_lossy().to_string());
     item
+}
+
+/// Where an item dropped on the group bar (or anywhere in the content area)
+/// goes: the first empty slot, else past the last item (§12.2).
+pub(crate) fn next_free_slot(cx: &App, group: usize) -> u32 {
+    state(cx)
+        .and_then(|state| state.config.groups.get(group))
+        .map_or(0, first_free_slot)
 }
 
 /// The KV key of one item's usage record (§6).
@@ -2153,7 +2219,8 @@ fn report_launch_failure(cx: &mut App, name: &str, error: &LaunchError) {
 }
 
 /// Starts the item in `slot` of the current group (§12.2).
-fn activate(cx: &mut App, slot: u32) {
+/// Starts the item in `slot` the way the click asked for (§12.2).
+pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
     let Some(quick_launch) = state(cx) else {
         return;
     };
@@ -2170,7 +2237,7 @@ fn activate(cx: &mut App, slot: u32) {
         "launching the selected item"
     );
     let (item, group_id) = (item.clone(), group.id.clone());
-    let mode = if item.admin {
+    let mode = if kind == ClickKind::Admin || item.admin {
         LaunchMode::Admin
     } else {
         LaunchMode::Normal
@@ -2219,14 +2286,12 @@ fn select_group(cx: &mut App, index: usize) {
 /// Moves the keyboard selection by `delta` cells, skipping empty slots and
 /// stopping at the edges without wrapping (§12.2).
 fn move_selection(cx: &mut App, delta: i64) {
+    // The arrow keys walk what the window shows: the filtered slots, or every
+    // slot when nothing is typed.
+    let occupied = filtered_slots(cx);
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
-    let Some(group) = quick_launch.config.groups.get(quick_launch.group) else {
-        return;
-    };
-    let mut occupied: Vec<u32> = group.items.iter().map(|item| item.slot).collect();
-    occupied.sort_unstable();
     let Some(first) = occupied.first().copied() else {
         quick_launch.slot = None;
         return;
@@ -2261,16 +2326,65 @@ fn move_selection(cx: &mut App, delta: i64) {
 /// Makes sure one item is selected, so `Enter` has something to start and the
 /// grid has a highlighted cell (§12.2).
 fn ensure_selection(cx: &mut App) {
+    let kept = filtered_slots(cx);
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
-    if quick_launch.slot.is_some() {
+    // A selection the filter no longer keeps is replaced, so Enter cannot start
+    // an item that is not on screen.
+    if quick_launch.slot.is_some_and(|slot| kept.contains(&slot)) {
         return;
     }
-    let Some(group) = quick_launch.config.groups.get(quick_launch.group) else {
-        return;
+    quick_launch.slot = kept.first().copied();
+}
+
+/// Shows where an item lives in LumaFiles (§12.2, `Shift`+click).
+///
+/// The path is expanded here because the Explorer needs the real one; the
+/// expansion is string work, not a filesystem read.
+pub(crate) fn reveal_item(cx: &App, slot: u32) -> bool {
+    let Some(state) = state(cx) else {
+        return false;
     };
-    quick_launch.slot = group.items.iter().map(|item| item.slot).min();
+    let Some(item) = state
+        .config
+        .groups
+        .get(state.group)
+        .and_then(|group| group.items.iter().find(|item| item.slot == slot))
+    else {
+        return false;
+    };
+    let Some(path) = expanded_path(cx, item) else {
+        return false;
+    };
+    crate::explorer_link::request(path)
+}
+
+/// The text the "copy" entry puts on the clipboard: the item's path (§12.2).
+pub(crate) fn copy_text(cx: &App, slot: u32) -> Option<String> {
+    let state = state(cx)?;
+    let item = state
+        .config
+        .groups
+        .get(state.group)?
+        .items
+        .iter()
+        .find(|item| item.slot == slot)?;
+    Some(
+        expanded_path(cx, item)
+            .map(|path| path.to_string_lossy().to_string())
+            .or_else(|| item.path.clone())
+            .unwrap_or_default(),
+    )
+}
+
+/// One item's path with the variables of §7 resolved.
+fn expanded_path(_cx: &App, item: &Item) -> Option<PathBuf> {
+    let context = ExpandContext::current();
+    let raw = item.path.as_deref()?.trim();
+    nohrs_services::launch::expand(raw, &context)
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// The message the footer shows, if the last launch failed.
@@ -2546,6 +2660,66 @@ mod tests {
     }
 
     /// §5.2, §12.3: a read-only file refuses every edit.
+    /// """ + S + """12.2: typing filters the current group by name and tags, and the
+    /// arrow keys walk only what is left.
+    #[gpui::test]
+    fn typing_filters_the_group_by_name_and_tags(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            let mut editor = Item::new(0, "app", "Editor de texto");
+            editor.tags = vec!["escrever".to_string()];
+            let mut terminal = Item::new(4, "app", "Terminal");
+            terminal.tags = vec!["shell".to_string()];
+            group.items = vec![editor, terminal];
+            install(cx, vec![group]);
+
+            set_filter(cx, "term".to_string());
+            assert_eq!(filtered_slots(cx), vec![4]);
+            ensure_selection(cx);
+            assert_eq!(state(cx).and_then(|state| state.slot), Some(4));
+
+            // A tag matches too.
+            set_filter(cx, "escrever".to_string());
+            assert_eq!(filtered_slots(cx), vec![0]);
+
+            // Nothing matches: no slot to select, so Enter has nothing to start.
+            set_filter(cx, "zzz".to_string());
+            assert!(filtered_slots(cx).is_empty());
+            ensure_selection(cx);
+            assert_eq!(state(cx).and_then(|state| state.slot), None);
+
+            set_filter(cx, String::new());
+            assert_eq!(filtered_slots(cx), vec![0, 4]);
+        });
+    }
+
+    /// """ + S + """12.2: the arrow keys step through the filtered slots only.
+    #[gpui::test]
+    fn the_arrow_keys_walk_the_filtered_slots(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                Item::new(0, "app", "Alfa"),
+                Item::new(2, "app", "Beta"),
+                Item::new(4, "app", "Alfa dois"),
+            ];
+            install(cx, vec![group]);
+            set_filter(cx, "alfa".to_string());
+            ensure_selection(cx);
+            assert_eq!(state(cx).and_then(|state| state.slot), Some(0));
+            move_selection(cx, 1);
+            assert_eq!(state(cx).and_then(|state| state.slot), Some(4));
+            move_selection(cx, 1);
+            assert_eq!(
+                state(cx).and_then(|state| state.slot),
+                Some(4),
+                "the edge stops instead of wrapping"
+            );
+            move_selection(cx, -1);
+            assert_eq!(state(cx).and_then(|state| state.slot), Some(0));
+        });
+    }
+
     #[gpui::test]
     fn a_read_only_file_refuses_edits(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {

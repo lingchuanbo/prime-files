@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, ImageSource, IntoElement, KeyDownEvent,
-    PathPromptOptions, Render, RenderImage, SharedString, Subscription, Task,
+    AnyElement, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, ImageSource, IntoElement,
+    KeyDownEvent, PathPromptOptions, Render, RenderImage, SharedString, Subscription, Task,
     UniformListScrollHandle, WeakEntity, Window, WindowControlArea, div, img, px, rgb,
     uniform_list,
 };
@@ -86,6 +86,32 @@ struct Rename {
     _subscription: Subscription,
 }
 
+/// One item being dragged inside the window (§12.2).
+#[derive(Clone)]
+struct ItemDrag {
+    group: usize,
+    slot: u32,
+}
+
+/// What the pointer carries while an item is dragged.
+struct ItemDragPreview {
+    name: SharedString,
+}
+
+impl Render for ItemDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(rgb(theme::bg_hover()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .text_xs()
+            .child(self.name.clone())
+    }
+}
+
 /// Everything a frame draws that does not change from frame to frame.
 struct Frame {
     revision: u64,
@@ -96,6 +122,9 @@ struct Frame {
     columns: usize,
     cell_size: f32,
     list_columns: usize,
+    /// True while a filter is typed: the grid packs the matches instead of
+    /// leaving the holes their slots would leave (§12.2).
+    packed: bool,
 }
 
 impl QuickLaunchView {
@@ -175,12 +204,45 @@ impl QuickLaunchView {
             cx.stop_propagation();
             return;
         }
+        // Typing filters the current group (§12.2). Escape then clears the
+        // filter before it hides.
+        if let Some(text) = event.keystroke.key_char.as_deref()
+            && !modifiers.control
+            && !modifiers.platform
+            && !modifiers.alt
+            && text.chars().count() == 1
+            && !text.chars().next().is_some_and(char::is_control)
+        {
+            let mut filter = super::filter(cx).to_string();
+            filter.push_str(text);
+            super::set_filter(cx, filter);
+            super::ensure_selection(cx);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if key == "backspace" && !super::filter(cx).is_empty() {
+            let mut filter = super::filter(cx).to_string();
+            filter.pop();
+            super::set_filter(cx, filter);
+            super::ensure_selection(cx);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         let handled = match key.as_str() {
-            // M1 has no filter, so Escape always hides (§12.2). The window is
-            // already in hand, so the hide goes through it: asking GPUI for the
-            // window it is currently updating fails with "window not found".
+            // Escape clears the filter first and only then hides (§12.2). The
+            // window is already in hand, so the hide goes through it: asking GPUI
+            // for the window it is currently updating fails with "window not
+            // found".
             "escape" => {
-                super::hide_in(cx, window);
+                if !super::filter(cx).is_empty() {
+                    super::set_filter(cx, String::new());
+                    super::ensure_selection(cx);
+                    cx.notify();
+                } else {
+                    super::hide_in(cx, window);
+                }
                 true
             }
             "left" => {
@@ -201,7 +263,12 @@ impl QuickLaunchView {
             }
             "enter" => {
                 if let Some(slot) = super::state(cx).and_then(|quick_launch| quick_launch.slot) {
-                    super::activate(cx, slot);
+                    let kind = if modifiers.control {
+                        super::ClickKind::Admin
+                    } else {
+                        super::ClickKind::Plain
+                    };
+                    super::activate_with(cx, slot, kind);
                 }
                 true
             }
@@ -438,12 +505,57 @@ impl QuickLaunchView {
         .detach();
     }
 
-    /// A click selects the cell and starts what is in it (§12.2).
-    fn clicked(&mut self, slot: u32, cx: &mut Context<Self>) {
+    /// A click selects the cell and does what its modifiers ask for (§12.2).
+    fn clicked(&mut self, slot: u32, kind: super::ClickKind, cx: &mut Context<Self>) {
         if let Some(quick_launch) = super::state_mut(cx) {
             quick_launch.slot = Some(slot);
         }
-        super::activate(cx, slot);
+        match kind {
+            super::ClickKind::Reveal => {
+                // The Explorer takes the foreground; this window goes away the
+                // way it does after a launch.
+                super::reveal_item(cx, slot);
+                super::hide(cx);
+            }
+            kind => super::activate_with(cx, slot, kind),
+        }
+    }
+
+    /// A file or folder dropped from outside fills the slot it landed on, and
+    /// the rest of the drop follows in the next free slots (§12.2).
+    fn drop_paths(
+        &mut self,
+        group: usize,
+        slot: u32,
+        paths: &[std::path::PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if !super::editable(cx) {
+            return;
+        }
+        for (offset, path) in paths.iter().enumerate() {
+            let offset = u32::try_from(offset).unwrap_or(u32::MAX);
+            let target = slot.saturating_add(offset);
+            let item = super::item_from_path(path, target);
+            super::put_item(cx, group, target, item);
+        }
+        cx.notify();
+    }
+
+    /// An item dragged onto another slot: they swap when it is taken (§12.2).
+    fn drop_item(&mut self, drag: &ItemDrag, group: usize, slot: u32, cx: &mut Context<Self>) {
+        if drag.group == group {
+            super::swap_slots(cx, group, drag.slot, slot);
+        } else {
+            super::move_item_to_group(cx, drag.group, drag.slot, group);
+        }
+        cx.notify();
+    }
+
+    /// An item dragged onto the group bar: first free slot, else appended.
+    fn drop_item_on_group(&mut self, drag: &ItemDrag, group: usize, cx: &mut Context<Self>) {
+        super::move_item_to_group(cx, drag.group, drag.slot, group);
+        cx.notify();
     }
 }
 
@@ -492,7 +604,15 @@ impl Render for QuickLaunchView {
                 let items: Vec<Item> = config
                     .groups
                     .get(current)
-                    .map(|group| group.items.clone())
+                    .map(|group| {
+                        let kept = super::filtered_slots(cx);
+                        group
+                            .items
+                            .iter()
+                            .filter(|item| kept.contains(&item.slot))
+                            .cloned()
+                            .collect()
+                    })
                     .unwrap_or_default();
                 (
                     groups,
@@ -501,9 +621,10 @@ impl Render for QuickLaunchView {
                     usize::from(config.window.columns.max(1)),
                     f32::from(config.window.cell_size),
                     usize::from(config.window.list_columns.max(1)),
+                    !state.filter.trim().is_empty(),
                 )
             };
-            let (groups, items, view, columns, cell_size, list_columns) = planned;
+            let (groups, items, view, columns, cell_size, list_columns, packed) = planned;
             // The icons are asked for here, once per rebuild, because
             // `super::icon` needs the mutable state.
             let drawn: Rc<Vec<Drawn>> = Rc::new(
@@ -533,6 +654,7 @@ impl Render for QuickLaunchView {
                 columns,
                 cell_size,
                 list_columns,
+                packed,
             });
         }
         let Some(frame) = self.frame.as_ref() else {
@@ -544,7 +666,10 @@ impl Render for QuickLaunchView {
         let columns = frame.columns;
         let cell_size = frame.cell_size;
         let list_columns = frame.list_columns;
+        let packed = frame.packed;
 
+        let filter_text = super::filter(cx).to_string();
+        let filtered_count = drawn.len();
         let title_bar = self.render_title_bar();
         let group_bar = render_group_bar(&groups, self.renaming.as_ref(), editable, cx);
         let entity = cx.entity().downgrade();
@@ -587,6 +712,7 @@ impl Render for QuickLaunchView {
                 columns,
                 cell_size,
                 icon_edge,
+                packed,
                 &entity,
                 &self.scroll_handle,
             )
@@ -601,6 +727,29 @@ impl Render for QuickLaunchView {
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key_down))
             .child(title_bar);
+        if !filter_text.is_empty() {
+            root = root.child(
+                div()
+                    .flex_shrink_0()
+                    .h(px(24.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .child(nohrs_core::t!("Filtrar"))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::accent()))
+                            .child(filter_text.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::muted()))
+                            .child(nohrs_core::tf!("{n} itens", n = filtered_count)),
+                    ),
+            );
+        }
         if let Some(reason) = read_only {
             root = root.child(
                 div()
@@ -624,7 +773,16 @@ impl Render for QuickLaunchView {
                         .min_w(px(0.0))
                         .flex()
                         .flex_col()
-                        .child(content),
+                        .child(content)
+                        .on_drop(cx.listener(
+                            move |view, paths: &gpui::ExternalPaths, _window, cx| {
+                                if editable {
+                                    let target = super::next_free_slot(cx, group);
+                                    let paths = paths.paths().to_vec();
+                                    view.drop_paths(group, target, &paths, cx);
+                                }
+                            },
+                        )),
                 ),
             )
             .when_some(message, |this, message| {
@@ -828,6 +986,7 @@ fn render_group_bar(
         }
         let entity = cx.entity().downgrade();
         let menu_entity = entity.clone();
+        let entity_drop = entity.clone();
         bar = bar.child(
             div()
                 .id(("quick-launch-group", index))
@@ -850,6 +1009,14 @@ fn render_group_bar(
                 .on_click(cx.listener(move |_view, _, _window, cx| {
                     super::select_group(cx, index);
                 }))
+                .on_drop(move |drag: &ItemDrag, _window, cx| {
+                    // An item dropped on the bar joins that group: first free
+                    // slot, else appended (§12.2).
+                    if editable {
+                        let _ = entity_drop
+                            .update(cx, |view, cx| view.drop_item_on_group(drag, index, cx));
+                    }
+                })
                 .context_menu(move |menu, _window, _cx| {
                     let add = menu_entity.clone();
                     let rename = menu_entity.clone();
@@ -892,6 +1059,16 @@ fn render_group_bar(
     bar.into_any_element()
 }
 
+/// The cells of a filtered grid: the matches packed in slot order, then one
+/// empty row (§12.2).
+fn packed_cells(items: &[Item], columns: usize) -> Vec<Option<Item>> {
+    let columns = columns.max(1);
+    let rows = items.len().div_ceil(columns).saturating_add(1);
+    let mut cells: Vec<Option<Item>> = items.iter().cloned().map(Some).collect();
+    cells.resize(rows.saturating_mul(columns), None);
+    cells
+}
+
 /// The grid (§12.1), virtualized by row.
 #[allow(clippy::too_many_arguments)]
 fn grid_view(
@@ -903,11 +1080,16 @@ fn grid_view(
     columns: usize,
     cell_size: f32,
     icon_edge: u32,
+    packed: bool,
     entity: &WeakEntity<QuickLaunchView>,
     scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
     let items: Vec<Item> = drawn.iter().map(|drawn| drawn.item.clone()).collect();
-    let cells = grid_cells(&items, columns);
+    let cells = if packed {
+        packed_cells(&items, columns)
+    } else {
+        grid_cells(&items, columns)
+    };
     let rows = cells.len().div_ceil(columns.max(1));
     let cells = Rc::new(cells);
     let drawn = Rc::new(drawn.to_vec());
@@ -944,6 +1126,17 @@ fn grid_view(
                                 item, image, selected, missing, group, editable, cell_size,
                                 icon_edge, &entity,
                             ));
+                        }
+                        None if packed => {
+                            // While filtering the empty cells are only the
+                            // padding of the last row: there is no slot to add to.
+                            line = line.child(
+                                div()
+                                    .w(px(cell_size))
+                                    .h(px(cell_size))
+                                    .flex_shrink_0()
+                                    .rounded(px(8.0)),
+                            );
                         }
                         None => {
                             let slot = u32::try_from(index).unwrap_or(MAX_SLOT);
@@ -1049,18 +1242,89 @@ fn item_menu(
     slot: u32,
     editable: bool,
     entity: &WeakEntity<QuickLaunchView>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    let admin = entity.clone();
+    let reveal = entity.clone();
     let edit = entity.clone();
+    let copy = entity.clone();
     let delete = entity.clone();
-    menu.item(
-        PopupMenuItem::new(nohrs_core::t!("Editar"))
-            .disabled(!editable)
-            .on_click(move |_, window, cx| {
-                let _ = edit.update(cx, |view, cx| view.edit_item(group, slot, window, cx));
+    let menu = menu
+        .item(
+            PopupMenuItem::new(nohrs_core::t!("Executar como administrador"))
+                .disabled(!editable)
+                .on_click(move |_, _window, cx| {
+                    let _ = admin.update(cx, |view, cx| {
+                        view.clicked(slot, super::ClickKind::Admin, cx);
+                    });
+                }),
+        )
+        .item(
+            PopupMenuItem::new(nohrs_core::t!("Abrir localização")).on_click(
+                move |_, _window, cx| {
+                    let _ = reveal.update(cx, |_view, cx| {
+                        super::reveal_item(cx, slot);
+                        super::hide(cx);
+                    });
+                },
+            ),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new(nohrs_core::t!("Editar"))
+                .disabled(!editable)
+                .on_click(move |_, window, cx| {
+                    let _ = edit.update(cx, |view, cx| view.edit_item(group, slot, window, cx));
+                }),
+        )
+        .item(
+            PopupMenuItem::new(nohrs_core::t!("Copiar caminho")).on_click(move |_, _window, cx| {
+                let _ = copy.update(cx, |_view, cx| {
+                    if let Some(text) = super::copy_text(cx, slot) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                });
             }),
-    )
-    .separator()
-    .item(
+        );
+
+    // "Move to group ▸" lists every other group; with a single group there is
+    // nowhere to move to and the entry is left out (§12.2).
+    let groups: Vec<(usize, String)> = super::state(cx)
+        .map(|state| {
+            state
+                .config()
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != group)
+                .map(|(index, group)| (index, group.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let menu = if groups.is_empty() {
+        menu
+    } else {
+        let for_submenu = entity.clone();
+        let submenu = PopupMenu::build(window, cx, move |submenu, _window, _cx| {
+            let mut submenu = submenu;
+            for (index, name) in groups {
+                let handle = for_submenu.clone();
+                submenu = submenu.item(PopupMenuItem::new(name).on_click(move |_, _window, cx| {
+                    let _ = handle.update(cx, |view, cx| {
+                        view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
+                    });
+                }));
+            }
+            submenu
+        });
+        menu.item(PopupMenuItem::submenu(
+            nohrs_core::t!("Mover para"),
+            submenu,
+        ))
+    };
+
+    menu.separator().item(
         PopupMenuItem::new(nohrs_core::t!("Excluir"))
             .disabled(!editable)
             .on_click(move |_, _window, cx| {
@@ -1084,7 +1348,10 @@ fn tile(
 ) -> AnyElement {
     let handle = entity.clone();
     let menu_handle = entity.clone();
+    let entity_drop = entity.clone();
     let slot = item.slot;
+    let drag_name = SharedString::from(item.name.clone());
+    let drop_handle = entity.clone();
     div()
         .id(("quick-launch-tile", slot))
         .w(px(cell_size))
@@ -1099,11 +1366,29 @@ fn tile(
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .on_click(move |_, _window, cx| {
-            let _ = handle.update(cx, |view, cx| view.clicked(slot, cx));
+        .on_click(move |event, _window, cx| {
+            let _ = handle.update(cx, |view, cx| view.clicked(slot, click_kind(event), cx));
         })
-        .context_menu(move |menu, _window, _cx| {
-            item_menu(menu, group, slot, editable, &menu_handle)
+        .when(editable, |this| {
+            this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
+                cx.new(|_| ItemDragPreview {
+                    name: drag_name.clone(),
+                })
+            })
+        })
+        .on_drop(move |drag: &ItemDrag, _window, cx| {
+            if editable {
+                let _ = drop_handle.update(cx, |view, cx| view.drop_item(drag, group, slot, cx));
+            }
+        })
+        .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
+            if editable {
+                let paths = paths.paths().to_vec();
+                let _ = entity_drop.update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx));
+            }
+        })
+        .context_menu(move |menu, window, cx| {
+            item_menu(menu, group, slot, editable, &menu_handle, window, cx)
         })
         .child(picture(item, image.as_ref(), icon_edge))
         .child(
@@ -1141,6 +1426,9 @@ fn row_of(
 ) -> AnyElement {
     let handle = entity.clone();
     let menu_handle = entity.clone();
+    let entity_drop = entity.clone();
+    let drop_handle = entity.clone();
+    let drag_name = SharedString::from(drawn.item.name.clone());
     let item = &drawn.item;
     let slot = item.slot;
     let subtitle = match item.action_kind() {
@@ -1159,11 +1447,29 @@ fn row_of(
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .on_click(move |_, _window, cx| {
-            let _ = handle.update(cx, |view, cx| view.clicked(slot, cx));
+        .on_click(move |event, _window, cx| {
+            let _ = handle.update(cx, |view, cx| view.clicked(slot, click_kind(event), cx));
         })
-        .context_menu(move |menu, _window, _cx| {
-            item_menu(menu, group, slot, editable, &menu_handle)
+        .when(editable, |this| {
+            this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
+                cx.new(|_| ItemDragPreview {
+                    name: drag_name.clone(),
+                })
+            })
+        })
+        .on_drop(move |drag: &ItemDrag, _window, cx| {
+            if editable {
+                let _ = drop_handle.update(cx, |view, cx| view.drop_item(drag, group, slot, cx));
+            }
+        })
+        .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
+            if editable {
+                let paths = paths.paths().to_vec();
+                let _ = entity_drop.update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx));
+            }
+        })
+        .context_menu(move |menu, window, cx| {
+            item_menu(menu, group, slot, editable, &menu_handle, window, cx)
         })
         .child(picture(item, drawn.image.as_ref(), icon_edge))
         .child(
@@ -1202,6 +1508,15 @@ fn row_of(
                 }),
         )
         .into_any_element()
+}
+
+/// What a click's modifiers ask for (§12.2).
+fn click_kind(event: &ClickEvent) -> super::ClickKind {
+    match event {
+        ClickEvent::Mouse(mouse) if mouse.down.modifiers.control => super::ClickKind::Admin,
+        ClickEvent::Mouse(mouse) if mouse.down.modifiers.shift => super::ClickKind::Reveal,
+        _ => super::ClickKind::Plain,
+    }
 }
 
 /// One labelled input of the editor (§12.3).
@@ -1347,6 +1662,18 @@ mod tests {
         assert!(cells[1].is_none(), "slot 1 is empty");
         assert!(cells[2].is_none(), "slot 2 is empty");
         assert_eq!(cells[3].as_ref().map(|item| item.name.as_str()), Some("B"));
+    }
+
+    #[test]
+    fn a_filtered_grid_packs_the_matches_and_keeps_one_empty_row() {
+        let matches = vec![item(2, "A"), item(7, "B"), item(9, "C")];
+        let cells = packed_cells(&matches, 2);
+        assert_eq!(cells.len(), 6, "two rows of matches and one padding row");
+        assert_eq!(cells[0].as_ref().map(|item| item.slot), Some(2));
+        assert_eq!(cells[1].as_ref().map(|item| item.slot), Some(7));
+        assert_eq!(cells[2].as_ref().map(|item| item.slot), Some(9));
+        assert!(cells[3..].iter().all(Option::is_none));
+        assert_eq!(packed_cells(&[], 4).len(), 4, "an empty filter keeps a row");
     }
 
     #[test]
