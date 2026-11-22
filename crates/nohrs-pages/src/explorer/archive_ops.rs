@@ -86,7 +86,13 @@ pub(crate) fn compress(
         }
         command.arg(path);
     }
-    progress.set_detail(output.file_name().unwrap_or_default().to_string_lossy().into_owned());
+    progress.set_detail(
+        output
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    );
     if let Err(error) = run_tool(&mut command, progress) {
         // A cancelled or failed compress leaves a half-written archive; it is
         // not the one the user asked for.
@@ -127,7 +133,13 @@ pub(crate) fn extract(
         .unwrap_or_else(|| "解压内容".into());
     let target = unique_directory(parent, &stem);
     std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
-    progress.set_detail(archive.file_name().unwrap_or_default().to_string_lossy().into_owned());
+    progress.set_detail(
+        archive
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    );
     let result = match chosen {
         Tool::HatchZip => extract_with_hatchzip(
             hatchzip.as_deref().unwrap_or(Path::new("hatchzip.exe")),
@@ -289,7 +301,10 @@ fn extract_with_7z(
 /// kills it. Its output goes to a temporary log file rather than a pipe: a tool
 /// that lists every extracted file would fill a pipe while nothing reads it, and
 /// block before it ever exits.
-fn run_tool(command: &mut std::process::Command, progress: &TransferProgress) -> Result<(), String> {
+fn run_tool(
+    command: &mut std::process::Command,
+    progress: &TransferProgress,
+) -> Result<(), String> {
     let log = ToolLog::new()?;
     command
         .stdout(std::process::Stdio::from(log.writer()?))
@@ -334,10 +349,8 @@ impl ToolLog {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
-        let path = std::env::temp_dir().join(format!(
-            "nohrs-archive-{}-{nanos}.log",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("nohrs-archive-{}-{nanos}.log", std::process::id()));
         std::fs::File::create(&path).map_err(|error| error.to_string())?;
         Ok(Self { path })
     }
@@ -411,9 +424,12 @@ impl ExplorerPane {
     pub(crate) fn compress_selection(&mut self, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         let cwd = self.cwd.clone();
-        self.run_archive_task("压缩", "正在压缩所选项目…", cx, move |progress| {
-            compress(&paths, &cwd, Format::SevenZip, &progress)
-        });
+        self.run_archive_task(
+            "压缩",
+            "正在压缩所选项目…",
+            cx,
+            move |progress| compress(&paths, &cwd, Format::SevenZip, &progress),
+        );
     }
 
     // Runs an archive tool on the background executor under the progress
@@ -443,10 +459,7 @@ impl ExplorerPane {
                         pane.reload(cx);
                     }
                     Ok(path) => {
-                        pane.set_status(
-                            StatusLevel::Info,
-                            format!("已完成：{}", path.display()),
-                        );
+                        pane.set_status(StatusLevel::Info, format!("已完成：{}", path.display()));
                         pane.reload(cx);
                     }
                     Err(error) => pane.set_status(StatusLevel::Error, error),
@@ -521,15 +534,7 @@ mod tests {
     #[test]
     fn hatchzip_reads_archives_but_not_bare_compressed_streams() {
         for name in [
-            "a.zip",
-            "A.ZIP",
-            "a.7z",
-            "a.rar",
-            "a.tar",
-            "a.tar.gz",
-            "a.tgz",
-            "a.tar.xz",
-            "a.txz",
+            "a.zip", "A.ZIP", "a.7z", "a.rar", "a.tar", "a.tar.gz", "a.tgz", "a.tar.xz", "a.txz",
         ] {
             assert!(hatchzip_reads(name), "{name}");
         }
@@ -575,7 +580,10 @@ mod tests {
         );
         // Nothing that can read it: an error the caller reports.
         assert_eq!(pick_tool("a.iso", ArchiveTool::HatchZip, true, false), None);
-        assert_eq!(pick_tool("a.zip", ArchiveTool::HatchZip, false, false), None);
+        assert_eq!(
+            pick_tool("a.zip", ArchiveTool::HatchZip, false, false),
+            None
+        );
     }
 
     /// The bundled HatchZip unpacks a zip with UTF-8 names, keeps the archive
@@ -613,7 +621,8 @@ mod tests {
 
         let target = root.path().join("saida");
         std::fs::create_dir_all(&target).expect("target");
-        super::extract_with_hatchzip(&program, &archive, &target, &no_progress()).expect("extracted");
+        super::extract_with_hatchzip(&program, &archive, &target, &no_progress())
+            .expect("extracted");
         assert_eq!(
             std::fs::read_to_string(target.join("子目录").join("中文名.txt")).expect("read"),
             "中文内容"

@@ -77,7 +77,11 @@ fn purge_ours(base: &Path) {
 fn main() {
     let base = std::env::temp_dir().join(format!("nohrs-trash-ab-{}", std::process::id()));
     fs::create_dir_all(&base).unwrap();
-    println!("{} rodadas alternadas, mediana, em {}", ROUNDS, base.display());
+    println!(
+        "{} rodadas alternadas, mediana, em {}",
+        ROUNDS,
+        base.display()
+    );
 
     for count in [1, 10, 200, 1000] {
         let mut before = Vec::new();

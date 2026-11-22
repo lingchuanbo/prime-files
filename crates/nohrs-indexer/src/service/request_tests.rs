@@ -33,7 +33,8 @@ fn pipe_subtree_body_preserves_wire_lengths_and_levels() {
     let mut request = vec![];
     protocol::write_subtree_request(&mut request, path, 3).unwrap();
     let body = &request[protocol::SUBTREE.len()..];
-    let file_path = std::env::temp_dir().join(format!("prime-pipe-subtree-{}.tmp", std::process::id()));
+    let file_path =
+        std::env::temp_dir().join(format!("prime-pipe-subtree-{}.tmp", std::process::id()));
     let mut file = OpenOptions::new()
         .create_new(true)
         .read(true)

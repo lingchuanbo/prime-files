@@ -275,12 +275,7 @@ impl Favorites {
     /// they are listed now, so a move within one list accounts for the entry
     /// leaving it first. Refused when the target is the entry itself or sits
     /// inside its subtree. Returns whether the order changed.
-    pub(crate) fn move_to(
-        id: u32,
-        new_parent: Option<u32>,
-        index: usize,
-        cx: &mut App,
-    ) -> bool {
+    pub(crate) fn move_to(id: u32, new_parent: Option<u32>, index: usize, cx: &mut App) -> bool {
         Self::change(cx, move |favorites| {
             let parent_ok = match new_parent {
                 None => true,
@@ -409,9 +404,7 @@ fn index_in(items: &[FavoriteItem], id: u32) -> Option<usize> {
     if let Some(index) = items.iter().position(|item| item.id == id) {
         return Some(index);
     }
-    items
-        .iter()
-        .find_map(|item| index_in(&item.children, id))
+    items.iter().find_map(|item| index_in(&item.children, id))
 }
 // The id of the submenu holding `id`; `None` when it sits at the top level
 // (or is not in the tree at all).
@@ -568,7 +561,10 @@ mod tests {
                 .iter()
                 .map(|item| item.path.clone())
                 .collect();
-            assert_eq!(order, vec![paths[2].clone(), paths[0].clone(), paths[1].clone()]);
+            assert_eq!(
+                order,
+                vec![paths[2].clone(), paths[0].clone(), paths[1].clone()]
+            );
 
             // a dropped after b (the gap below b is place 3 before a leaves):
             // [c, b, a].
@@ -577,7 +573,10 @@ mod tests {
                 .iter()
                 .map(|item| item.path.clone())
                 .collect();
-            assert_eq!(order, vec![paths[2].clone(), paths[1].clone(), paths[0].clone()]);
+            assert_eq!(
+                order,
+                vec![paths[2].clone(), paths[1].clone(), paths[0].clone()]
+            );
 
             // Dropped back into its own gap: no change.
             assert!(!Favorites::move_to(ids[0], None, 2, cx));

@@ -14,17 +14,29 @@ use std::time::Instant;
 
 fn main() {
     let dir = std::env::args().nth(1).expect("a folder");
-    let mut listed = list_dir_sync(ListParams { path: &dir, limit: usize::MAX, cursor: None })
-        .unwrap()
-        .entries;
+    let mut listed = list_dir_sync(ListParams {
+        path: &dir,
+        limit: usize::MAX,
+        cursor: None,
+    })
+    .unwrap()
+    .entries;
     // Back to the order `read_dir` hands them in, which is what the sort sees.
     let order: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    let position: std::collections::HashMap<&str, usize> =
-        order.iter().enumerate().map(|(index, name)| (name.as_str(), index)).collect();
-    listed.sort_by_key(|entry| position.get(entry.name.as_str()).copied().unwrap_or(usize::MAX));
+    let position: std::collections::HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+    listed.sort_by_key(|entry| {
+        position
+            .get(entry.name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
 
     let mut samples = Vec::new();
     for _ in 0..7 {
@@ -37,7 +49,12 @@ fn main() {
     samples.sort_by(f64::total_cmp);
     let whole = {
         let start = Instant::now();
-        let listing = list_dir_sync(ListParams { path: &dir, limit: usize::MAX, cursor: None }).unwrap();
+        let listing = list_dir_sync(ListParams {
+            path: &dir,
+            limit: usize::MAX,
+            cursor: None,
+        })
+        .unwrap();
         std::hint::black_box(&listing.entries);
         start.elapsed().as_secs_f64() * 1000.0
     };

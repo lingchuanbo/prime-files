@@ -4,46 +4,58 @@
 
 use gpui::AnyElement;
 
+use gpui::actions;
+
+actions!(
+    quick_launch,
+    [
+        /// Show the quick-launch window, or hide it if it is already showing.
+        ToggleQuickLaunch
+    ]
+);
+
+/// A reusable 2-way split/tab container shared across pages.
+pub mod compact;
 /// Making Nohrs the folder handler of the Windows user.
 pub mod default_explorer;
+/// The jump bar under other programs' Open/Save dialogs.
+pub(crate) mod dialog_jump;
+/// Panels docked to any side: the shared gestures and drawing.
+pub(crate) mod dock;
 /// The file explorer page and its supporting state and views.
 pub mod explorer;
 /// The in-process way another window asks the Explorer to show a path.
 pub(crate) mod explorer_link;
-/// The git page.
-pub mod git;
 /// Picking files for a browser's "Open" dialog from Nohrs.
 pub mod file_dialog;
+/// Taking the foreground back when another program's window has it.
+pub(crate) mod foreground;
+/// The git page.
+pub mod git;
 /// The local channel other programs (a second `LumaFiles.exe`, the Listary
 /// plugin) reach the running instance through.
 pub mod ipc;
 pub mod listary;
 /// Which language "auto" means on this machine.
 pub mod locale;
-/// A reusable 2-way split/tab container shared across pages.
-pub mod compact;
-/// Panels docked to any side: the shared gestures and drawing.
-pub(crate) mod dock;
 pub mod pane_group;
-/// Automatic updates from the project's GitHub releases.
-pub mod updater;
+/// The quick-launch panel: its state, its window and its view.
+pub mod quick_launch;
 /// Other programs' "show in folder", answered by Nohrs.
 pub mod reveal;
-/// The folder windows other programs see through `IShellWindows`, so their
-/// "show in folder" is answered here instead of by a new Explorer window.
-pub mod shell_windows;
-/// The jump bar under other programs' Open/Save dialogs.
-pub(crate) mod dialog_jump;
-/// The tray icon and its menu.
-pub(crate) mod tray;
-/// Taking the foreground back when another program's window has it.
-pub(crate) mod foreground;
-/// The standalone, indexed full-computer search window.
-pub mod search_window;
 /// The application root view that hosts the sidebar and active page.
 pub mod root;
 /// The S3 page.
 pub mod s3;
+/// The standalone, indexed full-computer search window.
+pub mod search_window;
+/// The folder windows other programs see through `IShellWindows`, so their
+/// "show in folder" is answered here instead of by a new Explorer window.
+pub mod shell_windows;
+/// The tray icon and its menu.
+pub(crate) mod tray;
+/// Automatic updates from the project's GitHub releases.
+pub mod updater;
 // removed search
 /// The settings page.
 pub mod settings;

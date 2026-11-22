@@ -38,7 +38,9 @@ pub fn watch(window: &mut Window, cx: &mut Context<RootView>) {
         window,
         async move |this: WeakEntity<RootView>, cx: &mut AsyncWindowContext| {
             while let Ok(path) = receiver.recv().await {
-                let shown = this.update_in(cx, |root, window, cx| root.reveal_from_elsewhere(&path, window, cx));
+                let shown = this.update_in(cx, |root, window, cx| {
+                    root.reveal_from_elsewhere(&path, window, cx)
+                });
                 if shown.is_err() {
                     return;
                 }
@@ -51,7 +53,8 @@ pub fn watch(window: &mut Window, cx: &mut Context<RootView>) {
 impl RootView {
     // The file another program asked Explorer to show, shown here instead.
     fn reveal_from_elsewhere(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((folder, select)) = crate::ipc::folder_and_selection(std::path::Path::new(path)) else {
+        let Some((folder, select)) = crate::ipc::folder_and_selection(std::path::Path::new(path))
+        else {
             return;
         };
         self.show_explorer(cx);
@@ -79,8 +82,8 @@ mod platform {
     use windows::Win32::System::Variant::VARIANT;
     use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
     use windows::Win32::UI::Shell::{
-        IFolderView2, IShellBrowser, IShellWindows, IWebBrowser2, SID_STopLevelBrowser, SIGDN_FILESYSPATH,
-        SVGIO_ALLVIEW, ShellWindows,
+        IFolderView2, IShellBrowser, IShellWindows, IWebBrowser2, SID_STopLevelBrowser,
+        SIGDN_FILESYSPATH, SVGIO_ALLVIEW, ShellWindows,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, EVENT_OBJECT_SHOW, GetClassNameW, GetMessageW, IsWindow, MSG,
@@ -177,7 +180,9 @@ mod platform {
     }
 
     fn watch_window(hwnd: isize) {
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok().ok();
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .ok();
         let deadline = Instant::now() + SETTLE;
         // Polls since the folder's items were first listed.
         let mut listed_for = None;
@@ -244,17 +249,26 @@ mod platform {
 
     // What the Explorer window `hwnd` shows, once it has listed its folder.
     fn read_window(hwnd: isize) -> Option<(IWebBrowser2, View)> {
-        let windows: IShellWindows = unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_ALL) }.ok()?;
+        let windows: IShellWindows =
+            unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_ALL) }.ok()?;
         let count = unsafe { windows.Count() }.ok()?;
         for index in 0..count {
-            let Ok(item) = (unsafe { windows.Item(&VARIANT::from(index)) }) else { continue };
-            let Ok(browser) = item.cast::<IWebBrowser2>() else { continue };
+            let Ok(item) = (unsafe { windows.Item(&VARIANT::from(index)) }) else {
+                continue;
+            };
+            let Ok(browser) = item.cast::<IWebBrowser2>() else {
+                continue;
+            };
             if !unsafe { browser.HWND() }.is_ok_and(|handle| handle.0 == hwnd) {
                 continue;
             }
             let provider: IServiceProvider = browser.cast().ok()?;
-            let shell_browser: IShellBrowser = unsafe { provider.QueryService(&SID_STopLevelBrowser) }.ok()?;
-            let view: IFolderView2 = unsafe { shell_browser.QueryActiveShellView() }.ok()?.cast().ok()?;
+            let shell_browser: IShellBrowser =
+                unsafe { provider.QueryService(&SID_STopLevelBrowser) }.ok()?;
+            let view: IFolderView2 = unsafe { shell_browser.QueryActiveShellView() }
+                .ok()?
+                .cast()
+                .ok()?;
             if unsafe { view.ItemCount(SVGIO_ALLVIEW) }.ok()? == 0 {
                 return None;
             }

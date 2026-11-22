@@ -973,8 +973,12 @@ mod tests {
 }
 
 /// What [`platform::extract`] is asked for.
+///
+/// Visible to the crate because the quick-launch window extracts its own icons
+/// with [`platform::extract`] rather than growing a second Shell extractor
+/// (docs/QuickDock-技术实现方案与边界约定.md §9).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Mode {
+pub(crate) enum Mode {
     /// The file's icon.
     Icon,
     /// The thumbnail, only if Windows already has it cached.
@@ -993,7 +997,7 @@ pub(crate) fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Ren
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
-mod platform {
+pub(crate) mod platform {
     //! The Shell's thumbnail extractor. `unsafe` is confined to this module:
     //! COM and GDI have no safe bindings, and the alternative — decoding every
     //! format ourselves — would still leave video frames and program icons out.
@@ -1208,7 +1212,7 @@ mod platform {
 }
 
 #[cfg(not(windows))]
-mod platform {
+pub(crate) mod platform {
     //! Elsewhere the formats `image` decodes here (PNG and JPEG) get a scaled
     //! copy; anything else keeps its icon.
 

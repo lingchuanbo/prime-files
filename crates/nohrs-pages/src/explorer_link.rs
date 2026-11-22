@@ -49,7 +49,12 @@ pub(crate) fn install(window: &mut Window, cx: &mut Context<RootView>) {
 }
 
 impl RootView {
-    fn show_path_from_elsewhere(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_path_from_elsewhere(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((folder, select)) = crate::ipc::folder_and_selection(path) else {
             return;
         };

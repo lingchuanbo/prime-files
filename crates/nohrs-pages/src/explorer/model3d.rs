@@ -383,7 +383,9 @@ fn load_fbx(path: &str) -> Result<Mesh, String> {
         Ok(AnyTree::V7400(_, tree, _)) => tree,
         Ok(_) => return Err(t!("Versão de FBX não suportada").to_string()),
         Err(_) => {
-            return Err(t!("Só FBX binário é suportado (este parece ser FBX em texto)").to_string());
+            return Err(
+                t!("Só FBX binário é suportado (este parece ser FBX em texto)").to_string(),
+            );
         }
     };
     let root = tree.root();

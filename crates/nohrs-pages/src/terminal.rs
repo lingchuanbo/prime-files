@@ -139,11 +139,17 @@ impl TerminalView {
         let (sender, receiver) = async_channel::unbounded();
         let session = start(&directory, Listener(sender));
         if let Err(error) = &session {
-            tracing::error!("could not start a terminal in {}: {error}", directory.display());
+            tracing::error!(
+                "could not start a terminal in {}: {error}",
+                directory.display()
+            );
         }
         let events = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             while let Ok(event) = receiver.recv().await {
-                if this.update(cx, |view, cx| view.on_event(event, cx)).is_err() {
+                if this
+                    .update(cx, |view, cx| view.on_event(event, cx))
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -190,9 +196,14 @@ impl TerminalView {
             TermEvent::Title(title) => self.title = Some(title),
             TermEvent::ResetTitle => self.title = None,
             TermEvent::PtyWrite(text) => session.write(text.into_bytes()),
-            TermEvent::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            TermEvent::ClipboardStore(_, text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text))
+            }
             TermEvent::ClipboardLoad(_, format) => {
-                let text = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+                let text = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .unwrap_or_default();
                 session.write(format(&text).into_bytes());
             }
             TermEvent::ColorRequest(index, format) => {
@@ -217,7 +228,11 @@ impl TerminalView {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        let bracketed = session.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+        let bracketed = session
+            .term
+            .lock()
+            .mode()
+            .contains(TermMode::BRACKETED_PASTE);
         let bytes = if bracketed {
             // The end marker inside the text would end the paste early and run
             // the rest as typed commands.
@@ -305,12 +320,19 @@ impl TerminalView {
         let y = ((position.y - layout.origin.y) / layout.line_height).max(0.0);
         let column = (x.floor() as usize).min(layout.columns - 1);
         let row = (y.floor() as usize).min(layout.lines - 1);
-        let side = if x.fract() > 0.5 { Side::Right } else { Side::Left };
+        let side = if x.fract() > 0.5 {
+            Side::Right
+        } else {
+            Side::Left
+        };
         let offset = match &self.session {
             Ok(session) => session.term.lock().grid().display_offset(),
             Err(_) => 0,
         };
-        Some((GridPoint::new(Line(row as i32 - offset as i32), Column(column)), side))
+        Some((
+            GridPoint::new(Line(row as i32 - offset as i32), Column(column)),
+            side,
+        ))
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -382,16 +404,32 @@ impl TerminalView {
 
 fn start(directory: &Path, listener: Listener) -> Result<Session, String> {
     let options = tty::Options {
-        shell: Some(tty::Shell::new(shell_program(), vec!["-NoLogo".to_string()])),
+        shell: Some(tty::Shell::new(
+            shell_program(),
+            vec!["-NoLogo".to_string()],
+        )),
         working_directory: Some(directory.to_path_buf()),
         drain_on_exit: true,
         ..Default::default()
     };
-    let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+    let size = WindowSize {
+        num_lines: 24,
+        num_cols: 80,
+        cell_width: 8,
+        cell_height: 16,
+    };
     let pty = tty::new(&options, size, 0).map_err(|error| error.to_string())?;
-    let term = Term::new(Config::default(), &GridSize { columns: 80, lines: 24 }, listener.clone());
+    let term = Term::new(
+        Config::default(),
+        &GridSize {
+            columns: 80,
+            lines: 24,
+        },
+        listener.clone(),
+    );
     let term = Arc::new(FairMutex::new(term));
-    let event_loop = EventLoop::new(term.clone(), listener, pty, true, false).map_err(|error| error.to_string())?;
+    let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)
+        .map_err(|error| error.to_string())?;
     let sender = event_loop.channel();
     // The reader thread ends on `Msg::Shutdown` or when the shell exits; its
     // handle is not needed to stop it.
@@ -422,7 +460,10 @@ fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let modifiers = keystroke.modifiers;
     let key = keystroke.key.as_str();
     // The xterm modifier parameter: 1 + Shift + 2·Alt + 4·Ctrl.
-    let parameter = 1 + u8::from(modifiers.shift) + 2 * u8::from(modifiers.alt) + 4 * u8::from(modifiers.control);
+    let parameter = 1
+        + u8::from(modifiers.shift)
+        + 2 * u8::from(modifiers.alt)
+        + 4 * u8::from(modifiers.control);
     let alt_prefix = |bytes: &[u8]| -> Vec<u8> {
         if modifiers.alt {
             [b"\x1b".as_slice(), bytes].concat()
@@ -526,8 +567,8 @@ fn control_code(key: &str) -> Option<u8> {
 // The 16 ANSI colors in Windows Terminal's "Campbell" scheme, what a Windows
 // user's programs are written to look right in.
 const ANSI: [u32; 16] = [
-    0x0C0C0C, 0xC50F1F, 0x13A10E, 0xC19C00, 0x0037DA, 0x881798, 0x3A96DD, 0xCCCCCC, 0x767676, 0xE74856, 0x16C60C,
-    0xF9F1A5, 0x3B78FF, 0xB4009E, 0x61D6D6, 0xF2F2F2,
+    0x0C0C0C, 0xC50F1F, 0x13A10E, 0xC19C00, 0x0037DA, 0x881798, 0x3A96DD, 0xCCCCCC, 0x767676,
+    0xE74856, 0x16C60C, 0xF9F1A5, 0x3B78FF, 0xB4009E, 0x61D6D6, 0xF2F2F2,
 ];
 
 fn default_rgb(index: usize) -> Rgb {
@@ -535,7 +576,13 @@ fn default_rgb(index: usize) -> Rgb {
         0..=15 => ANSI.get(index).copied().unwrap_or(0),
         16..=231 => {
             let cube = index - 16;
-            let level = |value: usize| if value == 0 { 0 } else { 55 + value as u32 * 40 };
+            let level = |value: usize| {
+                if value == 0 {
+                    0
+                } else {
+                    55 + value as u32 * 40
+                }
+            };
             (level(cube / 36) << 16) | (level(cube / 6 % 6) << 8) | level(cube % 6)
         }
         232..=255 => {
@@ -547,14 +594,20 @@ fn default_rgb(index: usize) -> Rgb {
         _ if index == NamedColor::DimForeground as usize => theme::fg_secondary(),
         _ => theme::fg(),
     };
-    Rgb { r: (color >> 16) as u8, g: (color >> 8) as u8, b: color as u8 }
+    Rgb {
+        r: (color >> 16) as u8,
+        g: (color >> 8) as u8,
+        b: color as u8,
+    }
 }
 
 fn resolve(color: TermColor, colors: &Colors) -> Hsla {
     let rgb = match color {
         TermColor::Spec(rgb) => rgb,
         TermColor::Named(named) => colors[named].unwrap_or_else(|| default_rgb(named as usize)),
-        TermColor::Indexed(index) => colors[index as usize].unwrap_or_else(|| default_rgb(index as usize)),
+        TermColor::Indexed(index) => {
+            colors[index as usize].unwrap_or_else(|| default_rgb(index as usize))
+        }
     };
     gpui::rgb((u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)).into()
 }
@@ -564,8 +617,16 @@ fn terminal_font(bold: bool, italic: bool) -> Font {
         family: "Cascadia Mono".into(),
         features: FontFeatures::default(),
         fallbacks: Some(FontFallbacks::from_fonts(vec!["Consolas".to_string()])),
-        weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-        style: if italic { FontStyle::Italic } else { FontStyle::Normal },
+        weight: if bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        style: if italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        },
     }
 }
 
@@ -617,7 +678,10 @@ fn build_frame(term: &Term<Listener>, columns: usize, lines: usize, focused: boo
             continue;
         }
         let cell = &indexed.cell;
-        if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
             continue;
         }
         let mut foreground = resolve(cell.fg, colors);
@@ -631,13 +695,24 @@ fn build_frame(term: &Term<Listener>, columns: usize, lines: usize, focused: boo
         if cell.flags.contains(Flags::HIDDEN) {
             foreground = background;
         }
-        let selected = content.selection.is_some_and(|range| range.contains(indexed.point));
-        let width = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+        let selected = content
+            .selection
+            .is_some_and(|range| range.contains(indexed.point));
+        let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
         if selected {
             background = selection_background;
         }
         if background != default_background {
-            backgrounds.push(Background { row, column, width, color: background });
+            backgrounds.push(Background {
+                row,
+                column,
+                width,
+                color: background,
+            });
         }
         let character = if cell.c == '\0' { ' ' } else { cell.c };
         let mut text = String::from(character);
@@ -680,21 +755,49 @@ fn build_frame(term: &Term<Listener>, columns: usize, lines: usize, focused: boo
             }
         } else if character != ' ' || underline || strikeout || continues {
             let closed = width == 2;
-            runs.push(Run { column, text, color: foreground, bold, italic, underline, strikeout, closed });
+            runs.push(Run {
+                column,
+                text,
+                color: foreground,
+                bold,
+                italic,
+                underline,
+                strikeout,
+                closed,
+            });
         }
     }
 
-    let cursor = if content.mode.contains(TermMode::SHOW_CURSOR) && content.cursor.shape != CursorShape::Hidden {
-        usize::try_from(cursor_point.line.0 + offset).ok().filter(|row| *row < lines).map(|row| {
-            let color = resolve(TermColor::Named(NamedColor::Cursor), colors);
-            let shape = if focused { content.cursor.shape } else { CursorShape::HollowBlock };
-            (row, cursor_point.column.0.min(columns.saturating_sub(1)), shape, color, cursor_cell)
-        })
+    let cursor = if content.mode.contains(TermMode::SHOW_CURSOR)
+        && content.cursor.shape != CursorShape::Hidden
+    {
+        usize::try_from(cursor_point.line.0 + offset)
+            .ok()
+            .filter(|row| *row < lines)
+            .map(|row| {
+                let color = resolve(TermColor::Named(NamedColor::Cursor), colors);
+                let shape = if focused {
+                    content.cursor.shape
+                } else {
+                    CursorShape::HollowBlock
+                };
+                (
+                    row,
+                    cursor_point.column.0.min(columns.saturating_sub(1)),
+                    shape,
+                    color,
+                    cursor_cell,
+                )
+            })
     } else {
         None
     };
 
-    Frame { rows, backgrounds, cursor }
+    Frame {
+        rows,
+        backgrounds,
+        cursor,
+    }
 }
 
 fn paint_run(
@@ -714,10 +817,20 @@ fn paint_run(
         font: terminal_font(run.bold, run.italic),
         color: run.color,
         background_color: None,
-        underline: run.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(run.color), wavy: false }),
-        strikethrough: run.strikeout.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(run.color) }),
+        underline: run.underline.then(|| UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(run.color),
+            wavy: false,
+        }),
+        strikethrough: run.strikeout.then(|| StrikethroughStyle {
+            thickness: px(1.0),
+            color: Some(run.color),
+        }),
     };
-    let shaped = window.text_system().shape_line(run.text.clone().into(), font_size, &[text_run], None);
+    let shaped =
+        window
+            .text_system()
+            .shape_line(run.text.clone().into(), font_size, &[text_run], None);
     let position = point(origin.x + cell_width * run.column as f32, origin.y);
     if let Err(error) = shaped.paint(position, line_height, window, cx) {
         tracing::debug!("painting terminal text: {error}");
@@ -746,7 +859,10 @@ impl Render for TerminalView {
                     .p(px(PADDING))
                     .text_sm()
                     .text_color(rgb(theme::danger()))
-                    .child(tf!("Não foi possível abrir o terminal: {error}", error = error))
+                    .child(tf!(
+                        "Não foi possível abrir o terminal: {error}",
+                        error = error
+                    ))
                     .into_any_element();
             }
         };
@@ -765,18 +881,27 @@ impl Render for TerminalView {
                 |_bounds, _window, _cx| {},
                 move |bounds, (), window, cx| {
                     let font_size = px(FONT_SIZE);
-                    let font_id = window.text_system().resolve_font(&terminal_font(false, false));
+                    let font_id = window
+                        .text_system()
+                        .resolve_font(&terminal_font(false, false));
                     let cell_width = window
                         .text_system()
                         .advance(font_id, font_size, 'm')
                         .map(|size| size.width)
                         .unwrap_or(px(FONT_SIZE * 0.6));
                     let line_height = (font_size * 1.3).round();
-                    let origin = point(bounds.origin.x + px(PADDING), bounds.origin.y + px(PADDING));
+                    let origin =
+                        point(bounds.origin.x + px(PADDING), bounds.origin.y + px(PADDING));
                     let usable = bounds.size - size(px(PADDING * 2.0), px(PADDING * 2.0));
                     let columns = ((usable.width / cell_width).floor() as usize).max(2);
                     let lines = ((usable.height / line_height).floor() as usize).max(1);
-                    let layout = Layout { origin, cell_width, line_height, columns, lines };
+                    let layout = Layout {
+                        origin,
+                        cell_width,
+                        line_height,
+                        columns,
+                        lines,
+                    };
                     let previous = layout_cell.get();
                     layout_cell.set(layout);
 
@@ -790,7 +915,11 @@ impl Render for TerminalView {
                     let frame = build_frame(&term, columns, lines, focused && !exited);
                     drop(term);
 
-                    window.handle_input(&focus_handle, ElementInputHandler::new(bounds, entity.clone()), cx);
+                    window.handle_input(
+                        &focus_handle,
+                        ElementInputHandler::new(bounds, entity.clone()),
+                        cx,
+                    );
 
                     for background in &frame.backgrounds {
                         let position = point(
@@ -798,7 +927,10 @@ impl Render for TerminalView {
                             origin.y + line_height * background.row as f32,
                         );
                         window.paint_quad(fill(
-                            Bounds::new(position, size(cell_width * background.width as f32, line_height)),
+                            Bounds::new(
+                                position,
+                                size(cell_width * background.width as f32, line_height),
+                            ),
                             background.color,
                         ));
                     }
@@ -809,19 +941,31 @@ impl Render for TerminalView {
                         }
                     }
                     if let Some((row, column, shape, color, under)) = frame.cursor {
-                        let position =
-                            point(origin.x + cell_width * column as f32, origin.y + line_height * row as f32);
+                        let position = point(
+                            origin.x + cell_width * column as f32,
+                            origin.y + line_height * row as f32,
+                        );
                         let cell = Bounds::new(position, size(cell_width, line_height));
                         match shape {
                             CursorShape::Block => {
                                 window.paint_quad(fill(cell, color));
                                 if let Some(mut under) = under {
                                     under.column = column;
-                                    paint_run(&under, point(origin.x, position.y), cell_width, line_height, window, cx);
+                                    paint_run(
+                                        &under,
+                                        point(origin.x, position.y),
+                                        cell_width,
+                                        line_height,
+                                        window,
+                                        cx,
+                                    );
                                 }
                             }
                             CursorShape::Beam => {
-                                window.paint_quad(fill(Bounds::new(position, size(px(2.0), line_height)), color));
+                                window.paint_quad(fill(
+                                    Bounds::new(position, size(px(2.0), line_height)),
+                                    color,
+                                ));
                             }
                             CursorShape::Underline => {
                                 let y = position.y + line_height - px(2.0);
@@ -874,10 +1018,17 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        Some(UTF16Selection { range: 0..0, reversed: false })
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         None
     }
 
@@ -897,7 +1048,10 @@ impl EntityInputHandler for TerminalView {
             return;
         };
         // Enter and Tab come as keys; the input handler would repeat them.
-        let text: String = text.chars().filter(|character| !matches!(character, '\r' | '\n' | '\t' | '\x08')).collect();
+        let text: String = text
+            .chars()
+            .filter(|character| !matches!(character, '\r' | '\n' | '\t' | '\x08'))
+            .collect();
         if text.is_empty() {
             return;
         }
@@ -941,7 +1095,10 @@ impl EntityInputHandler for TerminalView {
             layout.origin.x + layout.cell_width * cursor.column.0 as f32,
             layout.origin.y + layout.line_height * row,
         );
-        Some(Bounds::new(position, size(layout.cell_width, layout.line_height)))
+        Some(Bounds::new(
+            position,
+            size(layout.cell_width, layout.line_height),
+        ))
     }
 
     fn character_index_for_point(
@@ -969,13 +1126,34 @@ mod tests {
     fn special_keys_send_what_a_terminal_sends() {
         let normal = TermMode::empty();
         assert_eq!(key_bytes(&keystroke("enter"), normal), Some(b"\r".to_vec()));
-        assert_eq!(key_bytes(&keystroke("backspace"), normal), Some(b"\x7f".to_vec()));
-        assert_eq!(key_bytes(&keystroke("up"), normal), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_bytes(&keystroke("up"), TermMode::APP_CURSOR), Some(b"\x1bOA".to_vec()));
-        assert_eq!(key_bytes(&keystroke("ctrl-left"), normal), Some(b"\x1b[1;5D".to_vec()));
-        assert_eq!(key_bytes(&keystroke("delete"), normal), Some(b"\x1b[3~".to_vec()));
-        assert_eq!(key_bytes(&keystroke("shift-tab"), normal), Some(b"\x1b[Z".to_vec()));
-        assert_eq!(key_bytes(&keystroke("f5"), normal), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(
+            key_bytes(&keystroke("backspace"), normal),
+            Some(b"\x7f".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&keystroke("up"), normal),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&keystroke("up"), TermMode::APP_CURSOR),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&keystroke("ctrl-left"), normal),
+            Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&keystroke("delete"), normal),
+            Some(b"\x1b[3~".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&keystroke("shift-tab"), normal),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&keystroke("f5"), normal),
+            Some(b"\x1b[15~".to_vec())
+        );
     }
 
     #[test]
@@ -999,6 +1177,13 @@ mod tests {
     fn the_256_color_cube_matches_xterm() {
         assert_eq!(default_rgb(16), Rgb { r: 0, g: 0, b: 0 });
         assert_eq!(default_rgb(196), Rgb { r: 255, g: 0, b: 0 });
-        assert_eq!(default_rgb(244), Rgb { r: 128, g: 128, b: 128 });
+        assert_eq!(
+            default_rgb(244),
+            Rgb {
+                r: 128,
+                g: 128,
+                b: 128
+            }
+        );
     }
 }

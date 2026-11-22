@@ -434,7 +434,9 @@ async fn grouping_counts_headers_when_scrolling_to_an_entry(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-async fn the_fixed_header_setting_moves_the_header_out_of_the_scrolling_rows(cx: &mut TestAppContext) {
+async fn the_fixed_header_setting_moves_the_header_out_of_the_scrolling_rows(
+    cx: &mut TestAppContext,
+) {
     let window = new_explorer(cx);
     window
         .update(cx, |page, _window, cx| {
@@ -511,7 +513,9 @@ async fn a_fixed_header_stays_on_top_while_the_rows_scroll(cx: &mut TestAppConte
         cx.notify();
     });
     cx.run_until_parked();
-    let before = cx.debug_bounds("column-header-row").expect("the fixed header is drawn");
+    let before = cx
+        .debug_bounds("column-header-row")
+        .expect("the fixed header is drawn");
 
     pane.update(cx, |pane, cx| {
         pane.virtual_scroll_handle
@@ -524,7 +528,9 @@ async fn a_fixed_header_stays_on_top_while_the_rows_scroll(cx: &mut TestAppConte
         f32::from(offset) < 0.0,
         "the rows must actually have scrolled: {offset:?}"
     );
-    let after = cx.debug_bounds("column-header-row").expect("the fixed header, still drawn");
+    let after = cx
+        .debug_bounds("column-header-row")
+        .expect("the fixed header, still drawn");
     assert_eq!(
         before.origin, after.origin,
         "a fixed header must not move with the rows"
@@ -1161,7 +1167,10 @@ async fn the_ignore_list_hides_names_from_the_listing(cx: &mut TestAppContext) {
             page.apply_filter();
             // The default list hides the system's own bookkeeping files.
             let names = |page: &ExplorerPane| -> Vec<String> {
-                page.filtered_entries.iter().map(|entry| entry.name.clone()).collect()
+                page.filtered_entries
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect()
             };
             assert_eq!(names(page), ["draft.tmp", "keep.txt"]);
 
@@ -1548,6 +1557,85 @@ async fn toggle_sidebar_is_independent_per_pane(cx: &mut TestAppContext) {
             assert!(pane1.read(cx).sidebar_visible, "pane 1 unchanged");
         })
         .unwrap();
+}
+
+#[gpui::test]
+async fn a_sidebar_toggle_in_a_split_stays_in_that_pane(cx: &mut TestAppContext) {
+    let window = new_explorer_page(cx);
+    window
+        .update(cx, |page, window, cx| {
+            // The window opening: the file's layout reaches every pane.
+            page.apply_config_layout(&config::Layout::default(), cx);
+            page.split(SplitDirection::Vertical, window, cx);
+            assert!(page.pane(0).read(cx).sidebar_visible);
+            assert!(
+                !page.pane(1).read(cx).sidebar_visible,
+                "a split pane starts with its sidebar collapsed"
+            );
+
+            // Ctrl+B in pane 0 hides its sidebar; the toggle is written to
+            // `[layout]` and the watcher applies that file back.
+            page.pane(0).update(cx, |pane, cx| pane.toggle_sidebar(cx));
+            let mut hidden = config::Layout::default();
+            hidden.sidebar_visible = false;
+            page.apply_config_layout(&hidden, cx);
+            assert!(!page.pane(0).read(cx).sidebar_visible);
+            assert!(!page.pane(1).read(cx).sidebar_visible);
+
+            // Ctrl+B in pane 1 shows it there. The reload that follows must not
+            // show it in pane 0 as well.
+            page.set_active(1, window, cx);
+            page.pane(1).update(cx, |pane, cx| pane.toggle_sidebar(cx));
+            page.apply_config_layout(&config::Layout::default(), cx);
+            assert!(
+                page.pane(1).read(cx).sidebar_visible,
+                "the toggled pane shows its sidebar"
+            );
+            assert!(
+                !page.pane(0).read(cx).sidebar_visible,
+                "the other pane of the split keeps its own state"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn the_directory_menu_can_anchor_to_the_listings_corner(cx: &mut TestAppContext) {
+    use crate::explorer::context_menu::MenuPurpose;
+
+    let (pane, cx) = new_explorer_visual(cx);
+    cx.run_until_parked();
+    let listing = pane
+        .read_with(cx, |pane, _cx| pane.hit_boxes.listing())
+        .expect("the listing has been drawn");
+    let corner = pane
+        .read_with(cx, |pane, _cx| pane.listing_top_left())
+        .expect("its corner");
+
+    // The corner is the listing's, below the header while that stays on top.
+    assert_eq!(corner.x, listing.origin.x);
+    assert_eq!(
+        corner.y,
+        listing.origin.y + px(crate::explorer::view::listing::list::HEADER_HEIGHT)
+    );
+
+    // And the directory menu opens there when the settings say so.
+    pane.update(cx, |pane, cx| {
+        pane.apply_config_ui(
+            &config::Ui {
+                directory_menu_position: config::DirectoryMenuPosition::ListTopLeft,
+                ..config::Ui::default()
+            },
+            cx,
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let position = cx.update(|window, cx| {
+        let pane = pane.read(cx);
+        pane.menu_position(&MenuPurpose::FavoritesMenu, window)
+    });
+    assert_eq!(position, corner);
 }
 
 #[gpui::test]

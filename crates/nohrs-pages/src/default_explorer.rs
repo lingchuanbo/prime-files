@@ -41,7 +41,9 @@ fn reg_ok(args: &[&str]) -> io::Result<()> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_string()))
+        Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
     }
 }
 
@@ -66,7 +68,14 @@ pub fn enable(exe: &Path) -> io::Result<()> {
         let verb = format!(r"{shell}\{VERB}");
         reg_ok(&["add", &verb, "/ve", "/d", t!("Abrir no LumaFiles"), "/f"])?;
         reg_ok(&["add", &verb, "/v", "Icon", "/d", &quoted, "/f"])?;
-        reg_ok(&["add", &format!(r"{verb}\command"), "/ve", "/d", &format!("{quoted} \"%1\""), "/f"])?;
+        reg_ok(&[
+            "add",
+            &format!(r"{verb}\command"),
+            "/ve",
+            "/d",
+            &format!("{quoted} \"%1\""),
+            "/f",
+        ])?;
         reg_ok(&["add", &shell, "/ve", "/d", VERB, "/f"])?;
     }
     // Without an argument Nohrs brings its open window forward, or opens one.
@@ -97,15 +106,17 @@ pub fn disable() -> io::Result<()> {
 // other program set is left alone. The verb's name says "nohrs"; a command
 // names the executable, which the installer calls LumaFiles.exe.
 fn is_ours(key: &str) -> bool {
-    let exe_name = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.file_name().map(|name| name.to_string_lossy().to_ascii_lowercase()));
+    let exe_name = std::env::current_exe().ok().and_then(|exe| {
+        exe.file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+    });
     reg(&["query", key, "/ve"])
         .map(|output| {
             String::from_utf8_lossy(&output.stdout).lines().any(|line| {
                 let line = line.to_ascii_lowercase();
                 line.contains("reg_sz")
-                    && (line.contains("nohrs") || exe_name.as_deref().is_some_and(|name| line.contains(name)))
+                    && (line.contains("nohrs")
+                        || exe_name.as_deref().is_some_and(|name| line.contains(name)))
             })
         })
         .unwrap_or(false)
@@ -126,7 +137,9 @@ pub fn starts_with_windows() -> bool {
 pub fn set_starts_with_windows(exe: &Path, enable: bool) -> io::Result<()> {
     if enable {
         let command = format!("\"{}\" --background", exe.display());
-        reg_ok(&["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &command, "/f"])
+        reg_ok(&[
+            "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &command, "/f",
+        ])
     } else if starts_with_windows() {
         reg_ok(&["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])
     } else {

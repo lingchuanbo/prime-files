@@ -504,10 +504,10 @@ impl ExplorerPane {
             super::file_ops::ClipMode::Cut
         };
         if self.prepare_transfer(mode, sources, dest, false) {
-            while self.resolve_current_conflict(
-                nohrs_services::fs::ops::ConflictResolution::Rename,
-                cx,
-            ) {}
+            while self
+                .resolve_current_conflict(nohrs_services::fs::ops::ConflictResolution::Rename, cx)
+            {
+            }
         }
         self.execute_paste_plan(cx);
         cx.notify();
@@ -539,10 +539,7 @@ impl ExplorerPane {
         } else {
             self.set_status(
                 StatusLevel::Error,
-                tf!(
-                    "Não foi possível abrir o drive {letter}:",
-                    letter = letter
-                ),
+                tf!("Não foi possível abrir o drive {letter}:", letter = letter),
             );
             cx.notify();
         }

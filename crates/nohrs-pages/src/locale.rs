@@ -12,7 +12,11 @@ use nohrs_core::i18n::Lang;
 /// Finds the language on this machine and records it for "auto".
 pub fn detect_and_record() -> Lang {
     let system = system_locale();
-    let lang = choose(system.locale.as_deref(), system.country.as_deref(), system.ui_language.as_deref());
+    let lang = choose(
+        system.locale.as_deref(),
+        system.country.as_deref(),
+        system.ui_language.as_deref(),
+    );
     tracing::info!(
         locale = ?system.locale,
         country = ?system.country,
@@ -29,7 +33,11 @@ fn choose(locale: Option<&str>, country: Option<&str>, ui_language: Option<&str>
         .and_then(Lang::parse)
         .or_else(|| country.and_then(Lang::for_country))
         // The region part of the format names the country too (`fr-MX`).
-        .or_else(|| locale.and_then(|name| name.split(['-', '_']).nth(1)).and_then(Lang::for_country))
+        .or_else(|| {
+            locale
+                .and_then(|name| name.split(['-', '_']).nth(1))
+                .and_then(Lang::for_country)
+        })
         .or_else(|| ui_language.and_then(Lang::parse))
         .unwrap_or(Lang::En)
 }
@@ -75,7 +83,9 @@ fn system_locale() -> SystemLocale {
 #[cfg(not(windows))]
 fn system_locale() -> SystemLocale {
     SystemLocale {
-        locale: std::env::var("LANG").ok().map(|value| value.split('.').next().unwrap_or_default().to_string()),
+        locale: std::env::var("LANG")
+            .ok()
+            .map(|value| value.split('.').next().unwrap_or_default().to_string()),
         ..SystemLocale::default()
     }
 }

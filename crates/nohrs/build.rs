@@ -58,7 +58,8 @@ BEGIN
 END
 "#
     );
-    let out = Path::new(&std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("prime-files.rc");
+    let out =
+        Path::new(&std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("prime-files.rc");
     std::fs::write(&out, rc).expect("writing the resource script");
     embed_resource::compile(&out, embed_resource::NONE)
         .manifest_optional()

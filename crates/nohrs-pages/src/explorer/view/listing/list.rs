@@ -92,13 +92,17 @@ fn render_table_with_header(
             if !header_fixed {
                 all_sizes.push(gpui::size(px(table_width), px(HEADER_HEIGHT)));
             }
-            all_sizes.extend(rows.iter().map(|row| match row {
-                ListRow::Parent => gpui::size(px(table_width), px(page.row_height)),
-                ListRow::Group(_) => gpui::size(px(table_width), px(super::GROUP_HEADER_HEIGHT)),
-                ListRow::Entry(index) => {
-                    page.item_sizes.get(*index).copied().unwrap_or_else(|| {
-                        gpui::size(px(table_width), px(page.row_height))
-                    })
+            all_sizes.extend(rows.iter().map(|row| {
+                match row {
+                    ListRow::Parent => gpui::size(px(table_width), px(page.row_height)),
+                    ListRow::Group(_) => {
+                        gpui::size(px(table_width), px(super::GROUP_HEADER_HEIGHT))
+                    }
+                    ListRow::Entry(index) => page
+                        .item_sizes
+                        .get(*index)
+                        .copied()
+                        .unwrap_or_else(|| gpui::size(px(table_width), px(page.row_height))),
                 }
             }));
             let layout = ListLayout {
@@ -115,8 +119,17 @@ fn render_table_with_header(
 
     // Painted above the list when it stays put, so the rows scroll under it.
     let header = header_fixed.then(|| {
-        render_header_row(page, table_width, col_name, col_type, col_size, col_modified, col_action, cx)
-            .into_any_element()
+        render_header_row(
+            page,
+            table_width,
+            col_name,
+            col_type,
+            col_size,
+            col_modified,
+            col_action,
+            cx,
+        )
+        .into_any_element()
     });
 
     let list = v_virtual_list(
@@ -150,9 +163,19 @@ fn render_table_with_header(
                         (false, index) => index - 1,
                     };
                     match rows.get(index)? {
-                        ListRow::Parent => {
-                            Some(render_parent_row(view, table_width, col_name, col_type, col_size, col_modified, col_action, cx).into_any_element())
-                        }
+                        ListRow::Parent => Some(
+                            render_parent_row(
+                                view,
+                                table_width,
+                                col_name,
+                                col_type,
+                                col_size,
+                                col_modified,
+                                col_action,
+                                cx,
+                            )
+                            .into_any_element(),
+                        ),
                         ListRow::Group(group) => {
                             let group = view.groups().get(*group)?;
                             Some(super::group_header(group, table_width).into_any_element())
@@ -162,16 +185,18 @@ fn render_table_with_header(
                             view.filtered_entries.get(data_ix).cloned().map(|item| {
                                 // Only the Shell's own icons are worth asking
                                 // for; a plain or absent icon needs no read.
-                                let icon = (view.icon_mode == nohrs_core::config::IconMode::Associated)
-                                    .then(|| view.thumbnails.icon(
-                                        &item.path,
-                                        item.kind == "dir",
-                                        icon_px,
-                                        cx,
-                                    ))
+                                let icon = (view.icon_mode
+                                    == nohrs_core::config::IconMode::Associated)
+                                    .then(|| {
+                                        view.thumbnails.icon(
+                                            &item.path,
+                                            item.kind == "dir",
+                                            icon_px,
+                                            cx,
+                                        )
+                                    })
                                     .flatten();
-                                row::render(view, &item, data_ix, icon, cx)
-                                    .into_any_element()
+                                row::render(view, &item, data_ix, icon, cx).into_any_element()
                             })
                         }
                     }

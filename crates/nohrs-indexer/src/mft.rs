@@ -83,20 +83,28 @@ impl Table {
 
     /// The text of `name`.
     pub fn name(&self, name: &Name) -> &str {
-        self.text.get(name.start as usize..name.start as usize + name.len as usize).unwrap_or("")
+        self.text
+            .get(name.start as usize..name.start as usize + name.len as usize)
+            .unwrap_or("")
     }
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?))
+    Some(u16::from_le_bytes(
+        bytes.get(at..at.checked_add(2)?)?.try_into().ok()?,
+    ))
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?))
+    Some(u32::from_le_bytes(
+        bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
 }
 
 fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(bytes.get(at..at.checked_add(8)?)?.try_into().ok()?))
+    Some(u64::from_le_bytes(
+        bytes.get(at..at.checked_add(8)?)?.try_into().ok()?,
+    ))
 }
 
 fn seconds(ticks: u64) -> u32 {
@@ -124,8 +132,10 @@ pub fn apply_fixups(record: &mut [u8]) -> bool {
     };
     for sector in 1..count {
         let end = sector * stride;
-        let (Some(found), Some(real)) = (u16_at(record, end.wrapping_sub(2)), u16_at(record, offset + sector * 2))
-        else {
+        let (Some(found), Some(real)) = (
+            u16_at(record, end.wrapping_sub(2)),
+            u16_at(record, offset + sector * 2),
+        ) else {
             return false;
         };
         if end < 2 || found != check {
@@ -222,7 +232,9 @@ pub fn parse_record(table: &mut Table, number: u64, record: &mut [u8]) {
 }
 
 fn add_name(table: &mut Table, record: u64, value: &[u8]) {
-    let (Some(parent), Some(&length), Some(&namespace)) = (u64_at(value, 0), value.get(0x40), value.get(0x41)) else {
+    let (Some(parent), Some(&length), Some(&namespace)) =
+        (u64_at(value, 0), value.get(0x40), value.get(0x41))
+    else {
         return;
     };
     if namespace == DOS_NAMESPACE {
@@ -231,11 +243,19 @@ fn add_name(table: &mut Table, record: u64, value: &[u8]) {
     let Some(units) = value.get(0x42..0x42 + length as usize * 2) else {
         return;
     };
-    let units: Vec<u16> = units.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let units: Vec<u16> = units
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
     let name = String::from_utf16_lossy(&units);
     let start = table.text.len() as u32;
     table.text.push_str(&name);
-    table.names.push(Name { record, parent: parent & RECORD_NUMBER, start, len: name.len() as u16 });
+    table.names.push(Name {
+        record,
+        parent: parent & RECORD_NUMBER,
+        start,
+        len: name.len() as u16,
+    });
 }
 
 /// The extents of a non-resident attribute, as (first cluster, clusters);
@@ -260,7 +280,8 @@ pub fn data_runs(attribute: &[u8]) -> Option<Vec<(Option<u64>, u64)>> {
         let start = if offset_size == 0 {
             None
         } else {
-            let offset_bytes = attribute.get(at + 1 + length_size..at + 1 + length_size + offset_size)?;
+            let offset_bytes =
+                attribute.get(at + 1 + length_size..at + 1 + length_size + offset_size)?;
             // Signed, relative to the previous run's start.
             let negative = offset_bytes.last().is_some_and(|byte| byte & 0x80 != 0);
             let mut offset = if negative { [0xFFu8; 8] } else { [0u8; 8] };
@@ -293,7 +314,11 @@ pub fn mft_runs(record: &mut [u8]) -> Option<(Vec<(Option<u64>, u64)>, bool)> {
         if kind == ATTRIBUTE_LIST {
             listed = true;
         }
-        if kind == DATA && attribute[8] != 0 && attribute[9] == 0 && u64_at(attribute, 0x10) == Some(0) {
+        if kind == DATA
+            && attribute[8] != 0
+            && attribute[9] == 0
+            && u64_at(attribute, 0x10) == Some(0)
+        {
             runs = data_runs(attribute);
         }
         at += length;
@@ -315,21 +340,34 @@ pub struct Policy {
 
 // Folders whose contents nobody searches for, as the app's walk skips them.
 fn skipped(lowered: &str) -> bool {
-    matches!(lowered, "$recycle.bin" | "system volume information" | "$winreagent")
+    matches!(
+        lowered,
+        "$recycle.bin" | "system volume information" | "$winreagent"
+    )
 }
 
 /// The volume's names as a tree from its root, parents first.
 pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volume {
     let count = table.records.len();
-    if !table.records.get(ROOT as usize).is_some_and(|info| info.in_use && info.dir) {
+    if !table
+        .records
+        .get(ROOT as usize)
+        .is_some_and(|info| info.in_use && info.dir)
+    {
         return crate::protocol::Volume::new(root);
     }
     // Children by folder, without a vector per folder: count, then fill.
     let mut first = vec![0u32; count + 1];
     let live = |name: &Name| {
         name.record >= FIRST_USER_RECORD
-            && table.records.get(name.record as usize).is_some_and(|info| info.in_use)
-            && table.records.get(name.parent as usize).is_some_and(|info| info.in_use && info.dir)
+            && table
+                .records
+                .get(name.record as usize)
+                .is_some_and(|info| info.in_use)
+            && table
+                .records
+                .get(name.parent as usize)
+                .is_some_and(|info| info.in_use && info.dir)
     };
     for name in table.names.iter().filter(|name| live(name)) {
         first[name.parent as usize] += 1;
@@ -367,7 +405,13 @@ pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volu
                 continue;
             };
             let text = table.name(name);
-            let child_index = volume.push(index, text, info.dir, if info.dir { 0 } else { info.size }, info.modified);
+            let child_index = volume.push(
+                index,
+                text,
+                info.dir,
+                if info.dir { 0 } else { info.size },
+                info.modified,
+            );
             if !info.dir || visited[name.record as usize] {
                 continue;
             }
@@ -412,7 +456,10 @@ mod volume {
         read_volume_interruptible(root, || false)
     }
 
-    pub(crate) fn read_volume_interruptible(root: &str, cancelled: impl Fn() -> bool) -> io::Result<Table> {
+    pub(crate) fn read_volume_interruptible(
+        root: &str,
+        cancelled: impl Fn() -> bool,
+    ) -> io::Result<Table> {
         let volume = std::fs::OpenOptions::new()
             .read(true)
             // Share everything: the volume is in use by everyone else.
@@ -439,7 +486,9 @@ mod volume {
         let valid = u64::try_from(data.MftValidDataLength).unwrap_or(0);
         let start = u64::try_from(data.MftStartLcn).unwrap_or(0) * cluster;
         if cluster == 0 || record_size < 256 || record_size > 65_536 || valid == 0 {
-            return Err(io::Error::other(format!("{root}: unexpected NTFS geometry")));
+            return Err(io::Error::other(format!(
+                "{root}: unexpected NTFS geometry"
+            )));
         }
 
         let mut first = vec![0u8; record_size.max(sector)];
@@ -448,7 +497,9 @@ mod volume {
             .ok_or_else(|| io::Error::other(format!("{root}: the $MFT record is unreadable")))?;
         let covered: u64 = runs.iter().map(|(_, clusters)| clusters * cluster).sum();
         if covered < valid && listed {
-            return Err(io::Error::other(format!("{root}: the $MFT is too fragmented to read whole")));
+            return Err(io::Error::other(format!(
+                "{root}: the $MFT is too fragmented to read whole"
+            )));
         }
 
         let mut table = Table::default();
@@ -459,11 +510,20 @@ mod volume {
             let mut offset = lcn.map(|lcn| lcn * cluster);
             let mut remaining = clusters * cluster;
             while remaining > 0 {
-                if cancelled() { return Err(io::Error::new(io::ErrorKind::Interrupted, "index rebuild stopped")); }
+                if cancelled() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "index rebuild stopped",
+                    ));
+                }
                 if done >= valid {
                     break 'runs;
                 }
-                let length = remaining.min(CHUNK).min(valid - done).next_multiple_of(cluster).min(remaining);
+                let length = remaining
+                    .min(CHUNK)
+                    .min(valid - done)
+                    .next_multiple_of(cluster)
+                    .min(remaining);
                 let chunk = &mut buffer[..length as usize];
                 match offset {
                     Some(at) => volume.seek_read(chunk, at).map(|_| ())?,
@@ -507,18 +567,31 @@ pub(crate) mod tests {
             Self { bytes, at: 0x38 }
         }
 
-        fn attribute(mut self, kind: u32, resident: bool, header: &[(usize, &[u8])], value: &[u8]) -> Self {
+        fn attribute(
+            mut self,
+            kind: u32,
+            resident: bool,
+            header: &[(usize, &[u8])],
+            value: &[u8],
+        ) -> Self {
             let value_offset = 0x18usize;
-            let body = if resident { value_offset + value.len() } else { 0x48 + value.len() };
+            let body = if resident {
+                value_offset + value.len()
+            } else {
+                0x48 + value.len()
+            };
             let length = body.next_multiple_of(8);
             let at = self.at;
             self.bytes[at..at + 4].copy_from_slice(&kind.to_le_bytes());
             self.bytes[at + 4..at + 8].copy_from_slice(&(length as u32).to_le_bytes());
             self.bytes[at + 8] = u8::from(!resident);
             if resident {
-                self.bytes[at + 0x10..at + 0x14].copy_from_slice(&(value.len() as u32).to_le_bytes());
-                self.bytes[at + 0x14..at + 0x16].copy_from_slice(&(value_offset as u16).to_le_bytes());
-                self.bytes[at + value_offset..at + value_offset + value.len()].copy_from_slice(value);
+                self.bytes[at + 0x10..at + 0x14]
+                    .copy_from_slice(&(value.len() as u32).to_le_bytes());
+                self.bytes[at + 0x14..at + 0x16]
+                    .copy_from_slice(&(value_offset as u16).to_le_bytes());
+                self.bytes[at + value_offset..at + value_offset + value.len()]
+                    .copy_from_slice(value);
             } else {
                 self.bytes[at + 0x20..at + 0x22].copy_from_slice(&0x48u16.to_le_bytes());
                 self.bytes[at + 0x48..at + 0x48 + value.len()].copy_from_slice(value);
@@ -564,7 +637,10 @@ pub(crate) mod tests {
 
         pub(crate) fn big_data(self, size: u64, runs: &[u8]) -> Self {
             let header: Vec<(usize, Vec<u8>)> = vec![(0x30, size.to_le_bytes().to_vec())];
-            let header: Vec<(usize, &[u8])> = header.iter().map(|(at, bytes)| (*at, bytes.as_slice())).collect();
+            let header: Vec<(usize, &[u8])> = header
+                .iter()
+                .map(|(at, bytes)| (*at, bytes.as_slice()))
+                .collect();
             self.attribute(DATA, false, &header, runs)
         }
 
@@ -597,19 +673,77 @@ pub(crate) mod tests {
 
     fn sample() -> Table {
         table_of(vec![
-            (ROOT, Record::new(IN_USE | DIRECTORY, 0).modified(100).name(ROOT, ".", 3).finish()),
-            (11, Record::new(IN_USE | DIRECTORY, 0).name(ROOT, "$Extend", 3).finish()),
-            (30, Record::new(IN_USE | DIRECTORY, 0).modified(200).name(ROOT, "Users", 3).finish()),
-            (31, Record::new(IN_USE | DIRECTORY, 0).name(30, "ana", 1).name(30, "ANA~1", 2).finish()),
-            (32, Record::new(IN_USE | DIRECTORY, 0).name(30, "outra", 1).finish()),
-            (33, Record::new(IN_USE, 0).modified(300).name(31, "Bonk.wav", 1).big_data(5_000_000, &[0x11, 0x10, 0x20, 0]).finish()),
-            (34, Record::new(IN_USE, 0).name(32, "segredo.txt", 3).resident_data(12).finish()),
-            (35, Record::new(IN_USE, 0).name(31, "apagado.txt", 3).finish()),
-            (36, Record::new(IN_USE | DIRECTORY, 0).name(ROOT, "$Recycle.Bin", 3).finish()),
+            (
+                ROOT,
+                Record::new(IN_USE | DIRECTORY, 0)
+                    .modified(100)
+                    .name(ROOT, ".", 3)
+                    .finish(),
+            ),
+            (
+                11,
+                Record::new(IN_USE | DIRECTORY, 0)
+                    .name(ROOT, "$Extend", 3)
+                    .finish(),
+            ),
+            (
+                30,
+                Record::new(IN_USE | DIRECTORY, 0)
+                    .modified(200)
+                    .name(ROOT, "Users", 3)
+                    .finish(),
+            ),
+            (
+                31,
+                Record::new(IN_USE | DIRECTORY, 0)
+                    .name(30, "ana", 1)
+                    .name(30, "ANA~1", 2)
+                    .finish(),
+            ),
+            (
+                32,
+                Record::new(IN_USE | DIRECTORY, 0)
+                    .name(30, "outra", 1)
+                    .finish(),
+            ),
+            (
+                33,
+                Record::new(IN_USE, 0)
+                    .modified(300)
+                    .name(31, "Bonk.wav", 1)
+                    .big_data(5_000_000, &[0x11, 0x10, 0x20, 0])
+                    .finish(),
+            ),
+            (
+                34,
+                Record::new(IN_USE, 0)
+                    .name(32, "segredo.txt", 3)
+                    .resident_data(12)
+                    .finish(),
+            ),
+            (
+                35,
+                Record::new(IN_USE, 0).name(31, "apagado.txt", 3).finish(),
+            ),
+            (
+                36,
+                Record::new(IN_USE | DIRECTORY, 0)
+                    .name(ROOT, "$Recycle.Bin", 3)
+                    .finish(),
+            ),
             (37, Record::new(IN_USE, 0).name(36, "lixo.txt", 3).finish()),
             // An extension record naming 38 a second time (a hard link).
-            (38, Record::new(IN_USE, 0).name(31, "link a.txt", 3).resident_data(5).finish()),
-            (39, Record::new(IN_USE, 38).name(ROOT, "link b.txt", 3).finish()),
+            (
+                38,
+                Record::new(IN_USE, 0)
+                    .name(31, "link a.txt", 3)
+                    .resident_data(5)
+                    .finish(),
+            ),
+            (
+                39,
+                Record::new(IN_USE, 38).name(ROOT, "link b.txt", 3).finish(),
+            ),
             (40, Record::new(0, 0).name(31, "livre.txt", 3).finish()),
         ])
     }
@@ -622,7 +756,9 @@ pub(crate) mod tests {
             fn volume(&mut self, _root: &str) {}
             fn entry(&mut self, parent: u32, name: &str, dir: bool, size: u64, modified: u32) {
                 let path = match self.0.get(parent as usize) {
-                    Some(parent) => format!("{}\\{name}", parent.split(' ').next().unwrap_or_default()),
+                    Some(parent) => {
+                        format!("{}\\{name}", parent.split(' ').next().unwrap_or_default())
+                    }
                     None => name.to_string(),
                 };
                 self.0.push(format!("{path} {dir} {size} {modified}"));
@@ -636,7 +772,10 @@ pub(crate) mod tests {
     #[test]
     fn records_become_a_tree_with_sizes_dates_and_hard_links() {
         let table = sample();
-        let policy = Policy { profiles: vec!["users".into()], allowed: vec!["ana".into(), "public".into()] };
+        let policy = Policy {
+            profiles: vec!["users".into()],
+            allowed: vec!["ana".into(), "public".into()],
+        };
         let mut found = paths(&tree(&table, "C:", &policy));
         found.sort();
         assert_eq!(
@@ -677,7 +816,10 @@ pub(crate) mod tests {
         attribute[0x20..0x22].copy_from_slice(&0x40u16.to_le_bytes());
         attribute.truncate(0x40);
         attribute.extend_from_slice(&[0x11, 0x10, 0x20, 0x11, 0x08, 0xF0, 0x01, 0x04, 0x00]);
-        assert_eq!(data_runs(&attribute), Some(vec![(Some(0x20), 0x10), (Some(0x10), 0x08), (None, 4)]));
+        assert_eq!(
+            data_runs(&attribute),
+            Some(vec![(Some(0x20), 0x10), (Some(0x10), 0x08), (None, 4)])
+        );
         attribute.truncate(attribute.len() - 1);
         assert_eq!(data_runs(&attribute), None);
     }

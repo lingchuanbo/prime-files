@@ -235,9 +235,7 @@ fn apply_one(
 ) -> ops::ClaimResult<()> {
     match (mode, progress) {
         (ClipMode::Copy, None) => ops::copy_path_no_replace(src, dst),
-        (ClipMode::Copy, Some(progress)) => {
-            ops::copy_path_no_replace_reported(src, dst, progress)
-        }
+        (ClipMode::Copy, Some(progress)) => ops::copy_path_no_replace_reported(src, dst, progress),
         (ClipMode::Cut, None) => ops::move_path_no_replace(src, dst).map(|_| ()),
         (ClipMode::Cut, Some(progress)) => {
             ops::move_path_no_replace_reported(src, dst, progress).map(|_| ())
@@ -661,7 +659,11 @@ fn scratch_path(dst: &Path, role: &str) -> PathBuf {
 impl ExplorerPane {
     // Opens the progress dialog for `items` entries and returns the board the
     // worker updates; the dialog closes when `end_transfer` sees it finish.
-    pub(crate) fn begin_transfer(&mut self, title: &'static str, items: usize) -> Arc<TransferProgress> {
+    pub(crate) fn begin_transfer(
+        &mut self,
+        title: &'static str,
+        items: usize,
+    ) -> Arc<TransferProgress> {
         let progress = TransferProgress::new(items as u64);
         self.transfer = Some(super::state::ActiveTransfer {
             title,
@@ -810,7 +812,9 @@ impl ExplorerPane {
                     }
                 };
                 let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-                let cancelled = progress.as_ref().is_some_and(|progress| progress.cancelled());
+                let cancelled = progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.cancelled());
                 let failures = ops::trash_paths_reported(&paths, record, progress.as_deref());
                 let trashed = if cancelled {
                     // What the batch had not reached is neither trashed nor
@@ -1119,7 +1123,11 @@ impl ExplorerPane {
         } else {
             i18n::plural(total, k!("{n} item colado"), k!("{n} itens colados"))
         };
-        let title = if mode == ClipMode::Cut { "移动" } else { "复制" };
+        let title = if mode == ClipMode::Cut {
+            "移动"
+        } else {
+            "复制"
+        };
         self.run_fs_op_with(
             total,
             label,
@@ -1195,13 +1203,9 @@ impl ExplorerPane {
                         // Filtered out above; kept for exhaustiveness without panicking.
                         ConflictResolution::Skip => continue,
                         ConflictResolution::Rename => free_destination(&dest_dir, &name)
-                            .and_then(|dst| {
-                                apply_to_free_name(mode, &src, &dst, progress_ref)
-                            }),
+                            .and_then(|dst| apply_to_free_name(mode, &src, &dst, progress_ref)),
                         ConflictResolution::Overwrite => ops::destination_in(&dest_dir, &name)
-                            .and_then(|dst| {
-                                overwrite_apply(mode, &src, &dst, progress_ref)
-                            }),
+                            .and_then(|dst| overwrite_apply(mode, &src, &dst, progress_ref)),
                     };
                     match result {
                         Ok(applied) => report.applied(applied),

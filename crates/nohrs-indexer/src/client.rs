@@ -159,7 +159,9 @@ pub fn search(terms: &[String], limit: u32) -> io::Result<Vec<protocol::Hit>> {
 /// Reads the index worker's published count and refresh state.
 pub fn index_status() -> io::Result<protocol::IndexStatus> {
     if !protocol::supports_status(hello()?) {
-        return Err(io::Error::other("the indexer does not support status queries"));
+        return Err(io::Error::other(
+            "the indexer does not support status queries",
+        ));
     }
     let mut pipe = connect()?;
     pipe.write_all(protocol::STATUS)?;

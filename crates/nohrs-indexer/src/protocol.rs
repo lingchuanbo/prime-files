@@ -516,7 +516,8 @@ pub struct IndexStatus {
 
 /// Writes the fixed-size index status response.
 pub fn write_index_status(out: &mut impl Write, status: IndexStatus) -> io::Result<()> {
-    let flags = u8::from(status.ready) * STATUS_READY | u8::from(status.refreshing) * STATUS_REFRESHING;
+    let flags =
+        u8::from(status.ready) * STATUS_READY | u8::from(status.refreshing) * STATUS_REFRESHING;
     out.write_all(STATUS_MAGIC)?;
     out.write_all(&VERSION.to_le_bytes())?;
     out.write_all(&[flags])?;
@@ -531,14 +532,18 @@ pub fn read_index_status(input: &mut impl Read) -> io::Result<IndexStatus> {
         let length = u16::from_le_bytes(read_array(input)?) as usize;
         let mut message = Vec::new();
         read_text(input, length, &mut message)?;
-        return Err(io::Error::other(String::from_utf8_lossy(&message).into_owned()));
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&message).into_owned(),
+        ));
     }
     if &magic != STATUS_MAGIC {
         return Err(invalid("not an index status answer"));
     }
     let version = u32::from_le_bytes(read_array(input)?);
     if version != VERSION {
-        return Err(invalid(&format!("version {version}, this app reads {VERSION}")));
+        return Err(invalid(&format!(
+            "version {version}, this app reads {VERSION}"
+        )));
     }
     let flags = read_array::<1>(input)?[0];
     if flags & !(STATUS_READY | STATUS_REFRESHING) != 0 {
@@ -936,12 +941,20 @@ mod tests {
 
     #[test]
     fn index_status_round_trips_readiness_refresh_and_entry_count() {
-        let status = IndexStatus { ready: true, refreshing: false, entries: 1_234 };
+        let status = IndexStatus {
+            ready: true,
+            refreshing: false,
+            entries: 1_234,
+        };
         let mut answer = Vec::new();
         write_index_status(&mut answer, status).unwrap();
         assert_eq!(read_index_status(&mut answer.as_slice()).unwrap(), status);
 
-        let building = IndexStatus { ready: false, refreshing: true, entries: 0 };
+        let building = IndexStatus {
+            ready: false,
+            refreshing: true,
+            entries: 0,
+        };
         let mut answer = Vec::new();
         write_index_status(&mut answer, building).unwrap();
         assert_eq!(read_index_status(&mut answer.as_slice()).unwrap(), building);

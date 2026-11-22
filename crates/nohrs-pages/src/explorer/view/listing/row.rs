@@ -181,7 +181,9 @@ pub fn render(
                 // outline setting on, the same accent closes a frame around the
                 // row instead of leaving it open on three sides.
                 .border_l_2()
-                .when(is_selected && page.selection_outline, |this| this.border_1().border_l_2())
+                .when(is_selected && page.selection_outline, |this| {
+                    this.border_1().border_l_2()
+                })
                 .border_color(rgb(if is_selected {
                     theme::accent()
                 } else {
@@ -319,10 +321,9 @@ pub fn render(
                                 // With icons turned off the gutter stays, so
                                 // the names still line up.
                                 .child(match (page.icon_mode, shell_icon) {
-                                    (IconMode::None, _) => div()
-                                        .w(px(ICON_SIZE))
-                                        .flex_shrink_0()
-                                        .into_any_element(),
+                                    (IconMode::None, _) => {
+                                        div().w(px(ICON_SIZE)).flex_shrink_0().into_any_element()
+                                    }
                                     (_, Some(image)) => img(ImageSource::Render(image))
                                         .size(px(ICON_SIZE))
                                         .flex_shrink_0()
@@ -533,8 +534,16 @@ pub(crate) fn status_badges(page: &ExplorerPane, item: &FileEntryDto) -> Vec<Any
     let mut badges = Vec::with_capacity(2);
     if let Some(state) = page.sync_state(&item.path) {
         let (icon, color, label) = match state {
-            SyncState::CloudOnly => ("icons/cloud-download.svg", theme::gray_500(), t!("Só na nuvem")),
-            SyncState::Pinned => ("icons/pin.svg", theme::accent(), t!("Fixado neste dispositivo")),
+            SyncState::CloudOnly => (
+                "icons/cloud-download.svg",
+                theme::gray_500(),
+                t!("Só na nuvem"),
+            ),
+            SyncState::Pinned => (
+                "icons/pin.svg",
+                theme::accent(),
+                t!("Fixado neste dispositivo"),
+            ),
         };
         badges.push(
             div()
@@ -544,8 +553,15 @@ pub(crate) fn status_badges(page: &ExplorerPane, item: &FileEntryDto) -> Vec<Any
                 .items_center()
                 .justify_center()
                 .ml(px(4.0))
-                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(label).build(window, cx))
-                .child(Icon::new(Icon::empty()).path(icon).size_3().text_color(rgb(color)))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                })
+                .child(
+                    Icon::new(Icon::empty())
+                        .path(icon)
+                        .size_3()
+                        .text_color(rgb(color)),
+                )
                 .into_any_element(),
         );
     }
@@ -566,7 +582,9 @@ pub(crate) fn status_badges(page: &ExplorerPane, item: &FileEntryDto) -> Vec<Any
                 .text_xs()
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(rgb(vcs_color(state)))
-                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                })
                 .child(state.letter())
                 .into_any_element(),
         );

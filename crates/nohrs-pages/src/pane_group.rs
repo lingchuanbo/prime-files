@@ -373,7 +373,12 @@ impl<T: PaneItem> PaneGroup<T> {
     /// [`Self::add_pane`] at `index` (0 puts it before the open one, for a
     /// pane dragged out of the left or top edge). The active pane keeps
     /// pointing at the same pane.
-    pub fn add_pane_at(&mut self, index: usize, window: &mut Window, cx: &mut App) -> Option<(usize, Entity<T>)> {
+    pub fn add_pane_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(usize, Entity<T>)> {
         if self.panes.len() >= MAX_PANES {
             return None;
         }
@@ -399,7 +404,11 @@ impl<T: PaneItem> PaneGroup<T> {
 
     /// The side the tab column runs down. Anything but `Right` is the left.
     pub fn set_vertical_tabs_side(&mut self, side: DockSide) {
-        self.vertical_tabs_side = if side == DockSide::Right { DockSide::Right } else { DockSide::Left };
+        self.vertical_tabs_side = if side == DockSide::Right {
+            DockSide::Right
+        } else {
+            DockSide::Left
+        };
     }
 
     /// Whether the tabs are laid out in a column.
@@ -469,12 +478,20 @@ impl<T: PaneItem> PaneGroup<T> {
                 self.drag = Some(GroupDrag::Divider { collapsing });
                 true
             }
-            Some(GroupDrag::TabColumn { start_x, start_width, from_right }) => {
+            Some(GroupDrag::TabColumn {
+                start_x,
+                start_width,
+                from_right,
+            }) => {
                 // A column on the right grows as the pointer moves left.
                 let travelled = f32::from(pointer.x) - start_x;
                 let width = start_width + if from_right { -travelled } else { travelled };
                 // Under the labels' minimum the column snaps to its icons.
-                let width = if width < TAB_COLUMN_LABELS_MIN { TAB_COLUMN_ICONS } else { width.min(TAB_COLUMN_MAX) };
+                let width = if width < TAB_COLUMN_LABELS_MIN {
+                    TAB_COLUMN_ICONS
+                } else {
+                    width.min(TAB_COLUMN_MAX)
+                };
                 TAB_COLUMN_WIDTH.set(width);
                 true
             }
@@ -486,7 +503,9 @@ impl<T: PaneItem> PaneGroup<T> {
     /// for the embedder to close (it owns the per-tab state to drop).
     pub fn finish_drag(&mut self) -> Option<usize> {
         match self.drag.take() {
-            Some(GroupDrag::Divider { collapsing: Some(index) }) => {
+            Some(GroupDrag::Divider {
+                collapsing: Some(index),
+            }) => {
                 self.ratio = 0.5;
                 Some(index)
             }
@@ -517,7 +536,9 @@ impl<T: PaneItem> PaneGroup<T> {
         }
         self.focus_active(window, cx);
         let ids: Vec<_> = removed.tabs.iter().map(|tab| tab.entity_id()).collect();
-        for id in &ids { self.tab_metadata.remove(id); }
+        for id in &ids {
+            self.tab_metadata.remove(id);
+        }
         ids
     }
 
@@ -640,10 +661,7 @@ impl<T: PaneItem> PaneGroup<T> {
         to_pane: usize,
         to_tab: usize,
     ) -> bool {
-        if from_pane == to_pane
-            || from_pane >= self.panes.len()
-            || to_pane >= self.panes.len()
-        {
+        if from_pane == to_pane || from_pane >= self.panes.len() || to_pane >= self.panes.len() {
             return false;
         }
         if from_tab >= self.panes[from_pane].tabs.len() {
@@ -846,7 +864,12 @@ impl<T: PaneItem> PaneGroup<T> {
     /// Renders the split. The `callbacks` route every interaction (pane/tab
     /// activate, close, new tab, reorder) back to the embedding view `V` so it
     /// can keep its own state in sync.
-    pub fn render<V>(&self, window: &Window, cx: &mut Context<V>, callbacks: &PaneGroupCallbacks<V>) -> AnyElement
+    pub fn render<V>(
+        &self,
+        window: &Window,
+        cx: &mut Context<V>,
+        callbacks: &PaneGroupCallbacks<V>,
+    ) -> AnyElement
     where
         V: 'static,
     {
@@ -862,7 +885,11 @@ impl<T: PaneItem> PaneGroup<T> {
         };
         let held = matches!(self.drag, Some(GroupDrag::Divider { .. }));
         let bounds = self.bounds.get();
-        let length = f32::from(if across { bounds.size.width } else { bounds.size.height });
+        let length = f32::from(if across {
+            bounds.size.width
+        } else {
+            bounds.size.height
+        });
         // A pane about to close fades, so letting go is no surprise.
         let fade = |index: usize, element: AnyElement| {
             div()
@@ -871,12 +898,20 @@ impl<T: PaneItem> PaneGroup<T> {
                 .child(element)
         };
         let on_group_drag = callbacks.on_group_drag.clone();
-        let side = if across { nohrs_core::config::DockSide::Left } else { nohrs_core::config::DockSide::Top };
+        let side = if across {
+            nohrs_core::config::DockSide::Left
+        } else {
+            nohrs_core::config::DockSide::Top
+        };
         let at = length * self.ratio - DIVIDER_GRIP / 2.0;
         let divider = crate::dock::strip("pane-divider", side, held)
             .absolute()
-            .when(across, |this| this.top_0().bottom_0().w(px(DIVIDER_GRIP)).left(px(at)))
-            .when(!across, |this| this.left_0().right_0().h(px(DIVIDER_GRIP)).top(px(at)))
+            .when(across, |this| {
+                this.top_0().bottom_0().w(px(DIVIDER_GRIP)).left(px(at))
+            })
+            .when(!across, |this| {
+                this.left_0().right_0().h(px(DIVIDER_GRIP)).top(px(at))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -899,8 +934,12 @@ impl<T: PaneItem> PaneGroup<T> {
                 div()
                     .flex_shrink_0()
                     .overflow_hidden()
-                    .when(across, |this| this.w(relative(self.ratio)).h_full().border_r_1())
-                    .when(!across, |this| this.h(relative(self.ratio)).w_full().border_b_1())
+                    .when(across, |this| {
+                        this.w(relative(self.ratio)).h_full().border_r_1()
+                    })
+                    .when(!across, |this| {
+                        this.h(relative(self.ratio)).w_full().border_b_1()
+                    })
                     .border_color(rgb(theme::border()))
                     .child(fade(0, first)),
             )
@@ -961,13 +1000,26 @@ impl<T: PaneItem> PaneGroup<T> {
             // sidebar's to slide from.
             let reveal = self.panes[pane_index].reveal.clone();
             reveal.set_inset(0.0);
-            let compact = Compact { hide_tabs: false, ..self.compact.clone() };
+            let compact = Compact {
+                hide_tabs: false,
+                ..self.compact.clone()
+            };
             content.update(cx, |item, _| item.attach_compact(&compact, &reveal));
             let column = self.render_tab_column(pane_index, split, cx, callbacks);
-            let body = div().flex_1().min_w(px(0.0)).h_full().overflow_hidden().child(content);
+            let body = div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h_full()
+                .overflow_hidden()
+                .child(content);
             // The column docks to the side the user chose; the listing takes
             // the rest either way.
-            let row = div().flex().flex_row().size_full().min_w(px(0.0)).min_h(px(0.0));
+            let row = div()
+                .flex()
+                .flex_row()
+                .size_full()
+                .min_w(px(0.0))
+                .min_h(px(0.0));
             let row = if self.vertical_tabs_side == DockSide::Right {
                 row.child(body).child(column)
             } else {
@@ -976,7 +1028,9 @@ impl<T: PaneItem> PaneGroup<T> {
             return row
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _event, window, cx| on_activate_pane(this, pane_index, window, cx)),
+                    cx.listener(move |this, _event, window, cx| {
+                        on_activate_pane(this, pane_index, window, cx)
+                    }),
                 )
                 .into_any_element();
         }
@@ -1056,15 +1110,27 @@ impl<T: PaneItem> PaneGroup<T> {
         let overlay = self.compact.overlay;
         reveal.set_inset(if overlay { shown_height } else { 0.0 });
 
-        let sliding = compact::slider(Edge::Top, 0.0, bar_height, amount, None, div().h(px(bar_height)).child(tab_bar))
-            // Floating, it takes the mouse from what lies behind: a click on
-            // a tab, or on the window's buttons, must not reach the files
-            // under it (they would claim the press, and gpui then drops the
-            // minimize/maximize/close it was meant for).
-            .when(overlay, |this| this.absolute().top_0().left_0().right_0().occlude())
-            // With a frame the row is the frame's colour already and reads as
-            // part of it, as the explorer's bars do; a shadow would lift it off.
-            .when(overlay && amount > 0.0 && self.compact.frame_px == 0, |this| this.shadow_md());
+        let sliding = compact::slider(
+            Edge::Top,
+            0.0,
+            bar_height,
+            amount,
+            None,
+            div().h(px(bar_height)).child(tab_bar),
+        )
+        // Floating, it takes the mouse from what lies behind: a click on
+        // a tab, or on the window's buttons, must not reach the files
+        // under it (they would claim the press, and gpui then drops the
+        // minimize/maximize/close it was meant for).
+        .when(overlay, |this| {
+            this.absolute().top_0().left_0().right_0().occlude()
+        })
+        // With a frame the row is the frame's colour already and reads as
+        // part of it, as the explorer's bars do; a shadow would lift it off.
+        .when(
+            overlay && amount > 0.0 && self.compact.frame_px == 0,
+            |this| this.shadow_md(),
+        );
         // Out of the frame, a line along the row's foot from one side of the
         // card to the other carries on the card's outline, which the row
         // covers while it is out.
@@ -1093,9 +1159,15 @@ impl<T: PaneItem> PaneGroup<T> {
             cx.entity_id(),
         );
         if overlay {
-            (None, vec![sliding.into_any_element(), strip.into_any_element()])
+            (
+                None,
+                vec![sliding.into_any_element(), strip.into_any_element()],
+            )
         } else {
-            (Some(sliding.into_any_element()), vec![strip.into_any_element()])
+            (
+                Some(sliding.into_any_element()),
+                vec![strip.into_any_element()],
+            )
         }
     }
 
@@ -1123,7 +1195,10 @@ impl<T: PaneItem> PaneGroup<T> {
             .map(|(tab_index, tab)| {
                 let (title, icon) = {
                     let item = tab.read(cx);
-                    (self.decorated_tab_title(item.tab_title(cx), tab.entity_id()), item.tab_icon(cx))
+                    (
+                        self.decorated_tab_title(item.tab_title(cx), tab.entity_id()),
+                        item.tab_icon(cx),
+                    )
                 };
                 self.render_tab(
                     pane_index,
@@ -1318,24 +1393,28 @@ impl<T: PaneItem> PaneGroup<T> {
             .map(|(tab_index, tab)| {
                 let (title, icon) = {
                     let item = tab.read(cx);
-                    (self.decorated_tab_title(item.tab_title(cx), tab.entity_id()), item.tab_icon(cx))
+                    (
+                        self.decorated_tab_title(item.tab_title(cx), tab.entity_id()),
+                        item.tab_icon(cx),
+                    )
                 };
                 let metadata = self.tab_metadata(tab.entity_id());
                 let is_active = tab_index == active_tab;
                 let on_context = callbacks.on_tab_context.clone();
                 let on_activate_tab = callbacks.on_activate_tab.clone();
-        let on_activate_pane = callbacks.on_activate_pane.clone();
-        let close_on_double = self.tab_display.close_on_double_click;
-        let click_activates = self.tab_display.click_activates_pane;
+                let on_activate_pane = callbacks.on_activate_pane.clone();
+                let close_on_double = self.tab_display.close_on_double_click;
+                let click_activates = self.tab_display.click_activates_pane;
                 let on_close_tab = callbacks.on_close_tab.clone();
                 let on_close_click = callbacks.on_close_tab.clone();
                 let on_middle_close = callbacks.on_close_tab.clone();
                 let on_reorder_tab = callbacks.on_reorder_tab.clone();
-        let on_move_tab = callbacks.on_move_tab.clone();
+                let on_move_tab = callbacks.on_move_tab.clone();
                 let drag_title = SharedString::from(title.clone());
                 let tooltip_title = title.clone();
                 let group = SharedString::from(format!("vtab-group-{pane_index}-{tab_index}"));
-                let show_close = tab_count > 1 && !metadata.pinned && !metadata.resident && !metadata.locked;
+                let show_close =
+                    tab_count > 1 && !metadata.pinned && !metadata.resident && !metadata.locked;
                 let row = div()
                     .id(SharedString::from(format!("vtab-{pane_index}-{tab_index}")))
                     .group(group.clone())
@@ -1345,11 +1424,20 @@ impl<T: PaneItem> PaneGroup<T> {
                     .gap(px(8.0))
                     .h(px(34.0))
                     .px(px(if labels { 10.0 } else { 0.0 }))
-                    .when(metadata.resident, |this| this
-                        .w(px(if labels { ((width - 22.0) / 3.0).max(36.0) } else { 32.0 }))
-                        .h(px(if labels { 44.0 } else { 34.0 })).justify_center()
+                    .when(metadata.resident, |this| {
+                        this.w(px(if labels {
+                            ((width - 22.0) / 3.0).max(36.0)
+                        } else {
+                            32.0
+                        }))
+                        .h(px(if labels { 44.0 } else { 34.0 }))
+                        .justify_center()
                         .bg(rgb(theme::bg_secondary()))
-                        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip_title.clone()).build(window, cx)))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tooltip_title.clone())
+                                .build(window, cx)
+                        })
+                    })
                     .when(!labels, |this| this.justify_center())
                     .rounded(px(8.0))
                     .text_sm()
@@ -1360,15 +1448,20 @@ impl<T: PaneItem> PaneGroup<T> {
                             .border_1()
                             .border_color(rgb(theme::border()))
                     })
-                    .when(metadata.pinned && !is_active, |this| this.bg(rgb(theme::bg_secondary())))
+                    .when(metadata.pinned && !is_active, |this| {
+                        this.bg(rgb(theme::bg_secondary()))
+                    })
                     .when(!is_active, |this| {
                         this.text_color(rgb(theme::toolbar_text()))
                             .hover(|style| style.bg(rgb(theme::toolbar_hover())))
                     })
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        on_context(this, pane_index, tab_index, event.position, window, cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            on_context(this, pane_index, tab_index, event.position, window, cx);
+                        }),
+                    )
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         if close_on_double && event.click_count() >= 2 {
                             on_close_click(this, pane_index, tab_index, window, cx);
@@ -1403,7 +1496,9 @@ impl<T: PaneItem> PaneGroup<T> {
                         if drag.pane == pane_index {
                             on_reorder_tab(this, pane_index, drag.tab, tab_index, window, cx);
                         } else {
-                            on_move_tab(this, drag.pane, drag.tab, pane_index, tab_index, window, cx);
+                            on_move_tab(
+                                this, drag.pane, drag.tab, pane_index, tab_index, window, cx,
+                            );
                         }
                     }))
                     .when(self.tab_display.show_icons, |this| {
@@ -1411,7 +1506,11 @@ impl<T: PaneItem> PaneGroup<T> {
                             Icon::new(icon.unwrap_or(IconName::Folder))
                                 .size_4()
                                 .flex_shrink_0()
-                                .text_color(rgb(metadata.color.unwrap_or(if is_active { theme::accent() } else { theme::muted() }))),
+                                .text_color(rgb(metadata.color.unwrap_or(if is_active {
+                                    theme::accent()
+                                } else {
+                                    theme::muted()
+                                }))),
                         )
                     })
                     .when(labels && !metadata.resident, |this| {
@@ -1429,7 +1528,9 @@ impl<T: PaneItem> PaneGroup<T> {
                     .when(labels && show_close, |this| {
                         this.child(
                             div()
-                                .id(SharedString::from(format!("vtab-close-{pane_index}-{tab_index}")))
+                                .id(SharedString::from(format!(
+                                    "vtab-close-{pane_index}-{tab_index}"
+                                )))
                                 .flex()
                                 .flex_shrink_0()
                                 .items_center()
@@ -1437,13 +1538,18 @@ impl<T: PaneItem> PaneGroup<T> {
                                 .size(px(20.0))
                                 .rounded(px(4.0))
                                 .when(!is_active, |this| {
-                                    this.opacity(0.0).group_hover(group.clone(), |style| style.opacity(1.0))
+                                    this.opacity(0.0)
+                                        .group_hover(group.clone(), |style| style.opacity(1.0))
                                 })
                                 .text_color(rgb(theme::muted()))
                                 .hover(|style| {
-                                    style.bg(rgb(theme::toolbar_hover())).text_color(rgb(theme::fg()))
+                                    style
+                                        .bg(rgb(theme::toolbar_hover()))
+                                        .text_color(rgb(theme::fg()))
                                 })
-                                .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
+                                .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                                    cx.stop_propagation()
+                                })
                                 .on_click(cx.listener(move |this, _event, window, cx| {
                                     on_close_tab(this, pane_index, tab_index, window, cx)
                                 }))
@@ -1458,31 +1564,40 @@ impl<T: PaneItem> PaneGroup<T> {
         let mut pinned = Vec::new();
         let mut ordinary = Vec::new();
         for (metadata, row) in rows {
-            if metadata.resident { resident.push(row); }
-            else if metadata.pinned { pinned.push(row); }
-            else { ordinary.push(row); }
+            if metadata.resident {
+                resident.push(row);
+            } else if metadata.pinned {
+                pinned.push(row);
+            } else {
+                ordinary.push(row);
+            }
         }
         let on_new_tab = callbacks.on_new_tab.clone();
         let on_close_pane = callbacks.on_close_pane.clone();
         let on_group_drag = callbacks.on_group_drag.clone();
-        let new_tab = div()
-            .id(SharedString::from(format!("vtab-new-{pane_index}")))
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(32.0))
-            .px(px(if labels { 10.0 } else { 0.0 }))
-            .when(!labels, |this| this.justify_center())
-            .rounded(px(8.0))
-            .text_sm()
-            .text_color(rgb(theme::muted()))
-            .cursor_pointer()
-            .hover(|style| style.bg(rgb(theme::toolbar_hover())))
-            .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _event, window, cx| on_new_tab(this, pane_index, window, cx)))
-            .child(Icon::new(IconName::Plus).size_4().flex_shrink_0())
-            .when(labels, |this| this.child(nohrs_core::t!("Nova aba").to_string()));
+        let new_tab =
+            div()
+                .id(SharedString::from(format!("vtab-new-{pane_index}")))
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(8.0))
+                .h(px(32.0))
+                .px(px(if labels { 10.0 } else { 0.0 }))
+                .when(!labels, |this| this.justify_center())
+                .rounded(px(8.0))
+                .text_sm()
+                .text_color(rgb(theme::muted()))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::toolbar_hover())))
+                .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _event, window, cx| {
+                    on_new_tab(this, pane_index, window, cx)
+                }))
+                .child(Icon::new(IconName::Plus).size_4().flex_shrink_0())
+                .when(labels, |this| {
+                    this.child(nohrs_core::t!("Nova aba").to_string())
+                });
         div()
             .relative()
             .flex_shrink_0()
@@ -1502,18 +1617,41 @@ impl<T: PaneItem> PaneGroup<T> {
                 this.border_r_1().border_color(rgb(theme::border()))
             })
             .child(
-                div().flex().items_center().justify_between().h(px(36.0)).px(px(6.0))
-                    .when(labels, |row| row.child(div().text_xs()
-                        .text_color(rgb(theme::muted())).child(nohrs_core::t!("Abas"))))
-                    .child(div().id(("vtab-collapse", pane_index)).size(px(24.0))
-                        .flex().items_center().justify_center().rounded(px(5.0)).cursor_pointer()
-                        .text_color(rgb(theme::muted()))
-                        .hover(|style| style.bg(rgb(theme::toolbar_hover())))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            TAB_COLUMN_WIDTH.set(if labels { TAB_COLUMN_ICONS } else { TAB_COLUMN_DEFAULT });
-                            cx.notify();
-                        }))
-                        .child(Icon::new(IconName::Menu).size_4())),
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(36.0))
+                    .px(px(6.0))
+                    .when(labels, |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme::muted()))
+                                .child(nohrs_core::t!("Abas")),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("vtab-collapse", pane_index))
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.0))
+                            .cursor_pointer()
+                            .text_color(rgb(theme::muted()))
+                            .hover(|style| style.bg(rgb(theme::toolbar_hover())))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                TAB_COLUMN_WIDTH.set(if labels {
+                                    TAB_COLUMN_ICONS
+                                } else {
+                                    TAB_COLUMN_DEFAULT
+                                });
+                                cx.notify();
+                            }))
+                            .child(Icon::new(IconName::Menu).size_4()),
+                    ),
             )
             .when(split, |this| {
                 this.child(
@@ -1544,11 +1682,21 @@ impl<T: PaneItem> PaneGroup<T> {
                     .flex_col()
                     .gap(px(2.0))
                     .overflow_y_scroll()
-                    .when(!resident.is_empty(), |list| list.child(
-                        div().flex().flex_wrap().gap(px(3.0)).children(resident)))
-                    .when(!pinned.is_empty(), |list| list.child(
-                        div().flex().flex_col().gap(px(2.0)).pb(px(6.0))
-                            .border_b_1().border_color(rgb(theme::border())).children(pinned)))
+                    .when(!resident.is_empty(), |list| {
+                        list.child(div().flex().flex_wrap().gap(px(3.0)).children(resident))
+                    })
+                    .when(!pinned.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .pb(px(6.0))
+                                .border_b_1()
+                                .border_color(rgb(theme::border()))
+                                .children(pinned),
+                        )
+                    })
                     .child(new_tab)
                     .children(ordinary),
             )
@@ -1595,7 +1743,10 @@ impl<T: PaneItem> PaneGroup<T> {
         V: 'static,
     {
         let on_context = callbacks.on_tab_context.clone();
-        let metadata = self.tab(pane_index, tab_index).map(|tab| self.tab_metadata(tab.entity_id())).unwrap_or_default();
+        let metadata = self
+            .tab(pane_index, tab_index)
+            .map(|tab| self.tab_metadata(tab.entity_id()))
+            .unwrap_or_default();
         let show_close = show_close && !metadata.pinned && !metadata.resident && !metadata.locked;
         let on_activate_tab = callbacks.on_activate_tab.clone();
         let on_activate_pane = callbacks.on_activate_pane.clone();
@@ -1620,7 +1771,9 @@ impl<T: PaneItem> PaneGroup<T> {
             // Adaptive tabs use a comfortable band; fixed tabs use the
             // configured width so the strip remains predictable.
             .when(self.tab_width_mode == TabWidthMode::Fixed, |this| {
-                this.w(px(self.tab_width)).min_w(px(self.tab_width)).max_w(px(self.tab_width))
+                this.w(px(self.tab_width))
+                    .min_w(px(self.tab_width))
+                    .max_w(px(self.tab_width))
             })
             .when(self.tab_width_mode == TabWidthMode::Adaptive, |this| {
                 this.min_w(px(110.0)).max_w(px(220.0))
@@ -1656,10 +1809,13 @@ impl<T: PaneItem> PaneGroup<T> {
                             .bg(rgb(theme::border())),
                     )
             })
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                on_context(this, pane_index, tab_index, event.position, window, cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    on_context(this, pane_index, tab_index, event.position, window, cx);
+                }),
+            )
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if close_on_double && event.click_count() >= 2 {
                     on_close_click(this, pane_index, tab_index, window, cx);
@@ -1705,18 +1861,30 @@ impl<T: PaneItem> PaneGroup<T> {
                     div()
                         .flex_shrink_0()
                         .text_xs()
-                        .text_color(rgb(if is_active { theme::accent() } else { theme::muted() }))
-                        .child(if tab_index == 9 { "0".to_string() } else { (tab_index + 1).to_string() }),
+                        .text_color(rgb(if is_active {
+                            theme::accent()
+                        } else {
+                            theme::muted()
+                        }))
+                        .child(if tab_index == 9 {
+                            "0".to_string()
+                        } else {
+                            (tab_index + 1).to_string()
+                        }),
                 )
             })
-            .when_some(icon.or(metadata.color.map(|_| IconName::Folder)), |this, icon| {
-                this.child(
-                    Icon::new(icon)
-                        .size_4()
-                        .flex_shrink_0()
-                        .text_color(rgb(metadata.color.unwrap_or(if is_active { theme::accent() } else { theme::muted() }))),
-                )
-            })
+            .when_some(
+                icon.or(metadata.color.map(|_| IconName::Folder)),
+                |this, icon| {
+                    this.child(Icon::new(icon).size_4().flex_shrink_0().text_color(rgb(
+                        metadata.color.unwrap_or(if is_active {
+                            theme::accent()
+                        } else {
+                            theme::muted()
+                        }),
+                    )))
+                },
+            )
             .child(
                 div()
                     .flex_1()
@@ -1742,7 +1910,8 @@ impl<T: PaneItem> PaneGroup<T> {
                         // Only on the active tab and the one under the
                         // pointer, so a row of tabs is not a row of crosses.
                         .when(!is_active, |this| {
-                            this.opacity(0.0).group_hover(group.clone(), |style| style.opacity(1.0))
+                            this.opacity(0.0)
+                                .group_hover(group.clone(), |style| style.opacity(1.0))
                         })
                         .text_color(rgb(theme::muted()))
                         .hover(|style| {
@@ -1762,4 +1931,3 @@ impl<T: PaneItem> PaneGroup<T> {
             .into_any_element()
     }
 }
-

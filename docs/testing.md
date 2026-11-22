@@ -224,3 +224,33 @@ grep -rn 'panic!\|unimplemented!\|todo!' crates/
 # rustdoc
 cargo doc --no-deps --all-features --workspace
 ```
+
+---
+
+## 7. Windows での手動テスト環境
+
+実ユーザーの設定を壊さずに LumaFiles を起動して試すときの、Windows 固有の落とし穴。
+三つとも、隔離したプロファイルを使ったつもりで実ユーザーの設定を読んでしまう原因になる。
+
+1. **`target\release\userdata` があると portable モードになる。**
+   実行ファイルの隣に `userdata\config.toml` があり `[storage] portable_mode = true` だと、
+   `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME` は**無視**され、すべて `userdata` の下に置かれる。
+   `cargo build` の出力先で一度でも portable モードを試すと以降ずっとこの状態になるので、
+   手動テストは**空のフォルダに `LumaFiles.exe` をコピー**し、`userdata` を作らないまま起動する。
+
+2. **`XDG_*` は絶対パスでなければ無視される。**
+   `docs/config.md` §1 のとおり、XDG 仕様に従って相対パスの値は捨て、`~/.config` などへフォールバックする。
+   `$env:XDG_CONFIG_HOME = "target\tmp\..."` のような相対パスを渡すと、
+   アプリは実ユーザーの `C:\Users\<user>\.config\nohrs` を読み書きする。必ず絶対パスにする。
+
+3. **Windows PowerShell 5.1 の `-Encoding utf8` は BOM を書く。**
+   `Set-Content -Encoding utf8` で作った設定ファイルは先頭に U+FEFF を持つ。
+   `quicklaunch.toml` の BOM は許容する（§4.2 v2.3）が、
+   「書き換えられていないこと」をバイト単位で比べるテストや、BOM の有無そのものを見るテストでは結果が変わる。
+   設定ファイルは次のように書く:
+
+   ```powershell
+   [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
+   ```
+
+   同じ理由で、`powershell` (5.1) と `pwsh` (7+) を取り違えないこと。この環境の `pwsh` ツールは 5.1 で動いている。

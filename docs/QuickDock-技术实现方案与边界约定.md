@@ -1,6 +1,9 @@
-# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.1
+# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.4
 
 > v2.1（2026-11-22）：写入 Q1–Q5 的确认结果，新增 §15.0（主程序常驻）和 §15.1（常驻模式）。
+> v2.2（2026-11-22，M1 验收后）：§8.4 改为启动、图标两条线程。M1 的具体问题见 `docs/QuickLaunch-M1-验收报告.md`。
+> v2.3（2026-11-22，M1 复查后）：§8.5 失败提示改为窗口底部一行；§4.2 补充 BOM 的处理。
+> v2.4（2026-11-22，M2 开工前）：新增 §12.3，规定 M2 的添加和编辑界面。
 
 > 这是一份**实现规格**，执行方（DeepSeek）按它写代码。写着“必须 / 禁止”的条款不能自行改动；没写到的情况按 §19 处理。
 > 需求见 `docs/LumaFiles-快速启动工具方案.md`。两份文档有冲突时，**以本文为准**。
@@ -189,6 +192,7 @@ pub fn migrate(config: QuickLaunchConfig) -> QuickLaunchConfig;  // 目前只有
 | 语法错误、类型错误、未知字段 | `Err(Parse { line, column, message })`，行列号从 toml 错误的 span 换算 |
 | `schema_version` 大于当前版本 | `Err(UnsupportedVersion(found))`；调用方之后**禁止写回** |
 | `schema_version` 等于 0 或字段缺失 | 当作 1 处理 |
+| 文件以 UTF-8 BOM（U+FEFF）开头 | 去掉 BOM 后正常解析（v2.3；PowerShell 5.1 和旧版记事本会写入 BOM） |
 | 数值越界 | 夹到合法范围内，并报 warning |
 | 分组 id 重复、同组 slot 重复、条目 id 重复 | 保留第一个，丢弃后面的，并报 warning |
 | 超过 `MAX_*` 限制 | 截断，并报 warning |
@@ -293,8 +297,12 @@ pub struct LaunchRegistry { … }   // with_builtins() / register() 重复 kind 
 
 ### 8.4 线程、COM、unsafe（硬性要求）
 - `launch()`、`health()`、图标提取**不能在 gpui 前台线程执行**。
-- `launch()` 和图标提取在一条**专用线程**上运行（由 pages 层持有，`std::thread::Builder::new().name("quick-launch")`），通过 channel 接收请求、返回结果。原因：Shell 调用可能卡在网络路径或休眠的硬盘上，不能占用 gpui 的后台线程池，理由同 `PERFORMANCE.md` §1。
-- 这条线程启动时调用 `CoInitializeEx(COINIT_APARTMENTTHREADED)`，图标提取再调用 `thumbnails::init_thread()`；线程结束时 `CoUninitialize`，用 RAII guard 包住。
+- **v2.2 修订（M1 验收 B3）：两条专用线程，不共用。**由 pages 层持有，通过 channel 接收请求、返回结果。原因是 Shell 调用可能卡在网络路径或休眠的硬盘上，不能占用 gpui 的后台线程池，理由同 `PERFORMANCE.md` §1；同时两类请求不能互相阻塞：
+  - `quick-launch`：只处理启动请求。
+  - `quick-launch-icons`：只处理图标请求。请求在**队列中**等待超过 2 s 就直接丢弃，不再执行。这条线程卡住时，界面继续显示占位图标，**启动不受任何影响**。
+  - v2.1 的“一条线程同时处理启动和图标”作废：首次打开时几十个图标请求会排在点击之前，网络盘上一个卡住的图标也会让所有启动挂起。
+  - 验收：用一个会阻塞的假图标提取器卡住图标线程，启动请求仍然要在 100 ms 内得到回复。
+- 两条线程启动时都调用 `CoInitializeEx(COINIT_APARTMENTTHREADED)`，图标线程再调用 `thumbnails::init_thread()`。线程结束时调用 `CoUninitialize`，用 RAII guard 包住。
 - 每个请求都包在 `std::panic::catch_unwind` 里，panic 转成 `LaunchError::Internal`，线程继续运行。
 - 请求带上代次号，过期的结果直接丢弃。
 - `unsafe` 只能出现在 `launch/windows.rs` 和 `quick_launch.rs` 的窗口显示/隐藏函数里。每处都写**逐项** `#[allow(unsafe_code)]`，并在前面加 `// SAFETY:` 说明。
@@ -306,7 +314,7 @@ pub struct LaunchRegistry { … }   // with_builtins() / register() 重复 kind 
 pub enum LaunchError { NotFound(PathBuf), Expand(#[from] ExpandError), Unsupported(String),
     Blocked(String), Os { code: u32, message: String }, Internal(String) }
 ```
-界面上只用底部 toast 显示一行翻译后的文字，详情写进日志，**不弹模态框**。M4 里 command 的首次确认是唯一例外。
+界面上只在窗口底部显示一行翻译后的文字（v2.3：M1 验收时确认用底部一行代替 gpui-component 的通知层，因为通知层会触发 gpui 的嵌套更新并 abort），详情写进日志，**不弹模态框**。M4 里 command 的首次确认是唯一例外。
 
 ---
 
@@ -386,6 +394,25 @@ pub fn parse(text: &str) -> Result<HotKey>;   // 用 global_hotkey 的 FromStr�
 - `.lnk` 拖进来时保存 lnk 本身的路径。条目名默认取文件名（去掉扩展名）。
 
 ---
+
+### 12.3 M2 的添加与编辑（v2.4 补充）
+
+v2.3 之前只在右键菜单里写了“新建、编辑”，没有规定界面。M2 按下面的约定实现，**不要另行设计**：
+
+| 入口 | 行为 |
+|---|---|
+| 右键空槽 → 新建条目 | 打开系统文件选择框（gpui `prompt_for_paths`，允许选文件或文件夹），选中后写入这个槽：`.exe`/`.lnk` 记为 `app`，文件夹记为 `folder`，其他文件记为 `file`；`name` 取文件名去掉扩展名 |
+| 右键条目 → 编辑 | 弹出一个小对话框，只有 4 个字段：名称、路径（右侧带“浏览…”）、参数、以管理员运行。确定后保存，取消则不改。其余字段（图标、标签、工作目录）留给 M3 的设置页 |
+| 右键分组栏 → 新建分组 | id 自动取 `group_<n>`（n 从 1 起，取第一个没被占用的），名称取 `t!("Novo grupo")`，建好后立即进入改名状态 |
+| 右键分组栏 → 重命名 | 就地编辑；名称为空就取消 |
+| 右键分组栏 → 删除 | 空分组直接删除；非空分组先确认。最后一个分组不能删（菜单项置灰） |
+
+共同约束：
+- 只读状态（§5.2）下，以上所有入口和拖放**一律置灰**。
+- 每次修改都走 `mark_dirty()` + `touch()`，由 300 ms 节流统一在后台保存，**不要**在事件处理里直接写盘。
+- 删除条目或分组时，按 §6 用一次 `batch` 一起删掉对应的 `usage_*` 键。
+- 对话框和菜单回调里**不要**在当前窗口的更新期间再去更新同一个窗口（M1 已经因此 abort 过一次）：需要时用 `cx.defer` 或 `window.defer`。
+- 新增文案一律走 `t!`，9 种语言都要补齐。
 
 ## 13. 设置页（M3）
 - `SettingsSection::QuickLaunch` 排在 `Integrations` 之后，内容写在 `settings/quick_launch.rs`，风格参照同文件中的其他 section。

@@ -182,11 +182,7 @@ pub fn list_rows(groups: &[Group], entries: usize) -> Vec<ListRow> {
 }
 
 /// [`list_rows`], with a ".." row first when the folder has a parent.
-pub fn list_rows_with_parent(
-    groups: &[Group],
-    entries: usize,
-    parent: bool,
-) -> Vec<ListRow> {
+pub fn list_rows_with_parent(groups: &[Group], entries: usize, parent: bool) -> Vec<ListRow> {
     let offset = usize::from(parent);
     let mut rows = Vec::with_capacity(entries + groups.len() + offset);
     if parent {

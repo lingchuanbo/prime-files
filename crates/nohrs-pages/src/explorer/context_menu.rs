@@ -549,7 +549,7 @@ impl ExplorerPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let position = window.mouse_position();
+        let position = self.menu_position(&purpose, window);
         if matches!(&purpose, MenuPurpose::Listing { .. }) {
             self.context_menu = Some(listing_menu(purpose, &own, position));
             cx.notify();
@@ -606,6 +606,34 @@ impl ExplorerPane {
             },
         )
         .detach();
+    }
+
+    /// Where a menu opens, in window coordinates: under the pointer, except for
+    /// a directory menu told to stay put, which opens at the listing's corner.
+    pub(crate) fn menu_position(&self, purpose: &MenuPurpose, window: &Window) -> Point<Pixels> {
+        match self.directory_menu_position {
+            config::DirectoryMenuPosition::ListTopLeft
+                if matches!(purpose, MenuPurpose::FavoritesMenu) =>
+            {
+                self.listing_top_left()
+                    .unwrap_or_else(|| window.mouse_position())
+            }
+            _ => window.mouse_position(),
+        }
+    }
+
+    /// The top-left corner of the listing's rows, in window coordinates: where a
+    /// menu told to stay put opens. `None` until the listing has been drawn
+    /// once, so the caller falls back to the pointer.
+    pub(crate) fn listing_top_left(&self) -> Option<Point<Pixels>> {
+        let bounds = self.hit_boxes.listing()?;
+        let mut origin = bounds.origin;
+        // Below the column headings when they stay on top, so the menu does
+        // not cover them.
+        if self.fixed_header && matches!(self.view_mode, ViewMode::List | ViewMode::Tree) {
+            origin.y += gpui::px(super::view::listing::list::HEADER_HEIGHT);
+        }
+        Some(origin)
     }
 
     /// Closes the open menu without choosing.

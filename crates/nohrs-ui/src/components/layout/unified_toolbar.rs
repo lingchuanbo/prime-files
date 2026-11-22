@@ -1,4 +1,3 @@
-use nohrs_core::t;
 use crate::theme::theme;
 use gpui::{
     Action, App, Context, IntoElement, Pixels, Render, Window, WindowControlArea, div, prelude::*,
@@ -9,6 +8,7 @@ use gpui_component::{
     button::{Button, ButtonRounded, ButtonVariant, ButtonVariants},
     menu::DropdownMenu,
 };
+use nohrs_core::t;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -154,7 +154,9 @@ pub fn title_bar_controls<F: Fn(&mut App) + 'static>(
         .flex_row()
         .items_center()
         .gap_1()
-        .when(!cfg!(target_os = "windows"), |controls| controls.pr(px(16.0)))
+        .when(!cfg!(target_os = "windows"), |controls| {
+            controls.pr(px(16.0))
+        })
         .child(search_button)
         .child(account_button)
         .when(cfg!(target_os = "windows"), |controls| {

@@ -13,17 +13,25 @@ use std::time::Duration;
 
 pub mod loader;
 pub mod paths;
+/// The `quicklaunch.toml` model.
+pub mod quick_launch;
 pub mod settings;
 /// Portable-profile data migration and directory preparation.
 pub mod storage;
 pub mod watcher;
 
-pub use loader::{backup, ensure_exists, needs_migration, remove_value, reset, set_portable_mode, set_value, set_value_sparse, write_default};
+pub use loader::{
+    backup, ensure_exists, needs_migration, remove_value, reset, set_portable_mode, set_value,
+    set_value_sparse, write_default,
+};
 pub use settings::{
-    CURRENT_SCHEMA_VERSION, Archive, ArchiveTool, BarSize, Compact, Config, ConfigOverride, Diagnostic, DiagnosticLevel, Diagnostics, DockSide,
-    DiagnosticsStore, DoubleClickEmpty, Explorer, FileTypeColorRule, IconMode, IndexSource, Indexing, IndexingExclude, IndexingMode, Keybindings, Launcher, Layout,
-    ListRowHeight, Plugins, SCHEMA_URL, SortMethod, Search, SearchBackend, SortOrder, SpaceMap, SpaceMapColor, SplitDirection, Storage, TabWidthMode, Theme,
-    ThemeMode, TrayIcon, Ui, Updates, json_schema_string, load_from_files, load_from_path, name_is_ignored, report_diagnostics,
+    Archive, ArchiveTool, BarSize, CURRENT_SCHEMA_VERSION, Compact, Config, ConfigOverride,
+    Diagnostic, DiagnosticLevel, Diagnostics, DiagnosticsStore, DirectoryMenuPosition, DockSide,
+    DoubleClickEmpty, Explorer, FileTypeColorRule, IconMode, IndexSource, Indexing,
+    IndexingExclude, IndexingMode, Keybindings, Launcher, Layout, ListRowHeight, Plugins,
+    SCHEMA_URL, Search, SearchBackend, SortMethod, SortOrder, SpaceMap, SpaceMapColor,
+    SplitDirection, Storage, TabWidthMode, Theme, ThemeMode, TrayIcon, Ui, Updates,
+    json_schema_string, load_from_files, load_from_path, name_is_ignored, report_diagnostics,
 };
 pub use watcher::ConfigWatcher;
 

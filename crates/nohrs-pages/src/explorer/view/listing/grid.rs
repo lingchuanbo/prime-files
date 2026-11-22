@@ -289,7 +289,8 @@ fn render_grid_item(
     let name_color = if selected {
         theme::fg()
     } else {
-        page.file_name_color(&item.name, &item.kind).unwrap_or_else(theme::fg)
+        page.file_name_color(&item.name, &item.kind)
+            .unwrap_or_else(theme::fg)
     };
     // A sound file with waveforms on asks for its waveform and, until it
     // arrives or if it cannot be had, the type's icon: one image shared by
@@ -407,10 +408,9 @@ fn render_grid_item(
                 .child(match (page.icon_mode, waveform, thumbnail) {
                     // No icons: the tile keeps its shape, with nothing in the
                     // place the picture was.
-                    (nohrs_core::config::IconMode::None, _, _) => div()
-                        .size(px(tile.icon))
-                        .flex_shrink_0()
-                        .into_any_element(),
+                    (nohrs_core::config::IconMode::None, _, _) => {
+                        div().size(px(tile.icon)).flex_shrink_0().into_any_element()
+                    }
                     (_, Some(bars), _) => crate::explorer::waveforms::canvas(
                         bars,
                         tile.icon,

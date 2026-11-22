@@ -43,7 +43,10 @@ mod legacy {
             return Ok(());
         }
         let mut source = fs::File::open(from)?;
-        let mut destination = fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+        let mut destination = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)?;
         std::io::copy(&mut source, &mut destination)?;
         fs::set_permissions(to, fs::metadata(from)?.permissions())?;
         Ok(())
@@ -114,7 +117,11 @@ fn photo_folder(root: &Path) {
         let dir = root.join(format!("pasta {folder:02}"));
         fs::create_dir_all(&dir).unwrap();
         for file in 0..100u64 {
-            write_file(&dir.join(format!("arquivo {file:03}.bin")), 64 * 1024, folder * 1000 + file);
+            write_file(
+                &dir.join(format!("arquivo {file:03}.bin")),
+                64 * 1024,
+                folder * 1000 + file,
+            );
         }
     }
 }
@@ -125,9 +132,13 @@ fn one_big_file(root: &Path) {
 }
 
 fn keeps_dates(source: &Path, copy: &Path) -> bool {
-    files_under(source).iter().zip(files_under(copy)).all(|(from, to)| {
-        fs::metadata(from).unwrap().modified().unwrap() == fs::metadata(to).unwrap().modified().unwrap()
-    })
+    files_under(source)
+        .iter()
+        .zip(files_under(copy))
+        .all(|(from, to)| {
+            fs::metadata(from).unwrap().modified().unwrap()
+                == fs::metadata(to).unwrap().modified().unwrap()
+        })
 }
 
 fn median(mut samples: Vec<f64>) -> f64 {
@@ -148,7 +159,10 @@ fn main() {
         ("2.000 arquivos de 64 KB em 20 pastas", photo_folder),
         ("1 arquivo de 512 MB", one_big_file),
     ];
-    println!("{ROUNDS} rodadas alternadas, mediana; origem em {}", sources.display());
+    println!(
+        "{ROUNDS} rodadas alternadas, mediana; origem em {}",
+        sources.display()
+    );
     for (index, (name, build)) in cases.iter().enumerate() {
         let source = sources.join(format!("caso-{index}"));
         build(&source);
@@ -160,11 +174,21 @@ fn main() {
             let new = base.join("depois");
 
             legacy::copy(&source, &old).unwrap();
-            assert_eq!(manifest(&old), original, "{name}: the old copy changed the tree");
+            assert_eq!(
+                manifest(&old),
+                original,
+                "{name}: the old copy changed the tree"
+            );
             let old_dates = keeps_dates(&source, &old);
             fs::remove_dir_all(&old).unwrap();
-            ops::copy_path_no_replace(&source, &new).map_err(ops::ClaimFailure::into_error).unwrap();
-            assert_eq!(manifest(&new), original, "{name}: the new copy changed the tree");
+            ops::copy_path_no_replace(&source, &new)
+                .map_err(ops::ClaimFailure::into_error)
+                .unwrap();
+            assert_eq!(
+                manifest(&new),
+                original,
+                "{name}: the new copy changed the tree"
+            );
             let new_dates = keeps_dates(&source, &new);
             fs::remove_dir_all(&new).unwrap();
 
@@ -176,7 +200,9 @@ fn main() {
                 before.push(start.elapsed().as_secs_f64() * 1000.0);
                 fs::remove_dir_all(&old).unwrap();
                 let start = Instant::now();
-                ops::copy_path_no_replace(&source, &new).map_err(ops::ClaimFailure::into_error).unwrap();
+                ops::copy_path_no_replace(&source, &new)
+                    .map_err(ops::ClaimFailure::into_error)
+                    .unwrap();
                 after.push(start.elapsed().as_secs_f64() * 1000.0);
                 fs::remove_dir_all(&new).unwrap();
             }

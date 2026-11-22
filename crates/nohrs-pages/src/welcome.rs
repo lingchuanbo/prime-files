@@ -11,8 +11,8 @@
 //! away; Settings sets it back to false to bring it again.
 
 use gpui::{
-    AnyElement, Context, Div, ElementId, IntoElement, Render, SharedString, Stateful, Window, div, prelude::*, px,
-    rgb,
+    AnyElement, Context, Div, ElementId, IntoElement, Render, SharedString, Stateful, Window, div,
+    prelude::*, px, rgb,
 };
 use gpui_component::Icon;
 use nohrs_core::config::{self, Config, ThemeMode};
@@ -84,13 +84,25 @@ impl WelcomePage {
         .detach();
     }
 
-    fn write(&mut self, section: &'static str, key: &'static str, value: String, cx: &mut Context<Self>) {
+    fn write(
+        &mut self,
+        section: &'static str,
+        key: &'static str,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
         let path = config::paths::config_file();
-        let write = cx.background_spawn(async move { config::set_value(&path, section, key, &value) });
+        let write =
+            cx.background_spawn(async move { config::set_value(&path, section, key, &value) });
         cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             if let Err(error) = write.await {
                 this.update(cx, |page, cx| {
-                    page.error = Some(tf!("Não foi possível salvar {section}.{key}: {error}", section = section, key = key, error = error));
+                    page.error = Some(tf!(
+                        "Não foi possível salvar {section}.{key}: {error}",
+                        section = section,
+                        key = key,
+                        error = error
+                    ));
                     cx.notify();
                 })
                 .log_err();
@@ -101,11 +113,18 @@ impl WelcomePage {
 
     // Runs a system change (registry, Listary) in the background, then reads
     // everything again so the switches show what really happened.
-    fn change(&mut self, run: impl FnOnce(&std::path::Path) -> std::io::Result<()> + Send + 'static, cx: &mut Context<Self>) {
+    fn change(
+        &mut self,
+        run: impl FnOnce(&std::path::Path) -> std::io::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.error = Some(tf!("Não foi possível achar o executável do LumaFiles: {error}", error = error));
+                self.error = Some(tf!(
+                    "Não foi possível achar o executável do LumaFiles: {error}",
+                    error = error
+                ));
                 cx.notify();
                 return;
             }
@@ -136,10 +155,17 @@ impl WelcomePage {
 
     fn step_welcome(&self, cx: &mut Context<Self>) -> Div {
         let chosen = Lang::parse(&self.config.ui.language);
-        let mut languages: Vec<(SharedString, bool, String)> =
-            vec![(t!("Automático").into(), chosen.is_none(), "\"auto\"".to_string())];
+        let mut languages: Vec<(SharedString, bool, String)> = vec![(
+            t!("Automático").into(),
+            chosen.is_none(),
+            "\"auto\"".to_string(),
+        )];
         for lang in Lang::ALL {
-            languages.push((lang.native_name().into(), chosen == Some(lang), format!("\"{}\"", lang.code())));
+            languages.push((
+                lang.native_name().into(),
+                chosen == Some(lang),
+                format!("\"{}\"", lang.code()),
+            ));
         }
         let mode = self.config.theme.mode;
         div()
@@ -182,11 +208,17 @@ impl WelcomePage {
     fn accents(&self, cx: &mut Context<Self>) -> Div {
         let accent = self.config.theme.accent.trim().to_string();
         div().flex().flex_wrap().gap(px(6.0)).children(
-            theme::NAMED_ACCENTS.iter().zip(crate::settings::ACCENT_LABELS).enumerate().map(
-                |(index, (&(name, color), &label))| {
+            theme::NAMED_ACCENTS
+                .iter()
+                .zip(crate::settings::ACCENT_LABELS)
+                .enumerate()
+                .map(|(index, (&(name, color), &label))| {
                     let selected = accent.eq_ignore_ascii_case(name);
                     div()
-                        .id(ElementId::NamedInteger("welcome-accent".into(), index as u64))
+                        .id(ElementId::NamedInteger(
+                            "welcome-accent".into(),
+                            index as u64,
+                        ))
                         .w(px(72.0))
                         .py(px(8.0))
                         .flex()
@@ -205,16 +237,23 @@ impl WelcomePage {
                                 .rounded_full()
                                 .bg(rgb(color.unwrap_or_else(theme::palette_accent)))
                                 .border_2()
-                                .border_color(rgb(if selected { theme::fg() } else { theme::bg_secondary() })),
+                                .border_color(rgb(if selected {
+                                    theme::fg()
+                                } else {
+                                    theme::bg_secondary()
+                                })),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(if selected { theme::fg() } else { theme::fg_secondary() }))
+                                .text_color(rgb(if selected {
+                                    theme::fg()
+                                } else {
+                                    theme::fg_secondary()
+                                }))
                                 .child(i18n::tr(label)),
                         )
-                },
-            ),
+                }),
         )
     }
 
@@ -229,9 +268,17 @@ impl WelcomePage {
         (section, key): (&'static str, &'static str),
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        option_card(id, icon, title, text, Some(on), false, cx.listener(move |page, _, _, cx| {
-            page.write(section, key, (!on).to_string(), cx);
-        }))
+        option_card(
+            id,
+            icon,
+            title,
+            text,
+            Some(on),
+            false,
+            cx.listener(move |page, _, _, cx| {
+                page.write(section, key, (!on).to_string(), cx);
+            }),
+        )
     }
 
     fn step_view(&self, cx: &mut Context<Self>) -> Div {
@@ -334,8 +381,11 @@ impl WelcomePage {
     fn step_integrations(&self, cx: &mut Context<Self>) -> Div {
         let reveal = self.config.explorer.reveal_from_other_apps;
         let mft_on = mft::state() == mft::State::On;
-        let (mft_busy, mft_error) =
-            cx.try_global::<Everything>().map_or((false, None), |state| (state.mft_busy, state.mft_error.clone()));
+        let (mft_busy, mft_error) = cx
+            .try_global::<Everything>()
+            .map_or((false, None), |state| {
+                (state.mft_busy, state.mft_error.clone())
+            });
         let listary = self.listary;
         // With Everything answering, its index is the computer's and the
         // service this step offers would never be read.
@@ -422,10 +472,16 @@ impl WelcomePage {
             (t!("Forma de onda nos ícones"), Some(ui.audio_waveforms)),
             (t!("Explorador padrão do Windows"), self.default_explorer),
             (t!("Iniciar com o Windows"), self.starts_with_windows),
-            (t!("Atualizar automaticamente"), Some(self.config.updates.automatic)),
+            (
+                t!("Atualizar automaticamente"),
+                Some(self.config.updates.automatic),
+            ),
             (t!("\"Mostrar na pasta\" abre aqui"), Some(reveal)),
             ("Listary", listary),
-            (t!("Indexação instantânea"), Some(mft::state() == mft::State::On)),
+            (
+                t!("Indexação instantânea"),
+                Some(mft::state() == mft::State::On),
+            ),
         ];
         div()
             .flex()
@@ -480,18 +536,25 @@ impl Render for WelcomePage {
                     .flex_col()
                     .gap(px(26.0))
                     // Where the person is: one segment per step.
-                    .child(
-                        div().flex().gap(px(6.0)).children((0..STEPS).map(|index| {
-                            div().flex_1().h(px(4.0)).rounded_full().bg(rgb(if index <= step {
+                    .child(div().flex().gap(px(6.0)).children((0..STEPS).map(|index| {
+                        div()
+                            .flex_1()
+                            .h(px(4.0))
+                            .rounded_full()
+                            .bg(rgb(if index <= step {
                                 theme::accent()
                             } else {
                                 theme::border_hover()
                             }))
-                        })),
-                    )
+                    })))
                     .child(body)
                     .when_some(self.error.clone(), |this, error| {
-                        this.child(div().text_sm().text_color(rgb(theme::danger())).child(error))
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(theme::danger()))
+                                .child(error),
+                        )
                     })
                     .child(
                         div()
@@ -510,23 +573,32 @@ impl Render for WelcomePage {
                             )
                             .child(div().flex_1())
                             .when(step > 0, |this| {
-                                this.child(secondary_button("welcome-back", t!("Voltar")).on_click(cx.listener(
-                                    |page, _, _, cx| {
+                                this.child(secondary_button("welcome-back", t!("Voltar")).on_click(
+                                    cx.listener(|page, _, _, cx| {
                                         page.step = page.step.saturating_sub(1);
                                         cx.notify();
-                                    },
-                                )))
+                                    }),
+                                ))
                             })
                             .child(
-                                primary_button("welcome-next", if last { t!("Começar a usar") } else { t!("Próximo") })
-                                    .on_click(cx.listener(move |page, _, _, cx| {
+                                primary_button(
+                                    "welcome-next",
+                                    if last {
+                                        t!("Começar a usar")
+                                    } else {
+                                        t!("Próximo")
+                                    },
+                                )
+                                .on_click(cx.listener(
+                                    move |page, _, _, cx| {
                                         if last {
                                             page.finish(cx);
                                         } else {
                                             page.step += 1;
                                             cx.notify();
                                         }
-                                    })),
+                                    },
+                                )),
                             ),
                     ),
             )
@@ -565,7 +637,13 @@ fn hero(icon: &'static str, title: &'static str, text: &'static str) -> Div {
                 .text_color(rgb(theme::fg()))
                 .child(title),
         )
-        .child(div().text_sm().line_height(px(20.0)).text_color(rgb(theme::fg_secondary())).child(text))
+        .child(
+            div()
+                .text_sm()
+                .line_height(px(20.0))
+                .text_color(rgb(theme::fg_secondary()))
+                .child(text),
+        )
 }
 
 fn card() -> Div {
@@ -581,11 +659,18 @@ fn card() -> Div {
 }
 
 fn card_title(text: &'static str) -> Div {
-    div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::fg())).child(text)
+    div()
+        .text_sm()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(theme::fg()))
+        .child(text)
 }
 
 fn card_hint(text: String) -> Div {
-    div().text_xs().text_color(rgb(theme::fg_secondary())).child(text)
+    div()
+        .text_xs()
+        .text_color(rgb(theme::fg_secondary()))
+        .child(text)
 }
 
 fn note(text: &'static str) -> Div {
@@ -618,7 +703,9 @@ fn pill(id: ElementId, label: SharedString, selected: bool) -> Stateful<Div> {
         .text_sm()
         .map(|this| {
             if selected {
-                this.bg(rgb(theme::accent())).border_color(rgb(theme::accent())).text_color(rgb(theme::accent_fg()))
+                this.bg(rgb(theme::accent()))
+                    .border_color(rgb(theme::accent()))
+                    .text_color(rgb(theme::accent_fg()))
             } else {
                 this.border_color(rgb(theme::border_hover()))
                     .text_color(rgb(theme::fg()))
@@ -647,9 +734,15 @@ fn theme_tile(
         .rounded(px(10.0))
         .border_2()
         .cursor_pointer()
-        .border_color(rgb(if selected { theme::accent() } else { theme::border() }))
+        .border_color(rgb(if selected {
+            theme::accent()
+        } else {
+            theme::border()
+        }))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .on_click(cx.listener(move |page, _, _, cx| page.write("theme", "mode", value.to_string(), cx)))
+        .on_click(
+            cx.listener(move |page, _, _, cx| page.write("theme", "mode", value.to_string(), cx)),
+        )
         .child(
             div()
                 .h(px(64.0))
@@ -663,7 +756,13 @@ fn theme_tile(
                 .p(px(6.0))
                 .child(div().h(px(8.0)).rounded(px(3.0)).bg(rgb(bar)))
                 .child(div().w(px(48.0)).h(px(5.0)).rounded(px(3.0)).bg(rgb(text)))
-                .child(div().w(px(32.0)).h(px(5.0)).rounded(px(3.0)).bg(rgb(theme::accent()))),
+                .child(
+                    div()
+                        .w(px(32.0))
+                        .h(px(5.0))
+                        .rounded(px(3.0))
+                        .bg(rgb(theme::accent())),
+                ),
         )
         .child(
             div()
@@ -673,7 +772,12 @@ fn theme_tile(
                 .text_sm()
                 .text_color(rgb(theme::fg()))
                 .when(selected, |this| {
-                    this.child(Icon::new(Icon::empty()).path("icons/check.svg").size_3().text_color(rgb(theme::accent())))
+                    this.child(
+                        Icon::new(Icon::empty())
+                            .path("icons/check.svg")
+                            .size_3()
+                            .text_color(rgb(theme::accent())),
+                    )
                 })
                 .child(label),
         )
@@ -701,7 +805,11 @@ fn option_card(
         .bg(rgb(theme::bg_secondary()))
         .border_1()
         .border_color(rgb(if on { theme::accent() } else { theme::border() }))
-        .when(known && !busy, |this| this.cursor_pointer().hover(|style| style.bg(rgb(theme::bg_hover()))).on_click(toggle))
+        .when(known && !busy, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::bg_hover())))
+                .on_click(toggle)
+        })
         .child(
             div()
                 .size(px(40.0))
@@ -710,8 +818,16 @@ fn option_card(
                 .items_center()
                 .justify_center()
                 .rounded(px(10.0))
-                .bg(rgb(if on { theme::accent_subtle() } else { theme::bg() }))
-                .text_color(rgb(if on { theme::accent() } else { theme::fg_secondary() }))
+                .bg(rgb(if on {
+                    theme::accent_subtle()
+                } else {
+                    theme::bg()
+                }))
+                .text_color(rgb(if on {
+                    theme::accent()
+                } else {
+                    theme::fg_secondary()
+                }))
                 .child(Icon::new(Icon::empty()).path(icon).size_5()),
         )
         .child(
@@ -721,13 +837,29 @@ fn option_card(
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::fg())).child(title))
-                .child(div().text_xs().line_height(px(17.0)).text_color(rgb(theme::fg_secondary())).child(text)),
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::fg()))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .line_height(px(17.0))
+                        .text_color(rgb(theme::fg_secondary()))
+                        .child(text),
+                ),
         )
         .child(if known && !busy {
             switch(on).into_any_element()
         } else {
-            div().text_xs().text_color(rgb(theme::muted())).child(t!("Verificando…")).into_any_element()
+            div()
+                .text_xs()
+                .text_color(rgb(theme::muted()))
+                .child(t!("Verificando…"))
+                .into_any_element()
         })
 }
 
@@ -759,8 +891,20 @@ fn info_card(icon: &'static str, title: &'static str, text: &'static str) -> Div
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::fg())).child(title))
-                .child(div().text_xs().line_height(px(17.0)).text_color(rgb(theme::fg_secondary())).child(text)),
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::fg()))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .line_height(px(17.0))
+                        .text_color(rgb(theme::fg_secondary()))
+                        .child(text),
+                ),
         )
 }
 
@@ -778,19 +922,31 @@ fn switch(on: bool) -> Div {
         .border_1()
         .map(|track| {
             if on {
-                track.bg(rgb(theme::accent())).border_color(rgb(theme::accent()))
+                track
+                    .bg(rgb(theme::accent()))
+                    .border_color(rgb(theme::accent()))
             } else {
-                track.bg(rgb(theme::bg())).border_color(rgb(theme::border_hover()))
+                track
+                    .bg(rgb(theme::bg()))
+                    .border_color(rgb(theme::border_hover()))
             }
         })
         .child(
             div()
                 .absolute()
                 .top(px(inset))
-                .left(px(if on { WIDTH - KNOB - inset - 2.0 } else { inset }))
+                .left(px(if on {
+                    WIDTH - KNOB - inset - 2.0
+                } else {
+                    inset
+                }))
                 .size(px(KNOB))
                 .rounded_full()
-                .bg(rgb(if on { theme::accent_fg() } else { theme::fg_secondary() })),
+                .bg(rgb(if on {
+                    theme::accent_fg()
+                } else {
+                    theme::fg_secondary()
+                })),
         )
 }
 

@@ -95,7 +95,13 @@ fn search_finds_han_names_by_full_pinyin() {
     let mut actual = Vec::new();
     volume.search(&["wenjianjia".to_string()], 20, &mut actual);
 
-    assert_eq!(actual.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>(), ["C:\\文件夹"]);
+    assert_eq!(
+        actual
+            .iter()
+            .map(|hit| hit.path.as_str())
+            .collect::<Vec<_>>(),
+        ["C:\\文件夹"]
+    );
 }
 
 #[cfg(windows)]

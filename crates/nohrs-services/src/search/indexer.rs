@@ -1,14 +1,17 @@
 use anyhow::{Context, Result};
+use pinyin::ToPinyin;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tantivy::TantivyDocument;
 use tantivy::schema::{FAST, Field, STORED, STRING, Schema, TEXT, Term, Value};
 use tantivy::{Index, IndexWriter}; // Import trait for add_text etc? No, TantivyDocument implements it.
-use pinyin::ToPinyin;
 
 fn pinyin_forms(text: &str) -> Option<(String, String)> {
-    if !text.chars().any(|character| character.to_pinyin().is_some()) {
+    if !text
+        .chars()
+        .any(|character| character.to_pinyin().is_some())
+    {
         return None;
     }
     let mut full = String::with_capacity(text.len());
@@ -367,12 +370,19 @@ impl IndexManager {
         let schema = self.index.schema();
         let path_field = schema.get_field("path").context("Schema error")?;
         let filename_field = schema.get_field("filename").context("Schema error")?;
-        let filename_pinyin_field = schema.get_field("filename_pinyin").context("Schema error")?;
-        let filename_initials_field = schema.get_field("filename_initials").context("Schema error")?;
+        let filename_pinyin_field = schema
+            .get_field("filename_pinyin")
+            .context("Schema error")?;
+        let filename_initials_field = schema
+            .get_field("filename_initials")
+            .context("Schema error")?;
         let content_field = schema.get_field("content").context("Schema error")?;
         let is_directory_field = schema.get_field("is_directory").context("Schema error")?;
 
-        let paths: Vec<&PathBuf> = paths.iter().filter(|path| self.is_indexable_change(path)).collect();
+        let paths: Vec<&PathBuf> = paths
+            .iter()
+            .filter(|path| self.is_indexable_change(path))
+            .collect();
         if paths.is_empty() {
             return Ok(());
         }
@@ -419,8 +429,12 @@ impl super::backend::SearchBackend for IndexManager {
         let schema = self.index.schema();
         let path_field = schema.get_field("path").context("Field not found")?;
         let filename_field = schema.get_field("filename").context("Field not found")?;
-        let filename_pinyin_field = schema.get_field("filename_pinyin").context("Field not found")?;
-        let filename_initials_field = schema.get_field("filename_initials").context("Field not found")?;
+        let filename_pinyin_field = schema
+            .get_field("filename_pinyin")
+            .context("Field not found")?;
+        let filename_initials_field = schema
+            .get_field("filename_initials")
+            .context("Field not found")?;
         let content_field = schema.get_field("content").context("Field not found")?;
         let is_directory_field = schema
             .get_field("is_directory")
@@ -428,7 +442,12 @@ impl super::backend::SearchBackend for IndexManager {
 
         let query_parser = tantivy::query::QueryParser::for_index(
             &self.index,
-            vec![filename_field, filename_initials_field, filename_pinyin_field, content_field],
+            vec![
+                filename_field,
+                filename_initials_field,
+                filename_pinyin_field,
+                content_field,
+            ],
         );
         let query = query_parser.parse_query(query_str)?;
 
@@ -543,7 +562,12 @@ mod tests {
 
         let outside = dir.path().join("elsewhere.txt");
         std::fs::write(&outside, "x").unwrap();
-        let own_file = std::fs::read_dir(&index_path).unwrap().next().unwrap().unwrap().path();
+        let own_file = std::fs::read_dir(&index_path)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
         manager.process_changes(&[own_file, outside]).unwrap();
         assert_eq!(indexed(&manager), 0);
 
@@ -566,7 +590,8 @@ mod tests {
         let results = super::super::backend::SearchBackend::search(&manager, "wenjianjia").unwrap();
 
         assert!(results.iter().any(|result| result.path == file));
-        let body_results = super::super::backend::SearchBackend::search(&manager, "ordinary").unwrap();
+        let body_results =
+            super::super::backend::SearchBackend::search(&manager, "ordinary").unwrap();
         assert!(body_results.iter().any(|result| result.path == file));
     }
 

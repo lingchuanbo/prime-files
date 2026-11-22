@@ -3,13 +3,28 @@
 //! Simplified Chinese text, in that order. The tests in `i18n.rs` check
 //! that every key has a row here and that placeholders survive.
 
-pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
+pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
+    (
         "Cor do item",
-        ["Couleur de l’élément", "Elementfarbe", "Colore elemento", "Цвет элемента", "項目の色", "项目颜色"],
+        [
+            "Couleur de l’élément",
+            "Elementfarbe",
+            "Colore elemento",
+            "Цвет элемента",
+            "項目の色",
+            "项目颜色",
+        ],
     ),
     (
         "Seguir a regra de cor do tipo de arquivo",
-        ["Suivre la règle de couleur du type de fichier", "Farbregel des Dateityps folgen", "Segui la regola colore del tipo di file", "Следовать правилу цвета типа файла", "ファイル種類の色ルールに従う", "遵循文件类型颜色规则"],
+        [
+            "Suivre la règle de couleur du type de fichier",
+            "Farbregel des Dateityps folgen",
+            "Segui la regola colore del tipo di file",
+            "Следовать правилу цвета типа файла",
+            "ファイル種類の色ルールに従う",
+            "遵循文件类型颜色规则",
+        ],
     ),
     (
         "删除",
@@ -17,10 +32,25 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "打开所在位置",
-        ["Ouvrir l’emplacement", "Speicherort öffnen", "Apri percorso", "Открыть расположение", "保存場所を開く", "打开所在位置"],
-    ),    (
+        [
+            "Ouvrir l’emplacement",
+            "Speicherort öffnen",
+            "Apri percorso",
+            "Открыть расположение",
+            "保存場所を開く",
+            "打开所在位置",
+        ],
+    ),
+    (
         "Não foi possível alterar o armazenamento da configuração: {error}",
-        ["Impossible de modifier le stockage de la configuration : {error}", "Konfigurationsspeicher konnte nicht geändert werden: {error}", "Impossibile modificare la posizione della configurazione: {error}", "Не удалось изменить место хранения настроек: {error}", "設定の保存先を変更できませんでした: {error}", "无法更改配置存储位置：{error}"],
+        [
+            "Impossible de modifier le stockage de la configuration : {error}",
+            "Konfigurationsspeicher konnte nicht geändert werden: {error}",
+            "Impossibile modificare la posizione della configurazione: {error}",
+            "Не удалось изменить место хранения настроек: {error}",
+            "設定の保存先を変更できませんでした: {error}",
+            "无法更改配置存储位置：{error}",
+        ],
     ),
     (
         "Não foi possível copiar arquivos para a área de transferência: {error}",
@@ -35,23 +65,58 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Armazenamento",
-        ["Stockage", "Speicher", "Archiviazione", "Хранилище", "保存先", "存储"],
+        [
+            "Stockage",
+            "Speicher",
+            "Archiviazione",
+            "Хранилище",
+            "保存先",
+            "存储",
+        ],
     ),
     (
         "Configuração verde (portátil)",
-        ["Configuration portable", "Portable Konfiguration", "Configurazione portatile", "Портативная конфигурация", "ポータブル設定", "绿色配置模式"],
+        [
+            "Configuration portable",
+            "Portable Konfiguration",
+            "Configurazione portatile",
+            "Портативная конфигурация",
+            "ポータブル設定",
+            "绿色配置模式",
+        ],
     ),
     (
         "Guarda as configurações em userdata ao lado do programa. Reinicie para aplicar.",
-        ["Enregistre les paramètres dans userdata à côté de l’application. Redémarrez pour appliquer.", "Speichert Einstellungen in userdata neben der Anwendung. Neustart erforderlich.", "Salva le impostazioni in userdata accanto all’app. Riavvia per applicare.", "Сохраняет настройки в userdata рядом с приложением. Перезапустите для применения.", "アプリと同じ場所の userdata に設定を保存します。反映には再起動が必要です。", "将设置保存在软件同级的 userdata 文件夹中，重启后生效。"],
+        [
+            "Enregistre les paramètres dans userdata à côté de l’application. Redémarrez pour appliquer.",
+            "Speichert Einstellungen in userdata neben der Anwendung. Neustart erforderlich.",
+            "Salva le impostazioni in userdata accanto all’app. Riavvia per applicare.",
+            "Сохраняет настройки в userdata рядом с приложением. Перезапустите для применения.",
+            "アプリと同じ場所の userdata に設定を保存します。反映には再起動が必要です。",
+            "将设置保存在软件同级的 userdata 文件夹中，重启后生效。",
+        ],
     ),
     (
         "As configurações gerais ficam aqui; aparência e busca usam arquivos separados. Alterações manuais são aplicadas na hora.",
-        ["Les paramètres généraux restent ici ; l’apparence et la recherche utilisent des fichiers séparés. Les modifications manuelles s’appliquent immédiatement.", "Allgemeine Einstellungen bleiben hier; Darstellung und Suche verwenden eigene Dateien. Manuelle Änderungen gelten sofort.", "Le impostazioni generali restano qui; aspetto e ricerca usano file separati. Le modifiche manuali si applicano subito.", "Общие настройки остаются здесь; оформление и поиск используют отдельные файлы. Ручные изменения применяются сразу.", "一般設定はここに保存され、外観と検索は別ファイルを使います。手動編集はすぐ反映されます。", "常规设置保存在此文件；外观和搜索分别使用独立文件。手动修改会立即生效。"],
+        [
+            "Les paramètres généraux restent ici ; l’apparence et la recherche utilisent des fichiers séparés. Les modifications manuelles s’appliquent immédiatement.",
+            "Allgemeine Einstellungen bleiben hier; Darstellung und Suche verwenden eigene Dateien. Manuelle Änderungen gelten sofort.",
+            "Le impostazioni generali restano qui; aspetto e ricerca usano file separati. Le modifiche manuali si applicano subito.",
+            "Общие настройки остаются здесь; оформление и поиск используют отдельные файлы. Ручные изменения применяются сразу.",
+            "一般設定はここに保存され、外観と検索は別ファイルを使います。手動編集はすぐ反映されます。",
+            "常规设置保存在此文件；外观和搜索分别使用独立文件。手动修改会立即生效。",
+        ],
     ),
     (
         "Logs de execução",
-        ["Journaux d’exécution", "Laufzeitprotokolle", "Log di esecuzione", "Журналы работы", "実行ログ", "运行日志"],
+        [
+            "Journaux d’exécution",
+            "Laufzeitprotokolle",
+            "Log di esecuzione",
+            "Журналы работы",
+            "実行ログ",
+            "运行日志",
+        ],
     ),
     (
         "Desativado por padrão. Reinicie para aplicar. Salva logs ao lado do aplicativo; podem conter caminhos de arquivos. Desativar não apaga logs existentes.",
@@ -5793,7 +5858,17 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
             "颜色会应用到名称、类型标签、大小和修改时间。使用不区分大小写、以分号分隔的模式，例如 *.jpg;*.svg 或 README*；越靠前的规则越优先，没有规则覆盖的文件使用程序内置配色。",
         ],
     ),
-    ("Histórico", ["Historique", "Verlauf", "Cronologia", "История", "履歴", "输入历史"]),
+    (
+        "Histórico",
+        [
+            "Historique",
+            "Verlauf",
+            "Cronologia",
+            "История",
+            "履歴",
+            "输入历史",
+        ],
+    ),
     (
         "Mapa de espaço",
         [
@@ -5816,7 +5891,10 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
             "正在分析…",
         ],
     ),
-    ("Fechar", ["Fermer", "Schließen", "Chiudi", "Закрыть", "閉じる", "关闭"]),
+    (
+        "Fechar",
+        ["Fermer", "Schließen", "Chiudi", "Закрыть", "閉じる", "关闭"],
+    ),
     (
         "Não foi possível analisar a pasta",
         [
@@ -5828,13 +5906,43 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
             "无法分析该文件夹",
         ],
     ),
-    ("Índice", ["Index", "Index", "Indice", "Индекс", "インデックス", "索引"]),
+    (
+        "Índice",
+        ["Index", "Index", "Indice", "Индекс", "インデックス", "索引"],
+    ),
     (
         "Cor dos blocos",
-        ["Couleur des blocs", "Blockfarbe", "Colore dei blocchi", "Цвет блоков", "ブロックの色", "方块颜色"],
+        [
+            "Couleur des blocs",
+            "Blockfarbe",
+            "Colore dei blocchi",
+            "Цвет блоков",
+            "ブロックの色",
+            "方块颜色",
+        ],
     ),
-    ("Por tamanho", ["Par taille", "Nach Größe", "Per dimensione", "По размеру", "サイズ順", "按大小"]),
-    ("Por tipo", ["Par type", "Nach Typ", "Per tipo", "По типу", "種類順", "按类型"]),
+    (
+        "Por tamanho",
+        [
+            "Par taille",
+            "Nach Größe",
+            "Per dimensione",
+            "По размеру",
+            "サイズ順",
+            "按大小",
+        ],
+    ),
+    (
+        "Por tipo",
+        [
+            "Par type",
+            "Nach Typ",
+            "Per tipo",
+            "По типу",
+            "種類順",
+            "按类型",
+        ],
+    ),
     (
         "Por tamanho pinta cada bloco pela faixa em que ele cai; por tipo pinta pelo que ele contém.",
         [
@@ -5859,11 +5967,25 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Cor de cada faixa",
-        ["Couleur de chaque plage", "Farbe je Bereich", "Colore di ogni fascia", "Цвет каждой полосы", "各範囲の色", "每档颜色"],
+        [
+            "Couleur de chaque plage",
+            "Farbe je Bereich",
+            "Colore di ogni fascia",
+            "Цвет каждой полосы",
+            "各範囲の色",
+            "每档颜色",
+        ],
     ),
     (
         "Salvar cores",
-        ["Enregistrer les couleurs", "Farben speichern", "Salva colori", "Сохранить цвета", "色を保存", "保存颜色"],
+        [
+            "Enregistrer les couleurs",
+            "Farben speichern",
+            "Salva colori",
+            "Сохранить цвета",
+            "色を保存",
+            "保存颜色",
+        ],
     ),
     (
         "Digite três tamanhos decrescentes em GB e quatro cores #rrggbb.",
@@ -5878,43 +6000,113 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Largura, numeração e comportamento das abas.",
-        ["Largeur, numérotation et comportement des onglets.","Tabbreite, Nummerierung und Verhalten.","Larghezza, numerazione e comportamento delle schede.","Ширина, нумерация и поведение вкладок.","タブの幅、番号、動作。","标签宽度、编号和行为。"],
+        [
+            "Largeur, numérotation et comportement des onglets.",
+            "Tabbreite, Nummerierung und Verhalten.",
+            "Larghezza, numerazione e comportamento delle schede.",
+            "Ширина, нумерация и поведение вкладок.",
+            "タブの幅、番号、動作。",
+            "标签宽度、编号和行为。",
+        ],
     ),
     (
         "Abas horizontais",
-        ["Onglets horizontaux","Horizontale Tabs","Schede orizzontali","Горизонтальные вкладки","横タブ","水平标签页"],
+        [
+            "Onglets horizontaux",
+            "Horizontale Tabs",
+            "Schede orizzontali",
+            "Горизонтальные вкладки",
+            "横タブ",
+            "水平标签页",
+        ],
     ),
     (
         "Largura das abas",
-        ["Largeur des onglets","Tabbreite","Larghezza delle schede","Ширина вкладок","タブ幅","标签页宽度"],
+        [
+            "Largeur des onglets",
+            "Tabbreite",
+            "Larghezza delle schede",
+            "Ширина вкладок",
+            "タブ幅",
+            "标签页宽度",
+        ],
     ),
     (
         "Ajuste automático distribui o espaço; largura fixa mantém todas previsíveis.",
-        ["Le réglage automatique répartit l’espace ; la largeur fixe garde des onglets prévisibles.","Die automatische Anpassung verteilt den Platz; eine feste Breite hält Tabs berechenbar.","La regolazione automatica distribuisce lo spazio; la larghezza fissa mantiene le schede prevedibili.","Автоподбор распределяет пространство; фиксированная ширина делает вкладки предсказуемыми.","自動調整は幅を均等に配分し、固定幅では各タブの幅を一定に保ちます。","自动分配空间；固定宽度让每个标签页宽度一致。"],
+        [
+            "Le réglage automatique répartit l’espace ; la largeur fixe garde des onglets prévisibles.",
+            "Die automatische Anpassung verteilt den Platz; eine feste Breite hält Tabs berechenbar.",
+            "La regolazione automatica distribuisce lo spazio; la larghezza fissa mantiene le schede prevedibili.",
+            "Автоподбор распределяет пространство; фиксированная ширина делает вкладки предсказуемыми.",
+            "自動調整は幅を均等に配分し、固定幅では各タブの幅を一定に保ちます。",
+            "自动分配空间；固定宽度让每个标签页宽度一致。",
+        ],
     ),
     (
         "Ajuste automático",
-        ["Ajustement automatique","Automatische Anpassung","Regolazione automatica","Автоподбор","自動調整","自动调整"],
+        [
+            "Ajustement automatique",
+            "Automatische Anpassung",
+            "Regolazione automatica",
+            "Автоподбор",
+            "自動調整",
+            "自动调整",
+        ],
     ),
     (
         "Largura fixa",
-        ["Largeur fixe","Feste Breite","Larghezza fissa","Фиксированная ширина","固定幅","固定宽度"],
+        [
+            "Largeur fixe",
+            "Feste Breite",
+            "Larghezza fissa",
+            "Фиксированная ширина",
+            "固定幅",
+            "固定宽度",
+        ],
     ),
     (
         "Escolha a largura em pixels de cada aba horizontal.",
-        ["Choisissez la largeur en pixels de chaque onglet horizontal.","Wählen Sie die Breite jedes horizontalen Tabs in Pixeln.","Scegli la larghezza in pixel di ogni scheda orizzontale.","Выберите ширину каждой горизонтальной вкладки в пикселях.","各横タブの幅をピクセル単位で選択します。","设置每个水平标签页的像素宽度。"],
+        [
+            "Choisissez la largeur en pixels de chaque onglet horizontal.",
+            "Wählen Sie die Breite jedes horizontalen Tabs in Pixeln.",
+            "Scegli la larghezza in pixel di ogni scheda orizzontale.",
+            "Выберите ширину каждой горизонтальной вкладки в пикселях.",
+            "各横タブの幅をピクセル単位で選択します。",
+            "设置每个水平标签页的像素宽度。",
+        ],
     ),
     (
         "Mostrar numeração rápida",
-        ["Afficher la numérotation rapide","Schnellnummerierung anzeigen","Mostra numerazione rapida","Показывать номера для быстрого перехода","クイック番号を表示","显示快捷编号"],
+        [
+            "Afficher la numérotation rapide",
+            "Schnellnummerierung anzeigen",
+            "Mostra numerazione rapida",
+            "Показывать номера для быстрого перехода",
+            "クイック番号を表示",
+            "显示快捷编号",
+        ],
     ),
     (
         "Mostra números nas dez primeiras abas; use Alt+número para alternar.",
-        ["Affiche un numéro sur les dix premiers onglets ; utilisez Alt+numéro pour basculer.","Zeigt Nummern auf den ersten zehn Tabs; mit Alt+Zahl wechseln.","Mostra i numeri sulle prime dieci schede; usa Alt+numero per passare.","Показывает номера первых десяти вкладок; переключайтесь сочетанием Alt+цифра.","最初の10個のタブに番号を表示し、Alt+数字で切り替えます。","在前十个标签页前显示数字，可用 Alt+数字快速切换。"],
+        [
+            "Affiche un numéro sur les dix premiers onglets ; utilisez Alt+numéro pour basculer.",
+            "Zeigt Nummern auf den ersten zehn Tabs; mit Alt+Zahl wechseln.",
+            "Mostra i numeri sulle prime dieci schede; usa Alt+numero per passare.",
+            "Показывает номера первых десяти вкладок; переключайтесь сочетанием Alt+цифра.",
+            "最初の10個のタブに番号を表示し、Alt+数字で切り替えます。",
+            "在前十个标签页前显示数字，可用 Alt+数字快速切换。",
+        ],
     ),
     (
         "Data de modificação sem grupos",
-        ["Date de modification (sans groupes)","Änderungsdatum (ohne Gruppen)","Data di modifica (senza gruppi)","Дата изменения (без групп)","更新日時（グループなし）","修改时间（不分组）"],
+        [
+            "Date de modification (sans groupes)",
+            "Änderungsdatum (ohne Gruppen)",
+            "Data di modifica (senza gruppi)",
+            "Дата изменения (без групп)",
+            "更新日時（グループなし）",
+            "修改时间（不分组）",
+        ],
     ),
     (
         "Escolher arquivos nas janelas \"Abrir\" e \"Salvar\" de outros programas",
@@ -6061,26 +6253,9 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Pequeno",
-        [
-            "Petit",
-            "Klein",
-            "Piccolo",
-            "Малый",
-            "小",
-            "小",
-        ],
+        ["Petit", "Klein", "Piccolo", "Малый", "小", "小"],
     ),
-    (
-        "Grande",
-        [
-            "Grand",
-            "Groß",
-            "Grande",
-            "Большой",
-            "大",
-            "大",
-        ],
-    ),
+    ("Grande", ["Grand", "Groß", "Grande", "Большой", "大", "大"]),
     (
         "Janela e bandeja",
         [
@@ -6160,14 +6335,7 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Não mostrar",
-        [
-            "Jamais",
-            "Nie",
-            "Mai",
-            "Никогда",
-            "表示しない",
-            "不显示",
-        ],
+        ["Jamais", "Nie", "Mai", "Никогда", "表示しない", "不显示"],
     ),
     (
         "Mostrar janela",
@@ -6182,14 +6350,7 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Sair",
-        [
-            "Quitter",
-            "Beenden",
-            "Esci",
-            "Выход",
-            "終了",
-            "退出",
-        ],
+        ["Quitter", "Beenden", "Esci", "Выход", "終了", "退出"],
     ),
     (
         "Enviar a aba ativa para o painel à direita",
@@ -6622,11 +6783,25 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Compacta",
-        ["Compacte", "Kompakt", "Compatta", "Компактная", "コンパクト", "紧凑"],
+        [
+            "Compacte",
+            "Kompakt",
+            "Compatta",
+            "Компактная",
+            "コンパクト",
+            "紧凑",
+        ],
     ),
     (
         "Ampla",
-        ["Spacieuse", "Geräumig", "Ampia", "Просторная", "ゆったり", "宽松"],
+        [
+            "Spacieuse",
+            "Geräumig",
+            "Ampia",
+            "Просторная",
+            "ゆったり",
+            "宽松",
+        ],
     ),
     (
         "Linhas zebradas",
@@ -6786,10 +6961,7 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
             "已固定到本机",
         ],
     ),
-    (
-        "Novo",
-        ["Nouveau", "Neu", "Nuovo", "Новый", "新規", "新增"],
-    ),
+    ("Novo", ["Nouveau", "Neu", "Nuovo", "Новый", "新規", "新增"]),
     (
         "Não versionado",
         [
@@ -6803,11 +6975,25 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Apagado",
-        ["Supprimé", "Gelöscht", "Eliminato", "Удалён", "削除済み", "已删除"],
+        [
+            "Supprimé",
+            "Gelöscht",
+            "Eliminato",
+            "Удалён",
+            "削除済み",
+            "已删除",
+        ],
     ),
     (
         "Em conflito",
-        ["En conflit", "Im Konflikt", "In conflitto", "Конфликт", "競合", "冲突"],
+        [
+            "En conflit",
+            "Im Konflikt",
+            "In conflitto",
+            "Конфликт",
+            "競合",
+            "冲突",
+        ],
     ),
     (
         "Renomeado",
@@ -6822,7 +7008,14 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Copiado",
-        ["Copié", "Kopiert", "Copiato", "Скопирован", "コピー済み", "已复制"],
+        [
+            "Copié",
+            "Kopiert",
+            "Copiato",
+            "Скопирован",
+            "コピー済み",
+            "已复制",
+        ],
     ),
     (
         "Cabeçalho fixo",
@@ -6870,7 +7063,14 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Do sistema",
-        ["Du système", "Vom System", "Dal sistema", "Из системы", "システム", "系统"],
+        [
+            "Du système",
+            "Vom System",
+            "Dal sistema",
+            "Из системы",
+            "システム",
+            "系统",
+        ],
     ),
     (
         "Largura máxima das colunas",
@@ -6940,11 +7140,25 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Código + números",
-        ["Codes + nombres", "Codes + Zahlen", "Codici + numeri", "Коды + числа", "コード + 数字", "编码 + 数字"],
+        [
+            "Codes + nombres",
+            "Codes + Zahlen",
+            "Codici + numeri",
+            "Коды + числа",
+            "コード + 数字",
+            "编码 + 数字",
+        ],
     ),
     (
         "Idioma + números",
-        ["Langue + nombres", "Sprache + Zahlen", "Lingua + numeri", "Язык + числа", "言語 + 数字", "语言 + 数字"],
+        [
+            "Langue + nombres",
+            "Sprache + Zahlen",
+            "Lingua + numeri",
+            "Язык + числа",
+            "言語 + 数字",
+            "语言 + 数字",
+        ],
     ),
     (
         "Pastas pelo nome",
@@ -6970,7 +7184,14 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Lista de ignorados",
-        ["Liste d’ignorés", "Ignorierliste", "Lista ignorati", "Список игнорируемых", "無視リスト", "忽略列表"],
+        [
+            "Liste d’ignorés",
+            "Ignorierliste",
+            "Lista ignorati",
+            "Список игнорируемых",
+            "無視リスト",
+            "忽略列表",
+        ],
     ),
     (
         "Nomes e padrões ignorados",
@@ -7007,11 +7228,25 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     ),
     (
         "Salvar lista",
-        ["Enregistrer la liste", "Liste speichern", "Salva elenco", "Сохранить список", "リストを保存", "保存列表"],
+        [
+            "Enregistrer la liste",
+            "Liste speichern",
+            "Salva elenco",
+            "Сохранить список",
+            "リストを保存",
+            "保存列表",
+        ],
     ),
     (
         "Operações",
-        ["Opérations", "Vorgänge", "Operazioni", "Операции", "操作", "操作"],
+        [
+            "Opérations",
+            "Vorgänge",
+            "Operazioni",
+            "Операции",
+            "操作",
+            "操作",
+        ],
     ),
     (
         "Copiar ao arrastar",
@@ -7056,4 +7291,115 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
             "完全に削除する前に確認します。オフにすると即座に削除します。",
             "永久删除前询问。关闭后立即永久删除。",
         ],
-    ),];
+    ),
+    (
+        "Posição do menu de favoritos",
+        [
+            "Position du menu des favoris",
+            "Position des Favoritenmenüs",
+            "Posizione del menu dei preferiti",
+            "Положение меню избранного",
+            "お気に入りメニューの位置",
+            "收藏夹菜单位置",
+        ],
+    ),
+    (
+        "Onde o menu do Ctrl+D abre: sob o cursor, como um menu de contexto, ou no canto superior esquerdo da lista, sempre no mesmo lugar.",
+        [
+            "Où s’ouvre le menu Ctrl+D : sous le curseur, comme un menu contextuel, ou dans le coin supérieur gauche de la liste, toujours au même endroit.",
+            "Wo sich das Ctrl+D-Menü öffnet: unter dem Zeiger wie ein Kontextmenü oder in der oberen linken Ecke der Liste, immer an derselben Stelle.",
+            "Dove si apre il menu Ctrl+D: sotto il cursore, come un menu contestuale, oppure nell'angolo in alto a sinistra dell'elenco, sempre nello stesso punto.",
+            "Где открывается меню Ctrl+D: под курсором, как контекстное меню, или в левом верхнем углу списка, всегда на одном месте.",
+            "Ctrl+D メニューを開く位置：右クリックメニューのようにカーソル位置、またはリストの左上隅で常に同じ場所。",
+            "Ctrl+D 菜单的打开位置：跟随光标（像右键菜单），或固定在列表左上角、每次都在同一位置。",
+        ],
+    ),
+    (
+        "Sob o cursor",
+        [
+            "Sous le curseur",
+            "Unter dem Zeiger",
+            "Sotto il cursore",
+            "Под курсором",
+            "カーソル位置",
+            "跟随光标",
+        ],
+    ),
+    (
+        "Canto da lista",
+        [
+            "Coin de la liste",
+            "Ecke der Liste",
+            "Angolo dell'elenco",
+            "Угол списка",
+            "リストの隅",
+            "列表左上角",
+        ],
+    ),
+    (
+        "Inicialização rápida",
+        [
+            "Démarrage rapide",
+            "Schnellstart",
+            "Avvio rapido",
+            "Быстрый запуск",
+            "クイック起動",
+            "快速启动",
+        ],
+    ),
+    (
+        "Sair do LumaFiles",
+        [
+            "Quitter LumaFiles",
+            "LumaFiles beenden",
+            "Esci da LumaFiles",
+            "Выйти из LumaFiles",
+            "LumaFiles を終了",
+            "退出 LumaFiles",
+        ],
+    ),
+    (
+        "Nenhum item neste grupo",
+        [
+            "Aucun élément dans ce groupe",
+            "Keine Einträge in dieser Gruppe",
+            "Nessun elemento in questo gruppo",
+            "В этой группе нет элементов",
+            "このグループに項目はありません",
+            "此分组中没有项目",
+        ],
+    ),
+    (
+        "Não foi possível iniciar {name}: {error}",
+        [
+            "Impossible de lancer {name} : {error}",
+            "{name} konnte nicht gestartet werden: {error}",
+            "Impossibile avviare {name}: {error}",
+            "Не удалось запустить {name}: {error}",
+            "{name} を起動できませんでした: {error}",
+            "无法启动 {name}：{error}",
+        ],
+    ),
+    (
+        "Não foi possível ler quicklaunch.toml: {error}",
+        [
+            "Impossible de lire quicklaunch.toml : {error}",
+            "quicklaunch.toml konnte nicht gelesen werden: {error}",
+            "Impossibile leggere quicklaunch.toml: {error}",
+            "Не удалось прочитать quicklaunch.toml: {error}",
+            "quicklaunch.toml を読み込めませんでした: {error}",
+            "无法读取 quicklaunch.toml：{error}",
+        ],
+    ),
+    (
+        "Tipo não suportado",
+        [
+            "Type non pris en charge",
+            "Nicht unterstützter Typ",
+            "Tipo non supportato",
+            "Неподдерживаемый тип",
+            "未対応の種類",
+            "不支持的类型",
+        ],
+    ),
+];

@@ -1,7 +1,5 @@
 # LumaFiles 快速启动面板（Quick Dock）方案
 
-> **⚠ 实现以 `docs/QuickDock-技术实现方案与边界约定.md`（v2）为准。** 本文是需求概述。下文出现的 `dock.toml`、`nohrs-launcher/src/dock/`、`mod.rs`、条目级热键、`i18n:` 前缀等写法已被 v2 修正：代码里统一命名为 `quick_launch`，配置文件为 `quicklaunch.toml`，界面放在 `nohrs-pages`。原因见 v2 §0。
-
 > 目标：在 LumaFiles（prime-files）里加一个“分组 + 图标格子”的软件快速启动面板，功能对标参考截图。配置跟 LumaFiles 走：同一套配置目录（含便携模式 `userdata/`）、同一套主题和 i18n，在同一个设置页里编辑。
 > 依据：`docs/config.md`（`config.toml` 加拆分文件、便携模式）、`docs/launcher.md`（现有 Raycast 风搜索启动器）、`crates/nohrs-launcher`、`crates/nohrs-core/src/config`。
 

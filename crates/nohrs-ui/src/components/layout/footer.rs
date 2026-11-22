@@ -1,7 +1,7 @@
-use nohrs_core::{k, tf};
 use crate::theme::theme;
 use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
 use gpui_component::{Icon, IconName};
+use nohrs_core::{k, tf};
 
 /// What a footer status message is claiming, which decides the color it is
 /// painted in.

@@ -4547,6 +4547,7 @@ dependencies = [
  "syntect",
  "tantivy",
  "tempfile",
+ "thiserror 2.0.17",
  "time",
  "tracing",
  "trash",

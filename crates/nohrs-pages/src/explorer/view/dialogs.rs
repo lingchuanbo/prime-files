@@ -6,12 +6,12 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::Disableable as _;
 use gpui_component::WindowExt as _;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::progress::Progress;
-use gpui_component::Disableable as _;
 use nohrs_core::telemetry::LogErr as _;
 use nohrs_core::{t, tf};
 use nohrs_services::fs::ops::ConflictResolution;
