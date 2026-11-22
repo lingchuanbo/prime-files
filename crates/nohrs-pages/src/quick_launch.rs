@@ -193,27 +193,35 @@ impl IconCache {
     }
 }
 
-/// A request the worker thread answers.
-enum WorkerRequest {
-    /// Start one item.
-    // Boxed because the enum travels through a channel and an `Item` is by far
-    // the largest thing in it.
-    Launch {
-        item: Box<Item>,
-        mode: LaunchMode,
-        on_running: OnRunning,
-        /// Echoed back so a reply the window has moved on from is dropped (§8.4).
-        generation: u64,
-    },
-    /// Extract one icon.
-    Icon {
-        key: IconKey,
-        /// The custom icon's path, or the item's; expanded by the worker.
-        path: String,
-    },
+/// How long an icon request may wait in its queue before it is dropped (§8.4).
+///
+/// The window stops waiting for an icon after [`ICON_TIMEOUT`]; extracting one
+/// older than that would only delay the requests behind it.
+const ICON_QUEUE_LIMIT: Duration = Duration::from_secs(2);
+
+/// How long the exit path waits for the dedicated threads (§15.x).
+const WORKER_STOP_LIMIT: Duration = Duration::from_millis(500);
+
+/// One start request for the `quick-launch` thread.
+struct StartRequest {
+    // Boxed because the item is by far the largest thing a worker receives.
+    item: Box<Item>,
+    mode: LaunchMode,
+    on_running: OnRunning,
+    /// Echoed back so a reply the window has moved on from is dropped (§8.4).
+    generation: u64,
 }
 
-/// What the worker thread answers with.
+/// One icon request for the `quick-launch-icons` thread.
+struct IconRequest {
+    key: IconKey,
+    /// The custom icon's path, or the item's; expanded by the worker.
+    path: String,
+    /// When the window queued it: one that waited too long is dropped (§8.4).
+    queued: Instant,
+}
+
+/// What the worker threads answer with.
 enum WorkerReply {
     Launched {
         generation: u64,
@@ -226,92 +234,194 @@ enum WorkerReply {
     },
 }
 
-/// The dedicated thread that starts items and extracts icons (§8.4).
-struct Worker {
-    requests: std_mpsc::Sender<WorkerRequest>,
+/// One dedicated thread: its request channel, the notice that it has stopped, and
+/// the handle needed to join it (§8.4).
+struct Worker<Request> {
+    requests: Option<std_mpsc::Sender<Request>>,
+    stopped: std_mpsc::Receiver<()>,
+    join: Option<std::thread::JoinHandle<()>>,
 }
 
-impl Worker {
-    /// Starts the thread and returns the handle that feeds it.
-    fn start(replies: async_channel::Sender<WorkerReply>) -> Self {
-        let (requests, receiver) = std_mpsc::channel::<WorkerRequest>();
-        let spawned = std::thread::Builder::new()
-            .name("quick-launch".to_string())
-            .spawn(move || run_worker(receiver, replies));
-        if let Err(error) = spawned {
-            tracing::error!(target: "quick_launch", "the worker thread did not start: {error}");
+impl<Request: Send + 'static> Worker<Request> {
+    /// Starts `name` running `body` until its channel closes.
+    fn start(name: &str, body: impl FnOnce(std_mpsc::Receiver<Request>) + Send + 'static) -> Self {
+        let (requests, receiver) = std_mpsc::channel::<Request>();
+        let (stopped_sender, stopped) = std_mpsc::channel::<()>();
+        let join = match std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                body(receiver);
+                // Sent after the body returned, so the COM apartment it owned is
+                // already released when the wait below ends.
+                stopped_sender.send(()).log_err();
+            }) {
+            Ok(join) => Some(join),
+            Err(error) => {
+                tracing::error!(target: "quick_launch", "the {name} thread did not start: {error}");
+                None
+            }
+        };
+        Self {
+            requests: Some(requests),
+            stopped,
+            join,
         }
-        Self { requests }
     }
 
-    fn send(&self, request: WorkerRequest) {
-        if let Err(error) = self.requests.send(request) {
-            tracing::warn!(target: "quick_launch", "the worker is gone: {error}");
+    fn send(&self, request: Request) {
+        let Some(requests) = self.requests.as_ref() else {
+            return;
+        };
+        if let Err(error) = requests.send(request) {
+            tracing::warn!(target: "quick_launch", "a worker is gone: {error}");
         }
     }
-}
 
-/// The worker thread's whole life.
-fn run_worker(
-    receiver: std_mpsc::Receiver<WorkerRequest>,
-    replies: async_channel::Sender<WorkerReply>,
-) {
-    // Everything the thread needs is built here, off the foreground thread: the
-    // expansion context reads the configuration directory, and the registry is
-    // this thread's own.
-    let context = ExpandContext::current();
-    let registry = LaunchRegistry::with_builtins();
-    // One COM apartment for the whole thread: the Shell's extractors are
-    // apartment-threaded (§8.4).
-    let _com = ComApartment::enter();
-
-    while let Ok(request) = receiver.recv() {
-        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match request {
-            WorkerRequest::Launch {
-                item,
-                mode,
-                on_running,
-                generation,
-            } => {
-                let request = LaunchRequest {
-                    mode,
-                    on_running,
-                    expand: context.clone(),
-                };
-                let name = item.name.clone();
-                let outcome = registry.launch(&item, &request);
-                if let Err(error) = &outcome {
-                    tracing::debug!(target: "quick_launch", "launching {name:?} failed: {error}");
+    /// Ends the thread and waits at most `limit` for it (§15.x).
+    fn stop(&mut self, limit: Duration) {
+        let Some(join) = self.join.take() else {
+            return;
+        };
+        // Closing the channel is the stop signal: the loop ends as soon as it is
+        // done with the request it holds. The bound is for a Shell call stuck on
+        // a dead network path.
+        self.requests.take();
+        match self.stopped.recv_timeout(limit) {
+            Ok(()) => {
+                if join.join().is_err() {
+                    tracing::warn!(target: "quick_launch", "a worker panicked on the way out");
                 }
-                replies
-                    .try_send(WorkerReply::Launched {
-                        generation,
-                        name,
-                        outcome,
-                    })
-                    .log_err();
             }
-            WorkerRequest::Icon { key, path } => {
-                let image = icon_image(&context, &path, key.edge);
-                replies.try_send(WorkerReply::Icon { key, image }).log_err();
-            }
-        }));
-        if let Err(panic) = handled {
-            let message = panic
-                .downcast_ref::<&str>()
-                .map(|text| (*text).to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic".to_string());
-            tracing::error!(target: "quick_launch", "the worker panicked: {message}");
-            replies
-                .try_send(WorkerReply::Launched {
-                    generation: 0,
-                    name: String::new(),
-                    outcome: Err(LaunchError::Internal(message)),
-                })
-                .log_err();
+            Err(_) => tracing::warn!(
+                target: "quick_launch",
+                "a worker did not stop within {} ms",
+                limit.as_millis()
+            ),
         }
     }
+}
+
+/// The two dedicated threads (§8.4). Starting and extracting never share one, so
+/// a Shell call stuck on a dead network path cannot hold up a launch.
+struct Workers {
+    launch: Worker<StartRequest>,
+    icons: Worker<IconRequest>,
+}
+
+impl Workers {
+    fn start(replies: async_channel::Sender<WorkerReply>) -> Self {
+        let launch = Worker::start("quick-launch", {
+            let replies = replies.clone();
+            move |receiver| {
+                let registry = LaunchRegistry::with_builtins();
+                run_launch_worker(receiver, replies, move |item, request| {
+                    registry.launch(item, request)
+                });
+            }
+        });
+        let icons = Worker::start("quick-launch-icons", move |receiver| {
+            run_icon_worker(receiver, replies, icon_image);
+        });
+        Self { launch, icons }
+    }
+
+    fn send_launch(&self, request: StartRequest) {
+        self.launch.send(request);
+    }
+
+    fn send_icon(&self, request: IconRequest) {
+        self.icons.send(request);
+    }
+
+    /// Stops both threads within one `limit` (§15.x).
+    fn stop(&mut self, limit: Duration) {
+        // Half each: one budget for two threads, so a stuck icon extraction
+        // cannot eat the whole wait.
+        let each = limit / 2;
+        self.launch.stop(each);
+        self.icons.stop(each);
+    }
+}
+
+/// The `quick-launch` thread: starts items, one at a time (§8.4).
+fn run_launch_worker(
+    receiver: std_mpsc::Receiver<StartRequest>,
+    replies: async_channel::Sender<WorkerReply>,
+    start_item: impl Fn(&Item, &LaunchRequest) -> std::result::Result<LaunchOutcome, LaunchError>,
+) {
+    // COM and the expansion context are built on this thread: the Shell is
+    // apartment-threaded and the context reads the configuration directory.
+    let _com = ComApartment::enter();
+    let context = ExpandContext::current();
+    while let Ok(request) = receiver.recv() {
+        let generation = request.generation;
+        let name = request.item.name.clone();
+        let launch_request = LaunchRequest {
+            mode: request.mode,
+            on_running: request.on_running,
+            expand: context.clone(),
+        };
+        // A panic is a reply, not the end of the thread — and it keeps the
+        // request's generation, so the window reports the failure instead of
+        // dropping it as stale (§8.4).
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            start_item(&request.item, &launch_request)
+        }))
+        .unwrap_or_else(|panic| Err(LaunchError::Internal(panic_message(panic))));
+        if let Err(error) = &outcome {
+            tracing::debug!(target: "quick_launch", "launching {name:?} failed: {error}");
+        }
+        replies
+            .try_send(WorkerReply::Launched {
+                generation,
+                name,
+                outcome,
+            })
+            .log_err();
+    }
+}
+
+/// The `quick-launch-icons` thread: extracts icons, dropping the ones that waited
+/// too long in the queue (§8.4).
+fn run_icon_worker(
+    receiver: std_mpsc::Receiver<IconRequest>,
+    replies: async_channel::Sender<WorkerReply>,
+    extract: impl Fn(&ExpandContext, &str, u32) -> Option<Arc<RenderImage>>,
+) {
+    let _com = ComApartment::enter();
+    let context = ExpandContext::current();
+    while let Ok(request) = receiver.recv() {
+        let waited = request.queued.elapsed();
+        if waited >= ICON_QUEUE_LIMIT {
+            // The window gave up on this one two seconds ago; running it now
+            // would only delay the requests behind it.
+            tracing::debug!(
+                target: "quick_launch",
+                path = %request.path,
+                waited_ms = waited.as_millis(),
+                "dropping an icon request that waited too long"
+            );
+            continue;
+        }
+        let key = request.key;
+        let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            extract(&context, &request.path, key.edge)
+        }))
+        .unwrap_or_else(|panic| {
+            tracing::error!(target: "quick_launch", "icon: {}", panic_message(panic));
+            None
+        });
+        replies.try_send(WorkerReply::Icon { key, image }).log_err();
+    }
+}
+
+/// The text of a panic caught on a worker thread (§8.4).
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 /// The worker thread's COM apartment, uninitialized when the thread ends (§8.4).
@@ -605,7 +715,7 @@ pub(crate) struct QuickLaunch {
     kv: Option<Arc<dyn KvStore>>,
     restored: Restored,
     hooks: Option<HotkeyHooks>,
-    worker: Option<Worker>,
+    workers: Option<Workers>,
     icons: IconCache,
     /// The group the window is showing, as an index into `config.groups`.
     group: usize,
@@ -632,6 +742,11 @@ pub(crate) struct QuickLaunch {
     /// A hide asked for while GPUI had the window out for an update. The 400 ms
     /// tick performs it, outside any update, rather than the request being lost.
     pending_hide: bool,
+    /// Bumped whenever what the window draws changes, so the view rebuilds its
+    /// item list only then instead of on every frame (S6).
+    revision: u64,
+    /// The item a launch was asked for; counted only once it started (S7).
+    pending_usage: Option<(String, u32)>,
 }
 
 impl Global for QuickLaunch {}
@@ -657,6 +772,12 @@ impl QuickLaunch {
 
     /// Whether the quick launch is part of keeping the process alive: the chord
     /// is registered and the file asks for it (§15.0).
+    /// Notes that what the window draws has changed.
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Whether the quick launch is part of keeping the process alive: the chord
     fn keeps_running(&self) -> bool {
         self.hotkey.is_some() && self.config.window.keep_running
     }
@@ -695,7 +816,7 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
     };
 
     let (replies, reply_receiver) = async_channel::unbounded::<WorkerReply>();
-    let worker = Worker::start(replies);
+    let workers = Workers::start(replies);
 
     cx.set_global(QuickLaunch {
         config: QuickLaunchConfig::default(),
@@ -705,7 +826,7 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
         kv,
         restored: Restored::default(),
         hooks: Some(hooks),
-        worker: Some(worker),
+        workers: Some(workers),
         icons: IconCache::default(),
         group: 0,
         slot: None,
@@ -722,6 +843,8 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
         generation: 0,
         message: None,
         pending_hide: false,
+        revision: 0,
+        pending_usage: None,
     });
 
     // One task answers everything the worker says, for the process's lifetime.
@@ -864,6 +987,7 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     let groups = quick_launch.config.groups.len();
     quick_launch.group = quick_launch.group.min(groups.saturating_sub(1));
     quick_launch.slot = None;
+    quick_launch.touch();
     restore_last_group(cx);
     ensure_selection(cx);
     sync_hotkey(cx);
@@ -1011,9 +1135,11 @@ pub fn shutdown(cx: &mut App) {
     }
     if let Some(quick_launch) = state_mut(cx) {
         quick_launch.hotkey = None;
-        // Dropping the sender ends the worker thread, which uninitializes its
-        // COM apartment on the way out (§15.x).
-        quick_launch.worker = None;
+        // §15.x: the dedicated threads are stopped before the process goes, with
+        // a bounded wait so a Shell call on a dead path cannot hang the exit.
+        if let Some(mut workers) = quick_launch.workers.take() {
+            workers.stop(WORKER_STOP_LIMIT);
+        }
     }
 }
 
@@ -1053,7 +1179,46 @@ fn poll_save(cx: &mut App) {
         return;
     }
     quick_launch.pending_save = false;
-    save_now(quick_launch);
+    save_in_background(cx);
+}
+
+/// Renders the model and writes it, on a background task (§5.2).
+///
+/// The render happens here because the model belongs to the foreground; the file
+/// itself is written off the frame, and the hash of what was written comes back
+/// so the reload that follows it is skipped (§5.3).
+fn save_in_background(cx: &mut App) {
+    let Some(quick_launch) = state(cx) else {
+        return;
+    };
+    if !quick_launch.status.can_save() {
+        return;
+    }
+    let text = match nohrs_core::config::quick_launch::to_toml(&quick_launch.config) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::error!(target: "quick_launch", "could not write the configuration: {error}");
+            return;
+        }
+    };
+    let path = paths::quick_launch_file();
+    cx.spawn(async move |cx| {
+        let written = cx
+            .background_spawn(async move { write_atomically(&path, &text) })
+            .await;
+        cx.update(|cx| match written {
+            Ok(hash) => {
+                if let Some(quick_launch) = state_mut(cx) {
+                    quick_launch.file_hash = hash;
+                }
+            }
+            Err(error) => {
+                tracing::error!(target: "quick_launch", "could not write the configuration: {error}");
+            }
+        })
+        .ok();
+    })
+    .detach();
 }
 
 /// Marks the state as changed, and starts the throttle if it is not running.
@@ -1151,8 +1316,21 @@ fn display_at(cx: &App, point: Point<Pixels>) -> Option<Rc<dyn PlatformDisplay>>
         .or_else(|| cx.primary_display())
 }
 
-/// The display the pointer is on, when the platform tells us where it is.
+/// The display the pointer is on (§11).
+///
+/// GPUI only knows the pointer of one of its own windows, and when the summon
+/// chord fires the foreground belongs to another application — which is exactly
+/// the case this decides. Windows is asked where the pointer is instead.
 fn pointer_display(cx: &mut App) -> Option<Rc<dyn PlatformDisplay>> {
+    #[cfg(windows)]
+    if let Some(index) = platform::cursor_monitor_index()
+        && let Some(display) = cx
+            .displays()
+            .into_iter()
+            .find(|display| u32::from(display.id()) == index)
+    {
+        return Some(display);
+    }
     let position = cx.active_window().and_then(|window| {
         window
             .update(cx, |_, window, _| window.mouse_position())
@@ -1479,14 +1657,13 @@ fn icon(cx: &mut App, path: &str, edge: u32) -> Option<Arc<RenderImage>> {
     if !quick_launch.icons.wants_request(&key) {
         return None;
     }
-    quick_launch
-        .icons
-        .pending
-        .insert(key.clone(), Instant::now());
-    if let Some(worker) = quick_launch.worker.as_ref() {
-        worker.send(WorkerRequest::Icon {
+    let queued = Instant::now();
+    quick_launch.icons.pending.insert(key.clone(), queued);
+    if let Some(workers) = quick_launch.workers.as_ref() {
+        workers.send_icon(IconRequest {
             key,
             path: path.to_string(),
+            queued,
         });
     }
     None
@@ -1507,6 +1684,8 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                     quick_launch.icons.settled.insert(key);
                 } else {
                     quick_launch.icons.insert(key, image);
+                    // The tiles draw the picture that just arrived.
+                    quick_launch.touch();
                 }
             }
             cx.refresh_windows();
@@ -1523,6 +1702,10 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                 return;
             }
             let close_after_launch = quick_launch.config.window.close_after_launch;
+            let started = matches!(
+                &outcome,
+                Ok(LaunchOutcome::Started | LaunchOutcome::Activated)
+            );
             let folder = match outcome {
                 Ok(LaunchOutcome::OpenFolder(path)) => Some(path),
                 Ok(LaunchOutcome::Started | LaunchOutcome::Activated) => None,
@@ -1533,16 +1716,30 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                     return;
                 }
             };
-            if let Some(path) = folder
-                && !crate::explorer_link::request(path.clone())
+            if started
+                && let Some((group, slot)) =
+                    state_mut(cx).and_then(|state| state.pending_usage.take())
             {
-                // No Explorer to show it in: the system handler is the only
-                // thing left that can open a folder.
-                tracing::info!(
-                    target: "quick_launch",
-                    "no LumaFiles window to open {} in",
-                    path.display()
-                );
+                // Only a launch that happened is counted (S7).
+                record_usage(cx, &group, slot);
+            }
+            if let Some(path) = folder {
+                // The main window may be hidden in the tray, and Q5 makes that
+                // the normal case: a tab opened in a hidden window is invisible.
+                // Asking the tray to show it is the same request its own menu
+                // sends, and it is handled by the existing publisher loop — the
+                // quick launch does not touch the tray state itself (B2).
+                crate::tray::request_show();
+                if !crate::explorer_link::request(path.clone()) {
+                    // M1 has no fallback: the main process is always there when
+                    // this window is up, so a refusal means it is shutting down.
+                    // The resident-mode fallback is §15.1's, in M2.
+                    tracing::info!(
+                        target: "quick_launch",
+                        "no LumaFiles window to open {} in",
+                        path.display()
+                    );
+                }
             }
             if close_after_launch {
                 hide(cx);
@@ -1605,15 +1802,15 @@ fn activate(cx: &mut App, slot: u32) {
     };
     quick_launch.generation = generation;
     quick_launch.message = None;
-    if let Some(worker) = quick_launch.worker.as_ref() {
-        worker.send(WorkerRequest::Launch {
+    quick_launch.pending_usage = Some((group_id, slot));
+    if let Some(workers) = quick_launch.workers.as_ref() {
+        workers.send_launch(StartRequest {
             item: Box::new(item),
             mode,
             on_running,
             generation,
         });
     }
-    record_usage(cx, &group_id, slot);
     cx.refresh_windows();
 }
 
@@ -1623,6 +1820,7 @@ fn select_group(cx: &mut App, index: usize) {
         return;
     };
     quick_launch.set_group(index);
+    quick_launch.touch();
     let Some(id) = quick_launch
         .config
         .groups
@@ -1741,6 +1939,62 @@ pub fn poll_reload(cx: &mut App) {
     }
     ensure_selection(cx);
     poll_save(cx);
+}
+
+/// The pointer's monitor, numbered the way the platform lists displays (§11).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod platform {
+    //! `GetCursorPos` and `MonitorFromPoint`, which is the only way to learn
+    //! where the pointer is while no LumaFiles window has the foreground.
+
+    use windows::Win32::Foundation::{LPARAM, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromPoint,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    use windows::core::BOOL;
+
+    /// The index of the monitor under the pointer, in `EnumDisplayMonitors`
+    /// order — which is what `DisplayId` counts on this platform.
+    pub fn cursor_monitor_index() -> Option<u32> {
+        let mut position = POINT::default();
+        // SAFETY: `position` is a live out-parameter and the call only writes it.
+        unsafe { GetCursorPos(&mut position) }.ok()?;
+        // SAFETY: no buffer is involved; the call answers a monitor handle.
+        let monitor = unsafe { MonitorFromPoint(position, MONITOR_DEFAULTTONEAREST) };
+        let mut monitors: Vec<HMONITOR> = Vec::new();
+        // SAFETY: the callback only pushes into `monitors`, which outlives the
+        // enumeration because it is still borrowed here.
+        unsafe {
+            EnumDisplayMonitors(
+                None,
+                None,
+                Some(collect_monitor),
+                LPARAM((&mut monitors as *mut Vec<HMONITOR>).cast::<core::ffi::c_void>() as isize),
+            )
+        }
+        .ok()
+        .ok()?;
+        monitors
+            .iter()
+            .position(|handle| handle.0 == monitor.0)
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
+    /// Collects one monitor of the enumeration `cursor_monitor_index` runs.
+    unsafe extern "system" fn collect_monitor(
+        monitor: HMONITOR,
+        _device: HDC,
+        _rect: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        // SAFETY: `data` is the `Vec<HMONITOR>` that is alive for the whole
+        // enumeration, and the callback is only ever called from inside it.
+        let monitors = unsafe { &mut *(data.0 as *mut Vec<HMONITOR>) };
+        monitors.push(monitor);
+        BOOL(1)
+    }
 }
 
 #[cfg(test)]
@@ -1965,6 +2219,125 @@ mod tests {
         });
     }
 
+    /// §8.4 (v2.2) B3: an icon extraction that never returns must not delay a
+    /// launch, because the two requests run on different threads.
+    #[test]
+    fn a_blocked_icon_thread_does_not_delay_a_launch() {
+        use std::sync::{Condvar, Mutex};
+
+        let (replies, reply_receiver) = async_channel::unbounded::<WorkerReply>();
+        // The stand-in for the Shell call that never comes back.
+        let blocked = std::sync::Arc::new((Mutex::new(false), Condvar::new()));
+
+        let icons = Worker::start("test-icons", {
+            let replies = replies.clone();
+            let blocked = blocked.clone();
+            move |receiver: std_mpsc::Receiver<IconRequest>| {
+                run_icon_worker(receiver, replies, move |_context, _path, _edge| {
+                    let (lock, condvar) = &*blocked;
+                    let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
+                    while !*released {
+                        released = condvar
+                            .wait(released)
+                            .unwrap_or_else(|error| error.into_inner());
+                    }
+                    None
+                });
+            }
+        });
+        let launch = Worker::start("test-launch", {
+            let replies = replies.clone();
+            move |receiver: std_mpsc::Receiver<StartRequest>| {
+                run_launch_worker(receiver, replies, |_item, _request| {
+                    Ok(LaunchOutcome::Started)
+                });
+            }
+        });
+
+        // One icon request, which the icon thread takes and then hangs on.
+        icons.send(IconRequest {
+            key: IconKey::new("bloqueado", 32),
+            path: "C:\\nao\\existe".to_string(),
+            queued: Instant::now(),
+        });
+        std::thread::sleep(Duration::from_millis(50));
+
+        // The launch must be answered within 100 ms even though the icon thread
+        // is stuck, which is the whole point of having two of them.
+        launch.send(StartRequest {
+            item: Box::new(Item::new(0, "app", "Teste")),
+            mode: LaunchMode::Normal,
+            on_running: OnRunning::Activate,
+            generation: 7,
+        });
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut answer = None;
+        while Instant::now() < deadline && answer.is_none() {
+            answer = reply_receiver.try_recv().ok();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let answer = answer.expect("the launch must be answered within 100 ms");
+        match answer {
+            WorkerReply::Launched {
+                generation,
+                outcome,
+                ..
+            } => {
+                assert_eq!(generation, 7);
+                assert_eq!(outcome, Ok(LaunchOutcome::Started));
+            }
+            WorkerReply::Icon { .. } => panic!("the icon thread answered first"),
+        }
+
+        // Let the icon thread go, then stop both as the exit path does.
+        {
+            let (lock, condvar) = &*blocked;
+            *lock.lock().unwrap_or_else(|error| error.into_inner()) = true;
+            condvar.notify_all();
+        }
+        let mut launch = launch;
+        let mut icons = icons;
+        launch.stop(Duration::from_millis(500));
+        icons.stop(Duration::from_millis(500));
+    }
+
+    /// S4: a panic inside the launcher still answers with the request's
+    /// generation, so the window reports it instead of dropping it as stale.
+    #[test]
+    fn a_panicking_launcher_answers_with_the_requests_generation() {
+        let (replies, reply_receiver) = async_channel::unbounded::<WorkerReply>();
+        let mut launch = Worker::start("test-launch-panic", {
+            let replies = replies.clone();
+            move |receiver: std_mpsc::Receiver<StartRequest>| {
+                run_launch_worker(
+                    receiver,
+                    replies,
+                    |_item: &Item, _request: &LaunchRequest| {
+                        panic!("the launcher exploded");
+                    },
+                );
+            }
+        });
+        launch.send(StartRequest {
+            item: Box::new(Item::new(0, "app", "Teste")),
+            mode: LaunchMode::Normal,
+            on_running: OnRunning::Activate,
+            generation: 42,
+        });
+        match reply_receiver.recv_blocking() {
+            Ok(WorkerReply::Launched {
+                generation,
+                outcome,
+                ..
+            }) => {
+                assert_eq!(generation, 42, "the reply must not look stale");
+                assert!(matches!(outcome, Err(LaunchError::Internal(_))));
+            }
+            _ => panic!("the panic must be reported as a reply"),
+        }
+        launch.stop(Duration::from_millis(500));
+    }
+
     #[test]
     fn the_kv_keys_follow_the_key_rules_of_the_store() {
         let mut hasher = DefaultHasher::new();
@@ -2117,7 +2490,7 @@ mod tests {
             kv: None,
             restored: Restored::default(),
             hooks: None,
-            worker: None,
+            workers: None,
             icons: IconCache::default(),
             group: 0,
             slot: Some(3),
@@ -2134,6 +2507,8 @@ mod tests {
             generation: 0,
             message: None,
             pending_hide: false,
+            revision: 0,
+            pending_usage: None,
         }
     }
 
