@@ -1417,12 +1417,14 @@ pub(crate) fn move_item_to_group(
             .map(|source| source.items.push(item));
         return false;
     };
-    let slot = first_free_slot(target);
-    item.slot = slot;
+    let new_slot = first_free_slot(target);
+    item.slot = new_slot;
     target.items.push(item);
     target.items.sort_by_key(|item| item.slot);
     // B3 and S3: the answer and the usage record follow the item into its new
-    // group and slot.
+    // group and slot. The source is the `slot` the caller named, not the one the
+    // item landed on (R1): with the two confused, the move took the records of
+    // whatever sat at `new_slot` in the source group.
     let from_id = state
         .config
         .groups
@@ -1434,12 +1436,12 @@ pub(crate) fn move_item_to_group(
         .get(to_group)
         .map(|group| group.id.clone());
     if let (Some(from_id), Some(to_id)) = (from_id.clone(), to_id.clone()) {
-        move_health(state, (&from_id, slot), (&to_id, slot));
+        move_health(state, (&from_id, slot), (&to_id, new_slot));
     }
     state.touch();
     mark_dirty(cx);
     if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
-        move_usage(cx, (from_id, slot), (to_id, slot));
+        move_usage(cx, (from_id, slot), (to_id, new_slot));
     }
     true
 }
@@ -3372,6 +3374,50 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    /// §12.2, R1: moving an item takes its own health and usage with it, and leaves
+    /// every other slot's records alone — including the one it lands on in the
+    /// destination group.
+    #[gpui::test]
+    fn a_move_takes_its_own_records_not_the_destination_slot_s(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut source = group_of(0);
+            source.id = "a".to_string();
+            source.items = vec![Item::new(0, "app", "X"), Item::new(5, "app", "Y")];
+            let mut target = group_of(0);
+            target.id = "b".to_string();
+            install(cx, vec![source, target]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            apply_health(cx, "a".to_string(), 0, Health::Missing);
+            apply_health(cx, "a".to_string(), 5, Health::Ok);
+            let x = KvKey::new(KV_NAMESPACE, "usage_a_0").expect("valid key");
+            let y = KvKey::new(KV_NAMESPACE, "usage_a_5").expect("valid key");
+            store.put(&x, b"x").expect("the test store");
+            store.put(&y, b"y").expect("the test store");
+            // Y (slot 5) moves to the empty group B, whose free slot 0 is also
+            // where X's records would be found by a shadowed source slot.
+            assert!(move_item_to_group(cx, 0, 5, 1));
+        });
+        cx.run_until_parked();
+        // X keeps both records.
+        let health = cx.update(|cx| (health_of(cx, 0, 0), health_of(cx, 0, 5)));
+        assert_eq!(health.0, Some(Health::Missing), "X keeps its health answer");
+        assert_eq!(health.1, None, "nothing is left at the old slot");
+        let moved = cx.update(|cx| health_of(cx, 1, 0));
+        assert_eq!(moved, Some(Health::Ok), "Y took its own answer along");
+        let x = KvKey::new(KV_NAMESPACE, "usage_a_0").expect("valid key");
+        assert_eq!(store.get(&x).expect("the test store"), Some(b"x".to_vec()));
+        let y = KvKey::new(KV_NAMESPACE, "usage_a_5").expect("valid key");
+        assert_eq!(store.get(&y).expect("the test store"), None);
+        let moved_usage = KvKey::new(KV_NAMESPACE, "usage_b_0").expect("valid key");
+        assert_eq!(
+            store.get(&moved_usage).expect("the test store"),
+            Some(b"y".to_vec())
+        );
     }
 
     /// §6, S3: a moved item takes its usage record with it, in one transaction.
