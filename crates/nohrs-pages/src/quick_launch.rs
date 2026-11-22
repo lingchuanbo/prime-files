@@ -1003,6 +1003,55 @@ fn apply_health(cx: &mut App, group: String, slot: u32, health: Health) {
     cx.refresh_windows();
 }
 
+/// Forgets the health answer of one item and asks for it again (§12.1, B3).
+///
+/// Called after anything that can change what an item points at, so a fixed
+/// path stops being grey without a restart.
+fn recheck_health(cx: &mut App, group: usize, slot: u32) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    let Some(group_id) = state.config.groups.get(group).map(|group| group.id.clone()) else {
+        return;
+    };
+    let item = state
+        .config
+        .groups
+        .get(group)
+        .and_then(|group| group.items.iter().find(|item| item.slot == slot))
+        .cloned();
+    state.health.remove(&(group_id.clone(), slot));
+    if let Some(item) = item
+        && let Some(workers) = state.workers.as_ref()
+    {
+        workers.send_health(HealthRequest {
+            group: group_id,
+            slot,
+            item: Box::new(item),
+        });
+    }
+}
+
+/// Carries the health answer of one item to the place it moved to (§12.1, B3).
+fn move_health(state: &mut QuickLaunch, from: (&str, u32), to: (&str, u32)) {
+    let from_key = (from.0.to_string(), from.1);
+    let to_key = (to.0.to_string(), to.1);
+    // Both are taken out first: a swap exchanges them, and a move into a free
+    // slot has nothing to bring back.
+    let from_health = state.health.remove(&from_key);
+    let to_health = state.health.remove(&to_key);
+    if let Some(health) = from_health {
+        state.health.insert(to_key, health);
+    }
+    if let Some(health) = to_health {
+        state.health.insert(from_key, health);
+    }
+}
+
+/// Drops every health answer of one group (§12.1, B3).
+fn forget_group_health(state: &mut QuickLaunch, group_id: &str) {
+    state.health.retain(|(id, _), _| id != group_id);
+}
 /// Whether one item is known to be broken, so the view can grey it (§12.1).
 pub(crate) fn is_missing(cx: &App, group: usize, slot: u32) -> bool {
     health_of(cx, group, slot).is_some_and(|health| health != Health::Ok)
@@ -1095,6 +1144,7 @@ pub(crate) fn put_item(cx: &mut App, group: usize, slot: u32, mut item: Item) ->
     target.items.sort_by_key(|item| item.slot);
     state.touch();
     mark_dirty(cx);
+    recheck_health(cx, group, slot);
     true
 }
 
@@ -1132,6 +1182,7 @@ pub(crate) fn edit_item(
     item.admin = admin;
     state.touch();
     mark_dirty(cx);
+    recheck_health(cx, group, slot);
     true
 }
 
@@ -1186,7 +1237,7 @@ pub(crate) fn delete_group(cx: &mut App, index: usize, force: bool) -> bool {
     if state.config.groups.len() <= 1 {
         return false;
     }
-    let removed: Vec<(String, u32)> = {
+    let (id, removed): (String, Vec<(String, u32)>) = {
         let Some(group) = state.config.groups.get(index) else {
             return false;
         };
@@ -1194,12 +1245,14 @@ pub(crate) fn delete_group(cx: &mut App, index: usize, force: bool) -> bool {
             return false;
         }
         let id = group.id.clone();
-        group
+        let removed = group
             .items
             .iter()
             .map(|item| (id.clone(), item.slot))
-            .collect()
+            .collect();
+        (id, removed)
     };
+    forget_group_health(state, &id);
     state.config.groups.remove(index);
     state.group = state.group.min(state.config.groups.len().saturating_sub(1));
     state.slot = None;
@@ -1231,6 +1284,7 @@ pub(crate) fn delete_item(cx: &mut App, group: usize, slot: u32) -> bool {
     if state.slot == Some(slot) {
         state.slot = None;
     }
+    state.health.remove(&(id.clone(), slot));
     state.touch();
     mark_dirty(cx);
     delete_usage(cx, vec![(id, slot)]);
@@ -1267,9 +1321,24 @@ pub(crate) fn move_item_to_group(
             .map(|source| source.items.push(item));
         return false;
     };
-    item.slot = first_free_slot(target);
+    let slot = first_free_slot(target);
+    item.slot = slot;
     target.items.push(item);
     target.items.sort_by_key(|item| item.slot);
+    // B3: the answer follows the item into its new group and slot.
+    let from_id = state
+        .config
+        .groups
+        .get(from_group)
+        .map(|group| group.id.clone());
+    let to_id = state
+        .config
+        .groups
+        .get(to_group)
+        .map(|group| group.id.clone());
+    if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
+        move_health(state, (&from_id, slot), (&to_id, slot));
+    }
     state.touch();
     mark_dirty(cx);
     true
@@ -1302,6 +1371,10 @@ pub(crate) fn swap_slots(cx: &mut App, group: usize, from: u32, to: u32) -> bool
         parked.slot = from;
     }
     target.items.sort_by_key(|item| item.slot);
+    // B3: the answers belong to the items, not to the slots.
+    if let Some(group_id) = state.config.groups.get(group).map(|group| group.id.clone()) {
+        move_health(state, (&group_id, from), (&group_id, to));
+    }
     state.touch();
     mark_dirty(cx);
     true
@@ -3042,6 +3115,95 @@ mod tests {
         });
     }
 
+    /// §12.1, B3: an edit forgets the old answer and asks for a new one.
+    #[gpui::test]
+    fn an_edit_forgets_the_health_of_that_item(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(2);
+            group.id = "general".to_string();
+            install(cx, vec![group]);
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            assert!(is_missing(cx, 0, 0));
+            assert!(edit_item(
+                cx,
+                0,
+                0,
+                "Novo",
+                "C:\\Windows\\System32\\notepad.exe",
+                "",
+                false
+            ));
+            assert_eq!(
+                health_of(cx, 0, 0),
+                None,
+                "the grey mark is gone until the icon thread answers"
+            );
+            // A second item keeps its answer: only the edited slot is cleared.
+            apply_health(cx, "general".to_string(), 1, Health::Missing);
+            assert!(put_item(cx, 0, 1, Item::new(1, "app", "Outro")));
+            assert_eq!(health_of(cx, 0, 1), None);
+        });
+    }
+
+    /// §12.1, B3: swapping two slots swaps their answers with them.
+    #[gpui::test]
+    fn a_swap_takes_the_health_along(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            group.items = vec![Item::new(0, "app", "A"), Item::new(2, "app", "B")];
+            install(cx, vec![group]);
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            apply_health(cx, "general".to_string(), 2, Health::Ok);
+            assert!(swap_slots(cx, 0, 0, 2));
+            assert_eq!(health_of(cx, 0, 2), Some(Health::Missing));
+            assert_eq!(health_of(cx, 0, 0), Some(Health::Ok));
+            // A move into a free slot carries the answer but leaves nothing
+            // behind.
+            assert!(swap_slots(cx, 0, 0, 5));
+            assert_eq!(health_of(cx, 0, 5), Some(Health::Ok));
+            assert_eq!(health_of(cx, 0, 0), None);
+        });
+    }
+
+    /// §12.1, B3: an item moved to another group takes its answer there.
+    #[gpui::test]
+    fn a_move_takes_the_health_to_the_new_group(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut source = group_of(0);
+            source.id = "general".to_string();
+            source.items = vec![Item::new(0, "app", "A")];
+            let mut target = group_of(0);
+            target.id = "dev".to_string();
+            install(cx, vec![source, target]);
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            assert!(move_item_to_group(cx, 0, 0, 1));
+            assert_eq!(health_of(cx, 0, 0), None, "nothing left behind");
+            assert_eq!(health_of(cx, 1, 0), Some(Health::Missing));
+        });
+    }
+
+    /// §12.1, B3: deleting an item or a group drops its answers.
+    #[gpui::test]
+    fn deletes_drop_the_health(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(2);
+            group.id = "general".to_string();
+            let mut second = group_of(1);
+            second.id = "dev".to_string();
+            install(cx, vec![group, second]);
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            apply_health(cx, "general".to_string(), 1, Health::Missing);
+            apply_health(cx, "dev".to_string(), 0, Health::Missing);
+            assert!(delete_item(cx, 0, 0));
+            assert_eq!(health_of(cx, 0, 0), None);
+            assert_eq!(health_of(cx, 0, 1), Some(Health::Missing));
+            assert!(delete_group(cx, 0, true));
+            assert_eq!(health_of(cx, 0, 1), None, "the whole group's answers go");
+            // The group left keeps its own answer, now under index 0.
+            assert_eq!(health_of(cx, 0, 0), Some(Health::Missing));
+        });
+    }
     /// §12.1: a broken item is greyed by the view, and one that is fine is
     /// not. The answers live in the state, never in the file.
     #[gpui::test]
