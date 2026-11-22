@@ -105,8 +105,7 @@ impl TransferProgress {
 
     /// Counts `count` top-level items finished, for a batch done in chunks.
     pub fn items_added(&self, count: usize) {
-        self.items_done
-            .fetch_add(count as u64, Ordering::Relaxed);
+        self.items_done.fetch_add(count as u64, Ordering::Relaxed);
     }
 
     /// Counts one file finished inside an item.
@@ -170,10 +169,7 @@ mod tests {
         progress.cancel();
         assert!(progress.cancelled());
         assert!(progress.snapshot().cancelled);
-        assert!(matches!(
-            check(Some(&progress)),
-            Err(Error::Cancelled)
-        ));
+        assert!(matches!(check(Some(&progress)), Err(Error::Cancelled)));
         assert!(check(None).is_ok());
     }
 }

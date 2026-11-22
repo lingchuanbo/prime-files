@@ -18,25 +18,40 @@ fn refresh_keeps_published_snapshot_and_coalesces_requests() {
 #[test]
 fn status_reports_published_entry_count_and_refresh_state() {
     let index = Index::default();
-    assert!(index.status().is_err(), "status is unavailable before the first snapshot");
+    assert!(
+        index.status().is_err(),
+        "status is unavailable before the first snapshot"
+    );
 
     let mut volume = protocol::Volume::new("C:");
     volume.push(0, "Users", true, 0, 10);
     volume.push(1, "note.txt", false, 4, 11);
     index.publish(vec![Arc::new(volume)]);
     assert_eq!(
-        Some(protocol::IndexStatus { ready: true, refreshing: false, entries: 3 }),
+        Some(protocol::IndexStatus {
+            ready: true,
+            refreshing: false,
+            entries: 3
+        }),
         index.status().ok()
     );
 
     index.refresh();
     assert_eq!(
-        Some(protocol::IndexStatus { ready: true, refreshing: true, entries: 3 }),
+        Some(protocol::IndexStatus {
+            ready: true,
+            refreshing: true,
+            entries: 3
+        }),
         index.status().ok()
     );
     index.publish(vec![Arc::new(protocol::Volume::new("D:"))]);
     assert_eq!(
-        Some(protocol::IndexStatus { ready: true, refreshing: false, entries: 1 }),
+        Some(protocol::IndexStatus {
+            ready: true,
+            refreshing: false,
+            entries: 1
+        }),
         index.status().ok()
     );
 }

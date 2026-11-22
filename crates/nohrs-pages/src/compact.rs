@@ -57,7 +57,11 @@ impl Reveal {
     /// already out do not redraw the window.
     pub fn set_hovered(&self, source: u8, hovered: bool, now: Instant) -> bool {
         let before = self.hovered.get();
-        let after = if hovered { before | source } else { before & !source };
+        let after = if hovered {
+            before | source
+        } else {
+            before & !source
+        };
         self.hovered.set(after);
         if (before != 0) != (after != 0) {
             self.hover_changed.set(Some(now));
@@ -103,7 +107,11 @@ impl Reveal {
         } else if !self.held.get() {
             let hovered = self.hovered.get() != 0;
             if hovered != self.shown.get() {
-                let delay = if hovered { settings.reveal_delay_ms } else { settings.hide_delay_ms };
+                let delay = if hovered {
+                    settings.reveal_delay_ms
+                } else {
+                    settings.hide_delay_ms
+                };
                 let since = self
                     .hover_changed
                     .get()

@@ -113,7 +113,11 @@ fn photo_folder(root: &Path) {
         let dir = root.join(format!("pasta {folder:02}"));
         fs::create_dir_all(&dir).unwrap();
         for file in 0..100u64 {
-            write_file(&dir.join(format!("arquivo {file:03}.bin")), 64 * 1024, folder * 1000 + file);
+            write_file(
+                &dir.join(format!("arquivo {file:03}.bin")),
+                64 * 1024,
+                folder * 1000 + file,
+            );
         }
     }
 }
@@ -138,12 +142,25 @@ fn main() {
     fs::create_dir_all(&base).unwrap();
 
     let cases = [
-        Case { name: "1 arquivo de 1 KB", build: one_small_file },
-        Case { name: "2.000 arquivos de 64 KB em 20 pastas", build: photo_folder },
-        Case { name: "1 arquivo de 512 MB", build: one_big_file },
+        Case {
+            name: "1 arquivo de 1 KB",
+            build: one_small_file,
+        },
+        Case {
+            name: "2.000 arquivos de 64 KB em 20 pastas",
+            build: photo_folder,
+        },
+        Case {
+            name: "1 arquivo de 512 MB",
+            build: one_big_file,
+        },
     ];
 
-    println!("{} rodadas alternadas, mediana, em {}", ROUNDS, base.display());
+    println!(
+        "{} rodadas alternadas, mediana, em {}",
+        ROUNDS,
+        base.display()
+    );
     for case in &cases {
         let here = base.join("a");
         let there = base.join("b");
@@ -152,11 +169,31 @@ fn main() {
 
         // Each side moves the tree once and must hand back the same tree.
         legacy::move_no_replace(&here, &there).unwrap();
-        assert!(!here.exists(), "{}: the old move left the source", case.name);
-        assert_eq!(manifest(&there), original, "{}: the old move changed the tree", case.name);
-        ops::move_path_no_replace(&there, &here).map_err(ops::ClaimFailure::into_error).unwrap();
-        assert!(!there.exists(), "{}: the new move left the source", case.name);
-        assert_eq!(manifest(&here), original, "{}: the new move changed the tree", case.name);
+        assert!(
+            !here.exists(),
+            "{}: the old move left the source",
+            case.name
+        );
+        assert_eq!(
+            manifest(&there),
+            original,
+            "{}: the old move changed the tree",
+            case.name
+        );
+        ops::move_path_no_replace(&there, &here)
+            .map_err(ops::ClaimFailure::into_error)
+            .unwrap();
+        assert!(
+            !there.exists(),
+            "{}: the new move left the source",
+            case.name
+        );
+        assert_eq!(
+            manifest(&here),
+            original,
+            "{}: the new move changed the tree",
+            case.name
+        );
 
         let mut before = Vec::new();
         let mut after = Vec::new();
@@ -165,10 +202,17 @@ fn main() {
             legacy::move_no_replace(&here, &there).unwrap();
             before.push(start.elapsed().as_secs_f64() * 1000.0);
             let start = Instant::now();
-            ops::move_path_no_replace(&there, &here).map_err(ops::ClaimFailure::into_error).unwrap();
+            ops::move_path_no_replace(&there, &here)
+                .map_err(ops::ClaimFailure::into_error)
+                .unwrap();
             after.push(start.elapsed().as_secs_f64() * 1000.0);
         }
-        assert_eq!(manifest(&here), original, "{}: the tree changed over the rounds", case.name);
+        assert_eq!(
+            manifest(&here),
+            original,
+            "{}: the tree changed over the rounds",
+            case.name
+        );
         println!(
             "{:<40} antes {:>10.2} ms   depois {:>8.3} ms",
             case.name,

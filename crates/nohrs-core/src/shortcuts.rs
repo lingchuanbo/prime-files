@@ -913,7 +913,10 @@ mod tests {
         assert_eq!(resolve(false, false, false, "delete"), Some(Action::Trash));
         // `+` with the Shift the layout needs for it.
         assert_eq!(resolve(true, false, true, "+"), Some(Action::ZoomIn));
-        assert_eq!(resolve(true, false, true, "c"), Some(Action::CopyNameAndPath));
+        assert_eq!(
+            resolve(true, false, true, "c"),
+            Some(Action::CopyNameAndPath)
+        );
     }
 
     #[test]

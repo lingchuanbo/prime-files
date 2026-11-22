@@ -134,84 +134,88 @@ pub fn render(
         .px(px(16.0))
         .py(px(12.0))
         .gap_2()
-        .when(!narrow, |this| this.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .flex_shrink_0()
-                .child(
-                    ListItem::new("nav-back")
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .when(!can_go_back, |this| this.opacity(0.35))
-                        .when(can_go_back, |this| {
-                            this.on_click(
-                                cx.listener(|view, _, window, cx| view.go_back(window, cx)),
-                            )
-                        })
-                        .child(
-                            Icon::new(IconName::ArrowLeft)
-                                .size_4()
-                                .text_color(rgb(theme::gray_600())),
-                        ),
-                )
-                .child(
-                    ListItem::new("nav-forward")
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .when(!can_go_forward, |this| this.opacity(0.35))
-                        .when(can_go_forward, |this| {
-                            this.on_click(
-                                cx.listener(|view, _, window, cx| view.go_forward(window, cx)),
-                            )
-                        })
-                        .child(
-                            Icon::new(IconName::ArrowRight)
-                                .size_4()
-                                .text_color(rgb(theme::gray_600())),
-                        ),
-                )
-                // Up and refresh beside back and forward, in Explorer's order.
-                .child(
-                    ListItem::new("nav-up")
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .when(!can_go_up, |this| this.opacity(0.35))
-                        .when(can_go_up, |this| {
-                            this.on_click(cx.listener(|view, _, window, cx| view.go_up(window, cx)))
-                        })
-                        .child(
-                            Icon::new(Icon::empty())
-                                .path("icons/arrow-up.svg")
-                                .size_4()
-                                .text_color(rgb(theme::gray_600())),
-                        ),
-                )
-                .child(
-                    ListItem::new("nav-refresh")
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .on_click(cx.listener(|view, _, _, cx| view.reload(cx)))
-                        .child(
-                            Icon::new(Icon::empty())
-                                .path("icons/refresh-cw.svg")
-                                .size_4()
-                                .text_color(rgb(theme::gray_600())),
-                        ),
-                )
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h(px(20.0))
-                        .bg(rgb(theme::border()))
-                        .mx(px(6.0)),
-                ),
-        ))
+        .when(!narrow, |this| {
+            this.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .child(
+                        ListItem::new("nav-back")
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .when(!can_go_back, |this| this.opacity(0.35))
+                            .when(can_go_back, |this| {
+                                this.on_click(
+                                    cx.listener(|view, _, window, cx| view.go_back(window, cx)),
+                                )
+                            })
+                            .child(
+                                Icon::new(IconName::ArrowLeft)
+                                    .size_4()
+                                    .text_color(rgb(theme::gray_600())),
+                            ),
+                    )
+                    .child(
+                        ListItem::new("nav-forward")
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .when(!can_go_forward, |this| this.opacity(0.35))
+                            .when(can_go_forward, |this| {
+                                this.on_click(
+                                    cx.listener(|view, _, window, cx| view.go_forward(window, cx)),
+                                )
+                            })
+                            .child(
+                                Icon::new(IconName::ArrowRight)
+                                    .size_4()
+                                    .text_color(rgb(theme::gray_600())),
+                            ),
+                    )
+                    // Up and refresh beside back and forward, in Explorer's order.
+                    .child(
+                        ListItem::new("nav-up")
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .when(!can_go_up, |this| this.opacity(0.35))
+                            .when(can_go_up, |this| {
+                                this.on_click(
+                                    cx.listener(|view, _, window, cx| view.go_up(window, cx)),
+                                )
+                            })
+                            .child(
+                                Icon::new(Icon::empty())
+                                    .path("icons/arrow-up.svg")
+                                    .size_4()
+                                    .text_color(rgb(theme::gray_600())),
+                            ),
+                    )
+                    .child(
+                        ListItem::new("nav-refresh")
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .on_click(cx.listener(|view, _, _, cx| view.reload(cx)))
+                            .child(
+                                Icon::new(Icon::empty())
+                                    .path("icons/refresh-cw.svg")
+                                    .size_4()
+                                    .text_color(rgb(theme::gray_600())),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(1.0))
+                            .h(px(20.0))
+                            .bg(rgb(theme::border()))
+                            .mx(px(6.0)),
+                    ),
+            )
+        })
         .child(match &page.path_edit {
             Some(state) => div()
                 .flex_1()

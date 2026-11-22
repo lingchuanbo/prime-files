@@ -44,12 +44,30 @@ pub enum Lang {
 
 impl Lang {
     /// Every language, in stable order for persisted language identifiers.
-    pub const ALL: [Lang; 9] =
-        [Lang::Pt, Lang::En, Lang::Es, Lang::Fr, Lang::De, Lang::It, Lang::Ru, Lang::Ja, Lang::Zh];
+    pub const ALL: [Lang; 9] = [
+        Lang::Pt,
+        Lang::En,
+        Lang::Es,
+        Lang::Fr,
+        Lang::De,
+        Lang::It,
+        Lang::Ru,
+        Lang::Ja,
+        Lang::Zh,
+    ];
 
     /// The order shown in the settings language picker.
-    pub const SETTINGS_ORDER: [Lang; 9] =
-        [Lang::Zh, Lang::En, Lang::Pt, Lang::Es, Lang::Fr, Lang::De, Lang::It, Lang::Ru, Lang::Ja];
+    pub const SETTINGS_ORDER: [Lang; 9] = [
+        Lang::Zh,
+        Lang::En,
+        Lang::Pt,
+        Lang::Es,
+        Lang::Fr,
+        Lang::De,
+        Lang::It,
+        Lang::Ru,
+        Lang::Ja,
+    ];
 
     /// The value `ui.language` stores for this language.
     pub fn code(self) -> &'static str {
@@ -110,7 +128,9 @@ impl Lang {
             "ES", "MX", "AR", "CO", "CL", "PE", "VE", "EC", "GT", "CU", "BO", "DO", "HN", "PY",
             "SV", "NI", "CR", "PA", "UY", "PR", "GQ",
         ];
-        const FRENCH: &[&str] = &["FR", "BE", "LU", "MC", "SN", "CI", "CM", "ML", "BF", "NE", "MG", "HT"];
+        const FRENCH: &[&str] = &[
+            "FR", "BE", "LU", "MC", "SN", "CI", "CM", "ML", "BF", "NE", "MG", "HT",
+        ];
         const GERMAN: &[&str] = &["DE", "AT", "CH", "LI"];
         const ITALIAN: &[&str] = &["IT", "SM", "VA"];
         const RUSSIAN: &[&str] = &["RU", "BY", "KZ", "KG"];
@@ -134,7 +154,10 @@ impl Lang {
     }
 
     fn from_u8(value: u8) -> Lang {
-        Lang::ALL.get(usize::from(value)).copied().unwrap_or(Lang::Pt)
+        Lang::ALL
+            .get(usize::from(value))
+            .copied()
+            .unwrap_or(Lang::Pt)
     }
 
     fn as_u8(self) -> u8 {
@@ -196,7 +219,12 @@ pub fn current() -> Lang {
 
 fn table() -> &'static HashMap<&'static str, (&'static str, &'static str)> {
     static TABLE: OnceLock<HashMap<&'static str, (&'static str, &'static str)>> = OnceLock::new();
-    TABLE.get_or_init(|| strings::STRINGS.iter().map(|&(pt, en, es)| (pt, (en, es))).collect())
+    TABLE.get_or_init(|| {
+        strings::STRINGS
+            .iter()
+            .map(|&(pt, en, es)| (pt, (en, es)))
+            .collect()
+    })
 }
 
 /// `key` in the current language. A key without a row comes back as it is
@@ -217,7 +245,10 @@ pub fn tr_in(lang: Lang, key: &'static str) -> &'static str {
         Lang::Pt => key,
         Lang::En => table().get(key).map_or(key, |row| row.0),
         Lang::Es => table().get(key).map_or(key, |row| row.1),
-        other => match other.extra_column().and_then(|column| extra_table().get(key)?.get(column)) {
+        other => match other
+            .extra_column()
+            .and_then(|column| extra_table().get(key)?.get(column))
+        {
             Some(text) => text,
             None => tr_in(Lang::En, key),
         },
@@ -289,7 +320,10 @@ macro_rules! k {
 
 /// Picks the singular or plural key by `count` and fills `{n}`.
 pub fn plural(count: usize, one: &'static str, many: &'static str) -> String {
-    fill(tr(if count == 1 { one } else { many }), &[("n", count.to_string())])
+    fill(
+        tr(if count == 1 { one } else { many }),
+        &[("n", count.to_string())],
+    )
 }
 
 #[cfg(test)]
@@ -315,9 +349,20 @@ mod tests {
         let mut seen = HashSet::new();
         for &(pt, en, es) in strings::STRINGS {
             assert!(seen.insert(pt), "duplicated row: {pt:?}");
-            assert!(!en.trim().is_empty() && !es.trim().is_empty(), "empty translation for {pt:?}");
-            assert_eq!(placeholders(pt), placeholders(en), "placeholders differ in English: {pt:?}");
-            assert_eq!(placeholders(pt), placeholders(es), "placeholders differ in Spanish: {pt:?}");
+            assert!(
+                !en.trim().is_empty() && !es.trim().is_empty(),
+                "empty translation for {pt:?}"
+            );
+            assert_eq!(
+                placeholders(pt),
+                placeholders(en),
+                "placeholders differ in English: {pt:?}"
+            );
+            assert_eq!(
+                placeholders(pt),
+                placeholders(es),
+                "placeholders differ in Spanish: {pt:?}"
+            );
         }
     }
 
@@ -367,7 +412,9 @@ mod tests {
     }
 
     fn walk(dir: &Path, found: &mut Vec<String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -385,29 +432,48 @@ mod tests {
     fn every_row_has_every_extra_language_with_its_placeholders() {
         let extra: std::collections::HashMap<&str, &[&str; 6]> =
             extra::EXTRA.iter().map(|(pt, row)| (*pt, row)).collect();
-        assert_eq!(extra.len(), extra::EXTRA.len(), "duplicated row in i18n/extra.rs");
+        assert_eq!(
+            extra.len(),
+            extra::EXTRA.len(),
+            "duplicated row in i18n/extra.rs"
+        );
         for &(pt, _, _) in strings::STRINGS {
-            let row = extra.get(pt).unwrap_or_else(|| panic!("no row in i18n/extra.rs for {pt:?}"));
+            let row = extra
+                .get(pt)
+                .unwrap_or_else(|| panic!("no row in i18n/extra.rs for {pt:?}"));
             for text in row.iter() {
                 assert!(!text.trim().is_empty(), "empty translation for {pt:?}");
-                assert_eq!(placeholders(pt), placeholders(text), "placeholders differ: {pt:?} -> {text:?}");
+                assert_eq!(
+                    placeholders(pt),
+                    placeholders(text),
+                    "placeholders differ: {pt:?} -> {text:?}"
+                );
             }
         }
         for (pt, _) in extra::EXTRA {
-            assert!(strings::STRINGS.iter().any(|row| row.0 == *pt), "row in extra.rs without one in strings.rs: {pt:?}");
+            assert!(
+                strings::STRINGS.iter().any(|row| row.0 == *pt),
+                "row in extra.rs without one in strings.rs: {pt:?}"
+            );
         }
     }
 
     #[test]
     fn languages_round_trip_through_their_stored_number() {
         assert_eq!(&Lang::SETTINGS_ORDER[..2], &[Lang::Zh, Lang::En]);
-        assert_eq!(tr_in(Lang::Zh, "Data de modificação sem grupos"), "修改时间（不分组）");
+        assert_eq!(
+            tr_in(Lang::Zh, "Data de modificação sem grupos"),
+            "修改时间（不分组）"
+        );
         for lang in Lang::ALL {
             assert_eq!(Lang::from_u8(lang.as_u8()), lang);
             assert_eq!(Lang::parse(lang.code()), Some(lang));
         }
         assert_eq!(tr_in(Lang::De, "Copiar"), "Kopieren");
-        assert_eq!(tr_in(Lang::Ja, "texto que não existe na tabela"), "texto que não existe na tabela");
+        assert_eq!(
+            tr_in(Lang::Ja, "texto que não existe na tabela"),
+            "texto que não existe na tabela"
+        );
     }
 
     #[test]
@@ -415,12 +481,22 @@ mod tests {
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let mut found = Vec::new();
         walk(&crates, &mut found);
-        assert!(found.len() > 100, "the scan found only {} keys; is it reading the crates?", found.len());
+        assert!(
+            found.len() > 100,
+            "the scan found only {} keys; is it reading the crates?",
+            found.len()
+        );
         let rows: HashSet<&str> = strings::STRINGS.iter().map(|row| row.0).collect();
-        let mut missing: Vec<&String> = found.iter().filter(|key| !rows.contains(key.as_str())).collect();
+        let mut missing: Vec<&String> = found
+            .iter()
+            .filter(|key| !rows.contains(key.as_str()))
+            .collect();
         missing.sort();
         missing.dedup();
-        assert!(missing.is_empty(), "keys without a row in i18n/strings.rs:\n{missing:#?}");
+        assert!(
+            missing.is_empty(),
+            "keys without a row in i18n/strings.rs:\n{missing:#?}"
+        );
     }
 
     #[test]
@@ -449,7 +525,10 @@ mod tests {
 
     #[test]
     fn missing_rows_fall_back_to_the_key() {
-        assert_eq!(tr_in(Lang::En, "texto que não existe na tabela"), "texto que não existe na tabela");
+        assert_eq!(
+            tr_in(Lang::En, "texto que não existe na tabela"),
+            "texto que não existe na tabela"
+        );
         assert_eq!(tr_in(Lang::En, "Copiar"), "Copy");
         assert_eq!(tr_in(Lang::Es, "Copiar"), "Copiar");
     }

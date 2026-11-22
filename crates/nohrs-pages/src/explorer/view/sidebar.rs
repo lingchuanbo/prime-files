@@ -868,9 +868,7 @@ fn favorite_with_drop_target(
     div()
         .relative()
         .child(row)
-        .when_some(submenu, |this, id| {
-            this.child(favorite_inside_zone(id, cx))
-        })
+        .when_some(submenu, |this, id| this.child(favorite_inside_zone(id, cx)))
         .child(favorite_gap_zone(
             &key("before"),
             parent,

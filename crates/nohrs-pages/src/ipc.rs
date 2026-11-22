@@ -133,9 +133,14 @@ pub fn current_path() -> Result<String, String> {
     let reply = send(json!({ "cmd": "current" }))
         .ok_or_else(|| "no running LumaFiles window responded".to_string())?;
     if reply["ok"] != true {
-        return Err(reply["error"].as_str().unwrap_or("no active explorer tab").to_string());
+        return Err(reply["error"]
+            .as_str()
+            .unwrap_or("no active explorer tab")
+            .to_string());
     }
-    reply["folder"].as_str().map(str::to_owned)
+    reply["folder"]
+        .as_str()
+        .map(str::to_owned)
         .ok_or_else(|| "invalid response from LumaFiles".to_string())
 }
 

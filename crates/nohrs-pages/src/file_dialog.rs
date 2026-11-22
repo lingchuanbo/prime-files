@@ -309,7 +309,10 @@ mod platform {
         unsafe { CloseHandle(process) }.ok();
         queried.ok()?;
         let path = String::from_utf16_lossy(&path[..length as usize]);
-        let name = std::path::Path::new(&path).file_name()?.to_string_lossy().to_lowercase();
+        let name = std::path::Path::new(&path)
+            .file_name()?
+            .to_string_lossy()
+            .to_lowercase();
         Some(name)
     }
 
@@ -320,7 +323,9 @@ mod platform {
     pub fn bring_forward(hwnd: isize) {
         // Nohrs is in front when this runs, which is what lets it hand the
         // foreground over.
-        unsafe { SetForegroundWindow(HWND(hwnd as *mut _)) }.ok().ok();
+        unsafe { SetForegroundWindow(HWND(hwnd as *mut _)) }
+            .ok()
+            .ok();
     }
 
     pub fn fill_and_open(hwnd: isize, paths: &[String]) -> bool {
@@ -360,7 +365,8 @@ mod platform {
 
     fn file_name_edit(dialog: HWND) -> Option<HWND> {
         if let Ok(combo) = unsafe { GetDlgItem(Some(dialog), FILE_NAME_COMBO) }
-            && let Ok(edit) = unsafe { FindWindowExW(Some(combo), None, w!("Edit"), PCWSTR::null()) }
+            && let Ok(edit) =
+                unsafe { FindWindowExW(Some(combo), None, w!("Edit"), PCWSTR::null()) }
         {
             return Some(edit);
         }
@@ -370,7 +376,12 @@ mod platform {
     fn set_text(edit: HWND, text: &str) {
         let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
-            SendMessageW(edit, WM_SETTEXT, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
+            SendMessageW(
+                edit,
+                WM_SETTEXT,
+                Some(WPARAM(0)),
+                Some(LPARAM(wide.as_ptr() as isize)),
+            );
         }
     }
 

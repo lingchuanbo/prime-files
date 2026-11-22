@@ -6,13 +6,16 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, WIN32_ERROR};
+use windows::Win32::Foundation::{
+    ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, WIN32_ERROR,
+};
 use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
 use windows::Win32::System::Services::{
-    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
-    OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SERVICE_ALL_ACCESS,
-    SERVICE_AUTO_START, SERVICE_CONFIG_DESCRIPTION, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL,
-    SERVICE_STATUS, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
+    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
+    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_HANDLE,
+    SC_MANAGER_ALL_ACCESS, SERVICE_ALL_ACCESS, SERVICE_AUTO_START, SERVICE_CONFIG_DESCRIPTION,
+    SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL, SERVICE_STATUS,
+    SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
 };
 use windows::core::{HSTRING, PWSTR};
 
@@ -42,14 +45,18 @@ impl Drop for Handle {
 }
 
 fn manager() -> io::Result<Handle> {
-    unsafe { OpenSCManagerW(None, None, SC_MANAGER_ALL_ACCESS) }.map(Handle).map_err(io::Error::from)
+    unsafe { OpenSCManagerW(None, None, SC_MANAGER_ALL_ACCESS) }
+        .map(Handle)
+        .map_err(io::Error::from)
 }
 
 fn open(manager: &Handle) -> io::Result<Option<Handle>> {
     let name = HSTRING::from(SERVICE_NAME);
     match unsafe { OpenServiceW(manager.0, &name, SERVICE_ALL_ACCESS) } {
         Ok(handle) => Ok(Some(Handle(handle))),
-        Err(error) if WIN32_ERROR::from_error(&error) == Some(ERROR_SERVICE_DOES_NOT_EXIST) => Ok(None),
+        Err(error) if WIN32_ERROR::from_error(&error) == Some(ERROR_SERVICE_DOES_NOT_EXIST) => {
+            Ok(None)
+        }
         Err(error) => Err(io::Error::from(error)),
     }
 }
@@ -62,7 +69,9 @@ fn stop(service: &Handle) {
     }
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(15) {
-        if unsafe { QueryServiceStatus(service.0, &mut status) }.is_err() || status.dwCurrentState == SERVICE_STOPPED {
+        if unsafe { QueryServiceStatus(service.0, &mut status) }.is_err()
+            || status.dwCurrentState == SERVICE_STOPPED
+        {
             return;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -87,7 +96,10 @@ pub fn install(allowed_sid: &str) -> io::Result<()> {
     if !same_file(&current, &target) {
         std::fs::copy(&current, &target)?;
     }
-    let command = HSTRING::from(format!("\"{}\" --service --allow {allowed_sid}", target.display()));
+    let command = HSTRING::from(format!(
+        "\"{}\" --service --allow {allowed_sid}",
+        target.display()
+    ));
     let display = HSTRING::from(DISPLAY_NAME);
     let service = match existing {
         Some(service) => {
@@ -134,15 +146,23 @@ pub fn install(allowed_sid: &str) -> io::Result<()> {
         }
     };
     let mut text: Vec<u16> = DESCRIPTION.encode_utf16().chain([0]).collect();
-    let description = SERVICE_DESCRIPTIONW { lpDescription: PWSTR(text.as_mut_ptr()) };
+    let description = SERVICE_DESCRIPTIONW {
+        lpDescription: PWSTR(text.as_mut_ptr()),
+    };
     if let Err(error) = unsafe {
-        ChangeServiceConfig2W(service.0, SERVICE_CONFIG_DESCRIPTION, Some(std::ptr::from_ref(&description).cast()))
+        ChangeServiceConfig2W(
+            service.0,
+            SERVICE_CONFIG_DESCRIPTION,
+            Some(std::ptr::from_ref(&description).cast()),
+        )
     } {
         crate::service::log(&format!("could not set the description: {error}"));
     }
     match unsafe { StartServiceW(service.0, None) } {
         Ok(()) => Ok(()),
-        Err(error) if WIN32_ERROR::from_error(&error) == Some(ERROR_SERVICE_ALREADY_RUNNING) => Ok(()),
+        Err(error) if WIN32_ERROR::from_error(&error) == Some(ERROR_SERVICE_ALREADY_RUNNING) => {
+            Ok(())
+        }
         Err(error) => Err(io::Error::from(error)),
     }
 }
@@ -161,7 +181,10 @@ pub fn uninstall() -> io::Result<()> {
         for path in [dir.join(EXE_NAME), dir.clone()] {
             let wide = HSTRING::from(path.as_os_str());
             if let Err(error) = unsafe { MoveFileExW(&wide, None, MOVEFILE_DELAY_UNTIL_REBOOT) } {
-                crate::service::log(&format!("could not schedule {} for removal: {error}", path.display()));
+                crate::service::log(&format!(
+                    "could not schedule {} for removal: {error}",
+                    path.display()
+                ));
             }
         }
     }

@@ -46,7 +46,9 @@ pub mod theme {
     pub fn parse_accent(value: &str) -> Option<u32> {
         let value = value.trim();
         if let Some(hex) = value.strip_prefix('#') {
-            return (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok()).flatten();
+            return (hex.len() == 6)
+                .then(|| u32::from_str_radix(hex, 16).ok())
+                .flatten();
         }
         NAMED_ACCENTS
             .iter()
@@ -56,7 +58,10 @@ pub mod theme {
 
     /// Replaces the palette's accent with `color`, or restores it with `None`.
     pub fn set_accent(color: Option<u32>) {
-        ACCENT.store(color.map_or(0, |color| ACCENT_SET | (color & 0xFF_FFFF)), Ordering::Relaxed);
+        ACCENT.store(
+            color.map_or(0, |color| ACCENT_SET | (color & 0xFF_FFFF)),
+            Ordering::Relaxed,
+        );
     }
 
     fn picked_accent() -> Option<u32> {
@@ -72,7 +77,10 @@ pub mod theme {
     /// chrome — and the text are shaded from it by [`custom`], so any colour
     /// stays usable rather than leaving white text on a white window.
     pub fn set_background(color: Option<u32>) {
-        BACKGROUND.store(color.map_or(0, |color| ACCENT_SET | (color & 0xFF_FFFF)), Ordering::Relaxed);
+        BACKGROUND.store(
+            color.map_or(0, |color| ACCENT_SET | (color & 0xFF_FFFF)),
+            Ordering::Relaxed,
+        );
     }
 
     /// The colour a `theme.background` value names: `#rrggbb` only. `None` for
@@ -153,7 +161,11 @@ pub mod theme {
     fn luminance(color: u32) -> f32 {
         let linear = |shift: u32| {
             let c = ((color >> shift) & 0xFF) as f32 / 255.0;
-            if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
         };
         0.2126 * linear(16) + 0.7152 * linear(8) + 0.0722 * linear(0)
     }
@@ -161,7 +173,11 @@ pub mod theme {
     // A picked accent, shaded for the palette in use the way the orange is:
     // darker on white so text on it still reads, lighter on the dark grays.
     fn shaded_accent(base: u32) -> u32 {
-        if is_dark() { mix(base, 0xFFFFFF, 0.12) } else { mix(base, 0x000000, 0.18) }
+        if is_dark() {
+            mix(base, 0xFFFFFF, 0.12)
+        } else {
+            mix(base, 0x000000, 0.18)
+        }
     }
 
     /// A file-type colour as the listing paints it: the same hue, shaded

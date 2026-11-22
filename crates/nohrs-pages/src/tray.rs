@@ -108,16 +108,16 @@ mod platform {
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Shell::{
-        ExtractIconExW, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+        ExtractIconExW, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
         Shell_NotifyIconW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-        DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION, IsIconic, LoadIconW, MSG,
-        MF_SEPARATOR, MF_STRING, PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_RESTORE,
-        SW_SHOW, SetForegroundWindow, ShowWindow, TrackPopupMenu, TranslateMessage,
-        TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-        WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_POPUP,
+        DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION, IsIconic, LoadIconW,
+        MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE,
+        SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+        TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND,
+        WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
 
@@ -195,12 +195,7 @@ mod platform {
         let window = WINDOW.load(Ordering::SeqCst);
         if window != 0 {
             unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(window as *mut _)),
-                    WM_CLOSE,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
+                let _ = PostMessageW(Some(HWND(window as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
         }
     }
@@ -209,12 +204,7 @@ mod platform {
         let window = WINDOW.load(Ordering::SeqCst);
         if window != 0 {
             unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(window as *mut _)),
-                    WM_SYNC,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
+                let _ = PostMessageW(Some(HWND(window as *mut _)), WM_SYNC, WPARAM(0), LPARAM(0));
             }
         }
     }
@@ -377,15 +367,8 @@ mod platform {
             .unwrap_or_default();
         let wide: Vec<u16> = exe.encode_utf16().chain(std::iter::once(0)).collect();
         let mut small = windows::Win32::UI::WindowsAndMessaging::HICON::default();
-        let extracted = unsafe {
-            ExtractIconExW(
-                PCWSTR(wide.as_ptr()),
-                0,
-                None,
-                Some(&mut small),
-                1,
-            )
-        };
+        let extracted =
+            unsafe { ExtractIconExW(PCWSTR(wide.as_ptr()), 0, None, Some(&mut small), 1) };
         if extracted > 0 && !small.is_invalid() {
             return Ok(small);
         }

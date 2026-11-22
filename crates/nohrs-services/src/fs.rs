@@ -8,7 +8,7 @@ pub mod listing;
 pub mod ops;
 /// Directory sizes as a tree, and the treemap layout that draws them.
 pub mod space;
-/// Listing, restoring from, and emptying the trash.
-pub mod trash;
 /// Progress and cancellation for long copy, move and delete runs.
 pub mod transfer;
+/// Listing, restoring from, and emptying the trash.
+pub mod trash;

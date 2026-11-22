@@ -164,7 +164,8 @@ pub fn init_logging_with_file(config: &FileLogConfig) -> LogGuard {
 // Installed whether or not the runtime log is on: a released window has no
 // console, so without this a crash with `diagnostics.runtime_log = false`
 // (the default) leaves nothing behind at all.
-static PANIC_LOG_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PANIC_LOG_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Record every panic in `panic.log` under `directory`, before the default hook
 /// runs. Safe to call more than once: only the first call installs the hook.

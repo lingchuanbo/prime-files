@@ -1,7 +1,7 @@
 //! Pinyin initials for the service's fallback filename search.
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use pinyin::ToPinyin;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const FIRST: u32 = 0x4E00;
 const LAST: u32 = 0x9FFF;

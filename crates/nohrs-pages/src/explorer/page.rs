@@ -225,9 +225,7 @@ pub fn rebind_shortcuts(cx: &mut App) {
             Action::ToggleSidebar => KeyBinding::new(keys, ToggleSidebar, context),
             Action::MoveTabToRightPane => KeyBinding::new(keys, MoveTabToRightPane, context),
             Action::MoveTabToLeftPane => KeyBinding::new(keys, MoveTabToLeftPane, context),
-            Action::OpenFolderInRightPane => {
-                KeyBinding::new(keys, OpenFolderInRightPane, context)
-            }
+            Action::OpenFolderInRightPane => KeyBinding::new(keys, OpenFolderInRightPane, context),
             Action::OpenFolderInLeftPane => KeyBinding::new(keys, OpenFolderInLeftPane, context),
             Action::SwapPanes => KeyBinding::new(keys, SwapPanes, context),
             Action::NextTab => KeyBinding::new(keys, NextTab, context),
@@ -260,7 +258,10 @@ fn clamp_index(index: usize, len: usize) -> usize {
 }
 
 #[derive(Clone)]
-struct ClosedTab { cwd: String, metadata: TabMetadata }
+struct ClosedTab {
+    cwd: String,
+    metadata: TabMetadata,
+}
 
 /// The explorer page: a 2-way split container over panes, each holding its own
 /// tabs. With a single pane and a single tab it renders exactly like an unsplit
@@ -618,45 +619,84 @@ impl ExplorerPage {
     }
 
     fn remember_closed_tab(&mut self, cwd: String, metadata: TabMetadata) {
-        self.recently_closed.retain(|item| !super::same_path(&item.cwd, &cwd));
+        self.recently_closed
+            .retain(|item| !super::same_path(&item.cwd, &cwd));
         self.recently_closed.insert(0, ClosedTab { cwd, metadata });
         self.recently_closed.truncate(20);
     }
 
-    fn restore_recent_tab(&mut self, pane_index: usize, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(closed) = self.recently_closed.get(index).cloned() else { return; };
-        let Some(tab) = self.group.add_tab(pane_index, window, cx) else { return; };
+    fn restore_recent_tab(
+        &mut self,
+        pane_index: usize,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(closed) = self.recently_closed.get(index).cloned() else {
+            return;
+        };
+        let Some(tab) = self.group.add_tab(pane_index, window, cx) else {
+            return;
+        };
         self.subscribe_tab(&tab, cx);
         self.configure_tab(&tab, Some(closed.cwd), false, cx);
-        self.group.set_tab_metadata(tab.entity_id(), closed.metadata);
+        self.group
+            .set_tab_metadata(tab.entity_id(), closed.metadata);
         let open_folders_in_new_tab = closed.metadata.open_folders_in_new_tab;
-        tab.update(cx, |pane, _| pane.open_folders_in_new_tab = open_folders_in_new_tab);
+        tab.update(cx, |pane, _| {
+            pane.open_folders_in_new_tab = open_folders_in_new_tab
+        });
         self.group.set_active(pane_index, window, cx);
         self.recently_closed.remove(index);
         self.schedule_save(cx);
         cx.notify();
     }
 
-    fn close_other_tabs(&mut self, pane_index: usize, keep: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_other_tabs(
+        &mut self,
+        pane_index: usize,
+        keep: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for index in (0..self.group.tab_count(pane_index)).rev() {
-            if self.group.tab(pane_index, index).is_some_and(|tab| tab.entity_id() != keep) {
+            if self
+                .group
+                .tab(pane_index, index)
+                .is_some_and(|tab| tab.entity_id() != keep)
+            {
                 self.close_tab_in_pane(pane_index, index, window, cx);
             }
         }
     }
 
-    fn close_duplicate_tabs(&mut self, pane_index: usize, keep: EntityId, window: &mut Window, cx: &mut Context<Self>) {
-        let keep_path = self.group.locate_tab(keep)
+    fn close_duplicate_tabs(
+        &mut self,
+        pane_index: usize,
+        keep: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keep_path = self
+            .group
+            .locate_tab(keep)
             .and_then(|(pane, index)| self.group.tab(pane, index))
             .map(|tab| tab.read(cx).cwd.clone());
         let mut seen: Vec<String> = keep_path.into_iter().collect();
         let mut close = Vec::new();
         for index in 0..self.group.tab_count(pane_index) {
-            let Some(tab) = self.group.tab(pane_index, index) else { continue; };
-            if tab.entity_id() == keep { continue; }
+            let Some(tab) = self.group.tab(pane_index, index) else {
+                continue;
+            };
+            if tab.entity_id() == keep {
+                continue;
+            }
             let cwd = tab.read(cx).cwd.clone();
-            if seen.iter().any(|path| super::same_path(path, &cwd)) { close.push(index); }
-            else { seen.push(cwd); }
+            if seen.iter().any(|path| super::same_path(path, &cwd)) {
+                close.push(index);
+            } else {
+                seen.push(cwd);
+            }
         }
         for index in close.into_iter().rev() {
             self.close_tab_in_pane(pane_index, index, window, cx);
@@ -714,9 +754,12 @@ impl ExplorerPage {
         // one, the pane the tab landed in.
         if self.group.tab_count(from_pane) == 0 {
             self.remove_pane_and_cleanup(from_pane, window, cx);
-            let target = if from_pane < to_pane { to_pane - 1 } else { to_pane };
-            let active_tab =
-                to_tab.min(self.group.tab_count(target).saturating_sub(1));
+            let target = if from_pane < to_pane {
+                to_pane - 1
+            } else {
+                to_pane
+            };
+            let active_tab = to_tab.min(self.group.tab_count(target).saturating_sub(1));
             self.group.set_active(target, window, cx);
             self.group.set_active_tab(target, active_tab, window, cx);
             self.group.focus_active(window, cx);
@@ -768,7 +811,12 @@ impl ExplorerPage {
 
     /// Ctrl+Shift+Right / Ctrl+Shift+Left: the pane in use's folder opens in
     /// that pane, which takes the keyboard.
-    fn open_active_folder_in(&mut self, to_pane: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_active_folder_in(
+        &mut self,
+        to_pane: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // In a text field Ctrl+Shift+arrows select words, so the shortcut only
         // acts from a listing.
         if !self.listing_focused(window, cx) {
@@ -825,15 +873,25 @@ impl ExplorerPage {
                 return;
             }
             PaneEvent::OpenFolderInNewTab(path) => {
-                let Some((pane, _)) = self.group.locate_tab(source.entity_id()) else { return; };
-                let Some(window) = cx.windows().into_iter().next() else { return; };
+                let Some((pane, _)) = self.group.locate_tab(source.entity_id()) else {
+                    return;
+                };
+                let Some(window) = cx.windows().into_iter().next() else {
+                    return;
+                };
                 let this = cx.entity().downgrade();
                 let path = path.clone();
                 cx.spawn(async move |_, cx| {
-                    window.update(cx, |_, window, cx| {
-                        this.update(cx, |page, cx| page.open_folder_in_new_tab(pane, path, window, cx)).log_err();
-                    }).log_err();
-                }).detach();
+                    window
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |page, cx| {
+                                page.open_folder_in_new_tab(pane, path, window, cx)
+                            })
+                            .log_err();
+                        })
+                        .log_err();
+                })
+                .detach();
                 return;
             }
         };
@@ -858,10 +916,20 @@ impl ExplorerPage {
         }
     }
 
-    fn open_folder_in_new_tab(&mut self, pane_index: usize, folder: String, window: &mut Window, cx: &mut Context<Self>) {
-        let sidebar_visible = self.group.tab(pane_index, self.group.active_tab(pane_index))
+    fn open_folder_in_new_tab(
+        &mut self,
+        pane_index: usize,
+        folder: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sidebar_visible = self
+            .group
+            .tab(pane_index, self.group.active_tab(pane_index))
             .is_some_and(|tab| tab.read(cx).sidebar_visible);
-        let Some(tab) = self.group.add_tab(pane_index, window, cx) else { return; };
+        let Some(tab) = self.group.add_tab(pane_index, window, cx) else {
+            return;
+        };
         self.subscribe_tab(&tab, cx);
         self.configure_tab(&tab, Some(folder), sidebar_visible, cx);
         self.group.set_active(pane_index, window, cx);
@@ -1201,14 +1269,19 @@ impl ExplorerPage {
         self.terminal_side = layout.terminal;
         self.group.set_vertical_tabs(layout.vertical_tabs);
         self.group.set_vertical_tabs_side(layout.vertical_tabs_side);
-        self.group.set_tab_layout(layout.tab_width_mode, layout.tab_width, layout.show_tab_numbers);
-        self.group.set_tab_display(crate::pane_group::TabDisplaySettings {
-            title_limit: layout.tab_title_limit,
-            show_icons: layout.show_tab_icons,
-            asterisk_locked: layout.asterisk_locked_tabs,
-            close_on_double_click: layout.close_tab_on_double_click,
-            click_activates_pane: layout.tab_click_activates_pane,
-        });
+        self.group.set_tab_layout(
+            layout.tab_width_mode,
+            layout.tab_width,
+            layout.show_tab_numbers,
+        );
+        self.group
+            .set_tab_display(crate::pane_group::TabDisplaySettings {
+                title_limit: layout.tab_title_limit,
+                show_icons: layout.show_tab_icons,
+                asterisk_locked: layout.asterisk_locked_tabs,
+                close_on_double_click: layout.close_tab_on_double_click,
+                click_activates_pane: layout.tab_click_activates_pane,
+            });
         for tab in self.group.active_tabs() {
             let show = layout.show_drive_letter_on_tabs;
             tab.update(cx, |pane, _| pane.show_drive_letter = show);
@@ -1540,12 +1613,16 @@ impl ExplorerPage {
         let position = self.tab_menu.map(|(_, position)| position);
         self.tab_menu = None;
         self.tab_menu_recent = false;
-        let Some((pane, index)) = self.group.locate_tab(id) else { cx.notify(); return; };
+        let Some((pane, index)) = self.group.locate_tab(id) else {
+            cx.notify();
+            return;
+        };
         if action >= 2000 {
             if let Some(tab) = self.group.all_tabs().get(action - 2000)
                 && let Some((target_pane, target_index)) = self.group.locate_tab(tab.entity_id())
             {
-                self.group.set_active_tab(target_pane, target_index, window, cx);
+                self.group
+                    .set_active_tab(target_pane, target_index, window, cx);
                 self.group.set_active(target_pane, window, cx);
                 self.schedule_save(cx);
             }
@@ -1562,31 +1639,68 @@ impl ExplorerPage {
         match action {
             0 => meta.pinned = !meta.pinned,
             1 => {
-                let count = self.group.all_tabs().iter().filter(|tab| self.group.tab_metadata(tab.entity_id()).resident).count();
-                if meta.resident || count < 6 { meta.resident = !meta.resident; }
+                let count = self
+                    .group
+                    .all_tabs()
+                    .iter()
+                    .filter(|tab| self.group.tab_metadata(tab.entity_id()).resident)
+                    .count();
+                if meta.resident || count < 6 {
+                    meta.resident = !meta.resident;
+                }
             }
             2 => {
-                let cwd = self.group.tab(pane, index).map(|tab| tab.read(cx).cwd.clone());
+                let cwd = self
+                    .group
+                    .tab(pane, index)
+                    .map(|tab| tab.read(cx).cwd.clone());
                 self.new_tab_in_pane(pane, window, cx);
-                if let (Some(cwd), Some(tab)) = (cwd, self.group.tab(pane, self.group.active_tab(pane))) {
-                    tab.update(cx, |tab, _| { tab.cwd = cwd; tab.loaded = false; });
+                if let (Some(cwd), Some(tab)) =
+                    (cwd, self.group.tab(pane, self.group.active_tab(pane)))
+                {
+                    tab.update(cx, |tab, _| {
+                        tab.cwd = cwd;
+                        tab.loaded = false;
+                    });
                 }
             }
             3 => self.new_tab_in_pane(pane, window, cx),
             4..=10 => {
-                const COLORS: [Option<u32>; 7] = [None, Some(0xe4ad5b), Some(0xeb6a6a), Some(0xe7a8d3), Some(0x9a8be8), Some(0x69aee9), Some(0x70c5a0)];
+                const COLORS: [Option<u32>; 7] = [
+                    None,
+                    Some(0xe4ad5b),
+                    Some(0xeb6a6a),
+                    Some(0xe7a8d3),
+                    Some(0x9a8be8),
+                    Some(0x69aee9),
+                    Some(0x70c5a0),
+                ];
                 meta.color = COLORS[action - 4];
             }
-            11 => { self.close_other_tabs(pane, id, window, cx); return; }
+            11 => {
+                self.close_other_tabs(pane, id, window, cx);
+                return;
+            }
             12 => {
                 self.tab_list_menu = position;
                 self.tab_menu = position.map(|position| (id, position));
                 cx.notify();
                 return;
             }
-            13 => { self.close_tab_in_pane(pane, index, window, cx); return; }
-            14 => { self.close_duplicate_tabs(pane, id, window, cx); return; }
-            15 => { meta.pinned = false; meta.resident = false; meta.locked = false; meta.open_folders_in_new_tab = false; }
+            13 => {
+                self.close_tab_in_pane(pane, index, window, cx);
+                return;
+            }
+            14 => {
+                self.close_duplicate_tabs(pane, id, window, cx);
+                return;
+            }
+            15 => {
+                meta.pinned = false;
+                meta.resident = false;
+                meta.locked = false;
+                meta.open_folders_in_new_tab = false;
+            }
             16 => meta.locked = !meta.locked,
             17 => meta.open_folders_in_new_tab = !meta.open_folders_in_new_tab,
             _ => return,
@@ -1630,8 +1744,22 @@ impl ExplorerPage {
             Vec::new()
         } else if vertical {
             vec![
-                (0, if meta.pinned { "取消固定标签页".to_string() } else { "固定标签页".to_string() }),
-                (1, if meta.resident { format!("取消常驻标签 ({count}/6)") } else { format!("添加常驻标签 ({count}/6)") }),
+                (
+                    0,
+                    if meta.pinned {
+                        "取消固定标签页".to_string()
+                    } else {
+                        "固定标签页".to_string()
+                    },
+                ),
+                (
+                    1,
+                    if meta.resident {
+                        format!("取消常驻标签 ({count}/6)")
+                    } else {
+                        format!("添加常驻标签 ({count}/6)")
+                    },
+                ),
                 (2, "添加克隆标签".to_string()),
                 (3, "新增标签".to_string()),
                 (11, "关闭其它所有标签".to_string()),
@@ -1640,8 +1768,22 @@ impl ExplorerPage {
         } else {
             vec![
                 (2, "复制标签".to_string()),
-                (16, if meta.locked { "取消锁定标签".to_string() } else { "锁定标签（允许当前标签导航）".to_string() }),
-                (17, if meta.open_folders_in_new_tab { "关闭文件夹新标签打开".to_string() } else { "锁定标签（文件夹在新标签打开）".to_string() }),
+                (
+                    16,
+                    if meta.locked {
+                        "取消锁定标签".to_string()
+                    } else {
+                        "锁定标签（允许当前标签导航）".to_string()
+                    },
+                ),
+                (
+                    17,
+                    if meta.open_folders_in_new_tab {
+                        "关闭文件夹新标签打开".to_string()
+                    } else {
+                        "锁定标签（文件夹在新标签打开）".to_string()
+                    },
+                ),
                 (15, "取消标签锁定".to_string()),
                 (12, "标签列表".to_string()),
                 (13, "关闭此标签".to_string()),
@@ -1649,24 +1791,62 @@ impl ExplorerPage {
                 (14, "关闭重复标签".to_string()),
             ]
         };
-        let mut rows = labels.into_iter().map(|(action, label)| {
-            let disabled = action == 1 && !meta.resident && count >= 6;
-            div()
-                .id(("tab-menu-action", action))
-                .h(px(32.0)).px(px(10.0)).flex().items_center().rounded(px(5.0)).text_sm()
-                .text_color(rgb(if disabled { theme::muted() } else { theme::fg() }))
-                .when(!disabled, |row| row.cursor_pointer().hover(|s| s.bg(rgb(theme::toolbar_hover())))
-                    .on_click(cx.listener(move |page, _, window, cx| page.perform_tab_menu(id, action, window, cx))))
-                .child(label)
-        }).collect::<Vec<_>>();
+        let mut rows = labels
+            .into_iter()
+            .map(|(action, label)| {
+                let disabled = action == 1 && !meta.resident && count >= 6;
+                div()
+                    .id(("tab-menu-action", action))
+                    .h(px(32.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.0))
+                    .text_sm()
+                    .text_color(rgb(if disabled {
+                        theme::muted()
+                    } else {
+                        theme::fg()
+                    }))
+                    .when(!disabled, |row| {
+                        row.cursor_pointer()
+                            .hover(|s| s.bg(rgb(theme::toolbar_hover())))
+                            .on_click(cx.listener(move |page, _, window, cx| {
+                                page.perform_tab_menu(id, action, window, cx)
+                            }))
+                    })
+                    .child(label)
+            })
+            .collect::<Vec<_>>();
         if self.tab_list_menu.is_some() {
-            rows = self.group.all_tabs().iter().enumerate().map(|(index, tab)| {
-                let name = std::path::Path::new(&tab.read(cx).cwd).file_name().and_then(|part| part.to_str()).unwrap_or("/").to_string();
-                div().id(("tab-list-item", index)).h(px(30.0)).px(px(10.0)).flex().items_center().rounded(px(5.0))
-                    .cursor_pointer().text_sm().text_color(rgb(theme::fg())).hover(|s| s.bg(rgb(theme::toolbar_hover())))
-                    .on_click(cx.listener(move |page, _, window, cx| page.perform_tab_menu(id, 2000 + index, window, cx)))
-                    .child(name)
-            }).collect();
+            rows = self
+                .group
+                .all_tabs()
+                .iter()
+                .enumerate()
+                .map(|(index, tab)| {
+                    let name = std::path::Path::new(&tab.read(cx).cwd)
+                        .file_name()
+                        .and_then(|part| part.to_str())
+                        .unwrap_or("/")
+                        .to_string();
+                    div()
+                        .id(("tab-list-item", index))
+                        .h(px(30.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.0))
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(rgb(theme::fg()))
+                        .hover(|s| s.bg(rgb(theme::toolbar_hover())))
+                        .on_click(cx.listener(move |page, _, window, cx| {
+                            page.perform_tab_menu(id, 2000 + index, window, cx)
+                        }))
+                        .child(name)
+                })
+                .collect();
         }
         // "Recently closed" is a fly-out to the right, so the menu itself stays
         // short whatever the list holds.
@@ -1691,7 +1871,9 @@ impl ExplorerPage {
                     .cursor_pointer()
                     .text_color(rgb(theme::fg()))
                     .hover(|s| s.bg(rgb(theme::toolbar_hover())))
-                    .on_click(cx.listener(move |page, _, window, cx| page.perform_tab_menu(id, 18, window, cx)))
+                    .on_click(cx.listener(move |page, _, window, cx| {
+                        page.perform_tab_menu(id, 18, window, cx)
+                    }))
                     .child(format!("最近关闭 ({})", self.recently_closed.len().min(8)))
                     .child(if self.tab_menu_recent { "▾" } else { "▸" }),
             );
@@ -1755,95 +1937,90 @@ impl ExplorerPage {
             })
             .collect::<Vec<_>>();
         let menu = deferred(
-                anchored()
-                    .position_mode(AnchoredPositionMode::Window)
-                    .position(point(px(0.0), px(0.0)))
-                    .child(
-                        div()
-                            .w(viewport.width)
-                            .h(viewport.height)
-                            .child(
-                                div()
-                                    .id("tab-menu-backdrop")
-                                    .absolute()
-                                    .w(viewport.width)
-                                    .h(viewport.height)
-                                    .occlude()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|page, _, _, cx| {
-                                            page.tab_menu = None;
-                                            cx.notify();
-                                        }),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        cx.listener(|page, _, _, cx| {
-                                            page.tab_menu = None;
-                                            cx.notify();
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(x))
-                                    .top(px(y))
-                                                                        .max_h(px((f32::from(viewport.height) - 16.0).max(120.0)))
-                                    .overflow_y_scrollbar()
-                                    .w(px(width))
-                                    .p(px(5.0))
-                                    .flex()
-                                    .flex_col()
-                                    .rounded(px(8.0))
-                                    .border_1()
-                                    .border_color(rgb(theme::border()))
-                                    .bg(rgb(theme::bg_secondary()))
-                                    .shadow_xl()
-                                    .occlude()
-                                    .children(rows)
-                                    .child(
-                                        div()
-                                            .px(px(10.0))
-                                            .pt(px(8.0))
-                                            .pb(px(6.0))
-                                            .text_sm()
-                                            .text_color(rgb(theme::muted()))
-                                            .child("标签颜色"),
-                                    )
-                                    .child(
-                                        div()
-                                            .px(px(10.0))
-                                            .pb(px(8.0))
-                                            .flex()
-                                            .gap(px(7.0))
-                                            .children(swatches),
-                                    ),
-                            ),
-                    ),
-            )
-            .with_priority(10)
-            .into_any_element();
-        let flyout = if self.tab_menu_recent
-            && !recent_rows.is_empty()
-            && self.tab_list_menu.is_none()
-        {
-            let flyout_left = if x + width + 6.0 + 260.0 > f32::from(viewport.width) {
-                (x - 266.0).max(0.0)
-            } else {
-                x + width + 6.0
-            };
-            let flyout_top = y + 5.0 + heading_at as f32 * 28.0;
-            Some(
-                deferred(
-                    anchored()
-                        .position_mode(AnchoredPositionMode::Window)
-                        .position(point(px(0.0), px(0.0)))
+            anchored()
+                .position_mode(AnchoredPositionMode::Window)
+                .position(point(px(0.0), px(0.0)))
+                .child(
+                    div()
+                        .w(viewport.width)
+                        .h(viewport.height)
                         .child(
                             div()
+                                .id("tab-menu-backdrop")
+                                .absolute()
                                 .w(viewport.width)
                                 .h(viewport.height)
+                                .occlude()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|page, _, _, cx| {
+                                        page.tab_menu = None;
+                                        cx.notify();
+                                    }),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(|page, _, _, cx| {
+                                        page.tab_menu = None;
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(x))
+                                .top(px(y))
+                                .max_h(px((f32::from(viewport.height) - 16.0).max(120.0)))
+                                .overflow_y_scrollbar()
+                                .w(px(width))
+                                .p(px(5.0))
+                                .flex()
+                                .flex_col()
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(rgb(theme::border()))
+                                .bg(rgb(theme::bg_secondary()))
+                                .shadow_xl()
+                                .occlude()
+                                .children(rows)
                                 .child(
+                                    div()
+                                        .px(px(10.0))
+                                        .pt(px(8.0))
+                                        .pb(px(6.0))
+                                        .text_sm()
+                                        .text_color(rgb(theme::muted()))
+                                        .child("标签颜色"),
+                                )
+                                .child(
+                                    div()
+                                        .px(px(10.0))
+                                        .pb(px(8.0))
+                                        .flex()
+                                        .gap(px(7.0))
+                                        .children(swatches),
+                                ),
+                        ),
+                ),
+        )
+        .with_priority(10)
+        .into_any_element();
+        let flyout =
+            if self.tab_menu_recent && !recent_rows.is_empty() && self.tab_list_menu.is_none() {
+                let flyout_left = if x + width + 6.0 + 260.0 > f32::from(viewport.width) {
+                    (x - 266.0).max(0.0)
+                } else {
+                    x + width + 6.0
+                };
+                let flyout_top = y + 5.0 + heading_at as f32 * 28.0;
+                Some(
+                    deferred(
+                        anchored()
+                            .position_mode(AnchoredPositionMode::Window)
+                            .position(point(px(0.0), px(0.0)))
+                            .child(
+                                div().w(viewport.width).h(viewport.height).child(
                                     div()
                                         .absolute()
                                         .left(px(flyout_left))
@@ -1860,14 +2037,14 @@ impl ExplorerPage {
                                         .occlude()
                                         .children(recent_rows),
                                 ),
-                        ),
+                            ),
+                    )
+                    .with_priority(11)
+                    .into_any_element(),
                 )
-                .with_priority(11)
-                .into_any_element(),
-            )
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         Some(div().child(menu).children(flyout).into_any_element())
     }
 
@@ -2740,14 +2917,19 @@ impl Render for ExplorerPage {
                     cx.notify();
                     return;
                 }
-                if event.keystroke.key == "escape" && (this.tab_menu.take().is_some() || this.tab_list_menu.take().is_some()) {
+                if event.keystroke.key == "escape"
+                    && (this.tab_menu.take().is_some() || this.tab_list_menu.take().is_some())
+                {
                     this.tab_list_menu = None;
                     cx.stop_propagation();
                     cx.notify();
                     return;
                 }
                 let modifiers = event.keystroke.modifiers;
-                if modifiers.alt && !modifiers.control && !modifiers.platform && !modifiers.shift
+                if modifiers.alt
+                    && !modifiers.control
+                    && !modifiers.platform
+                    && !modifiers.shift
                     && let Some(tab) = tab_shortcut_index(&event.keystroke.key)
                 {
                     let pane = this.group.active();

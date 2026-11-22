@@ -50,7 +50,11 @@ pub(crate) enum Gesture {
 
 /// The pointer's coordinate along the axis a panel on `side` is sized on.
 pub(crate) fn along(side: DockSide, point: Point<Pixels>) -> f32 {
-    if side.is_column() { f32::from(point.x) } else { f32::from(point.y) }
+    if side.is_column() {
+        f32::from(point.x)
+    } else {
+        f32::from(point.y)
+    }
 }
 
 /// +1 where moving the pointer toward larger coordinates grows the panel
@@ -99,9 +103,15 @@ pub(crate) fn nearest_side(bounds: Bounds<Pixels>, point: Point<Pixels>) -> Dock
     let height = f32::from(bounds.size.height).max(1.0);
     let distances = [
         (DockSide::Left, depth(DockSide::Left, bounds, point) / width),
-        (DockSide::Right, depth(DockSide::Right, bounds, point) / width),
+        (
+            DockSide::Right,
+            depth(DockSide::Right, bounds, point) / width,
+        ),
         (DockSide::Top, depth(DockSide::Top, bounds, point) / height),
-        (DockSide::Bottom, depth(DockSide::Bottom, bounds, point) / height),
+        (
+            DockSide::Bottom,
+            depth(DockSide::Bottom, bounds, point) / height,
+        ),
     ];
     distances
         .into_iter()
@@ -136,7 +146,12 @@ pub(crate) fn fit(sizes: &mut [(f32, f32)], ranges: &[(f32, f32)], total: f32, k
 /// mode slides it), with the separator line on its inner side.
 pub(crate) fn frame(side: DockSide, size: f32, amount: f32) -> Div {
     let shown = size * amount;
-    let base = div().relative().flex_shrink_0().flex().flex_col().overflow_hidden();
+    let base = div()
+        .relative()
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .overflow_hidden();
     let base = if side.is_column() {
         base.w(px(shown)).h_full()
     } else {
@@ -181,12 +196,25 @@ pub(crate) fn place_on_edge(strip: Stateful<Div>, side: DockSide, depth: f32) ->
 /// a line that lights up while it is held or under the mouse.
 pub(crate) fn strip(id: impl Into<ElementId>, side: DockSide, held: bool) -> Stateful<Div> {
     let line = div().bg(rgb(theme::accent()));
-    let line = if side.is_column() { line.w(px(1.0)).h_full() } else { line.h(px(1.0)).w_full() };
+    let line = if side.is_column() {
+        line.w(px(1.0)).h_full()
+    } else {
+        line.h(px(1.0)).w_full()
+    };
     // `occlude`: in gpui every hitbox under the pointer sees a press, not
     // only the top one, and the text editor in the preview took the drag of
     // its own edge as a selection (05/11/2026).
-    let base = div().id(id).occlude().flex().items_center().justify_center();
-    let base = if side.is_column() { base.cursor_col_resize() } else { base.cursor_row_resize() };
+    let base = div()
+        .id(id)
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center();
+    let base = if side.is_column() {
+        base.cursor_col_resize()
+    } else {
+        base.cursor_row_resize()
+    };
     base.hover(|style| style.bg(rgba((theme::accent() << 8) | 0x30)))
         .when(held, |this| this.child(line))
 }
@@ -272,15 +300,29 @@ mod tests {
     fn the_nearest_side_weighs_width_and_height_alike() {
         // 150 px from the left of a 1000 px wide area is 15%; 100 px from
         // the bottom of a 500 px tall one is 20%, so the left wins.
-        assert_eq!(nearest_side(area(), point(px(250.0), px(450.0))), DockSide::Left);
-        assert_eq!(nearest_side(area(), point(px(600.0), px(530.0))), DockSide::Bottom);
-        assert_eq!(nearest_side(area(), point(px(1080.0), px(300.0))), DockSide::Right);
+        assert_eq!(
+            nearest_side(area(), point(px(250.0), px(450.0))),
+            DockSide::Left
+        );
+        assert_eq!(
+            nearest_side(area(), point(px(600.0), px(530.0))),
+            DockSide::Bottom
+        );
+        assert_eq!(
+            nearest_side(area(), point(px(1080.0), px(300.0))),
+            DockSide::Right
+        );
     }
 
     #[test]
     fn the_inner_panel_gives_way_first() {
         let mut sizes = [(400.0, 0.0), (500.0, 0.0)];
-        fit(&mut sizes, &[(160.0, 520.0), (240.0, 2000.0)], 1000.0, 220.0);
+        fit(
+            &mut sizes,
+            &[(160.0, 520.0), (240.0, 2000.0)],
+            1000.0,
+            220.0,
+        );
         assert_eq!(sizes[0].0, 400.0);
         assert_eq!(sizes[1].0, 380.0);
         let mut sizes = [(400.0, 0.0), (500.0, 0.0)];

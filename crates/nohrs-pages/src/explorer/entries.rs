@@ -104,7 +104,10 @@ pub fn sort_entries_with(entries: &mut [FileEntryDto], settings: SortSettings) {
         .iter()
         .map(|entry| match key {
             SortKey::Name => RowKey::Name(SortName::new(&entry.name, method)),
-            SortKey::Type => RowKey::Name(SortName::new(&get_extension(&entry.name, &entry.kind), method)),
+            SortKey::Type => RowKey::Name(SortName::new(
+                &get_extension(&entry.name, &entry.kind),
+                method,
+            )),
             SortKey::Size => RowKey::Number(entry.size),
             SortKey::Modified => RowKey::Number(entry.modified),
         })
@@ -193,7 +196,9 @@ impl SortName {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn locale_key(name: &str, digits_as_numbers: bool) -> Vec<u8> {
-    use windows::Win32::Globalization::{LCMAP_SORTKEY, LCMapStringW, NORM_IGNORECASE, SORT_DIGITSASNUMBERS};
+    use windows::Win32::Globalization::{
+        LCMAP_SORTKEY, LCMapStringW, NORM_IGNORECASE, SORT_DIGITSASNUMBERS,
+    };
     use windows::core::PWSTR;
     // LOCALE_USER_DEFAULT, the locale `StrCmpLogicalW` compares in.
     const USER_LOCALE: u32 = 0x0400;
@@ -315,15 +320,29 @@ mod tests {
                     ..SortSettings::default()
                 },
             );
-            copy.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>()
+            copy.iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>()
         };
         // Plain codes: `1` sorts before `2`, so f10 comes first.
-        assert_eq!(sorted(SortMethod::Lowercase), ["A.txt", "b.txt", "f10.txt", "f2.txt"]);
-        assert_eq!(sorted(SortMethod::Uppercase), ["A.txt", "b.txt", "f10.txt", "f2.txt"]);
+        assert_eq!(
+            sorted(SortMethod::Lowercase),
+            ["A.txt", "b.txt", "f10.txt", "f2.txt"]
+        );
+        assert_eq!(
+            sorted(SortMethod::Uppercase),
+            ["A.txt", "b.txt", "f10.txt", "f2.txt"]
+        );
         // Numbers as numbers: 2 before 10.
-        assert_eq!(sorted(SortMethod::LowercaseNumeric), ["A.txt", "b.txt", "f2.txt", "f10.txt"]);
+        assert_eq!(
+            sorted(SortMethod::LowercaseNumeric),
+            ["A.txt", "b.txt", "f2.txt", "f10.txt"]
+        );
         #[cfg(windows)]
-        assert_eq!(sorted(SortMethod::LocaleNumeric), ["A.txt", "b.txt", "f2.txt", "f10.txt"]);
+        assert_eq!(
+            sorted(SortMethod::LocaleNumeric),
+            ["A.txt", "b.txt", "f2.txt", "f10.txt"]
+        );
     }
 
     #[test]
@@ -335,7 +354,11 @@ mod tests {
             size: 0,
             modified,
         };
-        let mut entries = vec![folder("b", 100), folder("a", 200), entry("c.txt", "file", 50)];
+        let mut entries = vec![
+            folder("b", 100),
+            folder("a", 200),
+            entry("c.txt", "file", 50),
+        ];
         let settings = |folders_by_name| SortSettings {
             key: SortKey::Modified,
             ascending: true,
@@ -573,7 +596,12 @@ mod tests {
         }
         let mut keyed: Vec<(SortName, &str)> = names
             .iter()
-            .map(|name| (SortName::new(name, SortMethod::LocaleNumeric), name.as_str()))
+            .map(|name| {
+                (
+                    SortName::new(name, SortMethod::LocaleNumeric),
+                    name.as_str(),
+                )
+            })
             .collect();
         keyed.sort_by(|a, b| a.0.cmp(&b.0));
         let disagreements: Vec<(&str, &str)> = keyed

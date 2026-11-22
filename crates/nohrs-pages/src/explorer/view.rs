@@ -595,7 +595,9 @@ fn render_body(
         preview::render(page, window, cx).into_any_element()
     } else {
         match super::tags::tag_of_location(&page.cwd) {
-            Some(tag) if page.view_mode == super::types::ViewMode::Grid => page.workspace_page(tag, cx),
+            Some(tag) if page.view_mode == super::types::ViewMode::Grid => {
+                page.workspace_page(tag, cx)
+            }
             Some(_) => listing::render(page, window, cx),
             None if page.space_map_open() => space_map::render(page, window, cx),
             None => listing::render(page, window, cx),

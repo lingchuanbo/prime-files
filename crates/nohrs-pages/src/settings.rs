@@ -14,17 +14,21 @@
 //! in one place that follows the window's width.
 
 use gpui::{
-    AnyElement, Bounds, Context, DispatchPhase, Div, ElementId, Entity, FocusHandle, ImageSource, KeyDownEvent,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, Window, canvas, div,
-    img, linear_color_stop, linear_gradient, prelude::*, px, rgb, MouseButton, Subscription, Task,
+    AnyElement, Bounds, Context, DispatchPhase, Div, ElementId, Entity, FocusHandle, ImageSource,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    SharedString, Stateful, Subscription, Task, Window, canvas, div, img, linear_color_stop,
+    linear_gradient, prelude::*, px, rgb,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
-use nohrs_core::config::{self, BarSize, Config, DockSide, DoubleClickEmpty, FileTypeColorRule, IconMode, IndexSource, ListRowHeight, SortMethod, SortOrder, SplitDirection, TabWidthMode, ThemeMode, TrayIcon};
+use nohrs_core::config::{
+    self, BarSize, Config, DockSide, DoubleClickEmpty, FileTypeColorRule, IconMode, IndexSource,
+    ListRowHeight, SortMethod, SortOrder, SplitDirection, TabWidthMode, ThemeMode, TrayIcon,
+};
 use nohrs_core::i18n::{self, Lang, tr};
-use nohrs_core::telemetry::LogErr;
 use nohrs_core::shortcuts::{self, Action, Chord};
+use nohrs_core::telemetry::LogErr;
 use nohrs_core::{k, t, tf};
 use nohrs_ui::theme::theme;
 
@@ -92,9 +96,13 @@ impl SettingsSection {
             Self::Appearance => t!("Tema, cores e como a lista se move."),
             Self::Compact => t!("Esconda as barras e deixe só os arquivos na tela."),
             Self::Files => t!("O que aparece em cada pasta e em que ordem."),
-            Self::Media => t!("Áudio e vídeo: ouvir passando o mouse, tocar no visualizador e ver a forma de onda."),
+            Self::Media => t!(
+                "Áudio e vídeo: ouvir passando o mouse, tocar no visualizador e ver a forma de onda."
+            ),
             Self::Search => t!("Encontrar qualquer arquivo do computador pelo nome."),
-            Self::Integrations => t!("Abrir no LumaFiles as pastas do Windows e de outros programas."),
+            Self::Integrations => {
+                t!("Abrir no LumaFiles as pastas do Windows e de outros programas.")
+            }
             Self::Shortcuts => t!("Mude as teclas de cada comando do explorador."),
             Self::About => t!("Versão, atualizações e o arquivo de configuração."),
         }
@@ -119,7 +127,15 @@ impl SettingsSection {
 }
 
 // Portuguese names for the accents `theme::NAMED_ACCENTS` knows, same order.
-pub(crate) const ACCENT_LABELS: &[&str] = &[k!("Laranja"), k!("Azul"), k!("Verde-água"), k!("Verde"), k!("Roxo"), k!("Rosa"), k!("Vermelho")];
+pub(crate) const ACCENT_LABELS: &[&str] = &[
+    k!("Laranja"),
+    k!("Azul"),
+    k!("Verde-água"),
+    k!("Verde"),
+    k!("Roxo"),
+    k!("Rosa"),
+    k!("Vermelho"),
+];
 
 // Keys that are not commands of the shortcut table: typing filters, Enter
 // opens, the wheel zooms. Listed beside the editable ones so the page still
@@ -169,7 +185,13 @@ struct Row {
 
 impl Row {
     fn new(label: &'static str, hint: Option<SharedString>, control: impl IntoElement) -> Self {
-        Self { label, hint, control: control.into_any_element(), reset: None, wide: false }
+        Self {
+            label,
+            hint,
+            control: control.into_any_element(),
+            reset: None,
+            wide: false,
+        }
     }
 
     fn hint(label: &'static str, hint: impl Into<SharedString>, control: impl IntoElement) -> Self {
@@ -183,7 +205,12 @@ impl Row {
 
     // A reset to `default` (TOML) for `[section] key`, offered when `current`
     // is not already it.
-    fn reset(mut self, (section, key): (&'static str, &'static str), is_default: bool, default: &'static str) -> Self {
+    fn reset(
+        mut self,
+        (section, key): (&'static str, &'static str),
+        is_default: bool,
+        default: &'static str,
+    ) -> Self {
         if !is_default {
             self.reset = Some(Pick::Config(section, key, SharedString::from(default)));
         }
@@ -203,7 +230,10 @@ impl Group {
     }
 
     fn titled(title: &'static str, rows: Vec<Row>) -> Self {
-        Self { title: Some(title), rows }
+        Self {
+            title: Some(title),
+            rows,
+        }
     }
 }
 
@@ -286,9 +316,11 @@ impl SettingsPage {
     /// Creates a new settings page on its first section.
     pub fn new(cx: &mut Context<Self>) -> Self {
         let updater = crate::updater::updater(cx);
-        cx.observe(&updater, |_page, _updater, cx| cx.notify()).detach();
+        cx.observe(&updater, |_page, _updater, cx| cx.notify())
+            .detach();
         // The search section shows the index's count while it is walked.
-        cx.observe_global::<crate::explorer::everything::Everything>(|_page, cx| cx.notify()).detach();
+        cx.observe_global::<crate::explorer::everything::Everything>(|_page, cx| cx.notify())
+            .detach();
         let mut page = Self {
             section: SettingsSection::General,
             config: Config::default(),
@@ -317,7 +349,9 @@ impl SettingsPage {
         page.refresh_listary(cx);
         page.index_status_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                let result = cx.background_spawn(async { everything::mft::index_status() }).await;
+                let result = cx
+                    .background_spawn(async { everything::mft::index_status() })
+                    .await;
                 let Ok(()) = this.update(cx, |_page, cx| {
                     let state = cx.default_global::<everything::Everything>();
                     let updated = everything::mft::apply_index_status_poll(
@@ -330,7 +364,9 @@ impl SettingsPage {
                 }) else {
                     return;
                 };
-                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
             }
         }));
         page
@@ -339,7 +375,10 @@ impl SettingsPage {
     // Asks the registry, off the UI thread: each question is a `reg.exe` run.
     fn refresh_default_explorer(&mut self, cx: &mut Context<Self>) {
         let query = cx.background_spawn(async {
-            (crate::default_explorer::is_default(), crate::default_explorer::starts_with_windows())
+            (
+                crate::default_explorer::is_default(),
+                crate::default_explorer::starts_with_windows(),
+            )
         });
         cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let (is_default, starts) = query.await;
@@ -358,7 +397,13 @@ impl SettingsPage {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.status = Some((tf!("Não foi possível achar o executável do LumaFiles: {error}", error = error), true));
+                self.status = Some((
+                    tf!(
+                        "Não foi possível achar o executável do LumaFiles: {error}",
+                        error = error
+                    ),
+                    true,
+                ));
                 cx.notify();
                 return;
             }
@@ -374,9 +419,18 @@ impl SettingsPage {
             let outcome = change.await;
             this.update(cx, |page, cx| {
                 page.status = Some(match outcome {
-                    Ok(()) if enable => (t!("Pastas, drives e Win+E agora abrem no LumaFiles.").to_string(), false),
-                    Ok(()) => (t!("Pastas voltaram a abrir no Explorador do Windows.").to_string(), false),
-                    Err(error) => (tf!("Não foi possível mudar o registro: {error}", error = error), true),
+                    Ok(()) if enable => (
+                        t!("Pastas, drives e Win+E agora abrem no LumaFiles.").to_string(),
+                        false,
+                    ),
+                    Ok(()) => (
+                        t!("Pastas voltaram a abrir no Explorador do Windows.").to_string(),
+                        false,
+                    ),
+                    Err(error) => (
+                        tf!("Não foi possível mudar o registro: {error}", error = error),
+                        true,
+                    ),
                 });
                 page.refresh_default_explorer(cx);
             })
@@ -389,17 +443,28 @@ impl SettingsPage {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.status = Some((tf!("Não foi possível achar o executável do LumaFiles: {error}", error = error), true));
+                self.status = Some((
+                    tf!(
+                        "Não foi possível achar o executável do LumaFiles: {error}",
+                        error = error
+                    ),
+                    true,
+                ));
                 cx.notify();
                 return;
             }
         };
-        let change = cx.background_spawn(async move { crate::default_explorer::set_starts_with_windows(&exe, enable) });
+        let change = cx.background_spawn(async move {
+            crate::default_explorer::set_starts_with_windows(&exe, enable)
+        });
         cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let outcome = change.await;
             this.update(cx, |page, cx| {
                 if let Err(error) = outcome {
-                    page.status = Some((tf!("Não foi possível mudar o registro: {error}", error = error), true));
+                    page.status = Some((
+                        tf!("Não foi possível mudar o registro: {error}", error = error),
+                        true,
+                    ));
                 }
                 page.refresh_default_explorer(cx);
             })
@@ -425,7 +490,13 @@ impl SettingsPage {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => {
-                self.status = Some((tf!("Não foi possível achar o executável do LumaFiles: {error}", error = error), true));
+                self.status = Some((
+                    tf!(
+                        "Não foi possível achar o executável do LumaFiles: {error}",
+                        error = error
+                    ),
+                    true,
+                ));
                 cx.notify();
                 return;
             }
@@ -444,9 +515,18 @@ impl SettingsPage {
             let outcome = change.await;
             this.update(cx, |page, cx| {
                 page.status = Some(match outcome {
-                    Ok(()) if enable => (t!("O Listary agora abre pastas no LumaFiles.").to_string(), false),
-                    Ok(()) => (t!("O Listary voltou a abrir pastas no Explorador.").to_string(), false),
-                    Err(error) => (tf!("Não foi possível mudar o Listary: {error}", error = error), true),
+                    Ok(()) if enable => (
+                        t!("O Listary agora abre pastas no LumaFiles.").to_string(),
+                        false,
+                    ),
+                    Ok(()) => (
+                        t!("O Listary voltou a abrir pastas no Explorador.").to_string(),
+                        false,
+                    ),
+                    Err(error) => (
+                        tf!("Não foi possível mudar o Listary: {error}", error = error),
+                        true,
+                    ),
                 });
                 page.refresh_listary(cx);
             })
@@ -461,12 +541,20 @@ impl SettingsPage {
             Pick::DefaultExplorer(enable) => self.set_default_explorer(enable, cx),
             Pick::Listary(enable) => self.set_listary(enable, cx),
             Pick::RecordShortcut(action) => {
-                self.recording = if self.recording == Some(action) { None } else { Some(action) };
+                self.recording = if self.recording == Some(action) {
+                    None
+                } else {
+                    Some(action)
+                };
                 cx.notify();
             }
             Pick::ClearShortcut(action) => {
                 self.recording = None;
-                self.edit_keybindings(vec![(shortcuts::info_of(action).id, Some(String::new()))], None, cx);
+                self.edit_keybindings(
+                    vec![(shortcuts::info_of(action).id, Some(String::new()))],
+                    None,
+                    cx,
+                );
             }
             Pick::ResetShortcut(action) => {
                 self.recording = None;
@@ -475,8 +563,15 @@ impl SettingsPage {
             Pick::StartWithWindows(enable) => self.set_start_with_windows(enable, cx),
             Pick::ResetAllShortcuts => {
                 self.recording = None;
-                let edits = shortcuts::ACTIONS.iter().map(|info| (info.id, None)).collect();
-                self.edit_keybindings(edits, Some(t!("Todos os atalhos voltaram ao padrão.").to_string()), cx);
+                let edits = shortcuts::ACTIONS
+                    .iter()
+                    .map(|info| (info.id, None))
+                    .collect();
+                self.edit_keybindings(
+                    edits,
+                    Some(t!("Todos os atalhos voltaram ao padrão.").to_string()),
+                    cx,
+                );
             }
         }
     }
@@ -496,7 +591,8 @@ impl SettingsPage {
                 match value {
                     // A TOML string: `ctrl-\` needs its backslash escaped.
                     Some(keys) => {
-                        let quoted = format!("\"{}\"", keys.replace('\\', "\\\\").replace('"', "\\\""));
+                        let quoted =
+                            format!("\"{}\"", keys.replace('\\', "\\\\").replace('"', "\\\""));
                         config::set_value(&path, "keybindings", id, &quoted)?
                     }
                     None => config::remove_value(&path, "keybindings", id)?,
@@ -514,7 +610,10 @@ impl SettingsPage {
                         }
                     }
                     Err(error) => {
-                        page.status = Some((tf!("Não foi possível salvar os atalhos: {error}", error = error), true));
+                        page.status = Some((
+                            tf!("Não foi possível salvar os atalhos: {error}", error = error),
+                            true,
+                        ));
                     }
                 }
                 cx.notify();
@@ -555,8 +654,10 @@ impl SettingsPage {
         }
         self.recording = None;
         let taken = shortcuts::conflicts(&self.config.keybindings.bindings, &chord, action);
-        let mut edits: Vec<(&'static str, Option<String>)> =
-            taken.iter().map(|other| (shortcuts::info_of(*other).id, Some(String::new()))).collect();
+        let mut edits: Vec<(&'static str, Option<String>)> = taken
+            .iter()
+            .map(|other| (shortcuts::info_of(*other).id, Some(String::new())))
+            .collect();
         edits.push((shortcuts::info_of(action).id, Some(chord.to_config())));
         let mut message = tf!(
             "{keys} agora: {command}.",
@@ -564,7 +665,10 @@ impl SettingsPage {
             command = tr(shortcuts::info_of(action).label)
         );
         if !taken.is_empty() {
-            let others: Vec<&str> = taken.iter().map(|other| tr(shortcuts::info_of(*other).label)).collect();
+            let others: Vec<&str> = taken
+                .iter()
+                .map(|other| tr(shortcuts::info_of(*other).label))
+                .collect();
             message.push(' ');
             message.push_str(&tf!("Tirado de: {commands}.", commands = others.join(", ")));
         }
@@ -645,15 +749,19 @@ impl SettingsPage {
     fn save_space_map(&mut self, cx: &mut Context<Self>) {
         let mut bands = [0_u32; 3];
         let readable = self.space_map_bands.len() == 3
-            && self.space_map_bands.iter().enumerate().all(|(index, input)| {
-                match input.read(cx).value().trim().parse::<u32>() {
-                    Ok(value) if value > 0 => {
-                        bands[index] = value;
-                        true
-                    }
-                    _ => false,
-                }
-            })
+            && self
+                .space_map_bands
+                .iter()
+                .enumerate()
+                .all(
+                    |(index, input)| match input.read(cx).value().trim().parse::<u32>() {
+                        Ok(value) if value > 0 => {
+                            bands[index] = value;
+                            true
+                        }
+                        _ => false,
+                    },
+                )
             && bands[0] > bands[1]
             && bands[1] > bands[2];
         let colors: Vec<String> = self
@@ -661,11 +769,17 @@ impl SettingsPage {
             .iter()
             .map(|input| {
                 let value = input.read(cx).value().trim().to_string();
-                if value.starts_with('#') { value } else { format!("#{value}") }
+                if value.starts_with('#') {
+                    value
+                } else {
+                    format!("#{value}")
+                }
             })
             .collect();
         let colored = colors.len() == 4
-            && colors.iter().all(|color| theme::parse_color(color).is_some());
+            && colors
+                .iter()
+                .all(|color| theme::parse_color(color).is_some());
         if !readable || !colored {
             self.status = Some((
                 t!("Digite três tamanhos decrescentes em GB e quatro cores #rrggbb.").to_string(),
@@ -683,7 +797,14 @@ impl SettingsPage {
         self.write(
             "space_map",
             "colors",
-            format!("[{}]", colors.iter().map(|color| format!("\"{color}\"")).collect::<Vec<_>>().join(", ")),
+            format!(
+                "[{}]",
+                colors
+                    .iter()
+                    .map(|color| format!("\"{color}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             cx,
         );
     }
@@ -727,31 +848,40 @@ impl SettingsPage {
                 .flex_shrink_0()
                 .child(Input::new(input).small())
         });
-        let colors = self.space_map_colors.iter().enumerate().map(|(index, input)| {
-            let swatch = theme::parse_color(input.read(cx).value().trim()).unwrap_or(theme::accent());
-            let color_input = input.clone();
-            div()
-                .id(("space-map-color-swatch", index))
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .id(("space-map-color-picker", index))
-                        .size(px(16.0))
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .bg(rgb(swatch))
-                        .on_click(cx.listener(move |page, _, _, cx| {
-                            let value = color_input.read(cx).value().to_string();
-                            page.toggle_color_wheel(WheelTarget::SpaceMapColor(index), &value, cx);
-                        })),
-                )
-                .child(div().w(px(96.0)).child(Input::new(input).small()))
-        });
+        let colors = self
+            .space_map_colors
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let swatch =
+                    theme::parse_color(input.read(cx).value().trim()).unwrap_or(theme::accent());
+                let color_input = input.clone();
+                div()
+                    .id(("space-map-color-swatch", index))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id(("space-map-color-picker", index))
+                            .size(px(16.0))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .bg(rgb(swatch))
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                let value = color_input.read(cx).value().to_string();
+                                page.toggle_color_wheel(
+                                    WheelTarget::SpaceMapColor(index),
+                                    &value,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(div().w(px(96.0)).child(Input::new(input).small()))
+            });
         div()
             .flex()
             .flex_col()
@@ -786,11 +916,22 @@ impl SettingsPage {
                     )
                     .children(colors),
             )
-            .when(self.wheel.as_ref().is_some_and(|wheel| matches!(wheel.target, WheelTarget::SpaceMapColor(_))), |this| {
-                if let Some(target) = self.wheel.as_ref().map(|wheel| wheel.target) {
-                    if let Some(row) = self.wheel_row(target, cx) { this.child(row.control) } else { this }
-                } else { this }
-            })
+            .when(
+                self.wheel
+                    .as_ref()
+                    .is_some_and(|wheel| matches!(wheel.target, WheelTarget::SpaceMapColor(_))),
+                |this| {
+                    if let Some(target) = self.wheel.as_ref().map(|wheel| wheel.target) {
+                        if let Some(row) = self.wheel_row(target, cx) {
+                            this.child(row.control)
+                        } else {
+                            this
+                        }
+                    } else {
+                        this
+                    }
+                },
+            )
             .child(
                 div()
                     .flex()
@@ -842,7 +983,11 @@ impl SettingsPage {
 
     fn save_file_type_colors(&mut self, cx: &mut Context<Self>) {
         self.capture_file_type_color_inputs(cx);
-        if self.file_type_color_draft.iter().any(|rule| !rule.is_valid()) {
+        if self
+            .file_type_color_draft
+            .iter()
+            .any(|rule| !rule.is_valid())
+        {
             self.status = Some((t!("Digite padrões de nome separados por ponto e vírgula e uma cor #rrggbb para cada regra.").to_string(), true));
             cx.notify();
             return;
@@ -851,7 +996,8 @@ impl SettingsPage {
             .file_type_color_draft
             .iter()
             .map(|rule| {
-                let pattern = serde_json::to_string(&rule.pattern).unwrap_or_else(|_| "\"\"".into());
+                let pattern =
+                    serde_json::to_string(&rule.pattern).unwrap_or_else(|_| "\"\"".into());
                 let color = serde_json::to_string(&rule.color).unwrap_or_else(|_| "\"\"".into());
                 format!("{{ pattern = {pattern}, color = {color} }}")
             })
@@ -860,7 +1006,12 @@ impl SettingsPage {
         self.write("ui", "file_type_colors", format!("[{values}]"), cx);
     }
 
-    fn edit_file_type_color_rules(&mut self, action: FileColorRuleAction, window: &mut Window, cx: &mut Context<Self>) {
+    fn edit_file_type_color_rules(
+        &mut self,
+        action: FileColorRuleAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.capture_file_type_color_inputs(cx);
         match action {
             FileColorRuleAction::Add => self.file_type_color_draft.push(FileTypeColorRule {
@@ -872,10 +1023,14 @@ impl SettingsPage {
                     self.file_type_color_draft.remove(index);
                 }
             }
-            FileColorRuleAction::MoveUp(index) if index > 0 && index < self.file_type_color_draft.len() => {
+            FileColorRuleAction::MoveUp(index)
+                if index > 0 && index < self.file_type_color_draft.len() =>
+            {
                 self.file_type_color_draft.swap(index, index - 1);
             }
-            FileColorRuleAction::MoveDown(index) if index + 1 < self.file_type_color_draft.len() => {
+            FileColorRuleAction::MoveDown(index)
+                if index + 1 < self.file_type_color_draft.len() =>
+            {
                 self.file_type_color_draft.swap(index, index + 1);
             }
             _ => {}
@@ -885,7 +1040,11 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn app_name_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+    fn app_name_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
         if let Some(input) = &self.app_name {
             return input.clone();
         }
@@ -897,14 +1056,18 @@ impl SettingsPage {
             state.set_placeholder(t!("Nome do aplicativo"), window, cx);
             state.set_value(self.config.ui.app_name.clone(), window, cx);
         });
-        let subscription = cx.subscribe_in(&input, window, |page, input, event: &InputEvent, _window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                let value = input.read(cx).value().trim().to_string();
-                if let Ok(value) = serde_json::to_string(&value) {
-                    page.write("ui", "app_name", value, cx);
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |page, input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let value = input.read(cx).value().trim().to_string();
+                    if let Ok(value) = serde_json::to_string(&value) {
+                        page.write("ui", "app_name", value, cx);
+                    }
                 }
-            }
-        });
+            },
+        );
         self.app_name = Some(input.clone());
         self._app_name_subscription = Some(subscription);
         input
@@ -956,28 +1119,40 @@ impl SettingsPage {
             .w_full()
             .child(Input::new(&input))
             .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(button("ignore-list-save", t!("Salvar lista"), false).on_click(
-                        cx.listener(|page, _, _, cx| page.save_ignore_list(cx)),
-                    )),
+                div().flex().gap_2().child(
+                    button("ignore-list-save", t!("Salvar lista"), false)
+                        .on_click(cx.listener(|page, _, _, cx| page.save_ignore_list(cx))),
+                ),
             )
     }
 
     // Writes one value; the watcher brings it back through `set_config`.
-    fn write(&mut self, section: &'static str, key: &'static str, value: String, cx: &mut Context<Self>) {
+    fn write(
+        &mut self,
+        section: &'static str,
+        key: &'static str,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
         if section == "storage" && key == "portable_mode" {
             let enabled = value == "true";
             let task = cx.background_spawn(async move { config::set_portable_mode(enabled) });
             cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
                 if let Err(error) = task.await {
                     this.update(cx, |page, cx| {
-                        page.status = Some((tf!("Não foi possível alterar o armazenamento da configuração: {error}", error = error), true));
+                        page.status = Some((
+                            tf!(
+                                "Não foi possível alterar o armazenamento da configuração: {error}",
+                                error = error
+                            ),
+                            true,
+                        ));
                         cx.notify();
-                    }).log_err();
+                    })
+                    .log_err();
                 }
-            }).detach();
+            })
+            .detach();
             return;
         }
         let path = config::paths::config_file_for(section, key);
@@ -992,7 +1167,15 @@ impl SettingsPage {
         cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             if let Err(error) = write.await {
                 this.update(cx, |page, cx| {
-                    page.status = Some((tf!("Não foi possível salvar {section}.{key}: {error}", section = section, key = key, error = error), true));
+                    page.status = Some((
+                        tf!(
+                            "Não foi possível salvar {section}.{key}: {error}",
+                            section = section,
+                            key = key,
+                            error = error
+                        ),
+                        true,
+                    ));
                     cx.notify();
                 })
                 .log_err();
@@ -1006,14 +1189,31 @@ impl SettingsPage {
         // A first run may not have written it yet, and there is nothing to
         // open until it exists.
         if let Err(error) = config::ensure_exists(&path) {
-            self.status = Some((tf!("Não foi possível criar {path}: {error}", path = path.display(), error = error), true));
+            self.status = Some((
+                tf!(
+                    "Não foi possível criar {path}: {error}",
+                    path = path.display(),
+                    error = error
+                ),
+                true,
+            ));
             cx.notify();
             return;
         }
         // `explorer.exe <file>` hands it to whatever program `.toml` is
         // associated with, the same way a double click in the listing does.
-        if let Err(error) = std::process::Command::new("explorer.exe").arg(&path).spawn() {
-            self.status = Some((tf!("Não foi possível abrir {path}: {error}", path = path.display(), error = error), true));
+        if let Err(error) = std::process::Command::new("explorer.exe")
+            .arg(&path)
+            .spawn()
+        {
+            self.status = Some((
+                tf!(
+                    "Não foi possível abrir {path}: {error}",
+                    path = path.display(),
+                    error = error
+                ),
+                true,
+            ));
             cx.notify();
         }
     }
@@ -1027,7 +1227,10 @@ impl SettingsPage {
             command.arg(config::paths::config_dir());
         }
         if let Err(error) = command.spawn() {
-            self.status = Some((tf!("Não foi possível abrir a pasta: {error}", error = error), true));
+            self.status = Some((
+                tf!("Não foi possível abrir a pasta: {error}", error = error),
+                true,
+            ));
             cx.notify();
         }
     }
@@ -1046,11 +1249,17 @@ impl SettingsPage {
             this.update(cx, |page, cx| {
                 page.status = Some(match outcome {
                     Ok(Some(backup)) => (
-                        tf!("Configurações restauradas. A versão anterior ficou em {path}", path = backup.display()),
+                        tf!(
+                            "Configurações restauradas. A versão anterior ficou em {path}",
+                            path = backup.display()
+                        ),
                         false,
                     ),
                     Ok(None) => (t!("Configurações restauradas.").to_string(), false),
-                    Err(error) => (tf!("Não foi possível restaurar: {error}", error = error), true),
+                    Err(error) => (
+                        tf!("Não foi possível restaurar: {error}", error = error),
+                        true,
+                    ),
                 });
                 cx.notify();
             })
@@ -1291,12 +1500,7 @@ impl SettingsPage {
     // The background colours offered as dots; the first is the palette's own.
     // Any other colour goes in `[theme] background` in config.toml, where the
     // `#rrggbb` form is read as it is.
-    fn background_swatches(
-        &self,
-        cx: &mut Context<Self>,
-        chosen: &str,
-        own: bool,
-    ) -> Div {
+    fn background_swatches(&self, cx: &mut Context<Self>, chosen: &str, own: bool) -> Div {
         let palette = if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF };
         let presets: [(&str, u32); 6] = [
             ("", palette),
@@ -1306,30 +1510,45 @@ impl SettingsPage {
             ("#101828", 0x101828),
             ("#F5F1E8", 0xF5F1E8),
         ];
-        div().flex().flex_row().flex_wrap().gap_1().children(presets.into_iter().map(|(value, colour)| {
-            let selected = if value.is_empty() { !own } else { chosen.eq_ignore_ascii_case(value) };
-            div()
-                .id(ElementId::Name(SharedString::from(format!("background-{value}"))))
-                .w(px(36.0))
-                .h(px(28.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(theme::bg_hover())))
-                .on_click(cx.listener(move |page, _event, _window, cx| {
-                    page.write("theme", "background", format!("\"{value}\""), cx);
-                }))
-                .child(
-                    div()
-                        .size(px(20.0))
-                        .rounded_full()
-                        .bg(rgb(colour))
-                        .border_1()
-                        .border_color(rgb(if selected { theme::fg() } else { theme::border() })),
-                )
-        }))
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_1()
+            .children(presets.into_iter().map(|(value, colour)| {
+                let selected = if value.is_empty() {
+                    !own
+                } else {
+                    chosen.eq_ignore_ascii_case(value)
+                };
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "background-{value}"
+                    ))))
+                    .w(px(36.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::bg_hover())))
+                    .on_click(cx.listener(move |page, _event, _window, cx| {
+                        page.write("theme", "background", format!("\"{value}\""), cx);
+                    }))
+                    .child(
+                        div()
+                            .size(px(20.0))
+                            .rounded_full()
+                            .bg(rgb(colour))
+                            .border_1()
+                            .border_color(rgb(if selected {
+                                theme::fg()
+                            } else {
+                                theme::border()
+                            })),
+                    )
+            }))
     }
 
     // The font list: every family the system knows, by the name it is
@@ -1339,8 +1558,12 @@ impl SettingsPage {
         if self.font_select.is_some() {
             return;
         }
-        let mut fonts: Vec<SharedString> =
-            cx.text_system().all_font_names().into_iter().map(SharedString::from).collect();
+        let mut fonts: Vec<SharedString> = cx
+            .text_system()
+            .all_font_names()
+            .into_iter()
+            .map(SharedString::from)
+            .collect();
         fonts.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
         fonts.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
         let state = cx.new(|cx| SelectState::new(SearchableVec::new(fonts), None, window, cx));
@@ -1360,7 +1583,11 @@ impl SettingsPage {
     // The row's control: the searchable list of installed families.
     fn font_select(&self) -> Div {
         let current = self.config.ui.font_family.trim().to_string();
-        let shown = if current.is_empty() { t!("Padrão").to_string() } else { current };
+        let shown = if current.is_empty() {
+            t!("Padrão").to_string()
+        } else {
+            current
+        };
         div().flex().items_center().gap_2().children(
             self.font_select
                 .clone()
@@ -1408,9 +1635,15 @@ impl SettingsPage {
     // The wheel's button, beside the presets: it opens the ring under them and
     // shows the colour in use.
     fn wheel_button(&self, background: String, cx: &mut Context<Self>) -> Stateful<Div> {
-        let open = self.wheel.as_ref().is_some_and(|wheel| wheel.target == WheelTarget::Background);
-        let color = theme::parse_color(&background)
-            .unwrap_or(if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF });
+        let open = self
+            .wheel
+            .as_ref()
+            .is_some_and(|wheel| wheel.target == WheelTarget::Background);
+        let color = theme::parse_color(&background).unwrap_or(if theme::is_dark() {
+            0x1E1F22
+        } else {
+            0xFFFFFF
+        });
         div()
             .id("background-wheel-open")
             .flex()
@@ -1421,13 +1654,29 @@ impl SettingsPage {
             .rounded(px(6.0))
             .cursor_pointer()
             .border_1()
-            .border_color(rgb(if open { theme::accent() } else { theme::border() }))
+            .border_color(rgb(if open {
+                theme::accent()
+            } else {
+                theme::border()
+            }))
             .hover(|style| style.bg(rgb(theme::bg_hover())))
             .on_click(cx.listener(|page, _event, _window, cx| {
                 page.toggle_wheel(cx);
             }))
-            .child(div().size(px(16.0)).rounded_full().bg(rgb(color)).border_1().border_color(rgb(theme::border())))
-            .child(div().text_sm().text_color(rgb(theme::fg())).child(t!("Personalizada")))
+            .child(
+                div()
+                    .size(px(16.0))
+                    .rounded_full()
+                    .bg(rgb(color))
+                    .border_1()
+                    .border_color(rgb(theme::border())),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(theme::fg()))
+                    .child(t!("Personalizada")),
+            )
     }
 
     // Opens or closes the wheel, starting it on the colour in use.
@@ -1437,13 +1686,17 @@ impl SettingsPage {
     }
 
     fn toggle_color_wheel(&mut self, target: WheelTarget, value: &str, cx: &mut Context<Self>) {
-        if self.wheel.as_ref().is_some_and(|wheel| wheel.target == target) {
+        if self
+            .wheel
+            .as_ref()
+            .is_some_and(|wheel| wheel.target == target)
+        {
             self.wheel = None;
             cx.notify();
             return;
         }
-        let color = theme::parse_color(value)
-            .unwrap_or(if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF });
+        let color =
+            theme::parse_color(value).unwrap_or(if theme::is_dark() { 0x1E1F22 } else { 0xFFFFFF });
         self.wheel = Some(Wheel {
             hsv: Hsv::from_rgb(color),
             dragging: None,
@@ -1503,44 +1756,67 @@ impl SettingsPage {
             .border_1()
             .border_color(rgb(theme::border()))
             .cursor_pointer()
-            .bg(linear_gradient(90.0, linear_color_stop(hue, 0.0), linear_color_stop(gpui::black(), 1.0)))
+            .bg(linear_gradient(
+                90.0,
+                linear_color_stop(hue, 0.0),
+                linear_color_stop(gpui::black(), 1.0),
+            ))
             .child(pointer_events(entity, WheelPart::Brightness));
 
-        let panel = div()
-            .flex()
-            .items_center()
-            .gap_4()
-            .child(ring)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(div().text_sm().text_color(rgb(theme::muted())).child(t!("Brilho")))
-                    .child(brightness)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .size(px(28.0))
-                                    .rounded(px(6.0))
-                                    .bg(rgb(color))
-                                    .border_1()
-                                    .border_color(rgb(theme::border())),
-                            )
-                            .child(div().text_sm().text_color(rgb(theme::fg_secondary())).child(wheel.hsv.hex())),
-                    ),
-            );
+        let panel = div().flex().items_center().gap_4().child(ring).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(theme::muted()))
+                        .child(t!("Brilho")),
+                )
+                .child(brightness)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .size(px(28.0))
+                                .rounded(px(6.0))
+                                .bg(rgb(color))
+                                .border_1()
+                                .border_color(rgb(theme::border())),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(theme::fg_secondary()))
+                                .child(wheel.hsv.hex()),
+                        ),
+                ),
+        );
 
-        Some(Row::hint(t!("Escolher a cor"), t!("Arraste no anel e na barra."), panel).wide())
+        Some(
+            Row::hint(
+                t!("Escolher a cor"),
+                t!("Arraste no anel e na barra."),
+                panel,
+            )
+            .wide(),
+        )
     }
 
     // A press on the ring or the brightness bar: the colour follows the
     // pointer from here on, and the window previews it at once.
-    fn wheel_press(&mut self, part: WheelPart, bounds: Bounds<Pixels>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn wheel_press(
+        &mut self,
+        part: WheelPart,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(wheel) = self.wheel.as_mut() else {
             return;
         };
@@ -1564,13 +1840,21 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn wheel_apply(&mut self, part: WheelPart, bounds: Bounds<Pixels>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn wheel_apply(
+        &mut self,
+        part: WheelPart,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(wheel) = self.wheel.as_mut() else {
             return;
         };
         match part {
             WheelPart::Ring => {
-                let Some((hue, saturation)) = color_wheel::ring_hue_saturation(bounds, position) else {
+                let Some((hue, saturation)) = color_wheel::ring_hue_saturation(bounds, position)
+                else {
                     return;
                 };
                 wheel.hsv.h = hue;
@@ -1589,7 +1873,9 @@ impl SettingsPage {
             WheelTarget::FileTypeColor(index) => {
                 if let Some((_, input)) = self.file_type_color_inputs.get(index) {
                     input.update(cx, |state, cx| state.set_value(hex.clone(), window, cx));
-                    if let Some(rule) = self.file_type_color_draft.get_mut(index) { rule.color = hex; }
+                    if let Some(rule) = self.file_type_color_draft.get_mut(index) {
+                        rule.color = hex;
+                    }
                 }
             }
             WheelTarget::SpaceMapColor(index) => {
@@ -1647,14 +1933,23 @@ impl SettingsPage {
     // cannot read the current one still finds theirs.
     fn language_row(&self, cx: &mut Context<Self>) -> Row {
         let chosen = Lang::parse(&self.config.ui.language);
-        let mut options: Vec<(&'static str, bool, SharedString)> =
-            vec![(t!("Automático"), chosen.is_none(), SharedString::from("\"auto\""))];
+        let mut options: Vec<(&'static str, bool, SharedString)> = vec![(
+            t!("Automático"),
+            chosen.is_none(),
+            SharedString::from("\"auto\""),
+        )];
         for lang in Lang::SETTINGS_ORDER {
-            options.push((lang.native_name(), chosen == Some(lang), SharedString::from(format!("\"{}\"", lang.code()))));
+            options.push((
+                lang.native_name(),
+                chosen == Some(lang),
+                SharedString::from(format!("\"{}\"", lang.code())),
+            ));
         }
         let options: Vec<_> = options
             .into_iter()
-            .map(|(label, selected, value)| (label, selected, Pick::Config("ui", "language", value)))
+            .map(|(label, selected, value)| {
+                (label, selected, Pick::Config("ui", "language", value))
+            })
             .collect();
         Row::hint(
             t!("Idioma"),
@@ -1677,39 +1972,52 @@ impl SettingsPage {
         let ui = &self.config.ui;
 
         let swatches = div().flex().flex_row().flex_wrap().gap_1().children(
-            theme::NAMED_ACCENTS.iter().zip(ACCENT_LABELS).map(|(&(name, color), &label)| {
-                let selected = accent.eq_ignore_ascii_case(name)
-                    || (color.is_none() && theme::parse_accent(&accent).is_none());
-                let swatch = color.unwrap_or_else(theme::palette_accent);
-                div()
-                    .id(ElementId::Name(SharedString::from(format!("accent-{name}"))))
-                    .w(px(64.0))
-                    .py(px(6.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(theme::bg_hover())))
-                    .on_click(cx.listener(move |page, _event, _window, cx| {
-                        page.write("theme", "accent", format!("\"{name}\""), cx);
-                    }))
-                    .child(
-                        div()
-                            .size(px(28.0))
-                            .rounded_full()
-                            .bg(rgb(swatch))
-                            .border_2()
-                            .border_color(rgb(if selected { theme::fg() } else { theme::bg_secondary() })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(if selected { theme::fg() } else { theme::fg_secondary() }))
-                            .child(tr(label)),
-                    )
-            }),
+            theme::NAMED_ACCENTS
+                .iter()
+                .zip(ACCENT_LABELS)
+                .map(|(&(name, color), &label)| {
+                    let selected = accent.eq_ignore_ascii_case(name)
+                        || (color.is_none() && theme::parse_accent(&accent).is_none());
+                    let swatch = color.unwrap_or_else(theme::palette_accent);
+                    div()
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "accent-{name}"
+                        ))))
+                        .w(px(64.0))
+                        .py(px(6.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_1()
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(theme::bg_hover())))
+                        .on_click(cx.listener(move |page, _event, _window, cx| {
+                            page.write("theme", "accent", format!("\"{name}\""), cx);
+                        }))
+                        .child(
+                            div()
+                                .size(px(28.0))
+                                .rounded_full()
+                                .bg(rgb(swatch))
+                                .border_2()
+                                .border_color(rgb(if selected {
+                                    theme::fg()
+                                } else {
+                                    theme::bg_secondary()
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(if selected {
+                                    theme::fg()
+                                } else {
+                                    theme::fg_secondary()
+                                }))
+                                .child(tr(label)),
+                        )
+                }),
         );
 
         let mut groups = vec![Group::titled(
@@ -1975,7 +2283,11 @@ impl SettingsPage {
                         cx,
                     ),
                 )
-                .reset(("compact", "reveal_delay_ms"), compact.reveal_delay_ms == 100, "100"),
+                .reset(
+                    ("compact", "reveal_delay_ms"),
+                    compact.reveal_delay_ms == 100,
+                    "100",
+                ),
                 Row::hint(
                     t!("Espera para sumir"),
                     t!("Quanto tempo a barra fica depois que o mouse sai dela."),
@@ -1991,7 +2303,11 @@ impl SettingsPage {
                         cx,
                     ),
                 )
-                .reset(("compact", "hide_delay_ms"), compact.hide_delay_ms == 400, "400"),
+                .reset(
+                    ("compact", "hide_delay_ms"),
+                    compact.hide_delay_ms == 400,
+                    "400",
+                ),
                 Row::hint(
                     t!("Animação"),
                     t!("Duração do deslizar. Desligada, as barras aparecem e somem de uma vez."),
@@ -2007,7 +2323,11 @@ impl SettingsPage {
                         cx,
                     ),
                 )
-                .reset(("compact", "animation_ms"), compact.animation_ms == 220, "220"),
+                .reset(
+                    ("compact", "animation_ms"),
+                    compact.animation_ms == 220,
+                    "220",
+                ),
                 Row::hint(
                     t!("Área de ativação"),
                     t!("Largura da faixa em cada borda que chama a barra."),
@@ -2160,58 +2480,116 @@ impl SettingsPage {
     }
 
     fn file_type_color_editor(&self, cx: &mut Context<Self>) -> Div {
-        let rows = self.file_type_color_inputs.iter().enumerate().map(|(index, (pattern, color))| {
-            let color_input = color.clone();
-            let swatch = theme::parse_color(color.read(cx).value().trim()).unwrap_or(theme::accent());
-            div()
-                .id(("file-type-color-rule", index))
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().flex_1().min_w(px(110.0)).child(Input::new(pattern).small()))
-                .child(div().w(px(118.0)).flex_shrink_0().child(Input::new(color).small()))
-                .child(
+        let rows =
+            self.file_type_color_inputs
+                .iter()
+                .enumerate()
+                .map(|(index, (pattern, color))| {
+                    let color_input = color.clone();
+                    let swatch = theme::parse_color(color.read(cx).value().trim())
+                        .unwrap_or(theme::accent());
                     div()
-                        .id(("file-type-color-preview", index))
-                        .size(px(18.0))
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .bg(rgb(swatch))
-                        .on_click(cx.listener(move |page, _, _, cx| {
-                            let value = color_input.read(cx).value().to_string();
-                            page.toggle_color_wheel(WheelTarget::FileTypeColor(index), &value, cx);
-                        })),
-                )
-                .child(file_rule_button("↑", index, FileColorRuleAction::MoveUp(index), cx))
-                .child(file_rule_button("↓", index, FileColorRuleAction::MoveDown(index), cx))
-                .child(file_rule_button("×", index, FileColorRuleAction::Remove(index), cx))
-        });
+                        .id(("file-type-color-rule", index))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(110.0))
+                                .child(Input::new(pattern).small()),
+                        )
+                        .child(
+                            div()
+                                .w(px(118.0))
+                                .flex_shrink_0()
+                                .child(Input::new(color).small()),
+                        )
+                        .child(
+                            div()
+                                .id(("file-type-color-preview", index))
+                                .size(px(18.0))
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(rgb(theme::border()))
+                                .bg(rgb(swatch))
+                                .on_click(cx.listener(move |page, _, _, cx| {
+                                    let value = color_input.read(cx).value().to_string();
+                                    page.toggle_color_wheel(
+                                        WheelTarget::FileTypeColor(index),
+                                        &value,
+                                        cx,
+                                    );
+                                })),
+                        )
+                        .child(file_rule_button(
+                            "↑",
+                            index,
+                            FileColorRuleAction::MoveUp(index),
+                            cx,
+                        ))
+                        .child(file_rule_button(
+                            "↓",
+                            index,
+                            FileColorRuleAction::MoveDown(index),
+                            cx,
+                        ))
+                        .child(file_rule_button(
+                            "×",
+                            index,
+                            FileColorRuleAction::Remove(index),
+                            cx,
+                        ))
+                });
         div()
             .flex()
             .flex_col()
             .gap_2()
             .when(self.file_type_color_inputs.is_empty(), |this| {
-                this.child(div().text_xs().text_color(rgb(theme::muted())).child(t!("Ainda não há regras de cor.")))
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme::muted()))
+                        .child(t!("Ainda não há regras de cor.")),
+                )
             })
             .children(rows)
-            .when(self.wheel.as_ref().is_some_and(|wheel| matches!(wheel.target, WheelTarget::FileTypeColor(_))), |this| {
-                if let Some(target) = self.wheel.as_ref().map(|wheel| wheel.target) {
-                    if let Some(row) = self.wheel_row(target, cx) { this.child(row.control) } else { this }
-                } else { this }
-            })
+            .when(
+                self.wheel
+                    .as_ref()
+                    .is_some_and(|wheel| matches!(wheel.target, WheelTarget::FileTypeColor(_))),
+                |this| {
+                    if let Some(target) = self.wheel.as_ref().map(|wheel| wheel.target) {
+                        if let Some(row) = self.wheel_row(target, cx) {
+                            this.child(row.control)
+                        } else {
+                            this
+                        }
+                    } else {
+                        this
+                    }
+                },
+            )
             .child(
                 div()
                     .flex()
                     .gap_2()
-                    .child(button("file-type-color-add", t!("Adicionar regra de cor"), false).on_click(cx.listener(
-                        |page, _, window, cx| page.edit_file_type_color_rules(FileColorRuleAction::Add, window, cx),
-                    )))
-                    .child(button("file-type-color-save", t!("Salvar regras de cor"), false).on_click(cx.listener(
-                        |page, _, _, cx| page.save_file_type_colors(cx),
-                    )))
+                    .child(
+                        button("file-type-color-add", t!("Adicionar regra de cor"), false)
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                page.edit_file_type_color_rules(
+                                    FileColorRuleAction::Add,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        button("file-type-color-save", t!("Salvar regras de cor"), false)
+                            .on_click(cx.listener(|page, _, _, cx| page.save_file_type_colors(cx))),
+                    ),
             )
     }
 
@@ -2277,10 +2655,16 @@ impl SettingsPage {
         let refresh_feedback = if status.service_refreshing {
             Some(t!("Pedindo para reconstruir o índice…").to_string())
         } else {
-            status.service_refresh_result.as_ref().map(|result| match result {
-                Ok(()) => t!("O serviço de indexação aceitou o pedido.").to_string(),
-                Err(error) => format!("{} {error}", t!("Não foi possível pedir a reconstrução do índice:")),
-            })
+            status
+                .service_refresh_result
+                .as_ref()
+                .map(|result| match result {
+                    Ok(()) => t!("O serviço de indexação aceitou o pedido.").to_string(),
+                    Err(error) => format!(
+                        "{} {error}",
+                        t!("Não foi possível pedir a reconstrução do índice:")
+                    ),
+                })
         };
         // The own index's count while it is walked or read; with Everything
         // answering, what its index holds instead.
@@ -2302,10 +2686,14 @@ impl SettingsPage {
         } else {
             match (status.building, status.entries) {
                 (Some(found), _) => tf!("Indexando… {n} itens até agora", n = found),
-                (None, Some(entries)) => match status.built.and_then(|built| built.elapsed().ok()) {
-                    Some(age) => tf!("{n} itens, atualizado {ago}", n = entries, ago = ago(age)),
-                    None => tf!("{n} itens", n = entries),
-                },
+                (None, Some(entries)) => {
+                    match status.built.and_then(|built| built.elapsed().ok()) {
+                        Some(age) => {
+                            tf!("{n} itens, atualizado {ago}", n = entries, ago = ago(age))
+                        }
+                        None => tf!("{n} itens", n = entries),
+                    }
+                }
                 (None, None) => t!("O índice é criado na primeira busca.").to_string(),
             }
         };
@@ -2315,33 +2703,52 @@ impl SettingsPage {
         let mut rows = vec![
             Row::hint(
                 t!("Buscar em todo o computador"),
-                t!("Clique na lupa da barra de baixo ou aperte Ctrl+E e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho."),
+                t!(
+                    "Clique na lupa da barra de baixo ou aperte Ctrl+E e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho."
+                ),
                 div()
                     .flex()
                     .flex_col()
                     .items_end()
                     .gap_2()
-                    .child(div().text_xs().text_color(rgb(theme::fg_secondary())).child(state))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::fg_secondary()))
+                            .child(state),
+                    )
                     .when_some(refresh_feedback, |this, feedback| {
-                        this.child(div().text_xs().text_color(rgb(theme::fg_secondary())).child(feedback))
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme::fg_secondary()))
+                                .child(feedback),
+                        )
                     })
                     .when(own_index && !building, |this| {
-                        this.child(button(
-                            "everything-rebuild",
-                            if status.service_refreshing {
-                                t!("Pedindo para reconstruir o índice…")
-                            } else {
-                                t!("Reindexar agora")
-                            },
-                            status.service_refreshing,
-                        ).on_click(cx.listener(
-                            |_page, _event, _window, cx| crate::explorer::everything::rebuild(cx),
-                        )))
+                        this.child(
+                            button(
+                                "everything-rebuild",
+                                if status.service_refreshing {
+                                    t!("Pedindo para reconstruir o índice…")
+                                } else {
+                                    t!("Reindexar agora")
+                                },
+                                status.service_refreshing,
+                            )
+                            .on_click(cx.listener(
+                                |_page, _event, _window, cx| {
+                                    crate::explorer::everything::rebuild(cx)
+                                },
+                            )),
+                        )
                     }),
             ),
             Row::hint(
                 t!("Índice do computador"),
-                t!("De onde vêm os nomes da busca em todo o computador. Com o Everything aberto, o índice dele serve e nada é criado aqui; o automático decide isso na primeira busca."),
+                t!(
+                    "De onde vêm os nomes da busca em todo o computador. Com o Everything aberto, o índice dele serve e nada é criado aqui; o automático decide isso na primeira busca."
+                ),
                 div()
                     .flex()
                     .flex_col()
@@ -2351,22 +2758,33 @@ impl SettingsPage {
                         "index-source",
                         &[
                             (t!("Automático"), picked == IndexSource::Auto, "\"auto\""),
-                            (t!("Neste programa"), picked == IndexSource::PrimeFiles, "\"prime-files\""),
-                            ("Everything", picked == IndexSource::Everything, "\"everything\""),
+                            (
+                                t!("Neste programa"),
+                                picked == IndexSource::PrimeFiles,
+                                "\"prime-files\"",
+                            ),
+                            (
+                                "Everything",
+                                picked == IndexSource::Everything,
+                                "\"everything\"",
+                            ),
                         ],
                         ("indexing", "source"),
                         cx,
                     ))
-                    .when(picked == IndexSource::Auto && source == Source::Own, |this| {
-                        this.child(
-                            div()
-                                .max_w(px(280.0))
-                                .text_xs()
-                                .text_right()
-                                .text_color(rgb(theme::fg_secondary()))
-                                .child(everything::auto_note(status.external.as_ref())),
-                        )
-                    }),
+                    .when(
+                        picked == IndexSource::Auto && source == Source::Own,
+                        |this| {
+                            this.child(
+                                div()
+                                    .max_w(px(280.0))
+                                    .text_xs()
+                                    .text_right()
+                                    .text_color(rgb(theme::fg_secondary()))
+                                    .child(everything::auto_note(status.external.as_ref())),
+                            )
+                        },
+                    ),
             ),
         ];
         if own_index {
@@ -2374,12 +2792,16 @@ impl SettingsPage {
             let mft_state = mft::state();
             let (mft_busy, mft_error) = cx
                 .try_global::<crate::explorer::everything::Everything>()
-                .map_or((false, None), |state| (state.mft_busy, state.mft_error.clone()));
+                .map_or((false, None), |state| {
+                    (state.mft_busy, state.mft_error.clone())
+                });
             let mft_text = match (mft_busy, mft_error, mft_state) {
                 (true, _, _) => t!("Aguardando a permissão do Windows…").to_string(),
                 (false, Some(error), _) => tf!("Não deu certo: {error}", error = error),
                 (false, None, mft::State::On) => t!("Ligada").to_string(),
-                (false, None, mft::State::Stopped) => t!("O serviço está instalado mas parado.").to_string(),
+                (false, None, mft::State::Stopped) => {
+                    t!("O serviço está instalado mas parado.").to_string()
+                }
                 (false, None, mft::State::Off) => t!("Desligada").to_string(),
             };
             let mft_on = mft_state == mft::State::On;
@@ -2422,13 +2844,18 @@ impl SettingsPage {
                 vec![
                     Row::hint(
                         t!("Filtrar a pasta"),
-                        t!("Comece a digitar na lista: só os nomes da pasta aberta que combinam ficam."),
+                        t!(
+                            "Comece a digitar na lista: só os nomes da pasta aberta que combinam ficam."
+                        ),
                         key_cap(t!("Qualquer letra")),
                     ),
                     Row::hint(
                         t!("Buscar nas subpastas"),
                         t!("Procura a partir da pasta aberta, lendo o disco na hora."),
-                        key_cap_owned(shortcuts::display(Action::SearchSubfolders).unwrap_or_else(|| t!("Nenhum").to_string())),
+                        key_cap_owned(
+                            shortcuts::display(Action::SearchSubfolders)
+                                .unwrap_or_else(|| t!("Nenhum").to_string()),
+                        ),
                     ),
                 ],
             ),
@@ -2505,15 +2932,21 @@ impl SettingsPage {
             vec![
                 Row::hint(
                     t!("Iniciar com o Windows"),
-                    t!("Abre minimizado quando você entra no Windows, para que \"Mostrar na pasta\" de qualquer programa caia aqui na hora."),
+                    t!(
+                        "Abre minimizado quando você entra no Windows, para que \"Mostrar na pasta\" de qualquer programa caia aqui na hora."
+                    ),
                     match self.starts_with_windows {
-                        Some(on) => self.switch_pick("start-with-windows", on, Pick::StartWithWindows(!on), cx).into_any_element(),
+                        Some(on) => self
+                            .switch_pick("start-with-windows", on, Pick::StartWithWindows(!on), cx)
+                            .into_any_element(),
                         None => checking().into_any_element(),
                     },
                 ),
                 Row::hint(
                     "Listary",
-                    t!("Pastas abertas pelo Listary abrem no LumaFiles. O Listary é reiniciado ao mudar."),
+                    t!(
+                        "Pastas abertas pelo Listary abrem no LumaFiles. O Listary é reiniciado ao mudar."
+                    ),
                     match self.listary {
                         None => checking().into_any_element(),
                         Some(crate::listary::State::NotInstalled) => div()
@@ -2523,7 +2956,8 @@ impl SettingsPage {
                             .into_any_element(),
                         Some(state) => {
                             let ours = state == crate::listary::State::Ours;
-                            self.switch_pick("listary", ours, Pick::Listary(!ours), cx).into_any_element()
+                            self.switch_pick("listary", ours, Pick::Listary(!ours), cx)
+                                .into_any_element()
                         }
                     },
                 ),
@@ -2534,42 +2968,67 @@ impl SettingsPage {
 
     fn shortcuts(&self, cx: &mut Context<Self>) -> Vec<Group> {
         let bindings = &self.config.keybindings.bindings;
-        let customized = shortcuts::ACTIONS.iter().any(|info| bindings.contains_key(info.id));
+        let customized = shortcuts::ACTIONS
+            .iter()
+            .any(|info| bindings.contains_key(info.id));
         let mut groups = vec![Group::new(vec![Row::hint(
             t!("Como mudar"),
-            t!("Clique na tecla de um comando e aperte a combinação nova; Esc desiste. Um atalho que já era de outro comando sai dele. Vale na hora."),
+            t!(
+                "Clique na tecla de um comando e aperte a combinação nova; Esc desiste. Um atalho que já era de outro comando sai dele. Vale na hora."
+            ),
             div().when(customized, |this| {
-                this.child(button("shortcuts-reset-all", t!("Restaurar todos"), false).on_click(cx.listener(
-                    |page, _event, _window, cx| page.pick(Pick::ResetAllShortcuts, cx),
-                )))
+                this.child(
+                    button("shortcuts-reset-all", t!("Restaurar todos"), false).on_click(
+                        cx.listener(|page, _event, _window, cx| {
+                            page.pick(Pick::ResetAllShortcuts, cx)
+                        }),
+                    ),
+                )
             }),
         )])];
         let mut current: Option<(&'static str, Vec<Row>)> = None;
         for info in shortcuts::ACTIONS {
-            if current.as_ref().is_some_and(|(group, _)| *group != info.group) {
+            if current
+                .as_ref()
+                .is_some_and(|(group, _)| *group != info.group)
+            {
                 if let Some((group, rows)) = current.take() {
                     groups.push(Group::titled(tr(group), rows));
                 }
             }
             let row = self.shortcut_row(info, bindings.contains_key(info.id), cx);
-            current.get_or_insert_with(|| (info.group, Vec::new())).1.push(row);
+            current
+                .get_or_insert_with(|| (info.group, Vec::new()))
+                .1
+                .push(row);
         }
         if let Some((group, rows)) = current {
             groups.push(Group::titled(tr(group), rows));
         }
         groups.push(Group::titled(
             t!("Fixos"),
-            FIXED_KEYS.iter().map(|(keys, what)| Row::new(tr(what), None, key_cap(tr(keys)))).collect(),
+            FIXED_KEYS
+                .iter()
+                .map(|(keys, what)| Row::new(tr(what), None, key_cap(tr(keys))))
+                .collect(),
         ));
         groups
     }
 
     // A command, its keys as a button that records new ones, and a button to
     // leave it with none.
-    fn shortcut_row(&self, info: &'static shortcuts::ActionInfo, customized: bool, cx: &mut Context<Self>) -> Row {
+    fn shortcut_row(
+        &self,
+        info: &'static shortcuts::ActionInfo,
+        customized: bool,
+        cx: &mut Context<Self>,
+    ) -> Row {
         let action = info.action;
         let recording = self.recording == Some(action);
-        let keys: Vec<String> = shortcuts::chords(action).iter().map(Chord::display).collect();
+        let keys: Vec<String> = shortcuts::chords(action)
+            .iter()
+            .map(Chord::display)
+            .collect();
         let has_keys = !keys.is_empty();
         let shown = if recording {
             t!("Aperte as teclas…").to_string()
@@ -2585,7 +3044,10 @@ impl SettingsPage {
             .gap_1()
             .child(
                 div()
-                    .id(ElementId::Name(SharedString::from(format!("shortcut-{}", info.id))))
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "shortcut-{}",
+                        info.id
+                    ))))
                     .min_w(px(110.0))
                     .h(px(28.0))
                     .px(px(10.0))
@@ -2605,7 +3067,11 @@ impl SettingsPage {
                         } else {
                             this.border_color(rgb(theme::border_hover()))
                                 .bg(rgb(theme::bg()))
-                                .text_color(rgb(if has_keys { theme::fg() } else { theme::muted() }))
+                                .text_color(rgb(if has_keys {
+                                    theme::fg()
+                                } else {
+                                    theme::muted()
+                                }))
                                 .hover(|style| style.bg(rgb(theme::bg_hover())))
                         }
                     })
@@ -2618,7 +3084,10 @@ impl SettingsPage {
             .when(has_keys && !recording, |this| {
                 this.child(
                     div()
-                        .id(ElementId::Name(SharedString::from(format!("shortcut-clear-{}", info.id))))
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "shortcut-clear-{}",
+                            info.id
+                        ))))
                         .size(px(24.0))
                         .flex()
                         .items_center()
@@ -2626,9 +3095,18 @@ impl SettingsPage {
                         .rounded(px(5.0))
                         .cursor_pointer()
                         .text_color(rgb(theme::muted()))
-                        .hover(|style| style.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg())))
-                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new(t!("Remover o atalho")).build(window, cx))
-                        .on_click(cx.listener(move |page, _event, _window, cx| page.pick(Pick::ClearShortcut(action), cx)))
+                        .hover(|style| {
+                            style
+                                .bg(rgb(theme::bg_hover()))
+                                .text_color(rgb(theme::fg()))
+                        })
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new(t!("Remover o atalho"))
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |page, _event, _window, cx| {
+                            page.pick(Pick::ClearShortcut(action), cx)
+                        }))
                         .child(Icon::new(Icon::empty()).path("icons/close.svg").size_3()),
                 )
             });
@@ -2739,12 +3217,25 @@ impl SettingsPage {
         use crate::updater::Status;
         let status = self.updater.read(cx).status.clone();
         let (text, error) = match &status {
-            Status::NotInstalled => (t!("Esta cópia não foi instalada pelo instalador, então não se atualiza sozinha.").to_string(), false),
+            Status::NotInstalled => (
+                t!("Esta cópia não foi instalada pelo instalador, então não se atualiza sozinha.")
+                    .to_string(),
+                false,
+            ),
             Status::Idle => (t!("Ainda não procurou.").to_string(), false),
             Status::Checking => (t!("Procurando…").to_string(), false),
             Status::UpToDate => (t!("Você está na versão mais nova.").to_string(), false),
-            Status::Downloading(version) => (tf!("Baixando a versão {version}…", version = version), false),
-            Status::Ready { version, .. } => (tf!("A versão {version} está pronta para instalar.", version = version), false),
+            Status::Downloading(version) => (
+                tf!("Baixando a versão {version}…", version = version),
+                false,
+            ),
+            Status::Ready { version, .. } => (
+                tf!(
+                    "A versão {version} está pronta para instalar.",
+                    version = version
+                ),
+                false,
+            ),
             Status::Failed(error) => (tf!("Não deu para atualizar: {error}", error = error), true),
         };
         let busy = matches!(status, Status::Checking | Status::Downloading(_));
@@ -2752,7 +3243,9 @@ impl SettingsPage {
         let ready = matches!(status, Status::Ready { .. });
         Row::hint(
             t!("Procurar versão nova"),
-            t!("Vêm das releases do LumaFiles no GitHub; cada instalador é conferido pelo SHA256SUMS.txt antes de rodar."),
+            t!(
+                "Vêm das releases do LumaFiles no GitHub; cada instalador é conferido pelo SHA256SUMS.txt antes de rodar."
+            ),
             div()
                 .flex()
                 .flex_col()
@@ -2762,7 +3255,11 @@ impl SettingsPage {
                     div()
                         .text_xs()
                         .max_w(px(320.0))
-                        .text_color(rgb(if error { theme::danger() } else { theme::fg_secondary() }))
+                        .text_color(rgb(if error {
+                            theme::danger()
+                        } else {
+                            theme::fg_secondary()
+                        }))
                         .child(text),
                 )
                 .child(
@@ -2770,18 +3267,23 @@ impl SettingsPage {
                         .flex()
                         .gap_2()
                         .when(can_check, |row| {
-                            row.child(button("check-updates", t!("Procurar agora"), false).on_click(cx.listener(
-                                |page, _event, _window, cx| {
-                                    page.updater.update(cx, |updater, cx| updater.check(cx));
-                                },
-                            )))
+                            row.child(
+                                button("check-updates", t!("Procurar agora"), false).on_click(
+                                    cx.listener(|page, _event, _window, cx| {
+                                        page.updater.update(cx, |updater, cx| updater.check(cx));
+                                    }),
+                                ),
+                            )
                         })
                         .when(ready, |row| {
-                            row.child(button("install-update", t!("Atualizar agora"), false).on_click(cx.listener(
-                                |page, _event, _window, cx| {
-                                    page.updater.update(cx, |updater, cx| updater.install_now(cx));
-                                },
-                            )))
+                            row.child(
+                                button("install-update", t!("Atualizar agora"), false).on_click(
+                                    cx.listener(|page, _event, _window, cx| {
+                                        page.updater
+                                            .update(cx, |updater, cx| updater.install_now(cx));
+                                    }),
+                                ),
+                            )
                         }),
                 ),
         )
@@ -2799,11 +3301,22 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let value = if on { "false" } else { "true" };
-        self.switch_pick(id, on, Pick::Config(section, key, SharedString::from(value)), cx)
+        self.switch_pick(
+            id,
+            on,
+            Pick::Config(section, key, SharedString::from(value)),
+            cx,
+        )
     }
 
     // An on/off switch whose click does `pick` (what turns it the other way).
-    fn switch_pick(&self, id: &'static str, on: bool, pick: Pick, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn switch_pick(
+        &self,
+        id: &'static str,
+        on: bool,
+        pick: Pick,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         const WIDTH: f32 = 38.0;
         const HEIGHT: f32 = 22.0;
         const KNOB: f32 = 16.0;
@@ -2819,7 +3332,11 @@ impl SettingsPage {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(if on { theme::fg() } else { theme::fg_secondary() }))
+                    .text_color(rgb(if on {
+                        theme::fg()
+                    } else {
+                        theme::fg_secondary()
+                    }))
                     .child(if on { t!("Ligado") } else { t!("Desligado") }),
             )
             .child(
@@ -2831,19 +3348,31 @@ impl SettingsPage {
                     .border_1()
                     .map(|track| {
                         if on {
-                            track.bg(rgb(theme::accent())).border_color(rgb(theme::accent()))
+                            track
+                                .bg(rgb(theme::accent()))
+                                .border_color(rgb(theme::accent()))
                         } else {
-                            track.bg(rgb(theme::bg())).border_color(rgb(theme::border_hover()))
+                            track
+                                .bg(rgb(theme::bg()))
+                                .border_color(rgb(theme::border_hover()))
                         }
                     })
                     .child(
                         div()
                             .absolute()
                             .top(px(inset - 1.0))
-                            .left(px(if on { WIDTH - KNOB - inset - 1.0 } else { inset - 1.0 }))
+                            .left(px(if on {
+                                WIDTH - KNOB - inset - 1.0
+                            } else {
+                                inset - 1.0
+                            }))
                             .size(px(KNOB))
                             .rounded_full()
-                            .bg(rgb(if on { theme::accent_fg() } else { theme::fg_secondary() })),
+                            .bg(rgb(if on {
+                                theme::accent_fg()
+                            } else {
+                                theme::fg_secondary()
+                            })),
                     ),
             )
     }
@@ -2859,7 +3388,13 @@ impl SettingsPage {
     ) -> Div {
         let options: Vec<_> = options
             .iter()
-            .map(|&(label, selected, value)| (label, selected, Pick::Config(section, key, SharedString::from(value))))
+            .map(|&(label, selected, value)| {
+                (
+                    label,
+                    selected,
+                    Pick::Config(section, key, SharedString::from(value)),
+                )
+            })
             .collect();
         self.chips(id, &options, false, cx)
     }
@@ -2876,7 +3411,15 @@ impl SettingsPage {
         let options: Vec<_> = options
             .iter()
             .map(|&(label, on, key)| {
-                (label, on, Pick::Config(section, key, SharedString::from(if on { "false" } else { "true" })))
+                (
+                    label,
+                    on,
+                    Pick::Config(
+                        section,
+                        key,
+                        SharedString::from(if on { "false" } else { "true" }),
+                    ),
+                )
             })
             .collect();
         self.chips(id, &options, true, cx)
@@ -2885,7 +3428,13 @@ impl SettingsPage {
     // The row of chips behind `config_choice` and `config_toggles`. A
     // selected chip only answers a click when the chips are toggles, which
     // also show a check so "on" reads apart from "chosen".
-    fn chips(&self, id: &'static str, options: &[(&'static str, bool, Pick)], toggles: bool, cx: &mut Context<Self>) -> Div {
+    fn chips(
+        &self,
+        id: &'static str,
+        options: &[(&'static str, bool, Pick)],
+        toggles: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             // Only long rows wrap: a short row beside its text measured at
@@ -2897,34 +3446,49 @@ impl SettingsPage {
             .bg(rgb(theme::bg()))
             .border_1()
             .border_color(rgb(theme::border()))
-            .children(options.iter().enumerate().map(|(ix, (label, selected, pick))| {
-                let selected = *selected;
-                let pick = pick.clone();
-                div()
-                    .id(ElementId::NamedInteger(id.into(), ix as u64))
-                    .h(px(26.0))
-                    .px(px(11.0))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .rounded(px(5.0))
-                    .cursor_pointer()
-                    .text_sm()
-                    .whitespace_nowrap()
-                    .map(|this| {
-                        if selected {
-                            this.bg(rgb(theme::accent())).text_color(rgb(theme::accent_fg()))
-                        } else {
-                            this.text_color(rgb(theme::fg_secondary()))
-                                .hover(|style| style.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg())))
-                        }
-                    })
-                    .when(!selected || toggles, |this| {
-                        this.on_click(cx.listener(move |page, _event, _window, cx| page.pick(pick.clone(), cx)))
-                    })
-                    .when(toggles && selected, |this| this.child(Icon::new(Icon::empty()).path("icons/check.svg").size_3()))
-                    .child(*label)
-            }))
+            .children(
+                options
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, (label, selected, pick))| {
+                        let selected = *selected;
+                        let pick = pick.clone();
+                        div()
+                            .id(ElementId::NamedInteger(id.into(), ix as u64))
+                            .h(px(26.0))
+                            .px(px(11.0))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(5.0))
+                            .cursor_pointer()
+                            .text_sm()
+                            .whitespace_nowrap()
+                            .map(|this| {
+                                if selected {
+                                    this.bg(rgb(theme::accent()))
+                                        .text_color(rgb(theme::accent_fg()))
+                                } else {
+                                    this.text_color(rgb(theme::fg_secondary())).hover(|style| {
+                                        style
+                                            .bg(rgb(theme::bg_hover()))
+                                            .text_color(rgb(theme::fg()))
+                                    })
+                                }
+                            })
+                            .when(!selected || toggles, |this| {
+                                this.on_click(cx.listener(move |page, _event, _window, cx| {
+                                    page.pick(pick.clone(), cx)
+                                }))
+                            })
+                            .when(toggles && selected, |this| {
+                                this.child(
+                                    Icon::new(Icon::empty()).path("icons/check.svg").size_3(),
+                                )
+                            })
+                            .child(*label)
+                    }),
+            )
     }
 
     // ---------------------------------------------------------------------
@@ -2940,7 +3504,9 @@ impl SettingsPage {
             }
         };
         // Set each render: the language may have changed since.
-        input.update(cx, |state, cx| state.set_placeholder(t!("Buscar uma configuração…"), window, cx));
+        input.update(cx, |state, cx| {
+            state.set_placeholder(t!("Buscar uma configuração…"), window, cx)
+        });
         input
     }
 
@@ -2956,14 +3522,31 @@ impl SettingsPage {
             .bg(rgb(theme::bg()))
             .border_1()
             .border_color(rgb(theme::border()))
-            .child(Icon::new(Icon::empty()).path("icons/search.svg").size_4().text_color(rgb(theme::muted())))
-            .child(div().flex_1().min_w(px(0.0)).child(Input::new(input).small().appearance(false).cleanable(true)))
+            .child(
+                Icon::new(Icon::empty())
+                    .path("icons/search.svg")
+                    .size_4()
+                    .text_color(rgb(theme::muted())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(Input::new(input).small().appearance(false).cleanable(true)),
+            )
     }
 
-    fn render_nav_item(&self, section: SettingsSection, horizontal: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_nav_item(
+        &self,
+        section: SettingsSection,
+        horizontal: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let active = section == self.section;
         div()
-            .id(ElementId::Name(SharedString::from(format!("settings-nav-{section:?}"))))
+            .id(ElementId::Name(SharedString::from(format!(
+                "settings-nav-{section:?}"
+            ))))
             .h(px(34.0))
             .px(px(10.0))
             .flex()
@@ -2976,10 +3559,14 @@ impl SettingsPage {
             .whitespace_nowrap()
             .map(|this| {
                 if active {
-                    this.bg(rgb(theme::accent_subtle())).text_color(rgb(theme::accent()))
+                    this.bg(rgb(theme::accent_subtle()))
+                        .text_color(rgb(theme::accent()))
                 } else {
-                    this.text_color(rgb(theme::fg_secondary()))
-                        .hover(|style| style.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg())))
+                    this.text_color(rgb(theme::fg_secondary())).hover(|style| {
+                        style
+                            .bg(rgb(theme::bg_hover()))
+                            .text_color(rgb(theme::fg()))
+                    })
                 }
             })
             .when(!horizontal, |this| this.w_full())
@@ -3019,9 +3606,13 @@ impl SettingsPage {
                     .bg(rgb(theme::bg_secondary()))
                     .border_1()
                     .border_color(rgb(theme::border()))
-                    .children(group.rows.into_iter().enumerate().map(|(ix, row)| {
-                        self.render_row(row, stacked, ix + 1 < count, cx)
-                    })),
+                    .children(
+                        group
+                            .rows
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ix, row)| self.render_row(row, stacked, ix + 1 < count, cx)),
+                    ),
             )
     }
 
@@ -3029,7 +3620,10 @@ impl SettingsPage {
         let stacked = stacked || row.wide;
         let reset = row.reset.map(|pick| {
             div()
-                .id(ElementId::Name(SharedString::from(format!("reset-{}", row.label))))
+                .id(ElementId::Name(SharedString::from(format!(
+                    "reset-{}",
+                    row.label
+                ))))
                 .size(px(24.0))
                 .flex()
                 .flex_shrink_0()
@@ -3038,14 +3632,28 @@ impl SettingsPage {
                 .rounded(px(5.0))
                 .cursor_pointer()
                 .text_color(rgb(theme::muted()))
-                .hover(|style| style.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg())))
-                .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new(t!("Voltar ao padrão")).build(window, cx))
+                .hover(|style| {
+                    style
+                        .bg(rgb(theme::bg_hover()))
+                        .text_color(rgb(theme::fg()))
+                })
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new(t!("Voltar ao padrão")).build(window, cx)
+                })
                 .on_click(cx.listener(move |page, _event, _window, cx| page.pick(pick.clone(), cx)))
-                .child(Icon::new(Icon::empty()).path("icons/refresh-cw.svg").size_3())
+                .child(
+                    Icon::new(Icon::empty())
+                        .path("icons/refresh-cw.svg")
+                        .size_3(),
+                )
         });
         // Stacked, the reset sits by the name (under it is the control);
         // side by side, between the text and the control.
-        let (reset_by_label, reset_beside) = if stacked { (reset, None) } else { (None, reset) };
+        let (reset_by_label, reset_beside) = if stacked {
+            (reset, None)
+        } else {
+            (None, reset)
+        };
         let text = div()
             .flex()
             .flex_col()
@@ -3057,20 +3665,38 @@ impl SettingsPage {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(div().text_sm().font_weight(gpui::FontWeight::MEDIUM).text_color(rgb(theme::fg())).child(row.label))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgb(theme::fg()))
+                            .child(row.label),
+                    )
                     // Stacked, the reset sits by the name: under it is the control.
                     .children(reset_by_label),
             )
             .when_some(row.hint, |this, hint| {
-                this.child(div().text_xs().line_height(px(17.0)).text_color(rgb(theme::fg_secondary())).child(hint))
+                this.child(
+                    div()
+                        .text_xs()
+                        .line_height(px(17.0))
+                        .text_color(rgb(theme::fg_secondary()))
+                        .child(hint),
+                )
             });
         div()
             .px(px(16.0))
             .py(px(13.0))
-            .when(divider, |this| this.border_b_1().border_color(rgb(theme::border())))
+            .when(divider, |this| {
+                this.border_b_1().border_color(rgb(theme::border()))
+            })
             .map(|this| {
                 if stacked {
-                    this.flex().flex_col().gap(px(10.0)).child(text).child(div().child(row.control))
+                    this.flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(text)
+                        .child(div().child(row.control))
                 } else {
                     this.flex()
                         .items_center()
@@ -3085,7 +3711,12 @@ impl SettingsPage {
 }
 
 impl SettingsPage {
-    fn render_section(&self, section: SettingsSection, stacked: bool, cx: &mut Context<Self>) -> Div {
+    fn render_section(
+        &self,
+        section: SettingsSection,
+        stacked: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let groups = self.groups(section, cx);
         div()
             .flex()
@@ -3120,10 +3751,19 @@ impl SettingsPage {
                                     .text_color(rgb(theme::fg()))
                                     .child(section.label()),
                             )
-                            .child(div().text_sm().text_color(rgb(theme::fg_secondary())).child(section.description())),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(theme::fg_secondary()))
+                                    .child(section.description()),
+                            ),
                     ),
             )
-            .children(groups.into_iter().map(|group| self.render_group(group, stacked, cx)))
+            .children(
+                groups
+                    .into_iter()
+                    .map(|group| self.render_group(group, stacked, cx)),
+            )
     }
 
     // Every row whose name, explanation or section matches `query`, under its
@@ -3134,18 +3774,23 @@ impl SettingsPage {
         let mut found = 0;
         let mut body = div().flex().flex_col().gap(px(22.0));
         for section in SettingsSection::ALL {
-            let section_matches =
-                fold(section.label()).contains(needle) || fold(section.description()).contains(needle);
+            let section_matches = fold(section.label()).contains(needle)
+                || fold(section.description()).contains(needle);
             let rows: Vec<Row> = self
                 .groups(section, cx)
                 .into_iter()
                 .flat_map(|group| {
-                    let group_matches = group.title.is_some_and(|title| fold(title).contains(needle));
+                    let group_matches = group
+                        .title
+                        .is_some_and(|title| fold(title).contains(needle));
                     group.rows.into_iter().filter(move |row| {
                         section_matches
                             || group_matches
                             || fold(row.label).contains(needle)
-                            || row.hint.as_ref().is_some_and(|hint| fold(hint).contains(needle))
+                            || row
+                                .hint
+                                .as_ref()
+                                .is_some_and(|hint| fold(hint).contains(needle))
                     })
                 })
                 .collect();
@@ -3160,7 +3805,9 @@ impl SettingsPage {
                     .gap(px(8.0))
                     .child(
                         div()
-                            .id(ElementId::Name(SharedString::from(format!("result-section-{section:?}"))))
+                            .id(ElementId::Name(SharedString::from(format!(
+                                "result-section-{section:?}"
+                            ))))
                             .flex()
                             .items_center()
                             .gap_2()
@@ -3176,7 +3823,12 @@ impl SettingsPage {
                                 }
                                 page.show_section(section, cx);
                             }))
-                            .child(Icon::new(Icon::empty()).path(section.icon()).size_4().text_color(rgb(theme::accent())))
+                            .child(
+                                Icon::new(Icon::empty())
+                                    .path(section.icon())
+                                    .size_4()
+                                    .text_color(rgb(theme::accent())),
+                            )
                             .child(section.label()),
                     )
                     .child(self.render_group(Group::new(rows), stacked, cx)),
@@ -3190,7 +3842,10 @@ impl SettingsPage {
                     .justify_center()
                     .text_sm()
                     .text_color(rgb(theme::fg_secondary()))
-                    .child(tf!("Nenhuma configuração com \"{query}\".", query = query.trim())),
+                    .child(tf!(
+                        "Nenhuma configuração com \"{query}\".",
+                        query = query.trim()
+                    )),
             );
         }
         body
@@ -3207,7 +3862,11 @@ impl SettingsPage {
                 .py(px(10.0))
                 .rounded(px(8.0))
                 .border_1()
-                .border_color(rgb(if error { theme::danger() } else { theme::border() }))
+                .border_color(rgb(if error {
+                    theme::danger()
+                } else {
+                    theme::border()
+                }))
                 .bg(rgb(theme::bg_secondary()))
                 .child(
                     div()
@@ -3226,7 +3885,11 @@ impl SettingsPage {
                         .rounded(px(4.0))
                         .cursor_pointer()
                         .text_color(rgb(theme::muted()))
-                        .hover(|style| style.bg(rgb(theme::bg_hover())).text_color(rgb(theme::fg())))
+                        .hover(|style| {
+                            style
+                                .bg(rgb(theme::bg_hover()))
+                                .text_color(rgb(theme::fg()))
+                        })
                         .on_click(cx.listener(|page, _event, _window, cx| {
                             page.status = None;
                             cx.notify();
@@ -3287,7 +3950,10 @@ fn key_cap(keys: &'static str) -> Div {
 }
 
 fn checking() -> Div {
-    div().text_xs().text_color(rgb(theme::fg_secondary())).child(t!("Verificando…"))
+    div()
+        .text_xs()
+        .text_color(rgb(theme::fg_secondary()))
+        .child(t!("Verificando…"))
 }
 
 // "agora", "há 3 min", "há 2 h", "há 4 dias".
@@ -3319,9 +3985,11 @@ fn button(id: &'static str, label: &'static str, danger: bool) -> Stateful<Div> 
         .bg(rgb(theme::bg()))
         .map(|this| {
             if danger {
-                this.border_color(rgb(theme::danger())).text_color(rgb(theme::danger()))
+                this.border_color(rgb(theme::danger()))
+                    .text_color(rgb(theme::danger()))
             } else {
-                this.border_color(rgb(theme::border_hover())).text_color(rgb(theme::fg()))
+                this.border_color(rgb(theme::border_hover()))
+                    .text_color(rgb(theme::fg()))
             }
         })
         .hover(|style| style.bg(rgb(theme::bg_hover())))
@@ -3334,7 +4002,12 @@ fn file_rule_button(
     action: FileColorRuleAction,
     cx: &mut Context<SettingsPage>,
 ) -> Stateful<Div> {
-    let action_id = index * 3 + match label { "↑" => 0, "↓" => 1, _ => 2 };
+    let action_id = index * 3
+        + match label {
+            "↑" => 0,
+            "↓" => 1,
+            _ => 2,
+        };
     div()
         .id(("file-type-color-action", action_id))
         .size(px(28.0))
@@ -3349,7 +4022,9 @@ fn file_rule_button(
         .text_sm()
         .text_color(rgb(theme::fg()))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .on_click(cx.listener(move |page, _, window, cx| page.edit_file_type_color_rules(action, window, cx)))
+        .on_click(cx.listener(move |page, _, window, cx| {
+            page.edit_file_type_color_rules(action, window, cx)
+        }))
         .child(label)
 }
 
@@ -3404,7 +4079,11 @@ impl Render for SettingsPage {
                         .flex()
                         .gap_1()
                         .overflow_x_scroll()
-                        .children(SettingsSection::ALL.into_iter().map(|section| self.render_nav_item(section, true, cx))),
+                        .children(
+                            SettingsSection::ALL
+                                .into_iter()
+                                .map(|section| self.render_nav_item(section, true, cx)),
+                        ),
                 )
         } else {
             div()
@@ -3420,17 +4099,35 @@ impl Render for SettingsPage {
                 .bg(rgb(theme::toolbar_bg()))
                 // Flex, so the field takes the full width: in a plain block
                 // its `w_full` resolved to its content's width.
-                .child(div().pb(px(10.0)).flex().flex_col().child(self.render_search_field(&input)))
-                .children(SettingsSection::ALL.into_iter().map(|section| self.render_nav_item(section, false, cx)))
+                .child(
+                    div()
+                        .pb(px(10.0))
+                        .flex()
+                        .flex_col()
+                        .child(self.render_search_field(&input)),
+                )
+                .children(
+                    SettingsSection::ALL
+                        .into_iter()
+                        .map(|section| self.render_nav_item(section, false, cx)),
+                )
         };
 
         div()
             .size_full()
             .flex()
-            .map(|this| if narrow { this.flex_col() } else { this.flex_row() })
+            .map(|this| {
+                if narrow {
+                    this.flex_col()
+                } else {
+                    this.flex_row()
+                }
+            })
             .bg(rgb(theme::bg()))
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|page, event: &KeyDownEvent, _window, cx| page.record_key(event, cx)))
+            .on_key_down(
+                cx.listener(|page, event: &KeyDownEvent, _window, cx| page.record_key(event, cx)),
+            )
             .child(nav)
             .child(
                 div()
@@ -3475,21 +4172,34 @@ fn pointer_events(page: Entity<SettingsPage>, part: WheelPart) -> AnyElement {
                     && event.button == MouseButton::Left
                     && bounds.contains(&event.position)
                 {
-                    press.update(cx, |page, cx| page.wheel_press(part, bounds, event.position, window, cx));
+                    press.update(cx, |page, cx| {
+                        page.wheel_press(part, bounds, event.position, window, cx)
+                    });
                 }
             });
             let drag = page.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble
                     && event.pressed_button == Some(MouseButton::Left)
-                    && drag.read(cx).wheel.as_ref().is_some_and(|wheel| wheel.dragging == Some(part))
+                    && drag
+                        .read(cx)
+                        .wheel
+                        .as_ref()
+                        .is_some_and(|wheel| wheel.dragging == Some(part))
                 {
-                    drag.update(cx, |page, cx| page.wheel_apply(part, bounds, event.position, window, cx));
+                    drag.update(cx, |page, cx| {
+                        page.wheel_apply(part, bounds, event.position, window, cx)
+                    });
                 }
             });
             let release = page;
             window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
-                if release.read(cx).wheel.as_ref().is_some_and(|wheel| wheel.dragging == Some(part)) {
+                if release
+                    .read(cx)
+                    .wheel
+                    .as_ref()
+                    .is_some_and(|wheel| wheel.dragging == Some(part))
+                {
                     release.update(cx, |page, cx| page.wheel_release(cx));
                 }
             });

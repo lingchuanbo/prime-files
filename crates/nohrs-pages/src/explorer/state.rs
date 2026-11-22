@@ -701,7 +701,7 @@ impl ExplorerPane {
             // Hidden by default; the root pane is revealed by `ExplorerPage::new`,
             // split-created panes stay collapsed (issue #164, §2).
             sidebar_visible: false,
-        show_drive_letter: true,
+            show_drive_letter: true,
             sidebar: Default::default(),
 
             // Search
@@ -738,8 +738,8 @@ impl ExplorerPane {
             dock_drag: None,
             columns_bounds: Default::default(),
             split_available: false,
-        multi_pane: false,
-        pane_active: false,
+            multi_pane: false,
+            pane_active: false,
             terminal_shown: false,
             preview_pdf_bounds: Default::default(),
             preview_sharp: None,
@@ -791,11 +791,11 @@ impl ExplorerPane {
             context_menu: None,
             preview_visible: true,
             quick_look: false,
-        preview_in_sibling: false,
-        sibling_pane: None,
-        preview_full: false,
-        preview_request: None,
-        preview_visible_before: true,
+            preview_in_sibling: false,
+            sibling_pane: None,
+            preview_full: false,
+            preview_request: None,
+            preview_visible_before: true,
             zoom_menu_open: false,
             zoom_menu_flash: None,
             workspace: None,
@@ -840,11 +840,7 @@ impl ExplorerPane {
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         // The window opens with the sidebar as it was left.
-        super::view::panels::save_layout(
-            "sidebar_visible",
-            self.sidebar_visible.to_string(),
-            cx,
-        );
+        super::view::panels::save_layout("sidebar_visible", self.sidebar_visible.to_string(), cx);
         cx.notify();
     }
 
@@ -1472,7 +1468,8 @@ impl ExplorerPane {
         }
         // A different collation, or folders keeping their own order, re-sorts
         // what is on screen.
-        let order_changed = self.sort_method != ui.sort_method || self.folders_by_name != ui.folders_sort_by_name;
+        let order_changed =
+            self.sort_method != ui.sort_method || self.folders_by_name != ui.folders_sort_by_name;
         self.sort_method = ui.sort_method;
         self.folders_by_name = ui.folders_sort_by_name;
         if order_changed {
@@ -1566,7 +1563,8 @@ impl ExplorerPane {
         if kind != "file" {
             return None;
         }
-        let color = super::type_style::TypeStyle::of(name, kind, self.file_type_color(name)).color?;
+        let color =
+            super::type_style::TypeStyle::of(name, kind, self.file_type_color(name)).color?;
         Some(nohrs_ui::theme::theme::type_color(color))
     }
 
@@ -1595,14 +1593,20 @@ impl ExplorerPane {
         }
         let generation = self.status_generation;
         let cwd = self.cwd.clone();
-        let paths: Vec<String> = self.entries.iter().map(|entry| entry.path.clone()).collect();
+        let paths: Vec<String> = self
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
         if !keep_until_answer {
             self.vcs_status = None;
             self.sync_states.clear();
             cx.notify();
         }
         let work = cx.background_spawn(async move {
-            let vcs = want_vcs.then(|| super::status::scan(std::path::Path::new(&cwd))).flatten();
+            let vcs = want_vcs
+                .then(|| super::status::scan(std::path::Path::new(&cwd)))
+                .flatten();
             let sync = if want_sync {
                 super::status::scan_sync(&paths)
             } else {

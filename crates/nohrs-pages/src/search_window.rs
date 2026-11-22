@@ -18,7 +18,7 @@ use gpui::{
     AnyElement, App, AppContext, Bounds, ClipboardItem, Context, Div, Entity, FontWeight,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Render,
     ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, img, px, rgba, rgb, size,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, img, px, rgb, rgba, size,
     uniform_list,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -136,7 +136,10 @@ fn accelerator_index(key: &str) -> Option<usize> {
     if characters.next().is_some() {
         return None;
     }
-    if let Some(index) = ACCELERATOR_DIGITS.iter().position(|digit| *digit == character) {
+    if let Some(index) = ACCELERATOR_DIGITS
+        .iter()
+        .position(|digit| *digit == character)
+    {
         return Some(index);
     }
     ACCELERATOR_LETTERS
@@ -359,14 +362,25 @@ impl SearchWindow {
         self.results.sort_by(|left, right| {
             let ordering = match key {
                 SortKey::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-                SortKey::Path => left.hit.path.to_lowercase().cmp(&right.hit.path.to_lowercase()),
+                SortKey::Path => left
+                    .hit
+                    .path
+                    .to_lowercase()
+                    .cmp(&right.hit.path.to_lowercase()),
                 SortKey::Size => left.hit.size.cmp(&right.hit.size),
                 SortKey::Modified => left.hit.modified.cmp(&right.hit.modified),
             };
-            if ascending { ordering } else { ordering.reverse() }
+            if ascending {
+                ordering
+            } else {
+                ordering.reverse()
+            }
         });
         if let Some(path) = selected_path {
-            self.selected = self.results.iter().position(|result| result.hit.path == path);
+            self.selected = self
+                .results
+                .iter()
+                .position(|result| result.hit.path == path);
         }
     }
 
@@ -527,21 +541,19 @@ impl SearchWindow {
                 None => Ok(()),
             }
         });
-        cx.spawn(async move |this, cx| {
-            match task.await {
-                Ok(()) => this
-                    .update(cx, |this, cx| {
-                        this.status = "已移到回收站".to_string();
-                        this.start_search(this.query.clone(), cx);
-                    })
-                    .ok(),
-                Err(error) => this
-                    .update(cx, |this, cx| {
-                        this.status = error;
-                        cx.notify();
-                    })
-                    .ok(),
-            }
+        cx.spawn(async move |this, cx| match task.await {
+            Ok(()) => this
+                .update(cx, |this, cx| {
+                    this.status = "已移到回收站".to_string();
+                    this.start_search(this.query.clone(), cx);
+                })
+                .ok(),
+            Err(error) => this
+                .update(cx, |this, cx| {
+                    this.status = error;
+                    cx.notify();
+                })
+                .ok(),
         })
         .detach();
     }
@@ -681,12 +693,10 @@ impl SearchWindow {
                 .child("选择一行以预览")
                 .into_any_element();
         };
-        let name = preview
-            .path
-            .file_name()
-            .map_or_else(|| preview.path.to_string_lossy().into_owned(), |name| {
-                name.to_string_lossy().into_owned()
-            });
+        let name = preview.path.file_name().map_or_else(
+            || preview.path.to_string_lossy().into_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
         let body: AnyElement = match &preview.kind {
             PreviewKind::Loading => div()
                 .flex()
@@ -841,61 +851,61 @@ impl SearchWindow {
             }
             return;
         }
-        let handled = if modifiers.alt && !modifiers.control && !modifiers.platform && !modifiers.shift
-        {
-            if key == "q" {
-                self.preview_visible = !self.preview_visible;
-                self.refresh_preview(cx);
-                cx.notify();
-                true
-            } else if let Some(index) = accelerator_index(&key) {
-                if index < self.results.len() {
-                    self.select(index, cx);
-                    self.open_result(index, cx);
+        let handled =
+            if modifiers.alt && !modifiers.control && !modifiers.platform && !modifiers.shift {
+                if key == "q" {
+                    self.preview_visible = !self.preview_visible;
+                    self.refresh_preview(cx);
+                    cx.notify();
                     true
+                } else if let Some(index) = accelerator_index(&key) {
+                    if index < self.results.len() {
+                        self.select(index, cx);
+                        self.open_result(index, cx);
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
             } else {
-                false
-            }
-        } else {
-            match key.as_str() {
-                "escape" => {
-                    window.remove_window();
-                    true
-                }
-                "up" => {
-                    if !self.results.is_empty() {
-                        let next = self
-                            .selected
-                            .map_or(0, |index| index.saturating_sub(1));
-                        self.select(next, cx);
+                match key.as_str() {
+                    "escape" => {
+                        window.remove_window();
+                        true
                     }
-                    true
-                }
-                "down" => {
-                    if !self.results.is_empty() {
-                        let next = match self.selected {
-                            Some(index) => (index + 1).min(self.results.len() - 1),
-                            None => 0,
-                        };
-                        self.select(next, cx);
+                    "up" => {
+                        if !self.results.is_empty() {
+                            let next = self.selected.map_or(0, |index| index.saturating_sub(1));
+                            self.select(next, cx);
+                        }
+                        true
                     }
-                    true
-                }
-                "enter" => {
-                    let index = self
-                        .selected
-                        .or(if self.results.is_empty() { None } else { Some(0) });
-                    if let Some(index) = index {
-                        self.open_result(index, cx);
+                    "down" => {
+                        if !self.results.is_empty() {
+                            let next = match self.selected {
+                                Some(index) => (index + 1).min(self.results.len() - 1),
+                                None => 0,
+                            };
+                            self.select(next, cx);
+                        }
+                        true
                     }
-                    true
+                    "enter" => {
+                        let index = self.selected.or(if self.results.is_empty() {
+                            None
+                        } else {
+                            Some(0)
+                        });
+                        if let Some(index) = index {
+                            self.open_result(index, cx);
+                        }
+                        true
+                    }
+                    _ => false,
                 }
-                _ => false,
-            }
-        };
+            };
         if handled {
             // The field must not also act on a key the list consumed: an arrow
             // would move the text caret as well as the selection.
@@ -985,59 +995,54 @@ impl Render for SearchWindow {
                 cx,
             ));
 
-        let mut body = div()
-            .flex_1()
-            .min_h(px(0.0))
-            .flex()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .flex()
-                    .flex_col()
-                    .child(header)
-                    .child(
-                        uniform_list(
-                            "indexed-search-results",
-                            results.len(),
-                            move |range: Range<usize>, _window, _cx: &mut App| {
-                                range
-                                    .filter_map(|index| {
-                                        results.get(index).map(|result| {
-                                            let accelerator =
-                                                accelerator(index).map(accelerator_label);
-                                            render_row(
-                                                result,
-                                                index,
-                                                selected == Some(index),
-                                                accelerator,
-                                                widths,
-                                                &view,
-                                            )
-                                        })
+        let mut body = div().flex_1().min_h(px(0.0)).flex().child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(
+                    uniform_list(
+                        "indexed-search-results",
+                        results.len(),
+                        move |range: Range<usize>, _window, _cx: &mut App| {
+                            range
+                                .filter_map(|index| {
+                                    results.get(index).map(|result| {
+                                        let accelerator = accelerator(index).map(accelerator_label);
+                                        render_row(
+                                            result,
+                                            index,
+                                            selected == Some(index),
+                                            accelerator,
+                                            widths,
+                                            &view,
+                                        )
                                     })
-                                    .collect::<Vec<_>>()
-                            },
-                        )
-                        .flex_1()
-                        .pb(px(12.0))
-                        .track_scroll(self.scroll_handle.clone()),
-                    ),
-            );
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .flex_1()
+                    .pb(px(12.0))
+                    .track_scroll(self.scroll_handle.clone()),
+                ),
+        );
         if let Some(preview) = preview {
             body = body.child(preview);
         }
 
-        let mut root = div()
-            .relative()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(theme::bg()))
-            .text_color(rgb(theme::fg()))
-            .capture_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_move(cx.listener(
-                |this, event: &MouseMoveEvent, _window, cx| {
+        let mut root =
+            div()
+                .relative()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(rgb(theme::bg()))
+                .text_color(rgb(theme::fg()))
+                .capture_key_down(cx.listener(Self::on_key_down))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                     if event.pressed_button != Some(MouseButton::Left) {
                         if this.end_column_resize() {
                             cx.notify();
@@ -1047,68 +1052,59 @@ impl Render for SearchWindow {
                     if this.drag_column(event.position.x) {
                         cx.notify();
                     }
-                },
-            ))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    if this.end_column_resize() {
-                        cx.notify();
-                    }
-                }),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .p(px(14.0))
-                    .border_b_1()
-                    .border_color(rgb(theme::border()))
-                    .child(
-                        div()
-                            .h(px(38.0))
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .px(px(10.0))
-                            .rounded(px(7.0))
-                            .bg(rgb(theme::footer_bg()))
-                            .border_1()
-                            .border_color(rgb(theme::border()))
-                            .child(Icon::new(IconName::Search).size_4())
-                            .child(
-                                div().flex_1().child(
-                                    Input::new(&self.input)
-                                        .appearance(false)
-                                        .cleanable(true),
-                                ),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .h(px(32.0))
-                    .px(px(16.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(20.0))
-                    .text_xs()
-                    .text_color(rgb(theme::fg_secondary()))
-                    .child(if query.is_empty() {
-                        "索引搜索".to_string()
-                    } else {
-                        query
-                    })
-                    .child(div().flex_1())
-                    .child("Alt+键 打开 · Alt+Q 预览")
-                    .child(
-                        div()
-                            .text_color(rgb(theme::muted()))
-                            .child(status),
-                    ),
-            )
-            .child(body);
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        if this.end_column_resize() {
+                            cx.notify();
+                        }
+                    }),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .p(px(14.0))
+                        .border_b_1()
+                        .border_color(rgb(theme::border()))
+                        .child(
+                            div()
+                                .h(px(38.0))
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .px(px(10.0))
+                                .rounded(px(7.0))
+                                .bg(rgb(theme::footer_bg()))
+                                .border_1()
+                                .border_color(rgb(theme::border()))
+                                .child(Icon::new(IconName::Search).size_4())
+                                .child(div().flex_1().child(
+                                    Input::new(&self.input).appearance(false).cleanable(true),
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .h(px(32.0))
+                        .px(px(16.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(20.0))
+                        .text_xs()
+                        .text_color(rgb(theme::fg_secondary()))
+                        .child(if query.is_empty() {
+                            "索引搜索".to_string()
+                        } else {
+                            query
+                        })
+                        .child(div().flex_1())
+                        .child("Alt+键 打开 · Alt+Q 预览")
+                        .child(div().text_color(rgb(theme::muted())).child(status)),
+                )
+                .child(body);
 
         if let Some(rename_input) = rename {
             root = root.child(
@@ -1144,9 +1140,9 @@ impl Render for SearchWindow {
                                     .border_1()
                                     .border_color(rgb(theme::border()))
                                     .child(
-                                        div().flex_1().child(
-                                            Input::new(&rename_input).appearance(false),
-                                        ),
+                                        div()
+                                            .flex_1()
+                                            .child(Input::new(&rename_input).appearance(false)),
                                     ),
                             )
                             .child(
@@ -1243,12 +1239,7 @@ fn column_divider(column: ResizeColumn, cx: &mut Context<SearchWindow>) -> Div {
                 cx.stop_propagation();
             }),
         )
-        .child(
-            div()
-                .w(px(1.0))
-                .h(px(14.0))
-                .bg(rgb(theme::border())),
-        )
+        .child(div().w(px(1.0)).h(px(14.0)).bg(rgb(theme::border())))
 }
 
 fn render_row(
@@ -1372,38 +1363,27 @@ fn render_row(
             let rename_view = menu_view.clone();
             let path_view = menu_view.clone();
             let name_view = menu_view.clone();
-            menu.item(
-                PopupMenuItem::new("打开").on_click(move |_, _window, cx| {
-                    let _ = open_view.update(cx, |this, cx| this.open_result(index, cx));
-                }),
-            )
+            menu.item(PopupMenuItem::new("打开").on_click(move |_, _window, cx| {
+                let _ = open_view.update(cx, |this, cx| this.open_result(index, cx));
+            }))
             .item(
                 PopupMenuItem::new("在资源管理器中显示").on_click(move |_, _window, cx| {
                     let _ = reveal_view.update(cx, |this, cx| this.reveal_result(index, cx));
                 }),
             )
             .separator()
-            .item(
-                PopupMenuItem::new("复制").on_click(move |_, _window, cx| {
-                    let _ = copy_view.update(cx, |this, cx| this.copy_result(index, false, cx));
-                }),
-            )
-            .item(
-                PopupMenuItem::new("剪切").on_click(move |_, _window, cx| {
-                    let _ = cut_view.update(cx, |this, cx| this.copy_result(index, true, cx));
-                }),
-            )
-            .item(
-                PopupMenuItem::new("删除").on_click(move |_, _window, cx| {
-                    let _ = trash_view.update(cx, |this, cx| this.trash_result(index, cx));
-                }),
-            )
-            .item(
-                PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
-                    let _ = rename_view
-                        .update(cx, |this, cx| this.begin_rename(index, window, cx));
-                }),
-            )
+            .item(PopupMenuItem::new("复制").on_click(move |_, _window, cx| {
+                let _ = copy_view.update(cx, |this, cx| this.copy_result(index, false, cx));
+            }))
+            .item(PopupMenuItem::new("剪切").on_click(move |_, _window, cx| {
+                let _ = cut_view.update(cx, |this, cx| this.copy_result(index, true, cx));
+            }))
+            .item(PopupMenuItem::new("删除").on_click(move |_, _window, cx| {
+                let _ = trash_view.update(cx, |this, cx| this.trash_result(index, cx));
+            }))
+            .item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
+                let _ = rename_view.update(cx, |this, cx| this.begin_rename(index, window, cx));
+            }))
             .separator()
             .item(
                 PopupMenuItem::new("复制路径").on_click(move |_, _window, cx| {
@@ -1548,7 +1528,11 @@ fn format_bytes(bytes: u64) -> String {
 fn format_modified(seconds: u32) -> String {
     time::OffsetDateTime::from_unix_timestamp(i64::from(seconds))
         .ok()
-        .and_then(|value| value.format(&time::format_description::well_known::Rfc3339).ok())
+        .and_then(|value| {
+            value
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
         .unwrap_or_else(|| "—".to_string())
 }
 
@@ -1634,22 +1618,21 @@ mod tests {
             gpui_component::Root::new(search, window, cx)
         });
         let search = built.expect("the search view should be built with the window");
-        search
-            .update(cx, |view, cx| {
-                view.results = paths
-                    .iter()
-                    .map(|(path, is_dir)| {
-                        SearchResult::from(IndexedSearchHit {
-                            path: (*path).to_string(),
-                            is_dir: *is_dir,
-                            size: 0,
-                            modified: 0,
-                        })
+        search.update(cx, |view, cx| {
+            view.results = paths
+                .iter()
+                .map(|(path, is_dir)| {
+                    SearchResult::from(IndexedSearchHit {
+                        path: (*path).to_string(),
+                        is_dir: *is_dir,
+                        size: 0,
+                        modified: 0,
                     })
-                    .collect();
-                view.selected = view.results.first().map(|_| 0);
-                cx.notify();
-            });
+                })
+                .collect();
+            view.selected = view.results.first().map(|_| 0);
+            cx.notify();
+        });
         Harness { window, search }
     }
 
@@ -1748,30 +1731,30 @@ mod tests {
         cx.run_until_parked();
         cx.background_executor.run_until_parked();
         cx.run_until_parked();
-        search
-            .search
-            .read_with(cx, |view, _| {
-                assert!(view.preview_visible);
-                assert!(matches!(
-                    view.preview.as_ref().map(|preview| &preview.kind),
-                    Some(super::PreviewKind::Text { text, .. }) if text.contains("alpha")
-                ));
-            });
+        search.search.read_with(cx, |view, _| {
+            assert!(view.preview_visible);
+            assert!(matches!(
+                view.preview.as_ref().map(|preview| &preview.kind),
+                Some(super::PreviewKind::Text { text, .. }) if text.contains("alpha")
+            ));
+        });
 
         press(&search, cx, "q", alt);
-        search
-            .search
-            .read_with(cx, |view, _| {
-                assert!(!view.preview_visible);
-                assert!(view.preview.is_none());
-            });
+        search.search.read_with(cx, |view, _| {
+            assert!(!view.preview_visible);
+            assert!(view.preview.is_none());
+        });
     }
 
     #[gpui::test]
     fn clicking_a_heading_sorts_the_list_both_ways(cx: &mut TestAppContext) {
         let harness = harness(
             cx,
-            &[("C:/b.txt", false), ("C:/a.txt", false), ("C:/c.txt", false)],
+            &[
+                ("C:/b.txt", false),
+                ("C:/a.txt", false),
+                ("C:/c.txt", false),
+            ],
         );
         harness
             .search

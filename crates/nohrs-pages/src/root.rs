@@ -7,11 +7,12 @@
 //! (search). The binary just opens a window hosting this view; the future
 //! launcher window will be a symmetric root in `nohrs-launcher`.
 
-use nohrs_core::{t, tf};
 use crate::explorer::ExplorerPage;
 use crate::explorer::StatusLevel;
 use crate::{
-    PageKind, git::GitPage, s3::S3Page,
+    PageKind,
+    git::GitPage,
+    s3::S3Page,
     settings::{SettingsPage, SettingsSection},
 };
 use gpui::{
@@ -22,6 +23,7 @@ use gpui_component::resizable::ResizableState;
 use gpui_component::{Icon, IconName, Root, Theme, ThemeMode as GpuiThemeMode, WindowExt as _};
 use nohrs_core::config::{self, Config, ConfigOverride, ConfigWatcher};
 use nohrs_core::telemetry::LogErr;
+use nohrs_core::{t, tf};
 use nohrs_services::fs::trash::Ledger as TrashLedger;
 use nohrs_services::search::SearchService;
 use nohrs_store::KvStore;
@@ -368,7 +370,9 @@ impl RootView {
             return;
         }
         cx.spawn(async move |_root, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(5))
+                .await;
             if let Err(error) = updater.update(cx, |updater, cx| updater.check(cx)) {
                 tracing::debug!("app closed before the update check: {error}");
             }
@@ -411,7 +415,11 @@ impl RootView {
         }
         // Before `restyle_components`, which reads these tokens.
         let title = config.ui.app_name.trim();
-        window.set_window_title(if title.is_empty() { nohrs_ui::window::APP_NAME } else { title });
+        window.set_window_title(if title.is_empty() {
+            nohrs_ui::window::APP_NAME
+        } else {
+            title
+        });
         theme::set_dark(mode.is_dark());
         theme::set_accent(theme::parse_accent(&config.theme.accent));
         theme::set_background(theme::parse_color(&config.theme.background));
@@ -457,7 +465,8 @@ impl RootView {
             page.apply_config_archive(&archive, cx);
         });
         let shown = config.clone();
-        self.settings.update(cx, |page, cx| page.set_config(shown, cx));
+        self.settings
+            .update(cx, |page, cx| page.set_config(shown, cx));
         if config.ui.welcome_done {
             self.welcome = None;
         } else {
@@ -547,7 +556,11 @@ impl RootView {
                     .flex_shrink_0()
                     .text_color(rgb(theme::accent()))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(tf!("Escolhendo para {browser} ({title})", browser = browser, title = dialog.title)),
+                    .child(tf!(
+                        "Escolhendo para {browser} ({title})",
+                        browser = browser,
+                        title = dialog.title
+                    )),
             )
             .child(
                 div()
@@ -557,7 +570,9 @@ impl RootView {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(rgb(theme::fg_secondary()))
-                    .child(t!("Duplo clique ou Enter num arquivo para enviá-lo. Esc devolve a janela.")),
+                    .child(t!(
+                        "Duplo clique ou Enter num arquivo para enviá-lo. Esc devolve a janela."
+                    )),
             )
             .child(
                 div()
@@ -626,8 +641,11 @@ impl RootView {
                             continue;
                         }
                         let update = this.update_in(&mut cx, |this, window, cx| {
-                            let (mut config, diagnostics) =
-                                config::load_from_files(&this.config_path, &config::paths::appearance_file(), &config::paths::search_file());
+                            let (mut config, diagnostics) = config::load_from_files(
+                                &this.config_path,
+                                &config::paths::appearance_file(),
+                                &config::paths::search_file(),
+                            );
                             for over in &this.config_overrides {
                                 config.apply_override(over);
                             }
@@ -731,7 +749,9 @@ impl Render for RootView {
             .bg(rgb(theme::bg()))
             .relative()
             // Every text in the window inherits the family chosen in Settings.
-            .when(!self.font_family.is_empty(), |this| this.font_family(self.font_family.clone()))
+            .when(!self.font_family.is_empty(), |this| {
+                this.font_family(self.font_family.clone())
+            })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_account_action))
             .children(toolbar)
@@ -740,23 +760,18 @@ impl Render for RootView {
             })
             .child(
                 // Main content: toolbar + page
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .min_h(px(0.0))
-                    .child(
-                        // Main content area - render active page
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .min_w(px(0.0))
-                            .child(match &self.welcome {
-                                Some(welcome) => welcome.clone().into_any_element(),
-                                None => self.render_active_page(window, cx),
-                            }),
-                    ),
+                div().flex_1().flex().flex_row().min_h(px(0.0)).child(
+                    // Main content area - render active page
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.0))
+                        .child(match &self.welcome {
+                            Some(welcome) => welcome.clone().into_any_element(),
+                            None => self.render_active_page(window, cx),
+                        }),
+                ),
             )
             .children(
                 // Footer status bar
@@ -785,7 +800,8 @@ impl Render for RootView {
                     // File Pilot does; the footer stays for the other pages
                     // and for a config file that failed to load.
                     let shown = self.welcome.is_none()
-                        && (self.current_page != PageKind::Explorer || self.config_status.is_some());
+                        && (self.current_page != PageKind::Explorer
+                            || self.config_status.is_some());
                     shown.then(|| footer(props, None, cx))
                 },
             )
@@ -807,7 +823,8 @@ impl RootView {
             AccountMenuCommand::Keymap => SettingsSection::Shortcuts,
             AccountMenuCommand::Themes => SettingsSection::Appearance,
         };
-        self.settings.update(cx, |page, cx| page.show_section(section, cx));
+        self.settings
+            .update(cx, |page, cx| page.show_section(section, cx));
         self.set_page(PageKind::Settings, cx);
     }
 
@@ -849,4 +866,3 @@ impl RootView {
             .into_any_element()
     }
 }
-

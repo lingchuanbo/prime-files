@@ -93,7 +93,12 @@ pub(crate) fn image() -> Arc<RenderImage> {
                         continue;
                     }
                     let hue = (dy.atan2(dx).to_degrees() + 360.0) % 360.0;
-                    let color = Hsv { h: hue, s: distance.min(1.0), v: 1.0 }.to_rgb();
+                    let color = Hsv {
+                        h: hue,
+                        s: distance.min(1.0),
+                        v: 1.0,
+                    }
+                    .to_rgb();
                     // gpui draws BGRA, whatever the buffer type is called.
                     let pixel = image::Rgba([
                         (color & 0xFF) as u8,
@@ -113,7 +118,10 @@ pub(crate) fn image() -> Arc<RenderImage> {
 /// `bounds`: the angle around the centre is the hue, the distance from it the
 /// saturation. Past the rim the distance is capped, so a drag that leaves the
 /// ring keeps the colour it had rather than dropping it.
-pub(crate) fn ring_hue_saturation(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<(f32, f32)> {
+pub(crate) fn ring_hue_saturation(
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+) -> Option<(f32, f32)> {
     let radius = f64::from(bounds.size.width) / 2.0;
     if radius <= 0.0 {
         return None;
@@ -146,8 +154,14 @@ mod tests {
 
     #[test]
     fn colours_round_trip_through_hsv() {
-        for color in [0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0x1E1F22, 0x8B5CF6] {
-            assert_eq!(Hsv::from_rgb(color).to_rgb(), color, "{color:06x} did not round trip");
+        for color in [
+            0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0x1E1F22, 0x8B5CF6,
+        ] {
+            assert_eq!(
+                Hsv::from_rgb(color).to_rgb(),
+                color,
+                "{color:06x} did not round trip"
+            );
         }
     }
 
@@ -155,12 +169,52 @@ mod tests {
     fn the_wheel_reads_its_angles_the_way_a_wheel_does() {
         // Right is red, down is green, left is cyan: the ring runs clockwise
         // from the positive x axis, which is how the picture is drawn.
-        assert_eq!(Hsv { h: 0.0, s: 1.0, v: 1.0 }.to_rgb(), 0xFF0000);
-        assert_eq!(Hsv { h: 120.0, s: 1.0, v: 1.0 }.to_rgb(), 0x00FF00);
-        assert_eq!(Hsv { h: 240.0, s: 1.0, v: 1.0 }.to_rgb(), 0x0000FF);
+        assert_eq!(
+            Hsv {
+                h: 0.0,
+                s: 1.0,
+                v: 1.0
+            }
+            .to_rgb(),
+            0xFF0000
+        );
+        assert_eq!(
+            Hsv {
+                h: 120.0,
+                s: 1.0,
+                v: 1.0
+            }
+            .to_rgb(),
+            0x00FF00
+        );
+        assert_eq!(
+            Hsv {
+                h: 240.0,
+                s: 1.0,
+                v: 1.0
+            }
+            .to_rgb(),
+            0x0000FF
+        );
         // The centre of the wheel is white, its edge the pure hue.
-        assert_eq!(Hsv { h: 200.0, s: 0.0, v: 1.0 }.to_rgb(), 0xFFFFFF);
-        assert_eq!(Hsv { h: 200.0, s: 1.0, v: 0.0 }.to_rgb(), 0x000000);
+        assert_eq!(
+            Hsv {
+                h: 200.0,
+                s: 0.0,
+                v: 1.0
+            }
+            .to_rgb(),
+            0xFFFFFF
+        );
+        assert_eq!(
+            Hsv {
+                h: 200.0,
+                s: 1.0,
+                v: 0.0
+            }
+            .to_rgb(),
+            0x000000
+        );
     }
 
     #[test]
@@ -191,7 +245,8 @@ mod tests {
     }
 
     #[test]
-    fn the_picture_is_a_ring_that_matches_the_colours_it_promises() {        let image = image();
+    fn the_picture_is_a_ring_that_matches_the_colours_it_promises() {
+        let image = image();
         assert_eq!(image.size(0).width.0 as u32, SIZE as u32);
         // The middle of the picture is white (to within the rounding of a
         // pixel that is not quite on the centre); the outer edge, to the
@@ -200,15 +255,26 @@ mod tests {
         let at = |x: usize, y: usize| -> [u8; 4] {
             let bytes = image.as_bytes(0).expect("pixels");
             let start = (y * size + x) * 4;
-            [bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3]]
+            [
+                bytes[start],
+                bytes[start + 1],
+                bytes[start + 2],
+                bytes[start + 3],
+            ]
         };
         let middle = at(size / 2, size / 2);
-        assert!(middle[..3].iter().all(|channel| *channel > 250), "{middle:?} is near white");
+        assert!(
+            middle[..3].iter().all(|channel| *channel > 250),
+            "{middle:?} is near white"
+        );
         let edge = at(size - 3, size / 2);
         // The pixel sits a hair off the axis, so "red" is to within rounding.
         assert_eq!(edge[3], 0xFF);
         assert!(edge[2] > 250, "{edge:?} is red (in BGRA)");
-        assert!(edge[0] < 20 && edge[1] < 20, "{edge:?} has no green or blue to speak of");
+        assert!(
+            edge[0] < 20 && edge[1] < 20,
+            "{edge:?} has no green or blue to speak of"
+        );
         assert_eq!(at(1, 1)[3], 0x00, "the square corners are left transparent");
     }
 }

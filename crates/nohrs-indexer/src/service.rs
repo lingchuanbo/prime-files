@@ -14,35 +14,41 @@ use std::fs::File;
 use std::io::{self, BufWriter, Read as _, Write as _};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use windows::Win32::Foundation::{
-    ERROR_CALL_NOT_IMPLEMENTED, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree, NO_ERROR,
+    ERROR_CALL_NOT_IMPLEMENTED, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree,
+    NO_ERROR,
 };
-use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{
-    FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-    PIPE_ACCESS_DUPLEX,
+    FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, GetDriveTypeW, GetLogicalDrives,
+    GetVolumeInformationW, PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW};
+use windows::Win32::System::Registry::{
+    HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
+};
 use windows::Win32::System::Services::{
-    RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_CONTROL_INTERROGATE,
-    SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE,
-    SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
-    SetServiceStatus, StartServiceCtrlDispatcherW,
+    RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
+    SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING,
+    SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING,
+    SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
+    StartServiceCtrlDispatcherW,
 };
 use windows::core::{HSTRING, PWSTR};
 
 use crate::{PIPE_NAME, SERVICE_NAME, mft, protocol};
 
-mod journal;
 mod index;
+mod journal;
 
 #[cfg(test)]
 #[path = "service/request_tests.rs"]
@@ -61,7 +67,10 @@ pub fn run(allowed_sid: String) -> io::Result<()> {
     }
     let name: Vec<u16> = SERVICE_NAME.encode_utf16().chain([0]).collect();
     let table = [
-        SERVICE_TABLE_ENTRYW { lpServiceName: PWSTR(name.as_ptr().cast_mut()), lpServiceProc: Some(service_main) },
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR(name.as_ptr().cast_mut()),
+            lpServiceProc: Some(service_main),
+        },
         SERVICE_TABLE_ENTRYW::default(),
     ];
     unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) }.map_err(io::Error::from)
@@ -75,11 +84,19 @@ fn set_state(state: SERVICE_STATUS_CURRENT_STATE) {
     let status = SERVICE_STATUS {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS,
         dwCurrentState: state,
-        dwControlsAccepted: if state == SERVICE_RUNNING { SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN } else { 0 },
+        dwControlsAccepted: if state == SERVICE_RUNNING {
+            SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN
+        } else {
+            0
+        },
         dwWin32ExitCode: 0,
         dwServiceSpecificExitCode: 0,
         dwCheckPoint: 0,
-        dwWaitHint: if state == SERVICE_STOP_PENDING { 5_000 } else { 0 },
+        dwWaitHint: if state == SERVICE_STOP_PENDING {
+            5_000
+        } else {
+            0
+        },
     };
     if let Err(error) = unsafe { SetServiceStatus(handle, &status) } {
         log(&format!("SetServiceStatus failed: {error}"));
@@ -97,16 +114,20 @@ unsafe extern "system" fn service_main(_count: u32, _arguments: *mut PWSTR) {
     }
     set_state(SERVICE_RUNNING);
     log("started");
-    let index = INDEX.get_or_init(|| Arc::new(index::Index::default())).clone();
-    let worker = match std::thread::Builder::new().name("prime-index-updates".into()).spawn({
-        let index = index.clone();
-        move || {
-            if std::panic::catch_unwind(|| index::run(&index)).is_err() {
-                log("index worker panicked");
-                index.stop();
+    let index = INDEX
+        .get_or_init(|| Arc::new(index::Index::default()))
+        .clone();
+    let worker = match std::thread::Builder::new()
+        .name("prime-index-updates".into())
+        .spawn({
+            let index = index.clone();
+            move || {
+                if std::panic::catch_unwind(|| index::run(&index)).is_err() {
+                    log("index worker panicked");
+                    index.stop();
+                }
             }
-        }
-    }) {
+        }) {
         Ok(worker) => worker,
         Err(error) => {
             log(&format!("could not start index worker: {error}"));
@@ -116,20 +137,33 @@ unsafe extern "system" fn service_main(_count: u32, _arguments: *mut PWSTR) {
     };
     serve();
     index.stop();
-    if worker.join().is_err() { log("index worker join failed"); }
+    if worker.join().is_err() {
+        log("index worker join failed");
+    }
     log("stopped");
     set_state(SERVICE_STOPPED);
 }
 
-unsafe extern "system" fn control(code: u32, _kind: u32, _data: *mut c_void, _context: *mut c_void) -> u32 {
+unsafe extern "system" fn control(
+    code: u32,
+    _kind: u32,
+    _data: *mut c_void,
+    _context: *mut c_void,
+) -> u32 {
     match code {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             STOPPING.store(true, Ordering::SeqCst);
-            if let Some(index) = INDEX.get() { index.stop(); }
+            if let Some(index) = INDEX.get() {
+                index.stop();
+            }
             set_state(SERVICE_STOP_PENDING);
             // The loop waits in ConnectNamedPipe: a connection wakes it.
             std::thread::spawn(|| {
-                if let Err(error) = std::fs::OpenOptions::new().read(true).write(true).open(PIPE_NAME) {
+                if let Err(error) = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(PIPE_NAME)
+                {
                     log(&format!("could not wake the pipe to stop: {error}"));
                 }
             });
@@ -148,9 +182,14 @@ fn serve() {
     // write (its request) and nothing else. "P": no inherited entries.
     let sddl = HSTRING::from(format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})"));
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    if let Err(error) =
-        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, SDDL_REVISION_1, &mut descriptor, None) }
-    {
+    if let Err(error) = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            &sddl,
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+    } {
         log(&format!("bad security descriptor: {error}"));
         return;
     }
@@ -176,13 +215,17 @@ fn serve() {
             )
         };
         if pipe.is_invalid() {
-            log(&format!("CreateNamedPipeW failed: {:?}", unsafe { GetLastError() }));
+            log(&format!("CreateNamedPipeW failed: {:?}", unsafe {
+                GetLastError()
+            }));
             std::thread::sleep(std::time::Duration::from_secs(2));
             continue;
         }
-        let connected = unsafe { ConnectNamedPipe(pipe, None) }.is_ok() || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+        let connected = unsafe { ConnectNamedPipe(pipe, None) }.is_ok()
+            || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
         let file = unsafe { File::from_raw_handle(pipe.0) };
-        if connected && !STOPPING.load(Ordering::SeqCst)
+        if connected
+            && !STOPPING.load(Ordering::SeqCst)
             && let Err(error) = answer(&file)
         {
             log(&format!("request failed: {error}"));
@@ -217,11 +260,17 @@ fn answer(pipe: &File) -> io::Result<()> {
             Err(error) => protocol::write_error(&mut out, &error.to_string())?,
         }
     } else if request == protocol::REFRESH {
-        if let Some(index) = INDEX.get() { index.refresh(); }
+        if let Some(index) = INDEX.get() {
+            index.refresh();
+        }
         out.write_all(format!("PFIX1 OK {}\n", protocol::HELLO_VERSION).as_bytes())?;
         out.flush()?;
     } else if request == protocol::STATUS {
-        match INDEX.get().ok_or_else(|| io::Error::other("index worker not running")).and_then(|index| index.status()) {
+        match INDEX
+            .get()
+            .ok_or_else(|| io::Error::other("index worker not running"))
+            .and_then(|index| index.status())
+        {
             Ok(status) => protocol::write_index_status(&mut out, status)?,
             Err(error) => protocol::write_error(&mut out, &error.to_string())?,
         }
@@ -265,7 +314,10 @@ fn read_request_body(mut pipe: &File) -> io::Result<Vec<u8>> {
         body.extend_from_slice(&length);
         let length = u16::from_le_bytes(length) as usize;
         if length > 1024 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "search term too long"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "search term too long",
+            ));
         }
         let mut term = vec![0u8; length];
         pipe.read_exact(&mut term)?;
@@ -285,7 +337,10 @@ fn read_subtree_body(mut pipe: &File) -> io::Result<Vec<u8>> {
     pipe.read_exact(&mut head)?;
     let length = u16::from_le_bytes(head) as usize;
     if length > 32_768 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "subtree path too long"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "subtree path too long",
+        ));
     }
     let mut body = vec![0u8; 2 + length + 2];
     body[..2].copy_from_slice(&head);
@@ -294,19 +349,31 @@ fn read_subtree_body(mut pipe: &File) -> io::Result<Vec<u8>> {
 }
 
 fn cached() -> io::Result<Arc<Vec<Arc<protocol::Volume>>>> {
-    INDEX.get().ok_or_else(|| io::Error::other("index worker not running"))?.snapshot()
+    INDEX
+        .get()
+        .ok_or_else(|| io::Error::other("index worker not running"))?
+        .snapshot()
 }
 
 /// The folder `path` and what is under it, from the copy the service keeps.
 fn subtree(path: &str, levels: u16) -> io::Result<Vec<protocol::TreeNode>> {
     let volumes = cached()?;
-    let drive = path.split(['\\', '/']).next().unwrap_or_default().trim_end_matches(':');
+    let drive = path
+        .split(['\\', '/'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(':');
     if drive.is_empty() {
         return Err(io::Error::other("the path names no drive"));
     }
     let volume = volumes
         .iter()
-        .find(|volume| volume.root.trim_end_matches(':').eq_ignore_ascii_case(drive))
+        .find(|volume| {
+            volume
+                .root
+                .trim_end_matches(':')
+                .eq_ignore_ascii_case(drive)
+        })
         .ok_or_else(|| io::Error::other("the drive is not indexed"))?;
     volume
         .subtree(path, levels)
@@ -335,10 +402,20 @@ fn search(terms: &[String], limit: u32) -> io::Result<Vec<protocol::Hit>> {
 /// Reads a standalone snapshot; pipe requests use the background index instead.
 pub fn snapshot() -> Vec<protocol::Volume> {
     let profile = ALLOWED.get().and_then(|sid| profile_path(sid));
-    ntfs_volumes().into_iter().filter_map(|root| match mft::read_volume(&root) {
-        Ok(table) => Some(mft::tree(&table, &root, &policy_for(&root, profile.as_deref()))),
-        Err(error) => { log(&format!("{root}: {error}")); None }
-    }).collect()
+    ntfs_volumes()
+        .into_iter()
+        .filter_map(|root| match mft::read_volume(&root) {
+            Ok(table) => Some(mft::tree(
+                &table,
+                &root,
+                &policy_for(&root, profile.as_deref()),
+            )),
+            Err(error) => {
+                log(&format!("{root}: {error}"));
+                None
+            }
+        })
+        .collect()
 }
 
 // Which profile folders of `root` are listed: the user's own and Public.
@@ -348,22 +425,41 @@ fn policy_for(root: &str, profile: Option<&str>) -> mft::Policy {
     let (holder, own) = match profile {
         Some(profile) => {
             let lowered = profile.to_lowercase();
-            let mut parts: Vec<&str> = lowered.split('\\').filter(|part| !part.is_empty()).collect();
-            let drive = parts.first().map(|drive| drive.to_string()).unwrap_or_default();
+            let mut parts: Vec<&str> = lowered
+                .split('\\')
+                .filter(|part| !part.is_empty())
+                .collect();
+            let drive = parts
+                .first()
+                .map(|drive| drive.to_string())
+                .unwrap_or_default();
             let own = parts.pop().map(str::to_string);
             let holder: Vec<String> = parts.iter().skip(1).map(|part| part.to_string()).collect();
             (drive.eq_ignore_ascii_case(root).then_some(holder), own)
         }
-        None => (system_drive.eq_ignore_ascii_case(root).then(|| vec!["users".to_string()]), None),
+        None => (
+            system_drive
+                .eq_ignore_ascii_case(root)
+                .then(|| vec!["users".to_string()]),
+            None,
+        ),
     };
     match holder {
-        Some(profiles) => mft::Policy { profiles, allowed: own.into_iter().chain(["public".to_string()]).collect() },
-        None => mft::Policy { profiles: Vec::new(), allowed: Vec::new() },
+        Some(profiles) => mft::Policy {
+            profiles,
+            allowed: own.into_iter().chain(["public".to_string()]).collect(),
+        },
+        None => mft::Policy {
+            profiles: Vec::new(),
+            allowed: Vec::new(),
+        },
     }
 }
 
 fn profile_path(sid: &str) -> Option<String> {
-    let key = HSTRING::from(format!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\{sid}"));
+    let key = HSTRING::from(format!(
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\{sid}"
+    ));
     let value = HSTRING::from("ProfileImagePath");
     let mut buffer = vec![0u16; 1024];
     let mut size = (buffer.len() * 2) as u32;
@@ -380,7 +476,10 @@ fn profile_path(sid: &str) -> Option<String> {
     }
     .ok()
     .ok()?;
-    let length = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
+    let length = buffer
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(buffer.len());
     Some(String::from_utf16_lossy(&buffer[..length]))
 }
 
@@ -397,14 +496,16 @@ pub fn ntfs_volumes() -> Vec<String> {
                 return false;
             }
             let mut file_system = [0u16; 32];
-            unsafe { GetVolumeInformationW(&wide, None, None, None, None, Some(&mut file_system)) }.is_ok()
+            unsafe { GetVolumeInformationW(&wide, None, None, None, None, Some(&mut file_system)) }
+                .is_ok()
                 && String::from_utf16_lossy(&file_system).trim_end_matches('\0') == "NTFS"
         })
         .collect()
 }
 
 fn log_file() -> PathBuf {
-    let data = std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
+    let data = std::env::var_os("ProgramData")
+        .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
     data.join("Prime Files Indexer").join("indexer.log")
 }
 
@@ -418,7 +519,12 @@ pub fn log(line: &str) {
         return;
     }
     let append = std::fs::metadata(&path).map_or(true, |metadata| metadata.len() < 1 << 20);
-    let file = std::fs::OpenOptions::new().create(true).append(append).write(true).truncate(!append).open(&path);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(append)
+        .write(true)
+        .truncate(!append)
+        .open(&path);
     if let Ok(mut file) = file {
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -428,4 +534,3 @@ pub fn log(line: &str) {
         }
     }
 }
-

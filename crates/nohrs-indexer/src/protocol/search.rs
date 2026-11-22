@@ -62,20 +62,20 @@ impl Volume {
                 continue;
             }
             let Some(initials) = super::pinyin::initials(name) else {
-                if terms.iter().all(|term| self.pinyin_of(entry).contains(term.as_str())) {
+                if terms
+                    .iter()
+                    .all(|term| self.pinyin_of(entry).contains(term.as_str()))
+                {
                     seen.insert(position);
                     matched.push(position);
                 }
                 continue;
             };
-            if terms
-                .iter()
-                .all(|term| {
-                    name.contains(term.as_str())
-                        || initials.contains(term.as_str())
-                        || self.pinyin_of(entry).contains(term.as_str())
-                })
-            {
+            if terms.iter().all(|term| {
+                name.contains(term.as_str())
+                    || initials.contains(term.as_str())
+                    || self.pinyin_of(entry).contains(term.as_str())
+            }) {
                 seen.insert(position);
                 matched.push(position);
             }

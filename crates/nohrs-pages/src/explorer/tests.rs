@@ -434,7 +434,9 @@ async fn grouping_counts_headers_when_scrolling_to_an_entry(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-async fn the_fixed_header_setting_moves_the_header_out_of_the_scrolling_rows(cx: &mut TestAppContext) {
+async fn the_fixed_header_setting_moves_the_header_out_of_the_scrolling_rows(
+    cx: &mut TestAppContext,
+) {
     let window = new_explorer(cx);
     window
         .update(cx, |page, _window, cx| {
@@ -511,7 +513,9 @@ async fn a_fixed_header_stays_on_top_while_the_rows_scroll(cx: &mut TestAppConte
         cx.notify();
     });
     cx.run_until_parked();
-    let before = cx.debug_bounds("column-header-row").expect("the fixed header is drawn");
+    let before = cx
+        .debug_bounds("column-header-row")
+        .expect("the fixed header is drawn");
 
     pane.update(cx, |pane, cx| {
         pane.virtual_scroll_handle
@@ -524,7 +528,9 @@ async fn a_fixed_header_stays_on_top_while_the_rows_scroll(cx: &mut TestAppConte
         f32::from(offset) < 0.0,
         "the rows must actually have scrolled: {offset:?}"
     );
-    let after = cx.debug_bounds("column-header-row").expect("the fixed header, still drawn");
+    let after = cx
+        .debug_bounds("column-header-row")
+        .expect("the fixed header, still drawn");
     assert_eq!(
         before.origin, after.origin,
         "a fixed header must not move with the rows"
@@ -1161,7 +1167,10 @@ async fn the_ignore_list_hides_names_from_the_listing(cx: &mut TestAppContext) {
             page.apply_filter();
             // The default list hides the system's own bookkeeping files.
             let names = |page: &ExplorerPane| -> Vec<String> {
-                page.filtered_entries.iter().map(|entry| entry.name.clone()).collect()
+                page.filtered_entries
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect()
             };
             assert_eq!(names(page), ["draft.tmp", "keep.txt"]);
 

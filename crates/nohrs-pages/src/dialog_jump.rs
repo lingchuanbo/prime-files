@@ -141,14 +141,15 @@ mod platform {
 
     use serde::{Deserialize, Serialize};
     use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateRoundRectRgn,
-        CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
-        DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FF_DONTCARE,
-        FW_NORMAL, FillRect, GetStockObject, HDC, InvalidateRect, NULL_PEN, OUT_DEFAULT_PRECIS,
-        PAINTSTRUCT, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT,
+        CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
+        DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint,
+        FF_DONTCARE, FW_NORMAL, FillRect, GetStockObject, HDC, InvalidateRect, NULL_PEN,
+        OUT_DEFAULT_PRECIS, PAINTSTRUCT, RoundRect, SelectObject, SetBkMode, SetTextColor,
+        SetWindowRgn, TRANSPARENT,
     };
-    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -160,13 +161,13 @@ mod platform {
     use windows::Win32::UI::WindowsAndMessaging::{
         BN_CLICKED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
         DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetDlgItem,
-        GetForegroundWindow, GetPropW, GetSystemMetrics, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-        HWND_TOPMOST, IDOK, IsWindow, MSG, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW,
-        RemovePropW, SM_CYSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-        SetForegroundWindow, SetPropW, SetWindowPos, SetWindowTextW, ShowWindow,
-        SwitchToThisWindow, TranslateMessage, WM_CHAR, WM_COMMAND, WM_ERASEBKGND, WM_HOTKEY,
-        WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_SETFOCUS,
-        WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        GetForegroundWindow, GetPropW, GetSystemMetrics, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, HWND_TOPMOST, IDOK, IsWindow, MSG, PM_REMOVE, PeekMessageW,
+        PostMessageW, RegisterClassW, RemovePropW, SM_CYSCREEN, SW_HIDE, SW_SHOWNOACTIVATE,
+        SWP_NOACTIVATE, SWP_SHOWWINDOW, SetForegroundWindow, SetPropW, SetWindowPos,
+        SetWindowTextW, ShowWindow, SwitchToThisWindow, TranslateMessage, WM_CHAR, WM_COMMAND,
+        WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+        WM_QUIT, WM_SETFOCUS, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
 
@@ -619,7 +620,8 @@ mod platform {
         let now = Instant::now();
         let last = LAST_CTRL.get_or_init(|| Mutex::new(None));
         let mut last = last.lock().unwrap_or_else(|error| error.into_inner());
-        if last.is_some_and(|stamp| now.duration_since(stamp) < std::time::Duration::from_millis(600))
+        if last
+            .is_some_and(|stamp| now.duration_since(stamp) < std::time::Duration::from_millis(600))
         {
             *last = None;
             drop(last);
@@ -806,7 +808,9 @@ mod platform {
             search.id = id;
             search.remote.clear();
         }
-        *PENDING_QUERY.lock().unwrap_or_else(|error| error.into_inner()) = Some((id, text));
+        *PENDING_QUERY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((id, text));
         let context = CONTEXT
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -1034,10 +1038,7 @@ mod platform {
         if !unsafe { IsWindow(Some(dialog)) }.as_bool() {
             return;
         }
-        let focused_here = SEARCH
-            .lock()
-            .map(|search| search.focused)
-            .unwrap_or(false);
+        let focused_here = SEARCH.lock().map(|search| search.focused).unwrap_or(false);
         if focused_here {
             let _ = unsafe { SetForegroundWindow(dialog) };
             std::thread::sleep(std::time::Duration::from_millis(80));
@@ -1129,10 +1130,7 @@ mod platform {
                 LRESULT(0)
             }
             WM_CHAR => {
-                let focused = SEARCH
-                    .lock()
-                    .map(|search| search.focused)
-                    .unwrap_or(false);
+                let focused = SEARCH.lock().map(|search| search.focused).unwrap_or(false);
                 if focused
                     && let Some(character) = char::from_u32(wparam.0 as u32)
                     && !character.is_control()
@@ -1145,10 +1143,7 @@ mod platform {
                 LRESULT(0)
             }
             WM_KEYDOWN => {
-                let focused = SEARCH
-                    .lock()
-                    .map(|search| search.focused)
-                    .unwrap_or(false);
+                let focused = SEARCH.lock().map(|search| search.focused).unwrap_or(false);
                 if !focused {
                     return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
                 }
@@ -1167,8 +1162,7 @@ mod platform {
                     }
                     key if key == VK_RETURN.0 => {
                         let (selected, count, query) = {
-                            let search =
-                                SEARCH.lock().unwrap_or_else(|error| error.into_inner());
+                            let search = SEARCH.lock().unwrap_or_else(|error| error.into_inner());
                             (search.selected, search.view.len(), search.query.clone())
                         };
                         if selected >= 0 && (selected as usize) < count {
@@ -1380,7 +1374,12 @@ mod platform {
             &field,
             mix(state.bg, state.fg, if search.focused { 0.20 } else { 0.09 }),
         );
-        draw_magnifier(hdc, field.left + dpi_units(12), field.top + height / 2, colorref(mix(state.fg, state.bg, 0.35)));
+        draw_magnifier(
+            hdc,
+            field.left + dpi_units(12),
+            field.top + height / 2,
+            colorref(mix(state.fg, state.bg, 0.35)),
+        );
         let mut text_rect = RECT {
             left: field.left + dpi_units(30),
             top: field.top,
@@ -1481,12 +1480,8 @@ mod platform {
                 right: rect.right - dpi_units(6),
                 bottom: rect.bottom,
             };
-            let _ = unsafe {
-                SetTextColor(
-                    hdc,
-                    colorref(if current { state.bg } else { state.fg }),
-                )
-            };
+            let _ =
+                unsafe { SetTextColor(hdc, colorref(if current { state.bg } else { state.fg })) };
             let _ = unsafe {
                 DrawTextW(
                     hdc,
@@ -1554,8 +1549,7 @@ mod platform {
             };
             let selected = search.selected == index as isize;
             if selected {
-                let fill =
-                    unsafe { CreateSolidBrush(colorref(mix(state.bg, state.accent, 0.32))) };
+                let fill = unsafe { CreateSolidBrush(colorref(mix(state.bg, state.accent, 0.32))) };
                 let _ = unsafe { FillRect(hdc, &rect, fill) };
                 let _ = unsafe { DeleteObject(fill.into()) };
                 let strip = RECT {
@@ -1579,7 +1573,13 @@ mod platform {
             if found.dir {
                 draw_folder(hdc, glyph_x, glyph_y, glyph, colorref(state.accent));
             } else {
-                draw_file(hdc, glyph_x, glyph_y, glyph, colorref(mix(state.fg, state.bg, 0.45)));
+                draw_file(
+                    hdc,
+                    glyph_x,
+                    glyph_y,
+                    glyph,
+                    colorref(mix(state.fg, state.bg, 0.45)),
+                );
             }
 
             // The parent folder, right aligned and muted first, so the name can
@@ -1606,9 +1606,7 @@ mod platform {
                 };
                 let width = measure.right - measure.left;
                 parent_rect.left = (parent_rect.right - width).max(glyph_x + glyph + dpi_units(40));
-                let _ = unsafe {
-                    SetTextColor(hdc, colorref(mix(state.fg, state.bg, 0.48)))
-                };
+                let _ = unsafe { SetTextColor(hdc, colorref(mix(state.fg, state.bg, 0.48))) };
                 let _ = unsafe {
                     DrawTextW(
                         hdc,
@@ -1621,7 +1619,8 @@ mod platform {
             };
 
             let name_left = glyph_x + glyph + dpi_units(10);
-            let name_right = (client.right - parent_width - dpi_units(24)).max(name_left + dpi_units(40));
+            let name_right =
+                (client.right - parent_width - dpi_units(24)).max(name_left + dpi_units(40));
             let mut name_rect = RECT {
                 left: name_left,
                 top: row_top,
@@ -1729,7 +1728,15 @@ mod platform {
         unsafe {
             let previous_brush = SelectObject(hdc, brush.into());
             let previous_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-            let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius(), radius());
+            let _ = RoundRect(
+                hdc,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                radius(),
+                radius(),
+            );
             let _ = SelectObject(hdc, previous_pen);
             let _ = SelectObject(hdc, previous_brush);
         }
@@ -1748,7 +1755,10 @@ mod platform {
         };
         unsafe {
             let previous_pen = SelectObject(hdc, pen.into());
-            let previous_brush = SelectObject(hdc, GetStockObject(windows::Win32::Graphics::Gdi::NULL_BRUSH));
+            let previous_brush = SelectObject(
+                hdc,
+                GetStockObject(windows::Win32::Graphics::Gdi::NULL_BRUSH),
+            );
             let _ = windows::Win32::Graphics::Gdi::Ellipse(
                 hdc,
                 center_x - size,
@@ -1756,7 +1766,12 @@ mod platform {
                 center_x + size / 2,
                 center_y + size / 2,
             );
-            let _ = windows::Win32::Graphics::Gdi::MoveToEx(hdc, center_x + size / 2, center_y + size / 2, None);
+            let _ = windows::Win32::Graphics::Gdi::MoveToEx(
+                hdc,
+                center_x + size / 2,
+                center_y + size / 2,
+                None,
+            );
             let _ = windows::Win32::Graphics::Gdi::LineTo(hdc, center_x + size, center_y + size);
             let _ = SelectObject(hdc, previous_brush);
             let _ = SelectObject(hdc, previous_pen);
@@ -1889,11 +1904,35 @@ mod platform {
             label.truncate(cut);
         }
         const ACTIONS: &[&str] = &[
-            "open", "save", "save as", "guardar", "abrir", "salvar", "abrir como",
-            "enregistrer", "ouvrir", "speichern", "offnen", "salva", "apri", "salva con nome",
-            "открыть", "сохранить", "開く", "名前を付けて保存", "打开", "保存", "另存为",
-            "select folder", "selecionar pasta", "seleccionar carpeta", "choisir un dossier",
-            "ordner auswählen", "seleziona cartella", "выбрать папку", "选择文件夹",
+            "open",
+            "save",
+            "save as",
+            "guardar",
+            "abrir",
+            "salvar",
+            "abrir como",
+            "enregistrer",
+            "ouvrir",
+            "speichern",
+            "offnen",
+            "salva",
+            "apri",
+            "salva con nome",
+            "открыть",
+            "сохранить",
+            "開く",
+            "名前を付けて保存",
+            "打开",
+            "保存",
+            "另存为",
+            "select folder",
+            "selecionar pasta",
+            "seleccionar carpeta",
+            "choisir un dossier",
+            "ordner auswählen",
+            "seleziona cartella",
+            "выбрать папку",
+            "选择文件夹",
         ];
         ACTIONS.iter().any(|action| label.contains(action))
     }

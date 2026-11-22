@@ -375,7 +375,10 @@ pub struct FileTypeColorRule {
 
 impl Default for FileTypeColorRule {
     fn default() -> Self {
-        Self { pattern: "*.txt".into(), color: "#65a30d".into() }
+        Self {
+            pattern: "*.txt".into(),
+            color: "#65a30d".into(),
+        }
     }
 }
 
@@ -402,7 +405,10 @@ impl FileTypeColorRule {
 fn valid_file_type_pattern(pattern: &str) -> bool {
     pattern.split(';').all(|pattern| {
         let pattern = pattern.trim();
-        !pattern.is_empty() && !pattern.chars().any(|character| matches!(character, '/' | '\\'))
+        !pattern.is_empty()
+            && !pattern
+                .chars()
+                .any(|character| matches!(character, '/' | '\\'))
     })
 }
 
@@ -474,7 +480,9 @@ impl Default for Ui {
 impl Ui {
     /// Gets the colour for the first matching filename rule.
     pub fn file_type_color(&self, file_name: &str) -> Option<u32> {
-        self.file_type_colors.iter().find_map(|rule| rule.color_for(file_name))
+        self.file_type_colors
+            .iter()
+            .find_map(|rule| rule.color_for(file_name))
     }
 }
 
@@ -1383,10 +1391,13 @@ impl Config {
         if let Some(value) = table.get("storage") {
             match value.as_table() {
                 Some(storage) => {
-                    if let Some(mode) = storage.get("portable_mode").and_then(toml::Value::as_bool) {
+                    if let Some(mode) = storage.get("portable_mode").and_then(toml::Value::as_bool)
+                    {
                         config.storage.portable_mode = mode;
                     } else if storage.contains_key("portable_mode") {
-                        diagnostics.push(Diagnostic::warn("[storage].portable_mode must be a boolean; ignoring"));
+                        diagnostics.push(Diagnostic::warn(
+                            "[storage].portable_mode must be a boolean; ignoring",
+                        ));
                     }
                 }
                 None => diagnostics.push(Diagnostic::warn("[storage] is not a table; ignoring")),
@@ -1678,14 +1689,21 @@ fn read_theme(table: &toml::Table, theme: &mut Theme, diagnostics: &mut Vec<Diag
         match value.as_str().map(str::trim) {
             // Empty is "no colour of my own": the palette's background.
             Some(background) if background.is_empty() => theme.background.clear(),
-            Some(background) if is_hex_colour(background) => theme.background = background.to_string(),
+            Some(background) if is_hex_colour(background) => {
+                theme.background = background.to_string()
+            }
             _ => diagnostics.push(Diagnostic::warn(format!(
                 "invalid theme.background {value}; expected \"#rrggbb\", using {:?}",
                 theme.background
             ))),
         }
     }
-    warn_unknown_keys(table, &["mode", "accent", "background"], "theme.", diagnostics);
+    warn_unknown_keys(
+        table,
+        &["mode", "accent", "background"],
+        "theme.",
+        diagnostics,
+    );
 }
 
 /// Whether `value` is a `#rrggbb` colour, the only form `theme.background`
@@ -1708,8 +1726,12 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
     }
     if let Some(value) = table.get("language") {
         match value.as_str().map(str::trim) {
-            Some(language) if language.eq_ignore_ascii_case("auto") => ui.language = "auto".to_string(),
-            Some(language) if crate::i18n::Lang::parse(language).is_some() => ui.language = language.to_string(),
+            Some(language) if language.eq_ignore_ascii_case("auto") => {
+                ui.language = "auto".to_string()
+            }
+            Some(language) if crate::i18n::Lang::parse(language).is_some() => {
+                ui.language = language.to_string()
+            }
             _ => diagnostics.push(Diagnostic::warn(format!(
                 "invalid ui.language {value}; using {:?}",
                 ui.language
@@ -1771,7 +1793,11 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
         }
     }
     if let Some(value) = table.get("name_lines") {
-        match value.as_integer().and_then(|lines| u32::try_from(lines).ok()).filter(|&lines| lines <= 20) {
+        match value
+            .as_integer()
+            .and_then(|lines| u32::try_from(lines).ok())
+            .filter(|&lines| lines <= 20)
+        {
             Some(lines) => ui.name_lines = lines,
             None => diagnostics.push(Diagnostic::warn(format!(
                 "invalid ui.name_lines {value}; using {}",
@@ -1780,7 +1806,11 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
         }
     }
     if let Some(value) = table.get("scroll_smoothness") {
-        match value.as_integer().and_then(|v| u32::try_from(v).ok()).filter(|&v| v <= 100) {
+        match value
+            .as_integer()
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|&v| v <= 100)
+        {
             Some(smoothness) => ui.scroll_smoothness = smoothness,
             None => diagnostics.push(Diagnostic::warn(format!(
                 "invalid ui.scroll_smoothness {value}; using {}",
@@ -1888,7 +1918,11 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
         }
     }
     if let Some(value) = table.get("hover_audio_delay_ms") {
-        match value.as_integer().and_then(|delay| u32::try_from(delay).ok()).filter(|&delay| delay <= 10_000) {
+        match value
+            .as_integer()
+            .and_then(|delay| u32::try_from(delay).ok())
+            .filter(|&delay| delay <= 10_000)
+        {
             Some(delay) => ui.hover_audio_delay_ms = delay,
             None => diagnostics.push(Diagnostic::warn(format!(
                 "invalid ui.hover_audio_delay_ms {value}; using {}",
@@ -1931,7 +1965,10 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
         if let Some(value) = table.get(key) {
             match value.as_bool() {
                 Some(value) => *flag = value,
-                None => diagnostics.push(Diagnostic::warn(format!("invalid ui.{key} {value}; using {}", *flag))),
+                None => diagnostics.push(Diagnostic::warn(format!(
+                    "invalid ui.{key} {value}; using {}",
+                    *flag
+                ))),
             }
         }
     }
@@ -1986,8 +2023,16 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
                         )));
                         continue;
                     };
-                    let pattern = rule.get("pattern").and_then(toml::Value::as_str).unwrap_or("").trim();
-                    let color = rule.get("color").and_then(toml::Value::as_str).unwrap_or("").trim();
+                    let pattern = rule
+                        .get("pattern")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let color = rule
+                        .get("color")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("")
+                        .trim();
                     if !valid_file_type_pattern(pattern) || !is_hex_colour(color) {
                         diagnostics.push(Diagnostic::warn(format!(
                             "invalid ui.file_type_colors[{index}]; expected a filename glob and #rrggbb colour"
@@ -2000,7 +2045,9 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
                     });
                 }
             }
-            None => diagnostics.push(Diagnostic::warn("invalid ui.file_type_colors; expected an array")),
+            None => diagnostics.push(Diagnostic::warn(
+                "invalid ui.file_type_colors; expected an array",
+            )),
         }
     }
     warn_unknown_keys(
@@ -2167,7 +2214,11 @@ fn read_compact(table: &toml::Table, compact: &mut Compact, diagnostics: &mut Ve
     read_bool("overlay", &mut compact.overlay);
     let mut read_number = |key: &str, max: u32, slot: &mut u32| {
         if let Some(value) = table.get(key) {
-            match value.as_integer().and_then(|v| u32::try_from(v).ok()).filter(|&v| v <= max) {
+            match value
+                .as_integer()
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|&v| v <= max)
+            {
                 Some(number) => *slot = number,
                 None => diagnostics.push(Diagnostic::warn(format!(
                     "invalid compact.{key} {value} (0..={max}); using {slot}"
@@ -2228,23 +2279,56 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
         ("preview_visible", &mut layout.preview_visible),
         ("sidebar_visible", &mut layout.sidebar_visible),
         ("show_tab_numbers", &mut layout.show_tab_numbers),
-        ("close_tab_on_double_click", &mut layout.close_tab_on_double_click),
-        ("tab_click_activates_pane", &mut layout.tab_click_activates_pane),
+        (
+            "close_tab_on_double_click",
+            &mut layout.close_tab_on_double_click,
+        ),
+        (
+            "tab_click_activates_pane",
+            &mut layout.tab_click_activates_pane,
+        ),
         ("show_tab_icons", &mut layout.show_tab_icons),
         ("asterisk_locked_tabs", &mut layout.asterisk_locked_tabs),
-        ("show_drive_letter_on_tabs", &mut layout.show_drive_letter_on_tabs),
-        ("new_tab_next_to_current", &mut layout.new_tab_next_to_current),
+        (
+            "show_drive_letter_on_tabs",
+            &mut layout.show_drive_letter_on_tabs,
+        ),
+        (
+            "new_tab_next_to_current",
+            &mut layout.new_tab_next_to_current,
+        ),
     ] {
         if let Some(value) = table.get(key) {
             match value.as_bool() {
                 Some(flag) => *slot = flag,
-                None => diagnostics.push(Diagnostic::warn(format!("invalid layout.{key} {value}; using {slot}"))),
+                None => diagnostics.push(Diagnostic::warn(format!(
+                    "invalid layout.{key} {value}; using {slot}"
+                ))),
             }
         }
     }
     warn_unknown_keys(
         table,
-        &["sidebar", "preview", "terminal", "vertical_tabs", "vertical_tabs_side", "move_grips", "preview_visible", "sidebar_visible", "tab_width_mode", "tab_width", "show_tab_numbers", "tab_title_limit", "close_tab_on_double_click", "tab_click_activates_pane", "show_tab_icons", "asterisk_locked_tabs", "show_drive_letter_on_tabs", "new_tab_next_to_current"],
+        &[
+            "sidebar",
+            "preview",
+            "terminal",
+            "vertical_tabs",
+            "vertical_tabs_side",
+            "move_grips",
+            "preview_visible",
+            "sidebar_visible",
+            "tab_width_mode",
+            "tab_width",
+            "show_tab_numbers",
+            "tab_title_limit",
+            "close_tab_on_double_click",
+            "tab_click_activates_pane",
+            "show_tab_icons",
+            "asterisk_locked_tabs",
+            "show_drive_letter_on_tabs",
+            "new_tab_next_to_current",
+        ],
         "layout.",
         diagnostics,
     );
@@ -2263,7 +2347,11 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
         }
     }
     if let Some(value) = table.get("tab_width") {
-        match value.as_integer().and_then(|value| u32::try_from(value).ok()).filter(|value| (80..=400).contains(value)) {
+        match value
+            .as_integer()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| (80..=400).contains(value))
+        {
             Some(width) => layout.tab_width = width,
             None => diagnostics.push(Diagnostic::warn(format!(
                 "invalid layout.tab_width {value}; using {}",
@@ -2272,7 +2360,11 @@ fn read_layout(table: &toml::Table, layout: &mut Layout, diagnostics: &mut Vec<D
         }
     }
     if let Some(value) = table.get("tab_title_limit") {
-        match value.as_integer().and_then(|value| u32::try_from(value).ok()).filter(|value| *value <= 200) {
+        match value
+            .as_integer()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value <= 200)
+        {
             Some(limit) => layout.tab_title_limit = limit,
             None => diagnostics.push(Diagnostic::warn(format!(
                 "invalid layout.tab_title_limit {value}; using {}",
@@ -2344,7 +2436,12 @@ fn read_indexing(table: &toml::Table, indexing: &mut Indexing, diagnostics: &mut
             )),
         }
     }
-    warn_unknown_keys(table, &["mode", "source", "exclude"], "indexing.", diagnostics);
+    warn_unknown_keys(
+        table,
+        &["mode", "source", "exclude"],
+        "indexing.",
+        diagnostics,
+    );
 }
 
 fn read_indexing_exclude(
@@ -2457,7 +2554,12 @@ fn read_diagnostics(
             )),
         }
     }
-    warn_unknown_keys(table, &["runtime_log", "store"], "diagnostics.", diagnostics);
+    warn_unknown_keys(
+        table,
+        &["runtime_log", "store"],
+        "diagnostics.",
+        diagnostics,
+    );
 }
 
 fn read_diagnostics_store(
@@ -2542,7 +2644,12 @@ fn read_space_map(table: &toml::Table, map: &mut SpaceMap, diagnostics: &mut Vec
             ))),
         }
     }
-    warn_unknown_keys(table, &["color", "bands_gb", "colors"], "space_map.", diagnostics);
+    warn_unknown_keys(
+        table,
+        &["color", "bands_gb", "colors"],
+        "space_map.",
+        diagnostics,
+    );
 }
 
 // Three positive gigabytes, largest first.
@@ -2682,8 +2789,13 @@ pub fn load_from_files(main: &Path, appearance: &Path, search: &Path) -> (Config
             merge_table_value(&mut table, key, value.clone());
         }
     }
-    if let Some(colors) = appearance_table.get("ui").and_then(|ui| ui.get("file_type_colors")) {
-        let ui = table.entry("ui").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let Some(colors) = appearance_table
+        .get("ui")
+        .and_then(|ui| ui.get("file_type_colors"))
+    {
+        let ui = table
+            .entry("ui")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
         if let Some(ui) = ui.as_table_mut() {
             ui.insert("file_type_colors".into(), colors.clone());
         }
@@ -2705,13 +2817,19 @@ fn read_config_table(path: &Path, diagnostics: &mut Vec<Diagnostic>) -> toml::Ta
         Ok(contents) => match contents.parse::<toml::Table>() {
             Ok(table) => table,
             Err(error) => {
-                diagnostics.push(Diagnostic::error(format!("failed to parse {}: {error}", path.display())));
+                diagnostics.push(Diagnostic::error(format!(
+                    "failed to parse {}: {error}",
+                    path.display()
+                )));
                 toml::Table::new()
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
         Err(error) => {
-            diagnostics.push(Diagnostic::error(format!("could not read {}: {error}", path.display())));
+            diagnostics.push(Diagnostic::error(format!(
+                "could not read {}: {error}",
+                path.display()
+            )));
             toml::Table::new()
         }
     }
@@ -2770,8 +2888,16 @@ mod tests {
         let main = directory.path().join("config.toml");
         let appearance = directory.path().join("appearance.toml");
         let search = directory.path().join("search.toml");
-        std::fs::write(&main, "[theme]\naccent = \"red\"\n[search]\nbackend = \"auto\"\n").unwrap();
-        std::fs::write(&appearance, "[theme]\naccent = \"blue\"\n[space_map]\ncolor = \"kind\"\n").unwrap();
+        std::fs::write(
+            &main,
+            "[theme]\naccent = \"red\"\n[search]\nbackend = \"auto\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &appearance,
+            "[theme]\naccent = \"blue\"\n[space_map]\ncolor = \"kind\"\n",
+        )
+        .unwrap();
         std::fs::write(&search, "[search]\nbackend = \"ripgrep\"\n").unwrap();
 
         let (config, diagnostics) = load_from_files(&main, &appearance, &search);
@@ -2847,8 +2973,14 @@ mod tests {
             .filter(|d| d.level == DiagnosticLevel::Warning)
             .map(|d| d.message.as_str())
             .collect();
-        assert!(warnings.iter().any(|m| m.contains("ui.sort_method")), "{warnings:?}");
-        assert!(warnings.iter().any(|m| m.contains("ui.icon_mode")), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|m| m.contains("ui.sort_method")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|m| m.contains("ui.icon_mode")),
+            "{warnings:?}"
+        );
         assert!(
             warnings.iter().any(|m| m.contains("ui.max_column_width")),
             "{warnings:?}"
@@ -2907,24 +3039,41 @@ mod tests {
             .filter(|d| d.level == DiagnosticLevel::Warning)
             .map(|d| d.message.as_str())
             .collect();
-        assert!(warnings.iter().any(|m| m.contains("ui.list_row_height")), "{warnings:?}");
-        assert!(warnings.iter().any(|m| m.contains("ui.double_click_empty")), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|m| m.contains("ui.list_row_height")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|m| m.contains("ui.double_click_empty")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
     fn row_heights_run_compact_standard_relaxed() {
-        assert_eq!(ListRowHeight::Standard.row_height(), crate::config::BASE_ROW_HEIGHT);
+        assert_eq!(
+            ListRowHeight::Standard.row_height(),
+            crate::config::BASE_ROW_HEIGHT
+        );
         assert!(ListRowHeight::Compact.row_height() < ListRowHeight::Standard.row_height());
         assert!(ListRowHeight::Standard.row_height() < ListRowHeight::Relaxed.row_height());
     }
 
     #[test]
     fn double_click_empty_round_trips_through_its_names() {
-        for action in [DoubleClickEmpty::None, DoubleClickEmpty::Back, DoubleClickEmpty::Up] {
+        for action in [
+            DoubleClickEmpty::None,
+            DoubleClickEmpty::Back,
+            DoubleClickEmpty::Up,
+        ] {
             assert_eq!(DoubleClickEmpty::parse(action.as_str()), Some(action));
         }
         assert_eq!(DoubleClickEmpty::parse("double"), None);
-        for height in [ListRowHeight::Compact, ListRowHeight::Standard, ListRowHeight::Relaxed] {
+        for height in [
+            ListRowHeight::Compact,
+            ListRowHeight::Standard,
+            ListRowHeight::Relaxed,
+        ] {
             assert_eq!(ListRowHeight::parse(height.as_str()), Some(height));
         }
         assert_eq!(ListRowHeight::parse("huge"), None);
@@ -3359,7 +3508,10 @@ mod tests {
         assert!(!config.compact.overlay);
         assert_eq!(config.compact.animation_ms, 90);
         assert_eq!(config.compact.edge_px, Compact::default().edge_px);
-        assert_eq!(config.compact.hide_delay_ms, Compact::default().hide_delay_ms);
+        assert_eq!(
+            config.compact.hide_delay_ms,
+            Compact::default().hide_delay_ms
+        );
         assert_eq!(diagnostics.len(), 2);
     }
 
@@ -3438,7 +3590,8 @@ mod tests {
         crate::config::write_default(&path).unwrap();
         assert!(!load_from_path(&path).0.diagnostics.runtime_log);
         for enabled in [true, false] {
-            crate::config::set_value(&path, "diagnostics", "runtime_log", &enabled.to_string()).unwrap();
+            crate::config::set_value(&path, "diagnostics", "runtime_log", &enabled.to_string())
+                .unwrap();
             let (config, warnings) = load_from_path(&path);
             assert_eq!(enabled, config.diagnostics.runtime_log);
             assert!(warnings.is_empty());
@@ -3499,7 +3652,10 @@ mod tests {
 
     #[test]
     fn tab_layout_preferences_are_read_from_config() {
-        let config = Config::from_toml_str("[layout]\ntab_width_mode = \"fixed\"\ntab_width = 240\nshow_tab_numbers = false\n").0;
+        let config = Config::from_toml_str(
+            "[layout]\ntab_width_mode = \"fixed\"\ntab_width = 240\nshow_tab_numbers = false\n",
+        )
+        .0;
         assert_eq!(TabWidthMode::Fixed, config.layout.tab_width_mode);
         assert_eq!(240, config.layout.tab_width);
         assert!(!config.layout.show_tab_numbers);

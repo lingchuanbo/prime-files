@@ -155,7 +155,8 @@ fn render_item(
     let name_color = if selected {
         theme::fg()
     } else {
-        page.file_name_color(&item.name, &item.kind).unwrap_or_else(theme::fg)
+        page.file_name_color(&item.name, &item.kind)
+            .unwrap_or_else(theme::fg)
     };
     let highlight = page.highlight_query();
 
