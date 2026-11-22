@@ -1319,11 +1319,45 @@ fn next_group_id(config: &QuickLaunchConfig) -> String {
     }
 }
 
-/// The lowest slot a group does not occupy, or one past its highest slot.
-fn first_free_slot(group: &Group) -> u32 {
-    let mut candidate = 0u32;
-    let mut used: Vec<u32> = group.items.iter().map(|item| item.slot).collect();
+/// Puts `items` in the group's next free slots, from `start` on, in order
+/// (§12.2). Nothing already there is replaced: a drop onto a taken
+/// cell takes the first free slot after it.
+///
+/// This is the only way a drop or a file picker adds entries; `put_item` is
+/// for edits, where replacing is what the user asked for.
+pub(crate) fn place_items(cx: &mut App, group: usize, start: u32, items: Vec<Item>) -> bool {
+    if !editable(cx) || items.is_empty() {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    let mut cursor = start;
+    for mut item in items {
+        let slot = next_free_slot_from(target, cursor);
+        item.slot = slot;
+        target.items.push(item);
+        cursor = slot.saturating_add(1);
+    }
+    target.items.sort_by_key(|item| item.slot);
+    state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// The lowest free slot of `group` at or after `start`.
+fn next_free_slot_from(group: &Group, start: u32) -> u32 {
+    let mut used: Vec<u32> = group
+        .items
+        .iter()
+        .map(|item| item.slot)
+        .filter(|slot| *slot >= start)
+        .collect();
     used.sort_unstable();
+    let mut candidate = start;
     for slot in used {
         if slot == candidate {
             candidate = candidate.saturating_add(1);
@@ -1332,6 +1366,11 @@ fn first_free_slot(group: &Group) -> u32 {
         }
     }
     candidate
+}
+/// The lowest slot a group does not occupy, or one past its highest slot (the
+/// drop target of the group bar, §12.2).
+fn first_free_slot(group: &Group) -> u32 {
+    next_free_slot_from(group, 0)
 }
 
 /// The item a path picked or dropped into `slot` becomes (§12.3): an executable
@@ -2871,6 +2910,50 @@ mod tests {
             },
         ];
         assert_eq!(next_group_id(&config), "group_2");
+    }
+
+    /// §12.2, B1: a drop walks over taken slots instead of replacing what is there.
+    #[gpui::test]
+    fn placing_items_never_overwrites_a_slot(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            group.items = vec![Item::new(3, "app", "Tres"), Item::new(4, "app", "Quatro")];
+            install(cx, vec![group]);
+            let placed = vec![
+                Item::new(0, "file", "A"),
+                Item::new(0, "file", "B"),
+                Item::new(0, "file", "C"),
+            ];
+            assert!(place_items(cx, 0, 2, placed));
+            let slots: Vec<u32> = state(cx)
+                .map(|state| {
+                    state.config.groups[0]
+                        .items
+                        .iter()
+                        .map(|item| item.slot)
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(slots, vec![2, 3, 4, 5, 6]);
+            let name = |cx: &gpui::App, slot: u32| item_at(cx, 0, slot).map(|item| item.name);
+            assert_eq!(name(cx, 2), Some("A".to_string()));
+            assert_eq!(name(cx, 3), Some("Tres".to_string()), "the old item stays");
+            assert_eq!(
+                name(cx, 4),
+                Some("Quatro".to_string()),
+                "the old item stays"
+            );
+            assert_eq!(name(cx, 5), Some("B".to_string()));
+            assert_eq!(name(cx, 6), Some("C".to_string()));
+            // A single drop onto a taken cell goes after it.
+            assert!(place_items(cx, 0, 3, vec![Item::new(0, "file", "D")]));
+            assert_eq!(
+                item_at(cx, 0, 7).map(|item| item.name),
+                Some("D".to_string())
+            );
+            assert_eq!(name(cx, 3), Some("Tres".to_string()));
+        });
     }
 
     /// §12.2: a move or a drop into a group goes to its first empty slot, and

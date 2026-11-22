@@ -358,12 +358,13 @@ impl QuickLaunchView {
                 _ => return,
             };
             this.update_in(cx, |_view, _window, cx| {
-                for (offset, path) in picked.iter().enumerate() {
-                    let offset = u32::try_from(offset).unwrap_or(u32::MAX);
-                    let target = slot.saturating_add(offset);
-                    let item = super::item_from_path(path, target);
-                    super::put_item(cx, group, target, item);
-                }
+                // B1: the picked files take the next free slots, from the one the
+                // menu was opened on; an item already there is never replaced.
+                let items: Vec<nohrs_core::config::quick_launch::Item> = picked
+                    .iter()
+                    .map(|path| super::item_from_path(path, 0))
+                    .collect();
+                super::place_items(cx, group, slot, items);
                 cx.notify();
             })
             .ok();
@@ -521,8 +522,9 @@ impl QuickLaunchView {
         }
     }
 
-    /// A file or folder dropped from outside fills the slot it landed on, and
-    /// the rest of the drop follows in the next free slots (§12.2).
+    /// A file or folder dropped from outside takes the first free slot at or
+    /// after the one it landed on, and the rest of the drop follows it. Nothing
+    /// already in the group is replaced (§12.2, B1).
     fn drop_paths(
         &mut self,
         group: usize,
@@ -530,15 +532,14 @@ impl QuickLaunchView {
         paths: &[std::path::PathBuf],
         cx: &mut Context<Self>,
     ) {
-        if !super::editable(cx) {
+        if !super::editable(cx) || paths.is_empty() {
             return;
         }
-        for (offset, path) in paths.iter().enumerate() {
-            let offset = u32::try_from(offset).unwrap_or(u32::MAX);
-            let target = slot.saturating_add(offset);
-            let item = super::item_from_path(path, target);
-            super::put_item(cx, group, target, item);
-        }
+        let items: Vec<nohrs_core::config::quick_launch::Item> = paths
+            .iter()
+            .map(|path| super::item_from_path(path, 0))
+            .collect();
+        super::place_items(cx, group, slot, items);
         cx.notify();
     }
 
