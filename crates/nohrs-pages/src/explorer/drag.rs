@@ -206,7 +206,8 @@ impl ExplorerPane {
 
     /// Copies or moves files dropped on the window into `dest`. Explorer's
     /// rules: Shift moves, Ctrl copies, and otherwise a drop on the same drive
-    /// moves and one from another drive copies.
+    /// moves and one from another drive copies; with `ui.drag_copies` set, a
+    /// plain drop copies too.
     pub(crate) fn drop_paths(
         &mut self,
         paths: &[PathBuf],
@@ -217,7 +218,7 @@ impl ExplorerPane {
         let modifiers = window.modifiers();
         let mode = if modifiers.shift {
             ClipMode::Cut
-        } else if modifiers.control {
+        } else if modifiers.control || self.drag_copies {
             ClipMode::Copy
         } else if paths.iter().all(|path| same_volume(path, &dest)) {
             ClipMode::Cut

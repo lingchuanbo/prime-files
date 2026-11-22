@@ -29,6 +29,10 @@ actions!(nohrs, [OpenStandaloneSearch]);
 
 impl NohrsApp {
     pub fn run(cli: &Cli) {
+        // Before anything can panic. A released window has no console, so a
+        // crash with `diagnostics.runtime_log` off (the default) would leave
+        // nothing behind; this writes the one line that says where it died.
+        nohrs_core::telemetry::logging::install_panic_log(nohrs_core::config::paths::log_dir());
         // Load configuration before opening the window: defaults < file < env <
         // CLI (config.md §3). A missing file is created with defaults so users
         // have something to edit and the watcher has a target. Parse failures are

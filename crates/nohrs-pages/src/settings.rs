@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
-use nohrs_core::config::{self, BarSize, Config, DockSide, DoubleClickEmpty, FileTypeColorRule, IndexSource, ListRowHeight, SortOrder, SplitDirection, TabWidthMode, ThemeMode, TrayIcon};
+use nohrs_core::config::{self, BarSize, Config, DockSide, DoubleClickEmpty, FileTypeColorRule, IconMode, IndexSource, ListRowHeight, SortMethod, SortOrder, SplitDirection, TabWidthMode, ThemeMode, TrayIcon};
 use nohrs_core::i18n::{self, Lang, tr};
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::shortcuts::{self, Action, Chord};
@@ -229,6 +229,9 @@ pub struct SettingsPage {
     // Window title field, committed when the user presses Enter or leaves it.
     app_name: Option<Entity<InputState>>,
     _app_name_subscription: Option<Subscription>,
+    /// The ignore list as a multiline field, made on the first render (it needs
+    /// a `Window`).
+    ignore_input: Option<Entity<InputState>>,
     // The colour wheel, while it is open under the background presets.
     wheel: Option<Wheel>,
     // The font list, made on the first render (it needs a `Window`).
@@ -299,6 +302,7 @@ impl SettingsPage {
             search: None,
             app_name: None,
             _app_name_subscription: None,
+            ignore_input: None,
             wheel: None,
             font_select: None,
             tab_width_select: None,
@@ -587,6 +591,11 @@ impl SettingsPage {
         if self.config.ui.file_type_colors != config.ui.file_type_colors {
             self.file_type_color_draft = config.ui.file_type_colors.clone();
             self.file_type_color_inputs.clear();
+        }
+        if self.config.ui.ignore_list != config.ui.ignore_list {
+            // Edited elsewhere (by hand, or by the defaults button): the field
+            // shows the new list again.
+            self.ignore_input = None;
         }
         if self.config.space_map != config.space_map {
             // The fields are made from the config; a change from anywhere else
@@ -899,6 +908,61 @@ impl SettingsPage {
         self.app_name = Some(input.clone());
         self._app_name_subscription = Some(subscription);
         input
+    }
+
+    /// The ignore list's field, made once from the config and kept while it is
+    /// being edited; "Salvar lista" writes it back.
+    fn ensure_ignore_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ignore_input.is_some() {
+            return;
+        }
+        let text = self.config.ui.ignore_list.join("\n");
+        let input = cx.new(|cx| InputState::new(window, cx).multi_line(true).rows(6));
+        input.update(cx, |state, cx| {
+            state.set_placeholder(t!("Um nome ou padrão por linha"), window, cx);
+            state.set_value(text, window, cx);
+        });
+        self.ignore_input = Some(input);
+    }
+
+    fn save_ignore_list(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.ignore_input.clone() else {
+            return;
+        };
+        let entries: Vec<String> = input
+            .read(cx)
+            .value()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        let values = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap_or_else(|_| "\"\"".into()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.write("ui", "ignore_list", format!("[{values}]"), cx);
+    }
+
+    fn ignore_list_editor(&self, cx: &mut Context<Self>) -> Div {
+        let Some(input) = self.ignore_input.clone() else {
+            return div();
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .child(Input::new(&input))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(button("ignore-list-save", t!("Salvar lista"), false).on_click(
+                        cx.listener(|page, _, _, cx| page.save_ignore_list(cx)),
+                    )),
+            )
     }
 
     // Writes one value; the watcher brings it back through `set_config`.
@@ -1708,6 +1772,12 @@ impl SettingsPage {
             t!("Lista"),
             vec![
                 Row::hint(
+                    t!("Cabeçalho fixo"),
+                    t!("A linha com Nome, Tipo, Tamanho e Modificado fica no topo enquanto a lista rola."),
+                    self.switch("fixed-header", ui.fixed_header, ("ui", "fixed_header"), cx),
+                )
+                .reset(("ui", "fixed_header"), ui.fixed_header, "true"),
+                Row::hint(
                     t!("Altura das linhas"),
                     t!("A altura de cada linha da lista de detalhes."),
                     self.config_choice(
@@ -1749,6 +1819,39 @@ impl SettingsPage {
                     ),
                 )
                 .reset(("ui", "double_click_empty"), ui.double_click_empty == DoubleClickEmpty::None, "\"none\""),
+                Row::hint(
+                    t!("Ícones dos arquivos"),
+                    t!("O ícone que o próprio arquivo tem no Windows (o programa, a miniatura), um ícone padrão de arquivo ou de pasta, ou nenhum."),
+                    self.config_choice(
+                        "icon-mode",
+                        &[
+                            (t!("Do sistema"), ui.icon_mode == IconMode::Associated, "\"associated\""),
+                            (t!("Padrão"), ui.icon_mode == IconMode::Standard, "\"standard\""),
+                            (t!("Nenhum"), ui.icon_mode == IconMode::None, "\"none\""),
+                        ],
+                        ("ui", "icon_mode"),
+                        cx,
+                    ),
+                )
+                .reset(("ui", "icon_mode"), ui.icon_mode == IconMode::Associated, "\"associated\""),
+                Row::hint(
+                    t!("Largura máxima das colunas"),
+                    t!("Nenhuma coluna da lista passa desta largura, nem arrastada."),
+                    self.config_choice(
+                        "max-column-width",
+                        &[
+                            (t!("Sem limite"), ui.max_column_width == 0, "0"),
+                            ("160", ui.max_column_width == 160, "160"),
+                            ("200", ui.max_column_width == 200, "200"),
+                            ("260", ui.max_column_width == 260, "260"),
+                            ("320", ui.max_column_width == 320, "320"),
+                        ],
+                        ("ui", "max_column_width"),
+                        cx,
+                    ),
+                )
+                .wide()
+                .reset(("ui", "max_column_width"), ui.max_column_width == 0, "0"),
                 Row::hint(
                     t!("Rolagem suave"),
                     t!("Quanto a roda do mouse desliza a lista em vez de pular. Desligada rola em degraus."),
@@ -1965,6 +2068,30 @@ impl SettingsPage {
             )
             .reset(("ui", "default_sort_descending"), !ui.default_sort_descending, "false"),
             Row::hint(
+                t!("Método de ordenação"),
+                t!("Como os nomes são comparados: pelos códigos dos caracteres (minúsculos ou maiúsculos) ou pela ordem do idioma do sistema; com números, 2 vem antes de 10."),
+                self.config_choice(
+                    "sort-method",
+                    &[
+                        (t!("Código minúsculo"), ui.sort_method == SortMethod::Lowercase, "\"lowercase\""),
+                        (t!("Código maiúsculo"), ui.sort_method == SortMethod::Uppercase, "\"uppercase\""),
+                        (t!("Idioma"), ui.sort_method == SortMethod::Locale, "\"locale\""),
+                        (t!("Código + números"), ui.sort_method == SortMethod::LowercaseNumeric, "\"lowercase_numeric\""),
+                        (t!("Idioma + números"), ui.sort_method == SortMethod::LocaleNumeric, "\"locale_numeric\""),
+                    ],
+                    ("ui", "sort_method"),
+                    cx,
+                ),
+            )
+            .wide()
+            .reset(("ui", "sort_method"), ui.sort_method == SortMethod::LocaleNumeric, "\"locale_numeric\""),
+            Row::hint(
+                t!("Pastas pelo nome"),
+                t!("As pastas ficam na ordem do nome mesmo quando a lista está ordenada por data ou tamanho."),
+                self.switch("folders-by-name", ui.folders_sort_by_name, ("ui", "folders_sort_by_name"), cx),
+            )
+            .reset(("ui", "folders_sort_by_name"), !ui.folders_sort_by_name, "false"),
+            Row::hint(
                 "解压工具",
                 "解压到同名文件夹时使用的程序。HatchZip 随应用附带，zip、7z、rar、tar 和分卷都能解，tar.gz 一次解出；7-Zip 需要先安装，bz2、zst、cab、iso 仍由它来解。",
                 self.config_choice(
@@ -1991,6 +2118,23 @@ impl SettingsPage {
                 self.switch("show-vcs-status", ui.show_vcs_status, ("ui", "show_vcs_status"), cx),
             )
             .reset(("ui", "show_vcs_status"), !ui.show_vcs_status, "false"),
+        ]), Group::titled(t!("Lista de ignorados"), vec![Row::hint(
+            t!("Nomes e padrões ignorados"),
+            t!("Um por linha. Estes nomes nunca aparecem na lista, mesmo com os arquivos ocultos à mostra; * e ? valem como curingas."),
+            self.ignore_list_editor(cx),
+        ).wide()]), Group::titled(t!("Operações"), vec![
+            Row::hint(
+                t!("Copiar ao arrastar"),
+                t!("Arrastar com o mouse copia os arquivos em vez de movê-los; Shift continua movendo e Ctrl copiando."),
+                self.switch("drag-copies", ui.drag_copies, ("ui", "drag_copies"), cx),
+            )
+            .reset(("ui", "drag_copies"), !ui.drag_copies, "false"),
+            Row::hint(
+                t!("Confirmar exclusão permanente"),
+                t!("Perguntar antes de apagar para sempre. Desligado, a exclusão permanente acontece na hora."),
+                self.switch("confirm-permanent-delete", ui.confirm_permanent_delete, ("ui", "confirm_permanent_delete"), cx),
+            )
+            .reset(("ui", "confirm_permanent_delete"), ui.confirm_permanent_delete, "true"),
         ]), Group::titled(t!("Regras de cor por tipo de arquivo"), vec![Row::hint(
             t!("Cor por tipo de arquivo"),
             t!("As cores pintam o nome, o selo do tipo, o tamanho e a data. Use padrões sem diferenciar maiúsculas e minúsculas, separados por ponto e vírgula, como *.jpg;*.svg ou README*; as regras anteriores têm prioridade e o que nenhuma cobrir usa a paleta do programa."),
@@ -3221,6 +3365,7 @@ impl Render for SettingsPage {
         self.app_name_input(window, cx);
         self.ensure_file_type_color_inputs(window, cx);
         self.ensure_space_map_inputs(window, cx);
+        self.ensure_ignore_input(window, cx);
         // The font list needs the window's text system, so it is made here.
         self.ensure_font_select(window, cx);
         self.ensure_tab_width_select(window, cx);

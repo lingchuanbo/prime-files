@@ -386,7 +386,7 @@ fn cap(mut items: Vec<ListingItem>, summary: String) -> PreviewListing {
 
 // The order the listing sorts names in, Explorer's.
 fn natural_key(name: &str) -> SortName {
-    SortName::new(name)
+    SortName::new(name, nohrs_core::config::SortMethod::LocaleNumeric)
 }
 
 fn count_folders(n: usize) -> String {

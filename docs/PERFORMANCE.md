@@ -637,3 +637,60 @@ seu teste (o de renomear na thread também reprova
 **Não conferido.** Nada visto na tela. A vantagem de renomear em segundo plano
 num compartilhamento travado não foi provocada; o renomear de caixa não foi
 testado em FAT32/exFAT nem no Google Drive (`I:`).
+
+---
+
+### 9. Sem dormir na thread da interface (22/11/2026)
+
+**Sintoma.** Nenhum relatado; passada pedida pela revisão
+`docs/prime-files-优化方案.md` §2, que manda caçar 	hread::sleep rodando na
+thread da interface. Dos 30 sleep do código de produção, quase todos estão em
+thread própria e dormir ali é legítimo: a vigia do eveal e da barra do
+`dialog_jump`, a caixa de diálogo de arquivo (thread `nohrs-file-dialogs`), o
+`foreground` (thread criada só para isso), o processo de arquivamento, o
+`media` e o laço de mensagens da `shell_windows`. Dois não estavam:
+
+#### A busca da barra de salto congelava a janela à espera do índice
+
+`RootView::search_for_dialog_once` roda em `cx.spawn` — a thread do gpui. Se
+o índice ainda está subindo, ele dormia **250 ms ali dentro**, com até 10
+tentativas: até 2,5 s de janela parada, justo quando a pessoa está digitando na
+barra. Agora espera o timer do executor de segundo plano
+(`cx.background_executor().timer(250ms).await`), que devolve a thread entre um
+tique e outro.
+
+#### Entregar arquivos a um diálogo de outro programa travava a janela
+
+`ExplorerPane::activate_entry` chamava `file_dialog::deliver` na thread da
+interface. Para vários arquivos, `fill_and_open` dorme 300 ms: o Shell move o
+diálogo de pasta de forma assíncrona e a automação espera o movimento. Passou
+para `cx.background_spawn`; o diálogo é janela de outro processo, então o
+preenchimento não depende de quem chama.
+
+**Base / depois.** Sem número de antes: os dois caminhos não foram medidos na
+tela (o primeiro só dura a janela curta em que o índice não está pronto; o
+segundo aparece ao mandar vários arquivos para um diálogo alheio) e a
+justificativa é estrutural — nada que durma pode rodar na thread que desenha.
+O que dá para afirmar: antes, o primeiro somava 250 ms × tentativas de bloqueio
+da thread de desenho; hoje, zero.
+
+#### Também nesta passada (estabilidade, não desempenho)
+
+O registro de pânico em `panic.log` só era instalado quando
+`diagnostics.runtime_log` estava ligado — e ele vem desligado por padrão. Numa
+janela release não há console, então um crash não deixava rastro algum. Agora
+`install_panic_log` é chamado no começo de `NohrsApp::run` (antes de ler a
+configuração) e de novo, sem reinstalar o hook, quando o log sobe; o registro
+ganhou também o diretório de trabalho, que muitas vezes é a única pista que a
+pilha não dá.
+
+#### Build do instalador
+
+`[profile.dist]` passou a usar `lto = "fat"`, `codegen-units = 1` e
+`debug = "line-tables-only"`: `LumaFiles.exe` vai de 43,2 MB (release) para
+**35,7 MB** (-17%), ao custo de ~10 min de build que só o instalador paga. A
+build `release` do dia a dia não mudou. Medições em `docs/size.md`.
+
+**Cobertura.** 431 testes de `nohrs-pages` (`--test-threads=1`) e 95 de
+`nohrs-core` verdes depois das mudanças; `cargo build --workspace` sem
+aviso novo.

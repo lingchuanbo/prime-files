@@ -120,16 +120,22 @@ impl ExplorerPane {
             return;
         };
         let show_hidden = self.show_hidden;
+        let ignored = self.ignore_list.clone();
         let mut children: Vec<FileEntryDto> = children
             .iter()
             .filter(|child| show_hidden || !super::state::is_hidden(&child.name))
+            .filter(|child| !nohrs_core::config::name_is_ignored(&ignored, &child.name))
             .cloned()
             .collect();
         super::entries::sort_entries_with(
             &mut children,
-            self.sort_key,
-            self.sort_asc,
-            self.folder_order,
+            super::entries::SortSettings {
+                key: self.sort_key,
+                ascending: self.sort_asc,
+                folders: self.folder_order,
+                method: self.sort_method,
+                folders_by_name: self.folders_by_name,
+            },
         );
         for child in children {
             self.push_with_children(child, depth + 1, out);

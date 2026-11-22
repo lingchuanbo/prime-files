@@ -322,7 +322,12 @@ impl RootView {
                     });
                     match retry {
                         Ok(Some((id, text))) => {
-                            std::thread::sleep(std::time::Duration::from_millis(250));
+                            // The index needs a moment to come up. Waiting on a
+                            // timer, not on this thread: a sleep here held the
+                            // whole window for a quarter second per attempt.
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(250))
+                                .await;
                             this.update(&mut cx, |root, cx| {
                                 root.search_for_dialog_once(id, text, cx);
                             })

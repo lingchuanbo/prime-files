@@ -9,6 +9,7 @@ use gpui_component::Sizable as _;
 use gpui_component::input::Input;
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, IconName};
+use nohrs_core::config::IconMode;
 use nohrs_core::t;
 use nohrs_services::fs::listing::FileEntryDto;
 use nohrs_ui::theme::theme;
@@ -315,12 +316,18 @@ pub fn render(
                                 })
                                 // The Windows icon once extracted; until then,
                                 // or when the Shell has none, the generic one.
-                                .child(match shell_icon {
-                                    Some(image) => img(ImageSource::Render(image))
+                                // With icons turned off the gutter stays, so
+                                // the names still line up.
+                                .child(match (page.icon_mode, shell_icon) {
+                                    (IconMode::None, _) => div()
+                                        .w(px(ICON_SIZE))
+                                        .flex_shrink_0()
+                                        .into_any_element(),
+                                    (_, Some(image)) => img(ImageSource::Render(image))
                                         .size(px(ICON_SIZE))
                                         .flex_shrink_0()
                                         .into_any_element(),
-                                    None => Icon::new(icon_name)
+                                    (_, None) => Icon::new(icon_name)
                                         .size_4()
                                         .text_color(icon_color)
                                         .into_any_element(),
@@ -366,7 +373,7 @@ pub fn render(
                                                 .whitespace_nowrap()
                                                 .child(styled_name),
                                         )
-                                        .children(status_badges(page, &item))
+                                        .children(status_badges(page, item))
                                         .when(!tag_colors.is_empty(), |this| {
                                             this.child(
                                                 div()

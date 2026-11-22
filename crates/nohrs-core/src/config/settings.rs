@@ -312,6 +312,9 @@ pub struct Ui {
     /// How smoothly the mouse wheel scrolls the listing, 0..=100: 0 moves
     /// in steps, 100 glides for longest.
     pub scroll_smoothness: u32,
+    /// Whether the column headings stay on top of the listing while its rows
+    /// scroll.
+    pub fixed_header: bool,
     /// How tall a row of the Details list is.
     pub list_row_height: ListRowHeight,
     /// Whether alternating rows of the Details list get a faint background.
@@ -325,6 +328,21 @@ pub struct Ui {
     pub show_sync_status: bool,
     /// Whether files show a badge for their Git or SVN state.
     pub show_vcs_status: bool,
+    /// How names are compared when the listing is sorted.
+    pub sort_method: SortMethod,
+    /// Folders sorted by name even when the listing is sorted by date or size.
+    pub folders_sort_by_name: bool,
+    /// Names and globs the listing never shows (system files and the like).
+    pub ignore_list: Vec<String>,
+    /// Widest a column of the Details table may be made, in pixels; 0 = no
+    /// limit.
+    pub max_column_width: u32,
+    /// Which icons the listing draws for its entries.
+    pub icon_mode: IconMode,
+    /// Dragging with the mouse copies the files instead of moving them.
+    pub drag_copies: bool,
+    /// A permanent delete asks before it runs; false deletes at once.
+    pub confirm_permanent_delete: bool,
     /// Whether sound files show their waveform instead of their icon in the
     /// icons view.
     pub audio_waveforms: bool,
@@ -427,12 +445,20 @@ impl Default for Ui {
             font_family: String::new(),
             name_lines: 0,
             scroll_smoothness: 50,
+            fixed_header: true,
             list_row_height: ListRowHeight::Standard,
             zebra_rows: false,
             selection_outline: false,
             double_click_empty: DoubleClickEmpty::None,
             show_sync_status: false,
             show_vcs_status: false,
+            sort_method: SortMethod::LocaleNumeric,
+            folders_sort_by_name: false,
+            ignore_list: default_ignore_list(),
+            max_column_width: 0,
+            icon_mode: IconMode::Associated,
+            drag_copies: false,
+            confirm_permanent_delete: true,
             audio_waveforms: false,
             preview_autoplay: false,
             welcome_done: false,
@@ -450,6 +476,23 @@ impl Ui {
     pub fn file_type_color(&self, file_name: &str) -> Option<u32> {
         self.file_type_colors.iter().find_map(|rule| rule.color_for(file_name))
     }
+}
+
+/// Whether the ignore list `patterns` hides `name`: an entry of the list is
+/// either an exact name (compared without case, as Windows compares them) or,
+/// with `*` or `?`, a glob over the whole name.
+pub fn name_is_ignored(patterns: &[String], name: &str) -> bool {
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return false;
+        }
+        if pattern.contains(['*', '?']) {
+            wildcard_matches(pattern, name)
+        } else {
+            pattern.eq_ignore_ascii_case(name)
+        }
+    })
 }
 
 /// Split-view and pane settings (see `docs/explorer-essentials.md` 搂3).
@@ -844,6 +887,101 @@ impl ListRowHeight {
             Self::Relaxed => 40.0,
         }
     }
+}
+
+/// How names are compared when the listing is sorted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SortMethod {
+    /// By the character codes of the lowercased names.
+    Lowercase,
+    /// In the order the language of the system collates them.
+    Locale,
+    /// By the character codes of the uppercased names.
+    Uppercase,
+    /// Lowercased codes, with runs of digits compared as numbers (`2` before
+    /// `10`).
+    LowercaseNumeric,
+    /// The language of the system's collation, with digit runs as numbers:
+    /// the order Explorer shows.
+    #[default]
+    LocaleNumeric,
+}
+
+impl SortMethod {
+    /// The setting's name in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lowercase => "lowercase",
+            Self::Locale => "locale",
+            Self::Uppercase => "uppercase",
+            Self::LowercaseNumeric => "lowercase_numeric",
+            Self::LocaleNumeric => "locale_numeric",
+        }
+    }
+
+    /// Reads a `ui.sort_method` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "lowercase" => Some(Self::Lowercase),
+            "locale" => Some(Self::Locale),
+            "uppercase" => Some(Self::Uppercase),
+            "lowercase_numeric" => Some(Self::LowercaseNumeric),
+            "locale_numeric" => Some(Self::LocaleNumeric),
+            _ => None,
+        }
+    }
+}
+
+/// Which icons the listing draws for its entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum IconMode {
+    /// The icon the Shell gives the file (its program, its thumbnail).
+    #[default]
+    Associated,
+    /// A plain file or folder icon for every entry: the fastest to draw.
+    Standard,
+    /// No icons at all.
+    None,
+}
+
+impl IconMode {
+    /// The setting's name in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Associated => "associated",
+            Self::Standard => "standard",
+            Self::None => "none",
+        }
+    }
+
+    /// Reads a `ui.icon_mode` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "associated" => Some(Self::Associated),
+            "standard" => Some(Self::Standard),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+/// The names a fresh configuration hides from its listings: the system's own
+/// bookkeeping files and folders, which even a folder showing hidden files is
+/// rarely opened for.
+fn default_ignore_list() -> Vec<String> {
+    [
+        "System Volume Information",
+        "recycler",
+        "pagefile.sys",
+        "hiberfil.sys",
+        "$RECYCLE.BIN",
+        "swapfile.sys",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// Keybinding overrides (config.md 搂2, draft for P3).
@@ -1411,12 +1549,20 @@ impl Config {
              file_type_colors = []   # ordered filename glob(s), separated by ;, and hex colour rules\n\
              close_to_tray = false   # closing the window keeps LumaFiles in the tray\n\
              tray_icon = \"always\"      # \"always\" | \"background\" | \"never\"\n\
+             fixed_header = true             # the column headings stay on top while the list scrolls\n\
              list_row_height = \"standard\"   # Details rows: \"compact\" | \"standard\" | \"relaxed\"\n\
              zebra_rows = false              # alternating backgrounds in Details\n\
              selection_outline = false       # an accent outline around the selected rows\n\
              double_click_empty = \"none\"     # double click on empty list space: \"none\" | \"back\" | \"up\"\n\
              show_sync_status = false        # a badge with each file's cloud state (OneDrive and the like)\n\
              show_vcs_status = false         # a badge with each file's Git or SVN state\n\
+             sort_method = \"locale_numeric\"   # \"lowercase\" | \"locale\" | \"uppercase\" | \"lowercase_numeric\" | \"locale_numeric\"\n\
+             folders_sort_by_name = false    # folders by name even when the listing is sorted by date or size\n\
+             ignore_list = [\"System Volume Information\", \"recycler\", \"pagefile.sys\", \"hiberfil.sys\", \"$RECYCLE.BIN\", \"swapfile.sys\"]\n\
+             max_column_width = 0            # widest a Details column may be made, in pixels; 0 = no limit\n\
+             icon_mode = \"associated\"       # \"associated\" (the Shell's icons) | \"standard\" | \"none\"\n\
+             drag_copies = false             # dragging with the mouse copies the files instead of moving them\n\
+             confirm_permanent_delete = true # a permanent delete asks before it runs\n\
              \n\
              [explorer]\n\
              split_direction = \"vertical\"   # \"vertical\" (left/right) | \"horizontal\" (top/bottom)\n\
@@ -1642,6 +1788,15 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             ))),
         }
     }
+    if let Some(value) = table.get("fixed_header") {
+        match value.as_bool() {
+            Some(flag) => ui.fixed_header = flag,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.fixed_header {value}; using {}",
+                ui.fixed_header
+            ))),
+        }
+    }
     if let Some(value) = table.get("list_row_height") {
         match value.as_str().and_then(ListRowHeight::parse) {
             Some(height) => ui.list_row_height = height,
@@ -1759,6 +1914,67 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             ))),
         }
     }
+    if let Some(value) = table.get("sort_method") {
+        match value.as_str().and_then(SortMethod::parse) {
+            Some(method) => ui.sort_method = method,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.sort_method {value}; using {:?}",
+                ui.sort_method
+            ))),
+        }
+    }
+    for (key, flag) in [
+        ("folders_sort_by_name", &mut ui.folders_sort_by_name),
+        ("drag_copies", &mut ui.drag_copies),
+        ("confirm_permanent_delete", &mut ui.confirm_permanent_delete),
+    ] {
+        if let Some(value) = table.get(key) {
+            match value.as_bool() {
+                Some(value) => *flag = value,
+                None => diagnostics.push(Diagnostic::warn(format!("invalid ui.{key} {value}; using {}", *flag))),
+            }
+        }
+    }
+    if let Some(value) = table.get("max_column_width") {
+        match value
+            .as_integer()
+            .and_then(|width| u32::try_from(width).ok())
+            .filter(|width| *width <= 2000)
+        {
+            Some(width) => ui.max_column_width = width,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.max_column_width {value}; using {}",
+                ui.max_column_width
+            ))),
+        }
+    }
+    if let Some(value) = table.get("icon_mode") {
+        match value.as_str().and_then(IconMode::parse) {
+            Some(mode) => ui.icon_mode = mode,
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid ui.icon_mode {value}; using {:?}",
+                ui.icon_mode
+            ))),
+        }
+    }
+    if let Some(value) = table.get("ignore_list") {
+        match value.as_array() {
+            Some(entries) => {
+                ui.ignore_list.clear();
+                for entry in entries {
+                    match entry.as_str().map(str::trim) {
+                        Some(entry) if !entry.is_empty() => ui.ignore_list.push(entry.to_string()),
+                        _ => diagnostics.push(Diagnostic::warn(
+                            "invalid ui.ignore_list entry; expected a name or a glob",
+                        )),
+                    }
+                }
+            }
+            None => diagnostics.push(Diagnostic::warn(
+                "invalid ui.ignore_list; expected an array of names",
+            )),
+        }
+    }
     if let Some(value) = table.get("file_type_colors") {
         match value.as_array() {
             Some(rules) => {
@@ -1800,12 +2016,20 @@ fn read_ui(table: &toml::Table, ui: &mut Ui, diagnostics: &mut Vec<Diagnostic>) 
             "font_family",
             "name_lines",
             "scroll_smoothness",
+            "fixed_header",
             "list_row_height",
             "zebra_rows",
             "selection_outline",
             "double_click_empty",
             "show_sync_status",
             "show_vcs_status",
+            "sort_method",
+            "folders_sort_by_name",
+            "ignore_list",
+            "max_column_width",
+            "icon_mode",
+            "drag_copies",
+            "confirm_permanent_delete",
             "audio_waveforms",
             "preview_autoplay",
             "hover_audio",
@@ -2566,19 +2790,90 @@ mod tests {
         assert_eq!(config.ui.default_sort, SortOrder::Name);
         assert!(!config.ui.show_hidden);
         assert_eq!(config.ui.icon_pack, "default");
+        assert!(config.ui.fixed_header);
         assert_eq!(config.ui.list_row_height, ListRowHeight::Standard);
         assert!(!config.ui.zebra_rows);
         assert!(!config.ui.selection_outline);
         assert_eq!(config.ui.double_click_empty, DoubleClickEmpty::None);
         assert!(!config.ui.show_sync_status);
         assert!(!config.ui.show_vcs_status);
+        assert_eq!(config.ui.sort_method, SortMethod::LocaleNumeric);
+        assert!(!config.ui.folders_sort_by_name);
+        assert_eq!(config.ui.ignore_list, default_ignore_list());
+        assert_eq!(config.ui.max_column_width, 0);
+        assert_eq!(config.ui.icon_mode, IconMode::Associated);
+        assert!(!config.ui.drag_copies);
+        assert!(config.ui.confirm_permanent_delete);
         assert_eq!(config.indexing.source, IndexSource::Auto);
+    }
+
+    #[test]
+    fn sorting_icon_and_operation_settings_parse() {
+        let toml = r#"
+            [ui]
+            sort_method = "lowercase_numeric"
+            folders_sort_by_name = true
+            ignore_list = ["*.tmp", "pagefile.sys"]
+            max_column_width = 240
+            icon_mode = "standard"
+            drag_copies = true
+            confirm_permanent_delete = false
+        "#;
+        let (config, diagnostics) = Config::from_toml_str(toml);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(config.ui.sort_method, SortMethod::LowercaseNumeric);
+        assert!(config.ui.folders_sort_by_name);
+        assert_eq!(config.ui.ignore_list, ["*.tmp", "pagefile.sys"]);
+        assert_eq!(config.ui.max_column_width, 240);
+        assert_eq!(config.ui.icon_mode, IconMode::Standard);
+        assert!(config.ui.drag_copies);
+        assert!(!config.ui.confirm_permanent_delete);
+    }
+
+    #[test]
+    fn invalid_sorting_settings_warn_and_keep_the_defaults() {
+        let toml = r#"
+            [ui]
+            sort_method = "alphabetical"
+            icon_mode = "pretty"
+            max_column_width = 99999
+        "#;
+        let (config, diagnostics) = Config::from_toml_str(toml);
+        assert_eq!(config.ui.sort_method, SortMethod::LocaleNumeric);
+        assert_eq!(config.ui.icon_mode, IconMode::Associated);
+        assert_eq!(config.ui.max_column_width, 0);
+        let warnings: Vec<&str> = diagnostics
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Warning)
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(warnings.iter().any(|m| m.contains("ui.sort_method")), "{warnings:?}");
+        assert!(warnings.iter().any(|m| m.contains("ui.icon_mode")), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|m| m.contains("ui.max_column_width")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn the_ignore_list_matches_names_and_globs_without_case() {
+        let ignored = |pattern: &str, name: &str| {
+            let patterns = [pattern.to_string()];
+            name_is_ignored(&patterns, name)
+        };
+        assert!(ignored("pagefile.sys", "PAGEFILE.SYS"));
+        assert!(!ignored("pagefile.sys", "pagefile.sys.txt"));
+        assert!(ignored("*.tmp", "draft.TMP"));
+        assert!(ignored("~$*", "~$report.docx"));
+        assert!(!name_is_ignored(&[], "anything"));
+        assert!(!ignored("  ", "anything"), "blank lines hide nothing");
     }
 
     #[test]
     fn list_appearance_and_status_settings_parse() {
         let toml = r#"
             [ui]
+            fixed_header = false
             list_row_height = "relaxed"
             zebra_rows = true
             selection_outline = true
@@ -2588,6 +2883,7 @@ mod tests {
         "#;
         let (config, diagnostics) = Config::from_toml_str(toml);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(!config.ui.fixed_header);
         assert_eq!(config.ui.list_row_height, ListRowHeight::Relaxed);
         assert!(config.ui.zebra_rows);
         assert!(config.ui.selection_outline);

@@ -1,4 +1,5 @@
 use super::types::SortKey;
+use nohrs_core::config::SortMethod;
 use nohrs_services::fs::listing::FileEntryDto;
 use std::cmp::Ordering;
 
@@ -26,21 +27,66 @@ impl FolderOrder {
     }
 }
 
+/// How the listing orders its rows: which column, which direction, where the
+/// folders go, how names compare, and whether folders keep their own order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SortSettings {
+    /// The column the listing is ordered by.
+    pub key: SortKey,
+    /// A to Z, smallest or oldest first.
+    pub ascending: bool,
+    /// Where folders go.
+    pub folders: FolderOrder,
+    /// How names compare.
+    pub method: SortMethod,
+    /// Folders compare by name even when the listing is by date or size, as
+    /// Total Commander's "folders by name" does.
+    pub folders_by_name: bool,
+}
+
+impl Default for SortSettings {
+    fn default() -> Self {
+        Self {
+            key: SortKey::Name,
+            ascending: true,
+            folders: FolderOrder::First,
+            method: SortMethod::LocaleNumeric,
+            folders_by_name: false,
+        }
+    }
+}
+
+/// How one row's primary key compares: a name, or the size/date number.
+enum RowKey {
+    Name(SortName),
+    Number(u64),
+}
+
 /// Sorts with folders first, the default order.
 #[cfg(test)]
 pub fn sort_entries(entries: &mut [FileEntryDto], key: SortKey, asc: bool) {
-    sort_entries_with(entries, key, asc, FolderOrder::First);
+    sort_entries_with(
+        entries,
+        SortSettings {
+            key,
+            ascending: asc,
+            ..SortSettings::default()
+        },
+    );
 }
 
-/// Sorts by `key`, with folders placed as `folders` says. Names compare as
-/// Explorer compares them (`2.txt` before `10.txt`), so a folder lists in the
-/// order the user already knows from it.
-pub fn sort_entries_with(
-    entries: &mut [FileEntryDto],
-    key: SortKey,
-    asc: bool,
-    folders: FolderOrder,
-) {
+/// Sorts by the settings' key and direction, with folders placed where they
+/// say. Names compare as the method says, and by default as Explorer compares
+/// them (`2.txt` before `10.txt`), so a folder lists in the order the user
+/// already knows from it.
+pub fn sort_entries_with(entries: &mut [FileEntryDto], settings: SortSettings) {
+    let SortSettings {
+        key,
+        ascending,
+        folders,
+        method,
+        folders_by_name,
+    } = settings;
     let grouping = |a: &FileEntryDto, b: &FileEntryDto| {
         let (is_dir_a, is_dir_b) = (a.kind == "dir", b.kind == "dir");
         match folders {
@@ -49,46 +95,55 @@ pub fn sort_entries_with(
             FolderOrder::Mixed => Ordering::Equal,
         }
     };
-    let direction = |order: Ordering| if asc { order } else { order.reverse() };
+    let direction = |order: Ordering| if ascending { order } else { order.reverse() };
 
-    match key {
-        SortKey::Size | SortKey::Modified => {
-            let value = |entry: &FileEntryDto| match key {
-                SortKey::Size => entry.size,
-                _ => entry.modified,
+    // Each key is prepared once, not on every comparison: the old
+    // `to_lowercase()` inside the comparator allocated two strings per
+    // comparison, about 34 per entry in a folder of 35,000.
+    let keys: Vec<RowKey> = entries
+        .iter()
+        .map(|entry| match key {
+            SortKey::Name => RowKey::Name(SortName::new(&entry.name, method)),
+            SortKey::Type => RowKey::Name(SortName::new(&get_extension(&entry.name, &entry.kind), method)),
+            SortKey::Size => RowKey::Number(entry.size),
+            SortKey::Modified => RowKey::Number(entry.modified),
+        })
+        .collect();
+    // Folders keeping their own order need their names, even while the listing
+    // is ordered by another column.
+    let folder_names: Option<Vec<SortName>> = folders_by_name.then(|| {
+        entries
+            .iter()
+            .map(|entry| SortName::new(&entry.name, method))
+            .collect()
+    });
+    let compare = |a: usize, b: usize| {
+        grouping(&entries[a], &entries[b]).then_with(|| {
+            let order = match (&keys[a], &keys[b]) {
+                (RowKey::Name(left), RowKey::Name(right)) => left.cmp(right),
+                (RowKey::Number(left), RowKey::Number(right)) => left.cmp(right),
+                _ => Ordering::Equal,
             };
-            let compare = |a: &FileEntryDto, b: &FileEntryDto| {
-                grouping(a, b).then_with(|| direction(value(a).cmp(&value(b))))
+            let order = match (&folder_names, &keys[a]) {
+                (Some(names), RowKey::Number(_))
+                    if entries[a].kind == "dir" && entries[b].kind == "dir" =>
+                {
+                    names[a].cmp(&names[b])
+                }
+                _ => order,
             };
-            if !entries.is_sorted_by(|a, b| compare(a, b) != Ordering::Greater) {
-                entries.sort_by(compare);
-            }
-        }
-        SortKey::Name | SortKey::Type => {
-            // Each name is prepared once, not on every comparison: the old
-            // `to_lowercase()` inside the comparator allocated two strings per
-            // comparison, about 34 per entry in a folder of 35,000.
-            let keys: Vec<SortName> = entries
-                .iter()
-                .map(|entry| match key {
-                    SortKey::Name => SortName::new(&entry.name),
-                    _ => SortName::new(&get_extension(&entry.name, &entry.kind)),
-                })
-                .collect();
-            let compare = |a: usize, b: usize| {
-                grouping(&entries[a], &entries[b]).then_with(|| direction(keys[a].cmp(&keys[b])))
-            };
-            // The listing is sorted again after every filter and on every
-            // reload; most of those calls get it already in order, and a check
-            // is one comparison per entry rather than a sort.
-            if (1..entries.len()).all(|index| compare(index - 1, index) != Ordering::Greater) {
-                return;
-            }
-            let mut order: Vec<usize> = (0..entries.len()).collect();
-            order.sort_by(|&a, &b| compare(a, b));
-            apply_order(entries, order);
-        }
+            direction(order)
+        })
+    };
+    // The listing is sorted again after every filter and on every reload; most
+    // of those calls get it already in order, and a check is one comparison
+    // per entry rather than a sort.
+    if (1..entries.len()).all(|index| compare(index - 1, index) != Ordering::Greater) {
+        return;
     }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| compare(a, b));
+    apply_order(entries, order);
 }
 
 /// Puts `entries[order[i]]` at `i` for every `i`, by swapping along the
@@ -120,49 +175,99 @@ fn apply_order<T>(entries: &mut [T], mut order: Vec<usize>) {
 pub(crate) struct SortName(Vec<u8>);
 
 impl SortName {
-    #[cfg(windows)]
-    #[allow(unsafe_code)]
-    pub(crate) fn new(name: &str) -> Self {
-        use windows::Win32::Globalization::{
-            LCMAP_SORTKEY, LCMapStringW, NORM_IGNORECASE, SORT_DIGITSASNUMBERS,
-        };
-        use windows::core::PWSTR;
-        // LOCALE_USER_DEFAULT, the locale `StrCmpLogicalW` compares in.
-        const USER_LOCALE: u32 = 0x0400;
-        let flags = LCMAP_SORTKEY | NORM_IGNORECASE.0 | SORT_DIGITSASNUMBERS.0;
-        let source: Vec<u16> = name.encode_utf16().collect();
-        if source.is_empty() {
-            return Self(Vec::new());
-        }
-        // For a sort key the destination is bytes, and both lengths are in
-        // bytes; the first call asks how many.
-        let needed = unsafe { LCMapStringW(USER_LOCALE, flags, &source, None, 0) };
-        let Ok(length) = usize::try_from(needed) else {
-            return Self(name.to_lowercase().into_bytes());
-        };
-        let mut key = vec![0u8; length];
-        let written = unsafe {
-            LCMapStringW(
-                USER_LOCALE,
-                flags,
-                &source,
-                Some(PWSTR(key.as_mut_ptr().cast())),
-                needed,
-            )
-        };
-        match usize::try_from(written) {
-            Ok(written) if written > 0 => {
-                key.truncate(written);
-                Self(key)
-            }
-            _ => Self(name.to_lowercase().into_bytes()),
+    /// The key a name compares by under `method`.
+    pub(crate) fn new(name: &str, method: SortMethod) -> Self {
+        match method {
+            SortMethod::Lowercase => Self(name.to_lowercase().into_bytes()),
+            SortMethod::Uppercase => Self(name.to_uppercase().into_bytes()),
+            SortMethod::LowercaseNumeric => Self(numeric_key(&name.to_lowercase())),
+            SortMethod::Locale => Self(locale_key(name, false)),
+            SortMethod::LocaleNumeric => Self(locale_key(name, true)),
         }
     }
+}
 
-    #[cfg(not(windows))]
-    pub(crate) fn new(name: &str) -> Self {
-        Self(name.to_lowercase().into_bytes())
+/// The system's collation key for `name`, with digits as numbers when asked:
+/// the bytes `CompareString` itself compares, which is the order Explorer
+/// shows.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn locale_key(name: &str, digits_as_numbers: bool) -> Vec<u8> {
+    use windows::Win32::Globalization::{LCMAP_SORTKEY, LCMapStringW, NORM_IGNORECASE, SORT_DIGITSASNUMBERS};
+    use windows::core::PWSTR;
+    // LOCALE_USER_DEFAULT, the locale `StrCmpLogicalW` compares in.
+    const USER_LOCALE: u32 = 0x0400;
+    let mut flags = LCMAP_SORTKEY | NORM_IGNORECASE.0;
+    if digits_as_numbers {
+        flags |= SORT_DIGITSASNUMBERS.0;
     }
+    let source: Vec<u16> = name.encode_utf16().collect();
+    if source.is_empty() {
+        return Vec::new();
+    }
+    // For a sort key the destination is bytes, and both lengths are in bytes;
+    // the first call asks how many.
+    let needed = unsafe { LCMapStringW(USER_LOCALE, flags, &source, None, 0) };
+    let Ok(length) = usize::try_from(needed) else {
+        return name.to_lowercase().into_bytes();
+    };
+    let mut key = vec![0u8; length];
+    let written = unsafe {
+        LCMapStringW(
+            USER_LOCALE,
+            flags,
+            &source,
+            Some(PWSTR(key.as_mut_ptr().cast())),
+            needed,
+        )
+    };
+    match usize::try_from(written) {
+        Ok(written) if written > 0 => {
+            key.truncate(written);
+            key
+        }
+        _ => name.to_lowercase().into_bytes(),
+    }
+}
+
+#[cfg(not(windows))]
+fn locale_key(name: &str, digits_as_numbers: bool) -> Vec<u8> {
+    if digits_as_numbers {
+        numeric_key(&name.to_lowercase())
+    } else {
+        name.to_lowercase().into_bytes()
+    }
+}
+
+/// A key that compares like a lowercase name, except that runs of digits
+/// compare as numbers (`2` before `10`). Each run is a `0` byte and its value
+/// big-endian; each other character is a `1` byte and its lowercase bytes, so
+/// digits still sort before letters, as their codes do.
+fn numeric_key(lowercased: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(lowercased.len() + 9);
+    let mut digits = String::new();
+    let flush = |digits: &mut String, key: &mut Vec<u8>| {
+        if digits.is_empty() {
+            return;
+        }
+        // Longer runs than a u64 holds always sort after shorter ones.
+        let value = digits.parse::<u64>().unwrap_or(u64::MAX);
+        key.push(0);
+        key.extend_from_slice(&value.to_be_bytes());
+        digits.clear();
+    };
+    for character in lowercased.chars() {
+        if character.is_ascii_digit() {
+            digits.push(character);
+            continue;
+        }
+        flush(&mut digits, &mut key);
+        key.push(1);
+        let mut encoded = [0u8; 4];
+        key.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+    }
+    flush(&mut digits, &mut key);
+    key
 }
 
 pub fn get_extension(name: &str, kind: &str) -> String {
@@ -189,6 +294,71 @@ mod tests {
             size,
             modified: 0,
         }
+    }
+
+    #[test]
+    fn sort_methods_choose_how_digit_runs_compare() {
+        let entries = vec![
+            entry("f10.txt", "file", 0),
+            entry("f2.txt", "file", 0),
+            entry("A.txt", "file", 0),
+            entry("b.txt", "file", 0),
+        ];
+        let sorted = |method| {
+            let mut copy = entries.clone();
+            sort_entries_with(
+                &mut copy,
+                SortSettings {
+                    key: SortKey::Name,
+                    ascending: true,
+                    method,
+                    ..SortSettings::default()
+                },
+            );
+            copy.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>()
+        };
+        // Plain codes: `1` sorts before `2`, so f10 comes first.
+        assert_eq!(sorted(SortMethod::Lowercase), ["A.txt", "b.txt", "f10.txt", "f2.txt"]);
+        assert_eq!(sorted(SortMethod::Uppercase), ["A.txt", "b.txt", "f10.txt", "f2.txt"]);
+        // Numbers as numbers: 2 before 10.
+        assert_eq!(sorted(SortMethod::LowercaseNumeric), ["A.txt", "b.txt", "f2.txt", "f10.txt"]);
+        #[cfg(windows)]
+        assert_eq!(sorted(SortMethod::LocaleNumeric), ["A.txt", "b.txt", "f2.txt", "f10.txt"]);
+    }
+
+    #[test]
+    fn folders_keep_their_own_order_under_a_date_sort() {
+        let folder = |name: &str, modified: u64| FileEntryDto {
+            name: name.to_string(),
+            path: format!("/{name}"),
+            kind: "dir".to_string(),
+            size: 0,
+            modified,
+        };
+        let mut entries = vec![folder("b", 100), folder("a", 200), entry("c.txt", "file", 50)];
+        let settings = |folders_by_name| SortSettings {
+            key: SortKey::Modified,
+            ascending: true,
+            folders_by_name,
+            ..SortSettings::default()
+        };
+        let names = |entries: &[FileEntryDto]| -> Vec<String> {
+            entries.iter().map(|entry| entry.name.clone()).collect()
+        };
+        sort_entries_with(&mut entries, settings(true));
+        assert_eq!(names(&entries), ["a", "b", "c.txt"], "folders by name");
+        sort_entries_with(&mut entries, settings(false));
+        assert_eq!(names(&entries), ["b", "a", "c.txt"], "folders by date");
+    }
+
+    #[test]
+    fn numeric_keys_compare_digits_by_value_and_text_by_code() {
+        let numeric = |name: &str| numeric_key(&name.to_lowercase());
+        assert!(numeric("f2") < numeric("f10"));
+        assert!(numeric("a") < numeric("a1"));
+        assert!(numeric("a1") < numeric("ab"));
+        // Digits still sort before letters, as their codes do.
+        assert!(numeric("2") < numeric("a"));
     }
 
     #[test]
@@ -284,11 +454,17 @@ mod tests {
             entry("a", "dir", 0),
             entry("c", "dir", 0),
         ];
-        sort_entries_with(&mut entries, SortKey::Name, true, FolderOrder::First);
+        let settings = |folders| SortSettings {
+            key: SortKey::Name,
+            ascending: true,
+            folders,
+            ..SortSettings::default()
+        };
+        sort_entries_with(&mut entries, settings(FolderOrder::First));
         assert_eq!(names(&entries), ["a", "c", "b.txt"]);
-        sort_entries_with(&mut entries, SortKey::Name, true, FolderOrder::Last);
+        sort_entries_with(&mut entries, settings(FolderOrder::Last));
         assert_eq!(names(&entries), ["b.txt", "a", "c"]);
-        sort_entries_with(&mut entries, SortKey::Name, true, FolderOrder::Mixed);
+        sort_entries_with(&mut entries, settings(FolderOrder::Mixed));
         assert_eq!(names(&entries), ["a", "b.txt", "c"]);
         assert_eq!(FolderOrder::Mixed.next(), FolderOrder::First);
     }
@@ -397,7 +573,7 @@ mod tests {
         }
         let mut keyed: Vec<(SortName, &str)> = names
             .iter()
-            .map(|name| (SortName::new(name), name.as_str()))
+            .map(|name| (SortName::new(name, SortMethod::LocaleNumeric), name.as_str()))
             .collect();
         keyed.sort_by(|a, b| a.0.cmp(&b.0));
         let disagreements: Vec<(&str, &str)> = keyed

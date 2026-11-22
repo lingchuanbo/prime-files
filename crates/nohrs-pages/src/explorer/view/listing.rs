@@ -195,7 +195,17 @@ fn with_wheel_zoom(
             this.drop_paths(paths.paths(), folder, window, cx);
         }))
         .child(listing)
-        .child(scrollbar)
+        // A fixed header sits above the rows the bar scrolls, so the bar
+        // starts below it: its thumb must not travel over the headings.
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .top(px(scrollbar_offset(page)))
+                .child(scrollbar),
+        )
         .children(page.marquee_overlay())
         .child(
             canvas(
@@ -332,6 +342,15 @@ fn listing_scrollbar(page: &ExplorerPane) -> gpui_component::scroll::Scrollbar {
     bar.id("listing-scrollbar")
         .scroll_size(page.listing_extent)
         .scrollbar_show(gpui_component::scroll::ScrollbarShow::Always)
+}
+
+/// Where the scrollbar starts, from the top of the listing: below the column
+/// header when it is fixed there, and at the top otherwise.
+fn scrollbar_offset(page: &ExplorerPane) -> f32 {
+    match page.view_mode {
+        ViewMode::List | ViewMode::Tree if page.fixed_header => list::HEADER_HEIGHT,
+        _ => 0.0,
+    }
 }
 
 /// Truncates `text` to at most `max_len` characters by eliding the middle,

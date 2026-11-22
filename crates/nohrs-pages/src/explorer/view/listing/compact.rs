@@ -65,12 +65,17 @@ pub fn render(
                                 let Some(item) = page.filtered_entries.get(ix).cloned() else {
                                     continue;
                                 };
-                                let icon = page.thumbnails.icon(
-                                    &item.path,
-                                    item.kind == "dir",
-                                    icon_px,
-                                    cx,
-                                );
+                                let icon = (page.icon_mode
+                                    == nohrs_core::config::IconMode::Associated)
+                                    .then(|| {
+                                        page.thumbnails.icon(
+                                            &item.path,
+                                            item.kind == "dir",
+                                            icon_px,
+                                            cx,
+                                        )
+                                    })
+                                    .flatten();
                                 items = items.child(render_item(page, item, ix, icon, cx));
                             }
                             items
@@ -203,12 +208,15 @@ fn render_item(
                 cx.notify();
             }),
         )
-        .child(match icon {
-            Some(image) => img(ImageSource::Render(image))
+        .child(match (page.icon_mode, icon) {
+            (nohrs_core::config::IconMode::None, _) => {
+                div().size(px(16.0)).flex_shrink_0().into_any_element()
+            }
+            (_, Some(image)) => img(ImageSource::Render(image))
                 .size(px(16.0))
                 .flex_shrink_0()
                 .into_any_element(),
-            None => Icon::new(if is_dir {
+            (_, None) => Icon::new(if is_dir {
                 IconName::Folder
             } else {
                 IconName::File

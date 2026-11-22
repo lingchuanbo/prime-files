@@ -403,6 +403,12 @@ impl ExplorerPane {
         // The window the preview needs is only available while the other pane
         // renders, so the path waits in `preview_request` for that render.
         sibling.update(cx, move |other, cx| {
+            // The panel's state is remembered the first time, so closing the
+            // preview puts the pane back as it was (and a second click while
+            // it is open does not record the panel it already hid).
+            if !other.preview_full {
+                other.preview_visible_before = other.preview_visible;
+            }
             other.preview_full = true;
             other.quick_look = false;
             other.preview_visible = false;
@@ -422,10 +428,11 @@ impl ExplorerPane {
         cx: &mut Context<Self>,
     ) {
         // Pressed from the pane showing the preview: close it here, and tell
-        // the other pane to stop tracking it.
+        // the other pane to stop tracking it. The panel comes back as it was
+        // before the preview took the pane.
         if self.preview_full {
             self.preview_full = false;
-            self.preview_visible = true;
+            self.preview_visible = self.preview_visible_before;
             if let Some(sibling) = self.sibling_pane.clone() {
                 sibling.update(cx, |other, cx| {
                     other.preview_in_sibling = false;
@@ -463,7 +470,7 @@ impl ExplorerPane {
         };
         sibling.update(cx, |other, cx| {
             other.preview_full = false;
-            other.preview_visible = true;
+            other.preview_visible = other.preview_visible_before;
             other.preview_request = None;
             other.close_quick_look(cx);
             cx.notify();

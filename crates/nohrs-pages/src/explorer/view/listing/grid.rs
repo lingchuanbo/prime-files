@@ -295,16 +295,22 @@ fn render_grid_item(
     // arrives or if it cannot be had, the type's icon: one image shared by
     // every file of the extension, where the thumbnail would have the Shell
     // read each file for an icon that is about to be covered.
-    let waveform_wanted = page.audio_waveforms
+    let associated = page.icon_mode == nohrs_core::config::IconMode::Associated;
+    let waveform_wanted = associated
+        && page.audio_waveforms
         && item.kind == "file"
         && crate::explorer::waveforms::is_audio(&item.path);
     let waveform = waveform_wanted
         .then(|| page.waveforms.get(&item.path, item.size, item.modified, cx))
         .flatten();
-    let thumbnail = match (waveform_wanted, &waveform) {
-        (_, Some(_)) => None,
-        (true, None) => page.thumbnails.icon(&item.path, false, tile.thumbnail, cx),
-        (false, None) => page.thumbnails.get(&item.path, tile.thumbnail, cx),
+    let thumbnail = if !associated {
+        None
+    } else {
+        match (waveform_wanted, &waveform) {
+            (_, Some(_)) => None,
+            (true, None) => page.thumbnails.icon(&item.path, false, tile.thumbnail, cx),
+            (false, None) => page.thumbnails.get(&item.path, tile.thumbnail, cx),
+        }
     };
     let waveform_shown = waveform.is_some();
     let activation_item = item.clone();
@@ -398,18 +404,24 @@ fn render_grid_item(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(match (waveform, thumbnail) {
-                    (Some(bars), _) => crate::explorer::waveforms::canvas(
+                .child(match (page.icon_mode, waveform, thumbnail) {
+                    // No icons: the tile keeps its shape, with nothing in the
+                    // place the picture was.
+                    (nohrs_core::config::IconMode::None, _, _) => div()
+                        .size(px(tile.icon))
+                        .flex_shrink_0()
+                        .into_any_element(),
+                    (_, Some(bars), _) => crate::explorer::waveforms::canvas(
                         bars,
                         tile.icon,
                         selected,
                         crate::explorer::hover_audio::progress_of(&item.path),
                     ),
-                    (None, Some(image)) => img(ImageSource::Render(image))
+                    (_, None, Some(image)) => img(ImageSource::Render(image))
                         .size_full()
                         .object_fit(ObjectFit::Contain)
                         .into_any_element(),
-                    (None, None) => Icon::new(icon_name)
+                    (_, None, None) => Icon::new(icon_name)
                         .size(px((tile.icon * 0.6).max(24.0)))
                         .text_color(rgb(if is_dir {
                             theme::accent()

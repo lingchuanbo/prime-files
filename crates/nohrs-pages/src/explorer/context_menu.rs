@@ -76,10 +76,12 @@ enum Command {
     CompressZipMax,
     CompressSelection7z,
     ExtractArchive,
+    /// Whether the column header stays on top while the rows scroll.
+    ColumnHeaderFixed,
 }
 
 impl Command {
-    const ALL: [Command; 58] = [
+    const ALL: [Command; 59] = [
         Command::ViewList,
         Command::ViewGrid,
         Command::ViewTree,
@@ -138,6 +140,7 @@ impl Command {
         Command::CompressZipMax,
         Command::CompressSelection7z,
         Command::ExtractArchive,
+        Command::ColumnHeaderFixed,
     ];
 
     fn from_id(id: u32) -> Option<Self> {
@@ -704,6 +707,10 @@ impl ExplorerPane {
                         Some(Command::ColumnType) => self.toggle_column(1),
                         Some(Command::ColumnSize) => self.toggle_column(2),
                         Some(Command::ColumnModified) => self.toggle_column(3),
+                        Some(Command::ColumnHeaderFixed) => {
+                            let value = if self.fixed_header { "false" } else { "true" };
+                            self.write_config("ui", "fixed_header", value.to_string(), cx);
+                        }
                         _ => {}
                     }
                 }
@@ -1186,6 +1193,13 @@ impl ExplorerPane {
                 t!("Data de modificação"),
                 self.column_visible(3),
             ),
+            Entry::Separator,
+            // The heading row itself: whether it stays while the rows scroll.
+            Entry::check(
+                Command::ColumnHeaderFixed as u32,
+                t!("Cabeçalho fixo"),
+                self.fixed_header,
+            ),
         ];
         self.show_menu(MenuPurpose::Columns(column), own, hwnd, window, cx);
     }
@@ -1504,6 +1518,7 @@ impl ExplorerPane {
             | Command::ColumnType
             | Command::ColumnSize
             | Command::ColumnModified
+            | Command::ColumnHeaderFixed
             | Command::RenameTag
             | Command::DeleteTag
             | Command::RemoveNetworkPlace

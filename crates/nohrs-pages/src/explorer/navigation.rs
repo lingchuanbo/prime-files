@@ -658,7 +658,14 @@ impl ExplorerPane {
             } else {
                 vec![item.path]
             };
-            crate::file_dialog::deliver(&paths);
+            // Filling the dialog is Win32 automation that takes a moment (it
+            // moves the dialog between folders for a multi-file pick), so it
+            // runs off the foreground thread: the window must not freeze while
+            // another program's dialog settles.
+            cx.background_spawn(async move {
+                crate::file_dialog::deliver(&paths);
+            })
+            .detach();
             cx.notify();
         } else {
             self.open_with_default_app(&item.path);

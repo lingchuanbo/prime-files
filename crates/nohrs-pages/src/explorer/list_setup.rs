@@ -8,6 +8,9 @@ use gpui_component::list::{ListEvent, ListState};
 use super::ExplorerPane;
 use super::types::ResizingColumn;
 
+/// The widest a column can be dragged to when no limit is configured.
+const MAX_COLUMN_WIDTH: f32 = 900.0;
+
 impl ExplorerPane {
     pub(crate) fn ensure_list_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.list.is_none() {
@@ -75,7 +78,8 @@ impl ExplorerPane {
     pub(crate) fn update_column_resize(&mut self, current_pos: gpui::Point<gpui::Pixels>) {
         if let Some(resize) = self.resizing_column {
             let delta: f32 = (current_pos.x - resize.start_x.x).into();
-            let new_width = (resize.start_width + delta).max(config::MIN_COLUMN_WIDTH);
+            let ceiling = self.column_ceiling();
+            let new_width = (resize.start_width + delta).clamp(config::MIN_COLUMN_WIDTH, ceiling);
 
             match resize.column_index {
                 0 => self.col_name_width = new_width,
@@ -86,6 +90,16 @@ impl ExplorerPane {
             }
 
             self.update_item_sizes();
+        }
+    }
+
+    /// The widest a column may be dragged to: the configured limit
+    /// (`ui.max_column_width`), or the built-in ceiling when that limit is 0.
+    fn column_ceiling(&self) -> f32 {
+        if self.max_column_width > 0.0 {
+            self.max_column_width.max(config::MIN_COLUMN_WIDTH)
+        } else {
+            MAX_COLUMN_WIDTH
         }
     }
 
@@ -167,7 +181,7 @@ impl ExplorerPane {
             .map_or(0, |label| label.chars().count() + 2);
         let indent = if column == 0 { view_name_indent() } else { 0.0 };
         let fitted = (indent + widest.max(heading) as f32 * GLYPH + PADDING)
-            .clamp(config::MIN_COLUMN_WIDTH, 900.0);
+            .clamp(config::MIN_COLUMN_WIDTH, self.column_ceiling());
         if let Some(width) = self.column_width_mut(column) {
             *width = fitted;
         }

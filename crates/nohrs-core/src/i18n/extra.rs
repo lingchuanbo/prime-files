@@ -6823,4 +6823,237 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[    (
     (
         "Copiado",
         ["Copié", "Kopiert", "Copiato", "Скопирован", "コピー済み", "已复制"],
+    ),
+    (
+        "Cabeçalho fixo",
+        [
+            "En-tête fixe",
+            "Feste Kopfzeile",
+            "Intestazione fissa",
+            "Закреплённая шапка",
+            "ヘッダーを固定",
+            "固定表头",
+        ],
+    ),
+    (
+        "A linha com Nome, Tipo, Tamanho e Modificado fica no topo enquanto a lista rola.",
+        [
+            "La ligne avec Nom, Type, Taille et Modifié reste en haut pendant que la liste défile.",
+            "Die Zeile mit Name, Typ, Größe und Geändert bleibt beim Scrollen der Liste oben.",
+            "La riga con Nome, Tipo, Dimensione e Modificato resta in alto mentre l'elenco scorre.",
+            "Строка с «Имя», «Тип», «Размер» и «Изменён» остаётся вверху при прокрутке списка.",
+            "「名前・種類・サイズ・更新日時」の行が、リストをスクロールしても上部に残ります。",
+            "滚动列表时，「名称、类型、大小、修改时间」这一行始终留在顶部。",
+        ],
+    ),
+    (
+        "Ícones dos arquivos",
+        [
+            "Icônes des fichiers",
+            "Dateisymbole",
+            "Icone dei file",
+            "Значки файлов",
+            "ファイルのアイコン",
+            "文件图标",
+        ],
+    ),
+    (
+        "O ícone que o próprio arquivo tem no Windows (o programa, a miniatura), um ícone padrão de arquivo ou de pasta, ou nenhum.",
+        [
+            "L’icône que le fichier a sous Windows (son programme, sa vignette), une icône standard de fichier ou de dossier, ou aucune.",
+            "Das Symbol, das die Datei unter Windows selbst hat (ihr Programm, ihr Vorschaubild), ein Standardsymbol für Dateien oder Ordner, oder keines.",
+            "L'icona che il file ha in Windows (il suo programma, la sua anteprima), un'icona standard di file o cartella, oppure nessuna.",
+            "Значок, который файл имеет в Windows (программы, миниатюры), стандартный значок файла или папки, либо никакого.",
+            "Windows 上でそのファイル自身が持つアイコン（プログラム、サムネイル）、標準のファイル／フォルダーのアイコン、またはアイコンなしを選びます。",
+            "文件在 Windows 中自带的图标（程序图标、缩略图）、标准的文件/文件夹图标，或完全不显示。",
+        ],
+    ),
+    (
+        "Do sistema",
+        ["Du système", "Vom System", "Dal sistema", "Из системы", "システム", "系统"],
+    ),
+    (
+        "Largura máxima das colunas",
+        [
+            "Largeur maximale des colonnes",
+            "Maximale Spaltenbreite",
+            "Larghezza massima delle colonne",
+            "Максимальная ширина столбцов",
+            "列の最大幅",
+            "列宽上限",
+        ],
+    ),
+    (
+        "Nenhuma coluna da lista passa desta largura, nem arrastada.",
+        [
+            "Aucune colonne de la liste ne dépasse cette largeur, même en l’élargissant.",
+            "Keine Spalte der Liste wird breiter als dieser Wert, auch nicht durch Ziehen.",
+            "Nessuna colonna dell'elenco supera questa larghezza, nemmeno trascinandola.",
+            "Ни один столбец списка не становится шире этого значения, даже при перетаскивании.",
+            "リストの列はドラッグしてもこの幅を超えません。",
+            "列表的列即便拖动也不会超过此宽度。",
+        ],
+    ),
+    (
+        "Método de ordenação",
+        [
+            "Méthode de tri",
+            "Sortiermethode",
+            "Metodo di ordinamento",
+            "Метод сортировки",
+            "並べ替え方法",
+            "排序方式",
+        ],
+    ),
+    (
+        "Como os nomes são comparados: pelos códigos dos caracteres (minúsculos ou maiúsculos) ou pela ordem do idioma do sistema; com números, 2 vem antes de 10.",
+        [
+            "Comment les noms sont comparés : par les codes des caractères (minuscules ou majuscules) ou selon l’ordre de la langue du système ; avec les nombres, 2 passe avant 10.",
+            "Wie Namen verglichen werden: nach Zeichencodes (klein- oder großgeschrieben) oder in der Reihenfolge der Systemsprache; mit Zahlen kommt 2 vor 10.",
+            "Come vengono confrontati i nomi: per codici dei caratteri (minuscoli o maiuscoli) o secondo l'ordine della lingua di sistema; con i numeri, 2 viene prima di 10.",
+            "Как сравниваются имена: по кодам символов (нижний или верхний регистр) или в порядке языка системы; с числами 2 идёт раньше 10.",
+            "名前の比較方法：文字コード（小文字または大文字）順、またはシステム言語の順。数字ありでは 2 が 10 より前に来ます。",
+            "名称的比较方式：按字符编码（小写或大写），或按系统语言的顺序；启用数字时 2 排在 10 前面。",
+        ],
+    ),
+    (
+        "Código minúsculo",
+        [
+            "Codes minuscules",
+            "Kleingeschriebene Codes",
+            "Codici minuscoli",
+            "Коды в нижнем регистре",
+            "小文字コード",
+            "小写编码",
+        ],
+    ),
+    (
+        "Código maiúsculo",
+        [
+            "Codes majuscules",
+            "Großgeschriebene Codes",
+            "Codici maiuscoli",
+            "Коды в верхнем регистре",
+            "大文字コード",
+            "大写编码",
+        ],
+    ),
+    (
+        "Código + números",
+        ["Codes + nombres", "Codes + Zahlen", "Codici + numeri", "Коды + числа", "コード + 数字", "编码 + 数字"],
+    ),
+    (
+        "Idioma + números",
+        ["Langue + nombres", "Sprache + Zahlen", "Lingua + numeri", "Язык + числа", "言語 + 数字", "语言 + 数字"],
+    ),
+    (
+        "Pastas pelo nome",
+        [
+            "Dossiers par nom",
+            "Ordner nach Name",
+            "Cartelle per nome",
+            "Папки по имени",
+            "フォルダーを名前順",
+            "文件夹按名称",
+        ],
+    ),
+    (
+        "As pastas ficam na ordem do nome mesmo quando a lista está ordenada por data ou tamanho.",
+        [
+            "Les dossiers restent dans l’ordre du nom même quand la liste est triée par date ou taille.",
+            "Ordner behalten die Namensreihenfolge, auch wenn die Liste nach Datum oder Größe sortiert ist.",
+            "Le cartelle mantengono l'ordine per nome anche quando l'elenco è ordinato per data o dimensione.",
+            "Папки сохраняют порядок по имени, даже если список отсортирован по дате или размеру.",
+            "日付やサイズで並べ替えていても、フォルダーは名前順のままです。",
+            "即使列表按日期或大小排序，文件夹仍按名称排序。",
+        ],
+    ),
+    (
+        "Lista de ignorados",
+        ["Liste d’ignorés", "Ignorierliste", "Lista ignorati", "Список игнорируемых", "無視リスト", "忽略列表"],
+    ),
+    (
+        "Nomes e padrões ignorados",
+        [
+            "Noms et motifs ignorés",
+            "Ignorierte Namen und Muster",
+            "Nomi e modelli ignorati",
+            "Игнорируемые имена и шаблоны",
+            "無視する名前とパターン",
+            "忽略的名称和模式",
+        ],
+    ),
+    (
+        "Um por linha. Estes nomes nunca aparecem na lista, mesmo com os arquivos ocultos à mostra; * e ? valem como curingas.",
+        [
+            "Un par ligne. Ces noms n’apparaissent jamais dans la liste, même avec les fichiers cachés affichés ; * et ? servent de jokers.",
+            "Einer pro Zeile. Diese Namen erscheinen nie in der Liste, auch nicht bei sichtbaren versteckten Dateien; * und ? sind Platzhalter.",
+            "Uno per riga. Questi nomi non compaiono mai nell'elenco, nemmeno mostrando i file nascosti; * e ? valgono come jolly.",
+            "По одному в строке. Эти имена никогда не показываются в списке, даже при показе скрытых файлов; * и ? — подстановочные знаки.",
+            "1 行に 1 つ。これらの名前は隠しファイルを表示していても一覧に出ません。* と ? はワイルドカードです。",
+            "每行一个。这些名称即使在显示隐藏文件时也不会出现在列表中；* 和 ? 作为通配符。",
+        ],
+    ),
+    (
+        "Um nome ou padrão por linha",
+        [
+            "Un nom ou motif par ligne",
+            "Ein Name oder Muster pro Zeile",
+            "Un nome o modello per riga",
+            "Имя или шаблон в строке",
+            "1 行に 1 つの名前またはパターン",
+            "每行一个名称或模式",
+        ],
+    ),
+    (
+        "Salvar lista",
+        ["Enregistrer la liste", "Liste speichern", "Salva elenco", "Сохранить список", "リストを保存", "保存列表"],
+    ),
+    (
+        "Operações",
+        ["Opérations", "Vorgänge", "Operazioni", "Операции", "操作", "操作"],
+    ),
+    (
+        "Copiar ao arrastar",
+        [
+            "Copier en glissant",
+            "Beim Ziehen kopieren",
+            "Copia trascinando",
+            "Копировать при перетаскивании",
+            "ドラッグでコピー",
+            "拖放时复制",
+        ],
+    ),
+    (
+        "Arrastar com o mouse copia os arquivos em vez de movê-los; Shift continua movendo e Ctrl copiando.",
+        [
+            "Glisser avec la souris copie les fichiers au lieu de les déplacer ; Maj continue de déplacer et Ctrl de copier.",
+            "Ziehen mit der Maus kopiert die Dateien, statt sie zu verschieben; Umschalt verschiebt weiterhin und Strg kopiert.",
+            "Trascinare con il mouse copia i file invece di spostarli; Maiusc continua a spostare e Ctrl a copiare.",
+            "Перетаскивание мышью копирует файлы вместо перемещения; Shift по-прежнему перемещает, Ctrl копирует.",
+            "マウスでドラッグすると移動ではなくコピーします。Shift は移動、Ctrl はコピーのままです。",
+            "用鼠标拖动时复制文件而不是移动；Shift 仍然是移动，Ctrl 仍然是复制。",
+        ],
+    ),
+    (
+        "Confirmar exclusão permanente",
+        [
+            "Confirmer la suppression définitive",
+            "Endgültiges Löschen bestätigen",
+            "Conferma eliminazione definitiva",
+            "Подтверждать окончательное удаление",
+            "完全削除の確認",
+            "确认永久删除",
+        ],
+    ),
+    (
+        "Perguntar antes de apagar para sempre. Desligado, a exclusão permanente acontece na hora.",
+        [
+            "Demander avant de supprimer pour de bon. Désactivé, la suppression définitive se fait aussitôt.",
+            "Vor dem endgültigen Löschen fragen. Ausgeschaltet wird sofort gelöscht.",
+            "Chiedi prima di eliminare definitivamente. Disattivato, l'eliminazione avviene subito.",
+            "Спрашивать перед окончательным удалением. Если выключено, удаление выполняется сразу.",
+            "完全に削除する前に確認します。オフにすると即座に削除します。",
+            "永久删除前询问。关闭后立即永久删除。",
+        ],
     ),];

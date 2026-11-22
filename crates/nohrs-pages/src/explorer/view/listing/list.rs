@@ -16,9 +16,10 @@ pub(crate) const ROW_MARGIN: f32 = 24.0;
 /// Width of the line on each heading's right edge.
 const SEPARATOR_WIDTH: f32 = 1.0;
 
-/// Height of the sticky column-header row. Shared with the preview pane's
+/// Height of the column-header row. Shared with the preview pane's
 /// header so the two line up across the divider, and with the virtual list's
-/// size table, which must agree with what the header actually paints.
+/// size table when the header is not fixed, which must agree with what the
+/// header actually paints.
 pub const HEADER_HEIGHT: f32 = 40.0;
 
 /// Renders the file listing as a virtualized multi-column table.
@@ -64,14 +65,16 @@ fn render_table_with_header(
 ) -> impl IntoElement + use<> {
     let entity = cx.entity().clone();
 
-    // Rebuilt when the rows or the table's width change, not on every frame:
-    // each thumbnail or icon that arrives is a frame, and this is two vectors
-    // the length of the folder.
+    // Rebuilt when the rows, the table's width or the header's place change,
+    // not on every frame: each thumbnail or icon that arrives is a frame, and
+    // this is two vectors the length of the folder.
+    let header_fixed = page.fixed_header;
     let key = (
         page.rows_generation,
         page.filtered_entries.len(),
         table_width.to_bits(),
         page.has_parent_row(),
+        header_fixed,
     );
     let ListLayout {
         rows, all_sizes, ..
@@ -83,7 +86,12 @@ fn render_table_with_header(
                 page.filtered_entries.len(),
                 page.has_parent_row(),
             ));
-            let mut all_sizes = vec![gpui::size(px(table_width), px(HEADER_HEIGHT))];
+            // A fixed header is drawn above the list, so it is not one of the
+            // rows the list scrolls through.
+            let mut all_sizes = Vec::with_capacity(rows.len() + usize::from(!header_fixed));
+            if !header_fixed {
+                all_sizes.push(gpui::size(px(table_width), px(HEADER_HEIGHT)));
+            }
             all_sizes.extend(rows.iter().map(|row| match row {
                 ListRow::Parent => gpui::size(px(table_width), px(page.row_height)),
                 ListRow::Group(_) => gpui::size(px(table_width), px(super::GROUP_HEADER_HEIGHT)),
@@ -105,19 +113,27 @@ fn render_table_with_header(
     let scroll_handle = page.virtual_scroll_handle.clone();
     page.listing_extent = super::extent(&all_sizes, false);
 
-    div().flex_1().overflow_hidden().child(
-        v_virtual_list(
-            entity,
-            "file-table",
-            all_sizes,
-            move |view, visible_range, window, cx| {
-                // The Shell draws icons at the exact pixel size asked for, so
-                // the row's 16px icon is fetched at the screen's scale.
-                let icon_px = ((row::ICON_SIZE * window.scale_factor()).round() as u32).max(16);
-                visible_range
-                    .filter_map(|ix| {
-                        if ix == 0 {
-                            Some(
+    // Painted above the list when it stays put, so the rows scroll under it.
+    let header = header_fixed.then(|| {
+        render_header_row(page, table_width, col_name, col_type, col_size, col_modified, col_action, cx)
+            .into_any_element()
+    });
+
+    let list = v_virtual_list(
+        entity,
+        "file-table",
+        all_sizes,
+        move |view, visible_range, window, cx| {
+            // The Shell draws icons at the exact pixel size asked for, so
+            // the row's 16px icon is fetched at the screen's scale.
+            let icon_px = ((row::ICON_SIZE * window.scale_factor()).round() as u32).max(16);
+            visible_range
+                .filter_map(|ix| {
+                    // Row 0 is the header unless it is fixed above the list.
+                    let index = match (header_fixed, ix) {
+                        (true, index) => index,
+                        (false, 0) => {
+                            return Some(
                                 render_header_row(
                                     view,
                                     table_width,
@@ -129,37 +145,50 @@ fn render_table_with_header(
                                     cx,
                                 )
                                 .into_any_element(),
-                            )
-                        } else {
-                            match rows.get(ix - 1)? {
-                                ListRow::Parent => {
-                                    Some(render_parent_row(view, table_width, col_name, col_type, col_size, col_modified, col_action, cx).into_any_element())
-                                }
-                                ListRow::Group(group) => {
-                                    let group = view.groups().get(*group)?;
-                                    Some(super::group_header(group, table_width).into_any_element())
-                                }
-                                ListRow::Entry(data_ix) => {
-                                    let data_ix = *data_ix;
-                                    view.filtered_entries.get(data_ix).cloned().map(|item| {
-                                        let icon = view.thumbnails.icon(
-                                            &item.path,
-                                            item.kind == "dir",
-                                            icon_px,
-                                            cx,
-                                        );
-                                        row::render(view, &item, data_ix, icon, cx)
-                                            .into_any_element()
-                                    })
-                                }
-                            }
+                            );
                         }
-                    })
-                    .collect()
-            },
-        )
-        .track_scroll(&scroll_handle),
+                        (false, index) => index - 1,
+                    };
+                    match rows.get(index)? {
+                        ListRow::Parent => {
+                            Some(render_parent_row(view, table_width, col_name, col_type, col_size, col_modified, col_action, cx).into_any_element())
+                        }
+                        ListRow::Group(group) => {
+                            let group = view.groups().get(*group)?;
+                            Some(super::group_header(group, table_width).into_any_element())
+                        }
+                        ListRow::Entry(data_ix) => {
+                            let data_ix = *data_ix;
+                            view.filtered_entries.get(data_ix).cloned().map(|item| {
+                                // Only the Shell's own icons are worth asking
+                                // for; a plain or absent icon needs no read.
+                                let icon = (view.icon_mode == nohrs_core::config::IconMode::Associated)
+                                    .then(|| view.thumbnails.icon(
+                                        &item.path,
+                                        item.kind == "dir",
+                                        icon_px,
+                                        cx,
+                                    ))
+                                    .flatten();
+                                row::render(view, &item, data_ix, icon, cx)
+                                    .into_any_element()
+                            })
+                        }
+                    }
+                })
+                .collect()
+        },
     )
+    .track_scroll(&scroll_handle);
+
+    div()
+        .flex_1()
+        .min_h(px(0.0))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .children(header)
+        .child(div().flex_1().min_h(px(0.0)).overflow_hidden().child(list))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -174,6 +203,7 @@ fn render_header_row(
     cx: &mut Context<ExplorerPane>,
 ) -> impl IntoElement + use<> {
     div()
+        .debug_selector(|| "column-header-row".to_string())
         .w(px(table_width))
         .h(px(HEADER_HEIGHT))
         .pr(px(24.0))
@@ -470,11 +500,11 @@ fn render_parent_row(
         )
 }
 /// The list's rows and sizes, with what they were built for: the rows'
-/// generation, how many there are, the table's width, and whether the ".."
-/// row is shown.
+/// generation, how many there are, the table's width, whether the ".." row is
+/// shown, and whether the header is outside the scrolling rows.
 #[derive(Clone)]
 pub(crate) struct ListLayout {
-    key: (u64, usize, u32, bool),
+    key: (u64, usize, u32, bool, bool),
     rows: Rc<Vec<ListRow>>,
     all_sizes: Rc<Vec<gpui::Size<Pixels>>>,
 }

@@ -18,22 +18,40 @@ codegen unit remove o que a build multi-unidade duplica: cerca de 7 MB.
 
 ## Por que ficou de fora, por enquanto
 
-Nada disso foi aplicado além dos perfis como estão: a build `release` existe
-para recompilar rápido depois de uma edição (`incremental`, 256 codegen units),
-e as opções acima custam tempo de build (`dist` leva ~8 minutos) ou velocidade
-em execução (`opt-level = "s"`), que é justamente o motivo de o projeto usar
-`release` e não `debug` (ver o comentário em `Cargo.toml`).
+A build `release` continua como estava: ela existe para recompilar rápido depois
+de uma edição (`incremental`, 256 codegen units). O `[profile.dist]`, que é o
+que o instalador entrega, passou a usar `lto = "fat"` e `codegen-units = 1` em
+22/11/2026 (ver a medição abaixo); `opt-level = "s"` e `panic = "abort"`
+continuam de fora — o primeiro custa velocidade em execução, que é justamente o
+motivo de o projeto usar `release` e não `debug`, e o segundo impediria o
+`catch_unwind` que os testes usam.
+
+## Medição de 22/11/2026: `dist` com LTO
+
+Depois que o código cresceu (selos de tipo, status de VCS, colunas coloridas),
+`cargo build -p nohrs` no perfil `release` passou a dar **43,2 MB**. Com
+`[profile.dist]` em `lto = "fat"`, `codegen-units = 1` e
+`debug = "line-tables-only"`:
+
+| Perfil | Tamanho | Build |
+|---|---:|---:|
+| `release` | 43,2 MB | segundos, incremental |
+| `dist` com LTO | **35,7 MB** (-17%) | ~10 minutos |
+
+`debug = "line-tables-only"` não entra no `.exe` nesta cadeia MSVC (as linhas
+vão para o PDB), então a tabela acima é só o efeito do LTO. É o preço certo
+para quem instala: o `iniciar-nohrs.bat` continua no `release` e ninguém espera
+10 minutos a cada edição.
 
 Se o tamanho voltar a importar, nesta ordem, do mais barato ao mais caro:
 
 1. `opt-level = "s"` no `[profile.release]`: 39 → 29.6 MB, sem tocar no tempo
    de recompilação (a granularidade dos codegen units é a mesma);
-2. `lto = "fat"` + `codegen-units = 1` + `strip = "symbols"` no
-   `[profile.dist]`: o que o instalador entrega, 39 → 23.5 MB, ao custo de uma
-   build completa mais lenta;
-3. `panic = "abort"`: 1–3 MB. O código só instala um `panic::set_hook` para
+2. `lto = "fat"` + `codegen-units = 1` no `[profile.dist]` (já aplicado);
+   somar `opt-level = "s"` levaria o `dist` a ~23.5 MB, ao custo de runtime;
+3. `panic = "abort"`: 1–3 MB. O código instala um `panic::set_hook` para
    registrar o erro (`nohrs-core/src/telemetry/logging.rs`); não há
-   `catch_unwind`, então isso só muda o que acontece depois do registro — o
-   processo termina em vez de tentar continuar;
+   `catch_unwind` em produção, então isso só muda o que acontece depois do
+   registro — o processo termina em vez de tentar continuar;
 4. features opcionais, que tiram funcionalidade: o índice de busca (`tantivy`),
    os visualizadores de modelos 3D (glTF/FBX/OBJ/STL) e o PDF.

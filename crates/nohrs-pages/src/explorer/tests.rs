@@ -378,6 +378,26 @@ async fn rows_draw_their_type_cell_and_colours(cx: &mut TestAppContext) {
     // kind, including the rule-coloured file, the extensionless one and the
     // folder, whose row carries no badge.
     cx.run_until_parked();
+
+    // Each icon mode draws its rows too: the Shell's icons, plain file icons,
+    // and none at all.
+    for icon_mode in [
+        config::IconMode::Standard,
+        config::IconMode::None,
+        config::IconMode::Associated,
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.apply_config_ui(
+                &config::Ui {
+                    icon_mode,
+                    ..config::Ui::default()
+                },
+                cx,
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
 }
 
 #[gpui::test]
@@ -398,13 +418,117 @@ async fn grouping_counts_headers_when_scrolling_to_an_entry(cx: &mut TestAppCont
                 .collect();
             assert_eq!(names, ["docs", "a.png", "b.png"]);
             assert_eq!(page.groups().len(), 2);
-            // List: column header, "..", "Pastas", docs, "Imagens", a.png, b.png.
+            // List: "..", "Pastas", docs, "Imagens", a.png, b.png. The column
+            // header is fixed above the scrolling rows by default, so it is
+            // not one of them.
+            assert_eq!(page.visual_rows_of(2).0, 5);
+            // With the header scrolling with the rows, it comes before them.
+            page.fixed_header = false;
             assert_eq!(page.visual_rows_of(2).0, 6);
+            page.fixed_header = true;
             // Search results replace the entries without grouping them.
             page.search_results = Some(Vec::new());
             assert!(page.groups().is_empty());
         })
         .unwrap();
+}
+
+#[gpui::test]
+async fn the_fixed_header_setting_moves_the_header_out_of_the_scrolling_rows(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window
+        .update(cx, |page, _window, cx| {
+            page.entries = vec![file("a.txt", "file", 1), file("b.txt", "file", 2)];
+            page.apply_filter();
+            let ui = config::Ui {
+                fixed_header: false,
+                ..config::Ui::default()
+            };
+            page.apply_config_ui(&ui, cx);
+            assert!(!page.fixed_header);
+            let ui = config::Ui {
+                fixed_header: true,
+                ..config::Ui::default()
+            };
+            page.apply_config_ui(&ui, cx);
+            assert!(page.fixed_header);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn a_fixed_header_is_drawn_above_the_scrolling_rows(cx: &mut TestAppContext) {
+    let (pane, cx) = new_explorer_visual(cx);
+    let fixed_header = config::Ui {
+        fixed_header: true,
+        ..config::Ui::default()
+    };
+    pane.update(cx, |pane, cx| {
+        pane.entries = vec![file("a.txt", "file", 1), file("b.txt", "file", 2)];
+        pane.apply_config_ui(&fixed_header, cx);
+        pane.apply_filter();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let fixed = pane.read_with(cx, |pane, _| pane.listing_extent.height);
+
+    pane.update(cx, |pane, cx| {
+        pane.apply_config_ui(
+            &config::Ui {
+                fixed_header: false,
+                ..config::Ui::default()
+            },
+            cx,
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let scrolling = pane.read_with(cx, |pane, _| pane.listing_extent.height);
+
+    // The same folder is one header taller when the header scrolls with it.
+    let difference = f32::from(scrolling) - f32::from(fixed);
+    assert!(
+        (difference - super::view::listing::list::HEADER_HEIGHT).abs() < 0.5,
+        "fixed={fixed:?} scrolling={scrolling:?}"
+    );
+}
+
+#[gpui::test]
+async fn a_fixed_header_stays_on_top_while_the_rows_scroll(cx: &mut TestAppContext) {
+    let (pane, cx) = new_explorer_visual(cx);
+    pane.update(cx, |pane, cx| {
+        pane.entries = (0..60)
+            .map(|index| file(&format!("f{index:02}.txt"), "file", 1))
+            .collect();
+        pane.apply_config_ui(
+            &config::Ui {
+                fixed_header: true,
+                ..config::Ui::default()
+            },
+            cx,
+        );
+        pane.apply_filter();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let before = cx.debug_bounds("column-header-row").expect("the fixed header is drawn");
+
+    pane.update(cx, |pane, cx| {
+        pane.virtual_scroll_handle
+            .scroll_to_item(40, gpui::ScrollStrategy::Top);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let offset = pane.read_with(cx, |pane, _| pane.virtual_scroll_handle.offset().y);
+    assert!(
+        f32::from(offset) < 0.0,
+        "the rows must actually have scrolled: {offset:?}"
+    );
+    let after = cx.debug_bounds("column-header-row").expect("the fixed header, still drawn");
+    assert_eq!(
+        before.origin, after.origin,
+        "a fixed header must not move with the rows"
+    );
 }
 
 #[gpui::test]
@@ -998,6 +1122,57 @@ async fn column_resize_applies_delta_with_min_clamp(cx: &mut TestAppContext) {
 
             page.stop_column_resize();
             assert!(page.resizing_column.is_none());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn column_resize_respects_the_configured_maximum(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window
+        .update(cx, |page, _window, cx| {
+            page.apply_config_ui(
+                &config::Ui {
+                    max_column_width: 200,
+                    ..config::Ui::default()
+                },
+                cx,
+            );
+            // The cap pulls the columns already wider than it back in.
+            assert_eq!(page.col_name_width, 200.0);
+            page.start_column_resize(0, point(px(100.0), px(0.0)));
+            page.update_column_resize(point(px(1000.0), px(0.0)));
+            assert_eq!(page.col_name_width, 200.0);
+            page.stop_column_resize();
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn the_ignore_list_hides_names_from_the_listing(cx: &mut TestAppContext) {
+    let window = new_explorer(cx);
+    window
+        .update(cx, |page, _window, cx| {
+            page.entries = vec![
+                file("pagefile.sys", "file", 1),
+                file("keep.txt", "file", 2),
+                file("draft.tmp", "file", 3),
+            ];
+            page.apply_filter();
+            // The default list hides the system's own bookkeeping files.
+            let names = |page: &ExplorerPane| -> Vec<String> {
+                page.filtered_entries.iter().map(|entry| entry.name.clone()).collect()
+            };
+            assert_eq!(names(page), ["draft.tmp", "keep.txt"]);
+
+            page.apply_config_ui(
+                &config::Ui {
+                    ignore_list: vec!["*.tmp".into()],
+                    ..config::Ui::default()
+                },
+                cx,
+            );
+            assert_eq!(names(page), ["keep.txt", "pagefile.sys"]);
         })
         .unwrap();
 }

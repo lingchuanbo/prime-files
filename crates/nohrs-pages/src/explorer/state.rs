@@ -100,6 +100,26 @@ pub struct ExplorerPane {
     pub(crate) name_lines: u32,
     /// How long a wheel glide takes, 0 = none; driven by `ui.scroll_smoothness`.
     pub(crate) scroll_smoothness: u32,
+    /// Whether the column headings stay on top while the rows scroll; driven
+    /// by `ui.fixed_header`.
+    pub(crate) fixed_header: bool,
+    /// How names compare when sorting; driven by `ui.sort_method`.
+    pub(crate) sort_method: config::SortMethod,
+    /// Folders keep their own order for a date or size sort;
+    /// `ui.folders_sort_by_name`.
+    pub(crate) folders_by_name: bool,
+    /// Names and globs the listing never shows; driven by `ui.ignore_list`.
+    pub(crate) ignore_list: Vec<String>,
+    /// Widest a column may be made, in pixels; 0 = no limit, from
+    /// `ui.max_column_width`.
+    pub(crate) max_column_width: f32,
+    /// Which icons rows draw; driven by `ui.icon_mode`.
+    pub(crate) icon_mode: config::IconMode,
+    /// Dragging with the mouse copies the files instead of moving them;
+    /// `ui.drag_copies`.
+    pub(crate) drag_copies: bool,
+    /// A permanent delete asks before it runs; `ui.confirm_permanent_delete`.
+    pub(crate) confirm_permanent_delete: bool,
     /// Height of a Details row in pixels; driven by `ui.list_row_height`.
     pub(crate) row_height: f32,
     /// Alternating row backgrounds in Details; driven by `ui.zebra_rows`.
@@ -536,7 +556,11 @@ impl crate::pane_group::PaneItem for ExplorerPane {
     fn set_sibling_pane(&mut self, sibling: Option<gpui::Entity<ExplorerPane>>) {
         if sibling.is_none() {
             // The split went away: nothing is previewed on the other side, and
-            // a pane that was showing that preview goes back to its listing.
+            // a pane that was showing that preview goes back to its listing,
+            // with the side panel it had before the preview took the pane.
+            if self.preview_full {
+                self.preview_visible = self.preview_visible_before;
+            }
             self.preview_in_sibling = false;
             self.preview_full = false;
             self.preview_request = None;
@@ -629,6 +653,14 @@ impl ExplorerPane {
             icon_pack: "default".to_string(),
             name_lines: 0,
             scroll_smoothness: nohrs_core::config::Ui::default().scroll_smoothness,
+            fixed_header: nohrs_core::config::Ui::default().fixed_header,
+            sort_method: nohrs_core::config::Ui::default().sort_method,
+            folders_by_name: nohrs_core::config::Ui::default().folders_sort_by_name,
+            ignore_list: nohrs_core::config::Ui::default().ignore_list,
+            max_column_width: 0.0,
+            icon_mode: nohrs_core::config::Ui::default().icon_mode,
+            drag_copies: false,
+            confirm_permanent_delete: true,
             row_height: nohrs_core::config::ListRowHeight::default().row_height(),
             zebra_rows: false,
             selection_outline: false,
@@ -1291,10 +1323,14 @@ impl ExplorerPane {
         let show_hidden = self.show_hidden;
         let kind_filter = self.kind_filter;
         let name_filter = super::filter::NameMatcher::new(&self.name_filter);
+        let ignored = self.ignore_list.clone();
         let visible = self
             .entries
             .iter()
             .filter(move |entry| show_hidden || !is_hidden(&entry.name))
+            // The ignore list's names and globs are hidden whatever the hidden
+            // files setting says: they are the system's own bookkeeping.
+            .filter(move |entry| !config::name_is_ignored(&ignored, &entry.name))
             .filter(move |entry| kind_filter.matches(entry))
             .filter(move |entry| name_filter.matches(&entry.name));
 
@@ -1313,9 +1349,13 @@ impl ExplorerPane {
 
         entries::sort_entries_with(
             &mut self.filtered_entries,
-            self.sort_key,
-            self.sort_asc,
-            self.folder_order,
+            entries::SortSettings {
+                key: self.sort_key,
+                ascending: self.sort_asc,
+                folders: self.folder_order,
+                method: self.sort_method,
+                folders_by_name: self.folders_by_name,
+            },
         );
         if self.view_mode == ViewMode::Tree {
             // Groups would pull a folder's children away from it.
@@ -1360,10 +1400,12 @@ impl ExplorerPane {
             && crate::explorer::navigation::parent_location(&self.cwd).is_some()
     }
 
-    /// The list row (counting the column header as row 0) and the grid row
-    /// that show entry `index`, once group headers are taken into account.
+    /// The list row that shows entry `index`, once group headers are taken
+    /// into account, and the grid row that shows it. A fixed column header is
+    /// not one of the scrolling rows, so it does not shift them.
     pub(crate) fn visual_rows_of(&self, index: usize) -> (usize, usize) {
         let groups = self.groups();
+        let header = usize::from(!self.fixed_header);
         let list = super::grouping::list_rows_with_parent(
             groups,
             self.filtered_entries.len(),
@@ -1371,7 +1413,7 @@ impl ExplorerPane {
         )
         .iter()
         .position(|row| *row == super::grouping::ListRow::Entry(index))
-        .map_or(index + 1, |row| row + 1);
+        .map_or(index + header, |row| row + header);
         let grid = super::grouping::grid_rows(groups, self.filtered_entries.len(), self.grid_columns)
             .iter()
             .position(|row| matches!(row, super::grouping::GridRow::Tiles { first, end } if (*first..*end).contains(&index)))
@@ -1421,6 +1463,55 @@ impl ExplorerPane {
             changed = true;
         }
         self.scroll_smoothness = ui.scroll_smoothness;
+        // The header is either one of the scrolling rows or above them, so the
+        // rows' layout and their hit boxes are rebuilt around the choice.
+        if self.fixed_header != ui.fixed_header {
+            self.fixed_header = ui.fixed_header;
+            self.rows_generation += 1;
+            cx.notify();
+        }
+        // A different collation, or folders keeping their own order, re-sorts
+        // what is on screen.
+        let order_changed = self.sort_method != ui.sort_method || self.folders_by_name != ui.folders_sort_by_name;
+        self.sort_method = ui.sort_method;
+        self.folders_by_name = ui.folders_sort_by_name;
+        if order_changed {
+            changed = true;
+        }
+        // A new ignore list re-filters the folder on screen.
+        if self.ignore_list != ui.ignore_list {
+            self.ignore_list = ui.ignore_list.clone();
+            changed = true;
+        }
+        // A narrower cap pulls the columns made wider than it back in.
+        let max_column_width = ui.max_column_width as f32;
+        if self.max_column_width != max_column_width {
+            self.max_column_width = max_column_width;
+            if max_column_width > 0.0 {
+                let mut clamped = false;
+                for width in [
+                    &mut self.col_name_width,
+                    &mut self.col_type_width,
+                    &mut self.col_size_width,
+                    &mut self.col_modified_width,
+                ] {
+                    if *width > max_column_width {
+                        *width = max_column_width;
+                        clamped = true;
+                    }
+                }
+                if clamped {
+                    self.update_item_sizes();
+                }
+                cx.notify();
+            }
+        }
+        if self.icon_mode != ui.icon_mode {
+            self.icon_mode = ui.icon_mode;
+            cx.notify();
+        }
+        self.drag_copies = ui.drag_copies;
+        self.confirm_permanent_delete = ui.confirm_permanent_delete;
         // The row height is part of the rows' size table, so a change re-measures
         // them; the rest are read while rendering.
         let row_height = ui.list_row_height.row_height();

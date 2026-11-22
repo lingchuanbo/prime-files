@@ -150,9 +150,9 @@ pub fn init_logging_with_file(config: &FileLogConfig) -> LogGuard {
     for note in notes {
         tracing::warn!("{note}");
     }
-    if config.enabled {
-        install_panic_record(config.directory.clone());
-    }
+    // The panic record does not depend on the file sink: a crash is worth
+    // writing down even when routine logging is off.
+    install_panic_log(config.directory.clone());
     LogGuard(guard)
 }
 
@@ -160,14 +160,34 @@ pub fn init_logging_with_file(config: &FileLogConfig) -> LogGuard {
 // callback aborts before the buffered file writer flushes: on 04/11 a crash
 // left only a dump, with the panic message gone. So the message is also
 // appended to `panic.log` synchronously, before the default hook runs.
+//
+// Installed whether or not the runtime log is on: a released window has no
+// console, so without this a crash with `diagnostics.runtime_log = false`
+// (the default) leaves nothing behind at all.
+static PANIC_LOG_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record every panic in `panic.log` under `directory`, before the default hook
+/// runs. Safe to call more than once: only the first call installs the hook.
+pub fn install_panic_log(directory: PathBuf) {
+    if PANIC_LOG_INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    install_panic_record(directory);
+}
+
 fn install_panic_record(directory: PathBuf) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
         let name = thread.name().unwrap_or("<unnamed>");
         let backtrace = std::backtrace::Backtrace::force_capture();
+        // Where the program was when it died is often the one clue the stack
+        // alone does not give (a folder, a dialog, a drive).
+        let working_directory = std::env::current_dir()
+            .map(|directory| directory.display().to_string())
+            .unwrap_or_default();
         let text = format!(
-            "{} panic on thread '{name}': {info}\n{backtrace}\n",
+            "{} panic on thread '{name}': {info}\ncwd: {working_directory}\n{backtrace}\n",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())

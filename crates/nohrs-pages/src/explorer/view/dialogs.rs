@@ -23,10 +23,15 @@ use crate::explorer::file_ops::file_name_of;
 impl ExplorerPane {
     /// Opens a confirmation dialog before permanently deleting the selection
     /// (§1.1 — permanent delete is the one operation undo cannot reverse, so it
-    /// is gated behind a confirm).
+    /// is gated behind a confirm, unless the settings have that confirm off).
     pub(crate) fn request_permanent_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
+            return;
+        }
+        // Somebody who turned the confirm off asked to delete at once.
+        if !self.confirm_permanent_delete {
+            self.delete_permanent_paths(paths, cx);
             return;
         }
         let count = paths.len();

@@ -266,6 +266,26 @@
       },
       "type": "object"
     },
+    "IconMode": {
+      "description": "Which icons the listing draws for its entries.",
+      "oneOf": [
+        {
+          "const": "associated",
+          "description": "The icon the Shell gives the file (its program, its thumbnail).",
+          "type": "string"
+        },
+        {
+          "const": "standard",
+          "description": "A plain file or folder icon for every entry: the fastest to draw.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No icons at all.",
+          "type": "string"
+        }
+      ]
+    },
     "IndexSource": {
       "description": "Where the whole-computer name search gets its file names.\n\nThe whole-computer search (`Ctrl+E`) needs every name on the drives from\nsomewhere. This app can keep that list itself, or borrow the one an\ninstalled Everything (voidtools) already keeps.",
       "oneOf": [
@@ -546,6 +566,36 @@
         }
       ]
     },
+    "SortMethod": {
+      "description": "How names are compared when the listing is sorted.",
+      "oneOf": [
+        {
+          "const": "lowercase",
+          "description": "By the character codes of the lowercased names.",
+          "type": "string"
+        },
+        {
+          "const": "locale",
+          "description": "In the order the language of the system collates them.",
+          "type": "string"
+        },
+        {
+          "const": "uppercase",
+          "description": "By the character codes of the uppercased names.",
+          "type": "string"
+        },
+        {
+          "const": "lowercase_numeric",
+          "description": "Lowercased codes, with runs of digits compared as numbers (`2` before\n`10`).",
+          "type": "string"
+        },
+        {
+          "const": "locale_numeric",
+          "description": "The language of the system's collation, with digit runs as numbers:\nthe order Explorer shows.",
+          "type": "string"
+        }
+      ]
+    },
     "SortOrder": {
       "description": "The column a directory listing is ordered by.",
       "oneOf": [
@@ -747,6 +797,11 @@
           "description": "Whether closing the window keeps LumaFiles in the tray, with copies and\nother work still running, instead of quitting.",
           "type": "boolean"
         },
+        "confirm_permanent_delete": {
+          "default": true,
+          "description": "A permanent delete asks before it runs; false deletes at once.",
+          "type": "boolean"
+        },
         "default_sort": {
           "$ref": "#/$defs/SortOrder",
           "default": "name",
@@ -762,6 +817,11 @@
           "default": "none",
           "description": "What a double click on the Details list's empty space does."
         },
+        "drag_copies": {
+          "default": false,
+          "description": "Dragging with the mouse copies the files instead of moving them.",
+          "type": "boolean"
+        },
         "file_type_colors": {
           "default": [],
           "description": "Ordered file-name glob rules and their text colours; the first match wins.",
@@ -769,6 +829,16 @@
             "$ref": "#/$defs/FileTypeColorRule"
           },
           "type": "array"
+        },
+        "fixed_header": {
+          "default": true,
+          "description": "Whether the column headings stay on top of the listing while its rows\nscroll.",
+          "type": "boolean"
+        },
+        "folders_sort_by_name": {
+          "default": false,
+          "description": "Folders sorted by name even when the listing is sorted by date or size.",
+          "type": "boolean"
         },
         "font_family": {
           "default": "",
@@ -786,10 +856,30 @@
           "minimum": 0,
           "type": "integer"
         },
+        "icon_mode": {
+          "$ref": "#/$defs/IconMode",
+          "default": "associated",
+          "description": "Which icons the listing draws for its entries."
+        },
         "icon_pack": {
           "default": "default",
           "description": "Identifier of the icon pack used to render entries.",
           "type": "string"
+        },
+        "ignore_list": {
+          "default": [
+            "System Volume Information",
+            "recycler",
+            "pagefile.sys",
+            "hiberfil.sys",
+            "$RECYCLE.BIN",
+            "swapfile.sys"
+          ],
+          "description": "Names and globs the listing never shows (system files and the like).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "language": {
           "default": "zh-CN",
@@ -800,6 +890,12 @@
           "$ref": "#/$defs/ListRowHeight",
           "default": "standard",
           "description": "How tall a row of the Details list is."
+        },
+        "max_column_width": {
+          "default": 0,
+          "description": "Widest a column of the Details table may be made, in pixels; 0 = no\nlimit.",
+          "minimum": 0,
+          "type": "integer"
         },
         "name_lines": {
           "default": 0,
@@ -842,6 +938,11 @@
           "default": false,
           "description": "Whether files show a badge for their Git or SVN state.",
           "type": "boolean"
+        },
+        "sort_method": {
+          "$ref": "#/$defs/SortMethod",
+          "default": "locale_numeric",
+          "description": "How names are compared when the listing is sorted."
         },
         "tray_icon": {
           "$ref": "#/$defs/TrayIcon",
@@ -1037,16 +1138,30 @@
         "app_name": "",
         "audio_waveforms": false,
         "close_to_tray": false,
+        "confirm_permanent_delete": true,
         "default_sort": "name",
         "default_sort_descending": false,
         "double_click_empty": "none",
+        "drag_copies": false,
         "file_type_colors": [],
+        "fixed_header": true,
+        "folders_sort_by_name": false,
         "font_family": "",
         "hover_audio": true,
         "hover_audio_delay_ms": 400,
+        "icon_mode": "associated",
         "icon_pack": "default",
+        "ignore_list": [
+          "System Volume Information",
+          "recycler",
+          "pagefile.sys",
+          "hiberfil.sys",
+          "$RECYCLE.BIN",
+          "swapfile.sys"
+        ],
         "language": "zh-CN",
         "list_row_height": "standard",
+        "max_column_width": 0,
         "name_lines": 0,
         "preview_autoplay": false,
         "scroll_smoothness": 50,
@@ -1055,6 +1170,7 @@
         "show_quick_access": true,
         "show_sync_status": false,
         "show_vcs_status": false,
+        "sort_method": "locale_numeric",
         "tray_icon": "always",
         "welcome_done": false,
         "zebra_rows": false
