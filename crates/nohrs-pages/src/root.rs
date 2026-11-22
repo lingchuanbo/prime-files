@@ -275,6 +275,9 @@ impl RootView {
                             root.close_to_tray
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
                             crate::quick_launch::flush_pending_save(cx);
+                            // §15.x: the chord goes first, then the dedicated
+                            // threads, before the process ends.
+                            crate::quick_launch::shutdown(cx);
                             cx.quit();
                         }
                         let query = crate::dialog_jump::take_query();
