@@ -2310,10 +2310,7 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                 return;
             }
             let close_after_launch = quick_launch.config.window.close_after_launch;
-            let started = matches!(
-                &outcome,
-                Ok(LaunchOutcome::Started | LaunchOutcome::Activated)
-            );
+            let started = counts_as_usage(&outcome);
             let folder = match outcome {
                 Ok(LaunchOutcome::OpenFolder(path)) => Some(path),
                 Ok(LaunchOutcome::Started | LaunchOutcome::Activated) => None,
@@ -2354,6 +2351,15 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
             }
         }
     }
+}
+
+/// Whether one outcome counts as a use (§6): starting, activating and opening a
+/// folder all do; a decision or a failure does not.
+fn counts_as_usage(outcome: &std::result::Result<LaunchOutcome, LaunchError>) -> bool {
+    matches!(
+        outcome,
+        Ok(LaunchOutcome::Started | LaunchOutcome::Activated | LaunchOutcome::OpenFolder(_))
+    )
 }
 
 /// Tells the user that one item would not start, in one line (§8.5).
@@ -2832,6 +2838,20 @@ mod tests {
     }
 
     /// §5.2, §12.3: a read-only file refuses every edit.
+    /// §6: a folder opened from the quick launch is a use; a refused or
+    /// failed start is not.
+    #[test]
+    fn opening_a_folder_counts_as_a_use() {
+        let folder = LaunchOutcome::OpenFolder(std::path::PathBuf::from("C:\\"));
+        assert!(counts_as_usage(&Ok(folder)));
+        assert!(counts_as_usage(&Ok(LaunchOutcome::Started)));
+        assert!(counts_as_usage(&Ok(LaunchOutcome::Activated)));
+        assert!(!counts_as_usage(&Ok(LaunchOutcome::Cancelled)));
+        assert!(!counts_as_usage(&Err(LaunchError::NotFound(
+            std::path::PathBuf::from("C:\\nao\\existe.exe")
+        ))));
+    }
+
     /// §12.1: a broken item is greyed by the view, and one that is fine is
     /// not. The answers live in the state, never in the file.
     #[gpui::test]
