@@ -88,11 +88,16 @@ codegen-units = 256
 
 # What the installer ships (`cargo build --profile dist`): the release profile
 # above is tuned for fast rebuilds while developing, this one for the program
-# people run.
+# people run. One codegen unit plus a full LTO lets the optimizer see every
+# crate at once: docs/size.md measured 39 MB → 31.8 MB, and the program runs
+# faster for it. Line tables stay so a panic's backtrace in panic.log names
+# lines; MSVC keeps them in the PDB, not in the executable.
 [profile.dist]
 inherits = "release"
 incremental = false
-codegen-units = 16
+codegen-units = 1
+lto = "fat"
+debug = "line-tables-only"
 
 # gpui 0.2.2 with one fix in its Windows drop target (third_party/gpui/NOHRS.md).
 # Without it, dragging files out of Nohrs and over its own window crashes.
