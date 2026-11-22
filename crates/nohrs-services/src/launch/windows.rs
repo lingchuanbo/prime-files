@@ -5,13 +5,14 @@
 //! from the pages layer's dedicated worker thread (§8.4), never from the
 //! foreground.
 //!
-//! `ShellExecuteExW` is used for every document-like start ??`.exe`, `.lnk`,
-//! URLs ??rather than `CreateProcessW` plus a shortcut parser plus a UAC path:
+//! `ShellExecuteExW` is used for every document-like start — `.exe`, `.lnk`,
+//! URLs — rather than `CreateProcessW` plus a shortcut parser plus a UAC path:
 //! one call already covers all three, and it is the call Explorer itself makes.
 
 use std::path::{Path, PathBuf};
 
 use nohrs_core::config::quick_launch::Item;
+use nohrs_core::telemetry::LogErr;
 use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HWND, LPARAM, MAX_PATH};
 use windows::Win32::System::Diagnostics::Debug::{
     FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
@@ -227,6 +228,9 @@ fn system_message(code: u32) -> String {
 #[allow(unsafe_code)]
 fn process_id_for(executable: &Path) -> Option<u32> {
     let wanted = comparable(executable);
+    // §8.3: the scan may take 100 ms at most, after which the caller starts a
+    // new instance rather than keeping the user waiting.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
     // SAFETY: a snapshot handle, closed below.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
     let mut entry = PROCESSENTRY32W {
@@ -237,6 +241,9 @@ fn process_id_for(executable: &Path) -> Option<u32> {
     let mut found = unsafe { Process32FirstW(snapshot, &raw mut entry) }.is_ok();
     let mut process = None;
     while found {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
         if let Some(path) = process_image(entry.th32ProcessID)
             && comparable(&path).eq_ignore_ascii_case(&wanted)
         {
@@ -320,7 +327,9 @@ fn activate_main_window(process_id: u32) -> bool {
     // knows; the calls take no buffers.
     unsafe {
         if IsIconic(window).as_bool() {
-            ShowWindow(window, SW_RESTORE).ok().ok();
+            // S10: restoring a minimised window has no failure to report beyond
+            // the log; dropping the result silently would hide it.
+            ShowWindow(window, SW_RESTORE).ok().log_err();
         }
         keybd_event(VK_MENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
         keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);

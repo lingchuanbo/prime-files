@@ -3,9 +3,9 @@
 //!
 //! Three things live here, all of them usable off the UI thread:
 //!
-//! * [`expand`] ??the `%ENV%` / `{portable}` / `{luma}` / `{config}` variables
+//! * [`expand`] — the `%ENV%` / `{portable}` / `{luma}` / `{config}` variables
 //!   of a stored path (§7).
-//! * [`LaunchAction`] and [`LaunchRegistry`] ??one implementation per `type`,
+//! * [`LaunchAction`] and [`LaunchRegistry`] — one implementation per `type`,
 //!   looked up by name (§8.1).
 //! * [`validate_url`] — the scheme whitelist, a pure function (§8.2).
 //!
