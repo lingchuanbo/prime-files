@@ -4508,6 +4508,7 @@ dependencies = [
  "nohrs-store",
  "nohrs-ui",
  "notify 8.2.0",
+ "nucleo-matcher",
  "pinyin",
  "raw-window-handle",
  "semver",

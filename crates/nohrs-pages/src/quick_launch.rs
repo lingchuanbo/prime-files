@@ -44,9 +44,11 @@ use nohrs_core::config::quick_launch::{
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::launch::LaunchRegistry;
 use nohrs_services::launch::{
-    ExpandContext, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
+    ExpandContext, Health, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
 };
-use nohrs_store::{KvKey, KvStore};
+use nohrs_store::{KvKey, KvOp, KvStore};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config as MatchConfig, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
 
 use crate::explorer::thumbnails;
@@ -200,6 +202,13 @@ const ICON_QUEUE_LIMIT: Duration = Duration::from_secs(2);
 /// How long the exit path waits for the dedicated threads (§15.x).
 const WORKER_STOP_LIMIT: Duration = Duration::from_millis(500);
 
+/// How many items one health batch checks (§12.1).
+const HEALTH_BATCH: usize = 32;
+
+/// How long the health pass waits between batches, so it stays in the window's
+/// idle time (§12.1).
+const HEALTH_PAUSE: Duration = Duration::from_millis(250);
+
 /// One start request for the `quick-launch` thread.
 struct StartRequest {
     // Boxed because the item is by far the largest thing a worker receives.
@@ -208,6 +217,14 @@ struct StartRequest {
     on_running: OnRunning,
     /// Echoed back so a reply the window has moved on from is dropped (§8.4).
     generation: u64,
+}
+
+/// One health request for the `quick-launch-icons` thread.
+struct HealthRequest {
+    /// The group id the item belongs to: a renamed group keeps its answers.
+    group: String,
+    slot: u32,
+    item: Box<Item>,
 }
 
 /// One icon request for the `quick-launch-icons` thread.
@@ -229,6 +246,11 @@ enum WorkerReply {
     Icon {
         key: IconKey,
         image: Option<Arc<RenderImage>>,
+    },
+    Health {
+        group: String,
+        slot: u32,
+        health: Health,
     },
 }
 
@@ -299,11 +321,18 @@ impl<Request: Send + 'static> Worker<Request> {
     }
 }
 
+/// What the `quick-launch-icons` thread does: extract one icon, or check the
+/// health of one item (§12.1).
+enum IconWorkerRequest {
+    Icon(IconRequest),
+    Health(HealthRequest),
+}
+
 /// The two dedicated threads (§8.4). Starting and extracting never share one, so
 /// a Shell call stuck on a dead network path cannot hold up a launch.
 struct Workers {
     launch: Worker<StartRequest>,
-    icons: Worker<IconRequest>,
+    icons: Worker<IconWorkerRequest>,
 }
 
 impl Workers {
@@ -328,7 +357,11 @@ impl Workers {
     }
 
     fn send_icon(&self, request: IconRequest) {
-        self.icons.send(request);
+        self.icons.send(IconWorkerRequest::Icon(request));
+    }
+
+    fn send_health(&self, request: HealthRequest) {
+        self.icons.send(IconWorkerRequest::Health(request));
     }
 
     /// Stops both threads within one `limit` (§15.x).
@@ -382,34 +415,57 @@ fn run_launch_worker(
 /// The `quick-launch-icons` thread: extracts icons, dropping the ones that waited
 /// too long in the queue (§8.4).
 fn run_icon_worker(
-    receiver: std_mpsc::Receiver<IconRequest>,
+    receiver: std_mpsc::Receiver<IconWorkerRequest>,
     replies: async_channel::Sender<WorkerReply>,
     extract: impl Fn(&ExpandContext, &str, u32) -> Option<Arc<RenderImage>>,
 ) {
     let _com = ComApartment::enter();
     let context = ExpandContext::current();
+    // The same registry the launch thread uses, so an item is judged by the
+    // action that would start it (§12.1).
+    let registry = LaunchRegistry::with_builtins();
     while let Ok(request) = receiver.recv() {
-        let waited = request.queued.elapsed();
-        if waited >= ICON_QUEUE_LIMIT {
-            // The window gave up on this one two seconds ago; running it now
-            // would only delay the requests behind it.
-            tracing::debug!(
-                target: "quick_launch",
-                path = %request.path,
-                waited_ms = waited.as_millis(),
-                "dropping an icon request that waited too long"
-            );
-            continue;
+        match request {
+            IconWorkerRequest::Health(request) => {
+                let health = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    registry.health(&request.item, &context)
+                }))
+                .unwrap_or_else(|panic| {
+                    tracing::error!(target: "quick_launch", "health: {}", panic_message(panic));
+                    Health::Unknown
+                });
+                replies
+                    .try_send(WorkerReply::Health {
+                        group: request.group,
+                        slot: request.slot,
+                        health,
+                    })
+                    .log_err();
+            }
+            IconWorkerRequest::Icon(request) => {
+                let waited = request.queued.elapsed();
+                if waited >= ICON_QUEUE_LIMIT {
+                    // The window gave up on this one two seconds ago; running it
+                    // now would only delay the requests behind it.
+                    tracing::debug!(
+                        target: "quick_launch",
+                        path = %request.path,
+                        waited_ms = waited.as_millis(),
+                        "dropping an icon request that waited too long"
+                    );
+                    continue;
+                }
+                let key = request.key;
+                let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    extract(&context, &request.path, key.edge)
+                }))
+                .unwrap_or_else(|panic| {
+                    tracing::error!(target: "quick_launch", "icon: {}", panic_message(panic));
+                    None
+                });
+                replies.try_send(WorkerReply::Icon { key, image }).log_err();
+            }
         }
-        let key = request.key;
-        let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            extract(&context, &request.path, key.edge)
-        }))
-        .unwrap_or_else(|panic| {
-            tracing::error!(target: "quick_launch", "icon: {}", panic_message(panic));
-            None
-        });
-        replies.try_send(WorkerReply::Icon { key, image }).log_err();
     }
 }
 
@@ -485,6 +541,15 @@ fn icon_image(context: &ExpandContext, raw: &str, edge: u32) -> Option<Arc<Rende
             return None;
         }
     };
+    // `"exe,索引"` names an icon inside a program rather than the program's
+    // first icon, and the Shell's index-free extraction cannot express it (§9).
+    if let Some((program, index)) = split_icon_index(raw)
+        && let Ok(program) = nohrs_services::launch::expand(program, context)
+        && let Some((pixels, width, height)) =
+            nohrs_services::launch::indexed_icon(&program.to_string_lossy(), index, edge)
+    {
+        return thumbnails::render_image(width, height, pixels).map(Arc::new);
+    }
     // A custom `.png` is the picture itself; anything else asks the Shell, which
     // knows `.ico`, programs and folders (§9).
     if file
@@ -505,6 +570,20 @@ fn icon_image(context: &ExpandContext, raw: &str, edge: u32) -> Option<Arc<Rende
         write_icon_cache(&cache, &bytes);
     }
     Some(Arc::new(image))
+}
+
+/// Splits `"program.exe,3"` into the program and the icon index (§9).
+///
+/// A path may itself contain a comma, so the split is the last one and only
+/// counts when what follows it is a number.
+fn split_icon_index(raw: &str) -> Option<(&str, u32)> {
+    let (path, index) = raw.rsplit_once(',')?;
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let index = index.trim().parse::<u32>().ok()?;
+    Some((path, index))
 }
 
 /// Writes one cached icon, and prunes the cache when it grew too large.
@@ -686,6 +765,19 @@ impl Restored {
     }
 }
 
+/// Which process the quick launch is running in (§15.1).
+///
+/// The window is the same in both; what changes is where a folder goes and
+/// how a chord the main program already holds is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Beside the main window and its Explorer (§15.0).
+    Main,
+    /// Alone, in `LumaFiles launcher`: no Explorer, no tray, no `state.redb`
+    /// (§15.1).
+    Standalone,
+}
+
 /// What the binary injects so the window can own a global chord without this
 /// crate depending on the launcher crate (§3.4, §10).
 ///
@@ -745,6 +837,23 @@ pub(crate) struct QuickLaunch {
     revision: u64,
     /// The item a launch was asked for; counted only once it started (S7).
     pending_usage: Option<(String, u32)>,
+    /// What the user typed to filter the current group (§12.2, M2).
+    filter: String,
+    /// The health of each item, by group id and slot (§12.1, M2). Runtime state,
+    /// never written to the file.
+    health: HashMap<(String, u32), Health>,
+    /// Whether the health pass has been scheduled for this session.
+    health_started: bool,
+    /// Which process this is (§15.1).
+    mode: Mode,
+    /// The single-item health checks this session asked for, for the tests (R2).
+    #[cfg(test)]
+    health_checks: Vec<(String, u32)>,
+    /// The variables a path may contain (§7), built once: reading `config.toml` for them on the foreground is
+    /// what S2 removed.
+    expand: ExpandContext,
+    /// The items still to check (§12.1).
+    health_queue: VecDeque<(String, u32, Item)>,
 }
 
 impl Global for QuickLaunch {}
@@ -793,11 +902,825 @@ fn state_mut(cx: &mut App) -> Option<&mut QuickLaunch> {
         .then(|| cx.global_mut::<QuickLaunch>())
 }
 
+/// Whether editing is allowed: the file parsed and may be written back (§5.2).
+pub(crate) fn editable(cx: &App) -> bool {
+    state(cx).is_some_and(|state| state.status.can_save())
+}
+
+/// What the user typed to filter the current group, empty when not filtering.
+pub(crate) fn filter(cx: &App) -> &str {
+    state(cx)
+        .map(|state| state.filter.as_str())
+        .unwrap_or_default()
+}
+
+/// Replaces the filter text and drops the keyboard slot: the old slot may not be
+/// on screen any more (§12.2).
+pub(crate) fn set_filter(cx: &mut App, text: String) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    state.filter = text;
+    state.slot = None;
+    state.touch();
+}
+
+/// The health of one item, when it has been checked (§12.1).
+pub(crate) fn health_of(cx: &App, group: usize, slot: u32) -> Option<Health> {
+    let state = state(cx)?;
+    let id = state.config.groups.get(group)?.id.as_str();
+    state.health.get(&(id.to_string(), slot)).cloned()
+}
+
+/// Starts the health pass once, after the window has been shown (§12.1).
+///
+/// Items are checked a batch at a time on the icon thread, between two idle
+/// ticks, so the foreground never waits on a disk or a dead network path.
+fn start_health_check(cx: &mut App) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    if quick_launch.health_started {
+        return;
+    }
+    quick_launch.health_started = true;
+    quick_launch.health_queue = quick_launch
+        .config
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .items
+                .iter()
+                .map(|item| (group.id.clone(), item.slot, item.clone()))
+        })
+        .collect();
+    if quick_launch.health_queue.is_empty() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(HEALTH_PAUSE).await;
+            let batch = cx.update(|cx| {
+                let Some(quick_launch) = state_mut(cx) else {
+                    return None;
+                };
+                let mut sent = 0usize;
+                while sent < HEALTH_BATCH {
+                    let Some((group, slot, item)) = quick_launch.health_queue.pop_front() else {
+                        break;
+                    };
+                    if let Some(workers) = quick_launch.workers.as_ref() {
+                        workers.send_health(HealthRequest {
+                            group,
+                            slot,
+                            item: Box::new(item),
+                        });
+                        sent = sent.saturating_add(1);
+                    } else {
+                        return None;
+                    }
+                }
+                (sent > 0).then_some(sent)
+            });
+            match batch {
+                Ok(Some(_)) => continue,
+                _ => return,
+            }
+        }
+    })
+    .detach();
+}
+
+/// Records one answer, so the view can grey the item (§12.1).
+fn apply_health(cx: &mut App, group: String, slot: u32, health: Health) {
+    tracing::debug!(
+        target: "quick_launch",
+        group = %group,
+        slot,
+        ?health,
+        "health checked"
+    );
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    quick_launch.health.insert((group, slot), health);
+    quick_launch.touch();
+    cx.refresh_windows();
+}
+
+/// Forgets the health answer of one item and asks for it again (§12.1, B3).
+///
+/// Called after anything that can change what an item points at, so a fixed
+/// path stops being grey without a restart.
+fn recheck_health(cx: &mut App, group: usize, slot: u32) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    let Some(group_id) = state.config.groups.get(group).map(|group| group.id.clone()) else {
+        return;
+    };
+    let item = state
+        .config
+        .groups
+        .get(group)
+        .and_then(|group| group.items.iter().find(|item| item.slot == slot))
+        .cloned();
+    state.health.remove(&(group_id.clone(), slot));
+    #[cfg(test)]
+    state.health_checks.push((group_id.clone(), slot));
+    if let Some(item) = item
+        && let Some(workers) = state.workers.as_ref()
+    {
+        workers.send_health(HealthRequest {
+            group: group_id,
+            slot,
+            item: Box::new(item),
+        });
+    }
+}
+
+/// Carries the health answer of one item to the place it moved to (§12.1, B3).
+fn move_health(state: &mut QuickLaunch, from: (&str, u32), to: (&str, u32)) {
+    let from_key = (from.0.to_string(), from.1);
+    let to_key = (to.0.to_string(), to.1);
+    // Both are taken out first: a swap exchanges them, and a move into a free
+    // slot has nothing to bring back.
+    let from_health = state.health.remove(&from_key);
+    let to_health = state.health.remove(&to_key);
+    if let Some(health) = from_health {
+        state.health.insert(to_key, health);
+    }
+    if let Some(health) = to_health {
+        state.health.insert(from_key, health);
+    }
+}
+
+/// Drops every health answer of one group (§12.1, B3).
+fn forget_group_health(state: &mut QuickLaunch, group_id: &str) {
+    state.health.retain(|(id, _), _| id != group_id);
+}
+/// Whether the window is pinned (§11.1): the pin button's state and the
+/// `topmost` the configuration already had.
+pub(crate) fn is_locked(cx: &App) -> bool {
+    state(cx).is_some_and(|quick_launch| quick_launch.config.window.topmost)
+}
+
+/// Flips the pin and returns its new state (§11.1).
+///
+/// A read-only file still toggles for this session; only a writable one marks
+/// the state for the throttle, so the pin is kept on the next start too.
+pub(crate) fn toggle_lock(cx: &mut App) -> bool {
+    let Some(quick_launch) = state_mut(cx) else {
+        return false;
+    };
+    quick_launch.config.window.topmost = !quick_launch.config.window.topmost;
+    let locked = quick_launch.config.window.topmost;
+    let save = quick_launch.status.can_save();
+    quick_launch.touch();
+    if save {
+        mark_dirty(cx);
+    }
+    locked
+}
+
+/// Applies `topmost` to the open window, for a hot reload that changed it
+/// (§11.1).
+fn sync_topmost(cx: &mut App, topmost: bool) {
+    let Some(handle) = live_window(cx) else {
+        return;
+    };
+    handle
+        .update(cx, |_root, window, _cx| set_topmost(window, topmost))
+        .log_err();
+    cx.refresh_windows();
+}
+
+/// Re-judges the kind of an edited item from its new path, off the foreground
+/// (S4).
+///
+/// Only `app`, `file` and `folder` are re-judged: the other kinds are not built
+/// from a path by this milestone, and a path that does not exist keeps its kind
+/// so the health check can report it.
+fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str) {
+    if !matches!(previous_kind, "app" | "file" | "folder") {
+        return;
+    }
+    let Some(item) = item_at(cx, group, slot) else {
+        return;
+    };
+    let Some(path) = expanded_path(cx, &item) else {
+        return;
+    };
+    let kind = previous_kind.to_string();
+    cx.spawn(async move |cx| {
+        let judged = cx
+            .background_spawn(async move {
+                let is_dir = path_is_directory(&path);
+                path.is_file()
+                    .then(|| item_for_path(&path, slot, is_dir).kind)
+                    .or_else(|| is_dir.then(|| "folder".to_string()))
+            })
+            .await;
+        let Some(judged) = judged else {
+            return;
+        };
+        if judged == kind {
+            return;
+        }
+        cx.update(|cx| {
+            let Some(state) = state_mut(cx) else {
+                return;
+            };
+            let Some(target) = state.config.groups.get_mut(group) else {
+                return;
+            };
+            let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
+                return;
+            };
+            item.kind = judged;
+            state.touch();
+            mark_dirty(cx);
+            recheck_health(cx, group, slot);
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
+/// Whether one item is known to be broken, so the view can grey it (§12.1).
+pub(crate) fn is_missing(cx: &App, group: usize, slot: u32) -> bool {
+    health_of(cx, group, slot).is_some_and(|health| health != Health::Ok)
+}
+
+/// The slots of the current group the filter keeps, in slot order (§12.2).
+///
+/// Empty when nothing matches, and every slot when there is no filter. The
+/// view packs these into the grid, so this is also the order the arrow keys
+/// walk.
+pub(crate) fn filtered_slots(cx: &App) -> Vec<u32> {
+    let Some(state) = state(cx) else {
+        return Vec::new();
+    };
+    let Some(group) = state.config.groups.get(state.group) else {
+        return Vec::new();
+    };
+    if state.filter.trim().is_empty() {
+        let mut slots: Vec<u32> = group.items.iter().map(|item| item.slot).collect();
+        slots.sort_unstable();
+        return slots;
+    }
+    let mut matcher = Matcher::new(MatchConfig::DEFAULT.match_paths());
+    let pattern = Pattern::parse(
+        state.filter.trim(),
+        CaseMatching::Smart,
+        Normalization::Smart,
+    );
+    let mut buffer = Vec::new();
+    group
+        .items
+        .iter()
+        .filter(|item| matches(&pattern, item, &mut matcher, &mut buffer))
+        .map(|item| item.slot)
+        .collect()
+}
+
+/// Whether one item matches the typed filter: by name or by any of its tags.
+fn matches(pattern: &Pattern, item: &Item, matcher: &mut Matcher, buffer: &mut Vec<char>) -> bool {
+    let mut haystack = item.name.clone();
+    for tag in &item.tags {
+        haystack.push(' ');
+        haystack.push_str(tag);
+    }
+    pattern
+        .score(Utf32Str::new(&haystack, buffer), matcher)
+        .is_some()
+}
+
+/// The click that asked for a launch, as the keyboard and the mouse both express
+/// it (§12.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClickKind {
+    /// A plain click or `Enter`.
+    Plain,
+    /// `Ctrl`+click or `Ctrl+Enter`: elevated, whatever the item says.
+    Admin,
+    /// `Shift`+click: show the item's place in LumaFiles instead of starting it.
+    Reveal,
+}
+
+/// The item in `slot` of the group at `group`, if the slot is taken.
+pub(crate) fn item_at(cx: &App, group: usize, slot: u32) -> Option<Item> {
+    let state = state(cx)?;
+    state
+        .config
+        .groups
+        .get(group)?
+        .items
+        .iter()
+        .find(|item| item.slot == slot)
+        .cloned()
+}
+
+/// Puts `item` in `slot` of `group`, replacing whatever was there: one slot
+/// holds one entry (§12.1).
+#[cfg_attr(not(test), allow(dead_code))] // M3's settings page replaces items too
+pub(crate) fn put_item(cx: &mut App, group: usize, slot: u32, mut item: Item) -> bool {
+    if !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    item.slot = slot;
+    target.items.retain(|existing| existing.slot != slot);
+    target.items.push(item);
+    target.items.sort_by_key(|item| item.slot);
+    state.touch();
+    mark_dirty(cx);
+    recheck_health(cx, group, slot);
+    true
+}
+
+/// Applies the four fields the edit dialog offers (§12.3): name, path,
+/// arguments and "run as administrator".
+pub(crate) fn edit_item(
+    cx: &mut App,
+    group: usize,
+    slot: u32,
+    name: &str,
+    path: &str,
+    args: &str,
+    admin: bool,
+) -> bool {
+    let name = name.trim();
+    let path = path.trim();
+    // An item without a name would be an empty tile, and one without a path
+    // could never start: the dialog treats both as "cancel".
+    if name.is_empty() || path.is_empty() || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
+        return false;
+    };
+    let previous_kind = item.kind.clone();
+    item.name = name.to_string();
+    item.path = Some(path.to_string());
+    let args = args.trim();
+    item.args = (!args.is_empty()).then(|| args.to_string());
+    item.admin = admin;
+    state.touch();
+    mark_dirty(cx);
+    recheck_health(cx, group, slot);
+    // S4: a path that now points at a folder (or a program) changes the kind, so
+    // the item keeps working after the edit.
+    retype_after_edit(cx, group, slot, &previous_kind);
+    true
+}
+
+/// Adds a group at the end and makes it the current one (§12.3). The caller
+/// starts the inline rename the specification asks for.
+pub(crate) fn add_group(cx: &mut App) -> Option<usize> {
+    if !editable(cx) {
+        return None;
+    }
+    let state = state_mut(cx)?;
+    let id = next_group_id(&state.config);
+    let index = state.config.groups.len();
+    state.config.groups.push(Group {
+        id,
+        name: nohrs_core::t!("Novo grupo").to_string(),
+        items: Vec::new(),
+    });
+    state.group = index;
+    state.slot = None;
+    state.touch();
+    mark_dirty(cx);
+    Some(index)
+}
+
+/// Renames a group; an empty name cancels (§12.3).
+pub(crate) fn rename_group(cx: &mut App, index: usize, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(group) = state.config.groups.get_mut(index) else {
+        return false;
+    };
+    group.name = name.to_string();
+    state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// Removes a group and its usage records. The last group cannot be removed
+/// (§12.3), and neither can a group with items in it unless `force`.
+pub(crate) fn delete_group(cx: &mut App, index: usize, force: bool) -> bool {
+    if !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    if state.config.groups.len() <= 1 {
+        return false;
+    }
+    let (id, removed): (String, Vec<(String, u32)>) = {
+        let Some(group) = state.config.groups.get(index) else {
+            return false;
+        };
+        if !force && !group.items.is_empty() {
+            return false;
+        }
+        let id = group.id.clone();
+        let removed = group
+            .items
+            .iter()
+            .map(|item| (id.clone(), item.slot))
+            .collect();
+        (id, removed)
+    };
+    forget_group_health(state, &id);
+    state.config.groups.remove(index);
+    state.group = state.group.min(state.config.groups.len().saturating_sub(1));
+    state.slot = None;
+    state.touch();
+    mark_dirty(cx);
+    delete_usage(cx, removed);
+    true
+}
+
+/// Removes one item and the usage record it left behind (§6, §12.3).
+pub(crate) fn delete_item(cx: &mut App, group: usize, slot: u32) -> bool {
+    if !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(id) = state.config.groups.get(group).map(|group| group.id.clone()) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    let before = target.items.len();
+    target.items.retain(|item| item.slot != slot);
+    if target.items.len() == before {
+        return false;
+    }
+    if state.slot == Some(slot) {
+        state.slot = None;
+    }
+    state.health.remove(&(id.clone(), slot));
+    state.touch();
+    mark_dirty(cx);
+    delete_usage(cx, vec![(id, slot)]);
+    true
+}
+
+/// Moves an item to the first empty slot of another group, or past its last item
+/// when the group is full (§12.2, "drag to the group bar").
+pub(crate) fn move_item_to_group(
+    cx: &mut App,
+    from_group: usize,
+    slot: u32,
+    to_group: usize,
+) -> bool {
+    if from_group == to_group || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(source) = state.config.groups.get_mut(from_group) else {
+        return false;
+    };
+    let Some(position) = source.items.iter().position(|item| item.slot == slot) else {
+        return false;
+    };
+    let mut item = source.items.remove(position);
+    let Some(target) = state.config.groups.get_mut(to_group) else {
+        // Put it back: the destination vanished between the menu and the click.
+        state
+            .config
+            .groups
+            .get_mut(from_group)
+            .map(|source| source.items.push(item));
+        return false;
+    };
+    let new_slot = first_free_slot(target);
+    item.slot = new_slot;
+    target.items.push(item);
+    target.items.sort_by_key(|item| item.slot);
+    // B3 and S3: the answer and the usage record follow the item into its new
+    // group and slot. The source is the `slot` the caller named, not the one the
+    // item landed on (R1): with the two confused, the move took the records of
+    // whatever sat at `new_slot` in the source group.
+    let from_id = state
+        .config
+        .groups
+        .get(from_group)
+        .map(|group| group.id.clone());
+    let to_id = state
+        .config
+        .groups
+        .get(to_group)
+        .map(|group| group.id.clone());
+    if let (Some(from_id), Some(to_id)) = (from_id.clone(), to_id.clone()) {
+        move_health(state, (&from_id, slot), (&to_id, new_slot));
+    }
+    state.touch();
+    mark_dirty(cx);
+    if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
+        move_usage(cx, (from_id, slot), (to_id, new_slot));
+    }
+    true
+}
+
+/// Moves an item to another slot of its own group; when the target is taken the
+/// two swap (§12.2).
+pub(crate) fn swap_slots(cx: &mut App, group: usize, from: u32, to: u32) -> bool {
+    if from == to || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    // Both positions are found before anything is retagged: looking the target
+    // up afterwards would find the item that just moved into it.
+    let Some(position) = target.items.iter().position(|item| item.slot == from) else {
+        return false;
+    };
+    let occupied = target.items.iter().position(|item| item.slot == to);
+    if let Some(moved) = target.items.get_mut(position) {
+        moved.slot = to;
+    }
+    if let Some(occupied) = occupied
+        && let Some(parked) = target.items.get_mut(occupied)
+    {
+        parked.slot = from;
+    }
+    target.items.sort_by_key(|item| item.slot);
+    // B3 and S3: the answers and the usage records belong to the items, not to
+    // the slots.
+    let group_id = state.config.groups.get(group).map(|group| group.id.clone());
+    if let Some(group_id) = group_id.as_deref() {
+        move_health(state, (group_id, from), (group_id, to));
+    }
+    state.touch();
+    mark_dirty(cx);
+    if let Some(group_id) = group_id {
+        swap_usage(cx, group_id, from, to);
+    }
+    true
+}
+
+/// The first group id of the form `group_<n>` that nothing uses (§12.3).
+fn next_group_id(config: &QuickLaunchConfig) -> String {
+    let mut index = 1u32;
+    loop {
+        let candidate = format!("group_{index}");
+        if !config.groups.iter().any(|group| group.id == candidate) {
+            return candidate;
+        }
+        index = index.saturating_add(1);
+    }
+}
+
+/// Puts `items` in the group's next free slots, from `start` on, in order
+/// (§12.2). Nothing already there is replaced: a drop onto a taken
+/// cell takes the first free slot after it.
+///
+/// This is the only way a drop or a file picker adds entries; `put_item` is
+/// for edits, where replacing is what the user asked for.
+pub(crate) fn place_items(cx: &mut App, group: usize, start: u32, items: Vec<Item>) -> bool {
+    if !editable(cx) || items.is_empty() {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    let mut cursor = start;
+    let mut placed = Vec::with_capacity(items.len());
+    for mut item in items {
+        let slot = next_free_slot_from(target, cursor);
+        item.slot = slot;
+        target.items.push(item);
+        placed.push(slot);
+        cursor = slot.saturating_add(1);
+    }
+    target.items.sort_by_key(|item| item.slot);
+    state.touch();
+    mark_dirty(cx);
+    // R2: a new item is checked at once, on the same path an edit takes, so a
+    // path that is already broken is grey before the window is drawn again.
+    for slot in placed {
+        recheck_health(cx, group, slot);
+    }
+    true
+}
+
+/// The lowest free slot of `group` at or after `start`.
+fn next_free_slot_from(group: &Group, start: u32) -> u32 {
+    let mut used: Vec<u32> = group
+        .items
+        .iter()
+        .map(|item| item.slot)
+        .filter(|slot| *slot >= start)
+        .collect();
+    used.sort_unstable();
+    let mut candidate = start;
+    for slot in used {
+        if slot == candidate {
+            candidate = candidate.saturating_add(1);
+        } else if slot > candidate {
+            break;
+        }
+    }
+    candidate
+}
+/// The lowest slot a group does not occupy, or one past its highest slot (the
+/// drop target of the group bar, §12.2).
+fn first_free_slot(group: &Group) -> u32 {
+    next_free_slot_from(group, 0)
+}
+
+/// The item a path picked or dropped into `slot` becomes (§12.3): an executable
+/// or shortcut is an `app`, a folder a `folder`, everything else a `file`.
+///
+/// `is_dir` comes from the caller: whether the path is a folder needs the disk,
+/// and the window may not wait for a network path (S1).
+pub(crate) fn item_for_path(path: &Path, slot: u32, is_dir: bool) -> Item {
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+    let kind = if is_dir {
+        "folder"
+    } else if matches!(
+        extension.as_deref(),
+        Some("exe" | "lnk" | "com" | "bat" | "cmd")
+    ) {
+        "app"
+    } else {
+        "file"
+    };
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or_default()
+        .to_string();
+    let mut item = Item::new(slot, kind, name);
+    item.path = Some(path.to_string_lossy().to_string());
+    item
+}
+
+/// Where an item dropped on the group bar (or anywhere in the content area)
+/// goes: the first empty slot, else past the last item (§12.2).
+pub(crate) fn next_free_slot(cx: &App, group: usize) -> u32 {
+    state(cx)
+        .and_then(|state| state.config.groups.get(group))
+        .map_or(0, first_free_slot)
+}
+
+/// Whether `path` is a folder, read off the foreground (S1).
+///
+/// A path the disk cannot answer for is treated as a file, which is what the
+/// item then is: something the Shell has to be asked to open.
+pub(crate) fn path_is_directory(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// The item a path becomes, with the folder question answered on this thread.
+///
+/// Only the tests use this: the window asks [`path_is_directory`] on a background
+/// task and then builds the item with [`item_for_path`] (S1).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
+    item_for_path(path, slot, path.is_dir())
+}
+
+/// Moves one item's usage record to the place it went, in one transaction
+/// (S3): the old key is removed only when the new one is written.
+fn move_usage(cx: &mut App, from: (String, u32), to: (String, u32)) {
+    let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
+        return;
+    };
+    cx.background_spawn(async move {
+        let (Ok(from_key), Ok(to_key)) = (
+            KvKey::new(KV_NAMESPACE, &usage_key_name(&from.0, from.1)),
+            KvKey::new(KV_NAMESPACE, &usage_key_name(&to.0, to.1)),
+        ) else {
+            return;
+        };
+        let Some(value) = kv.get(&from_key).log_err().flatten() else {
+            return;
+        };
+        kv.batch(vec![
+            KvOp::Put { key: to_key, value },
+            KvOp::Delete { key: from_key },
+        ])
+        .log_err();
+    })
+    .detach();
+}
+
+/// Swaps the usage records of two slots of one group, in one transaction (S3).
+fn swap_usage(cx: &mut App, group_id: String, first: u32, second: u32) {
+    let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
+        return;
+    };
+    cx.background_spawn(async move {
+        let (Ok(first_key), Ok(second_key)) = (
+            KvKey::new(KV_NAMESPACE, &usage_key_name(&group_id, first)),
+            KvKey::new(KV_NAMESPACE, &usage_key_name(&group_id, second)),
+        ) else {
+            return;
+        };
+        let first_value = kv.get(&first_key).log_err().flatten();
+        let second_value = kv.get(&second_key).log_err().flatten();
+        let mut ops = Vec::new();
+        match second_value {
+            Some(value) => ops.push(KvOp::Put {
+                key: first_key.clone(),
+                value,
+            }),
+            None => ops.push(KvOp::Delete {
+                key: first_key.clone(),
+            }),
+        }
+        match first_value {
+            Some(value) => ops.push(KvOp::Put {
+                key: second_key,
+                value,
+            }),
+            None => ops.push(KvOp::Delete { key: second_key }),
+        }
+        kv.batch(ops).log_err();
+    })
+    .detach();
+}
+
+/// The KV key of one item's usage record (§6).
+fn usage_key_name(group: &str, slot: u32) -> String {
+    format!("usage_{group}_{slot}")
+}
+
+/// Deletes usage records in one transaction, off the foreground (§6, §12.3).
+fn delete_usage(cx: &mut App, entries: Vec<(String, u32)>) {
+    if entries.is_empty() {
+        return;
+    }
+    let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
+        return;
+    };
+    let ops: Vec<KvOp> = entries
+        .iter()
+        .filter_map(|(group, slot)| {
+            KvKey::new(KV_NAMESPACE, &usage_key_name(group, *slot))
+                .ok()
+                .map(|key| KvOp::Delete { key })
+        })
+        .collect();
+    if ops.is_empty() {
+        return;
+    }
+    tracing::debug!(
+        target: "quick_launch",
+        keys = ops.len(),
+        "deleting the usage records of removed items"
+    );
+    cx.background_spawn(async move {
+        kv.batch(ops).log_err();
+    })
+    .detach();
+}
+
 /// Installs the state, starts watching the file and starts the worker thread.
 ///
 /// Called once from the binary, before the first window is drawn. The file is
 /// read on a background task, so nothing here waits on the disk (§5.1).
-pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
+pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode: Mode) {
     if state(cx).is_some() {
         return;
     }
@@ -844,6 +1767,14 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
         pending_hide: false,
         revision: 0,
         pending_usage: None,
+        filter: String::new(),
+        health: HashMap::new(),
+        health_started: false,
+        health_queue: VecDeque::new(),
+        mode,
+        #[cfg(test)]
+        health_checks: Vec::new(),
+        expand: ExpandContext::current(),
     });
 
     // One task answers everything the worker says, for the process's lifetime.
@@ -992,7 +1923,11 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     let groups = quick_launch.config.groups.len();
     quick_launch.group = quick_launch.group.min(groups.saturating_sub(1));
     quick_launch.slot = None;
+    let topmost = quick_launch.config.window.topmost;
     quick_launch.touch();
+    // §11.1: a `topmost` changed in the file reaches the window that is already
+    // open; the pin button reads the same field.
+    sync_topmost(cx, topmost);
     restore_last_group(cx);
     ensure_selection(cx);
     sync_hotkey(cx);
@@ -1111,6 +2046,21 @@ fn sync_hotkey(cx: &mut App) {
             tracing::info!(target: "quick_launch", "listening on {wanted}");
         }
         Err(error) => {
+            // §15.1: the same user may run the main program and the resident
+            // one; the chord the first registered is the one that answers, and the
+            // second says so at info level only.
+            if crate::ipc::is_running() {
+                tracing::info!(
+                    target: "quick_launch",
+                    "the hotkey {wanted:?} is held by the running LumaFiles: {error}"
+                );
+                if let Some(quick_launch) = state_mut(cx) {
+                    quick_launch.hotkey = None;
+                    quick_launch.hotkey_text = None;
+                    quick_launch.hotkey_error = None;
+                }
+                return;
+            }
             tracing::warn!(target: "quick_launch", "the hotkey {wanted:?} is unavailable: {error}");
             // The chord that was working goes back: a typo in the file must not
             // leave the window with no way to be summoned (§10).
@@ -1239,9 +2189,8 @@ fn save_in_background(cx: &mut App) {
 
 /// Marks the state as changed, and starts the throttle if it is not running.
 ///
-/// The editor that calls this arrives with the settings page (M3); the save path
-/// it feeds is part of §5.2, so it is here and tested now.
-#[allow(dead_code)]
+/// Every edit goes through here: the event handlers never write the file
+/// themselves (§12.3).
 fn mark_dirty(cx: &mut App) {
     let Some(quick_launch) = state_mut(cx) else {
         return;
@@ -1493,6 +2442,9 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
         quick_launch.visible = true;
     }
     ensure_selection(cx);
+    // §12.1: the items are checked once the window has been shown, a batch at a
+    // time, on the icon thread.
+    start_health_check(cx);
     handle
         .update(cx, |_root, window, _cx| {
             set_topmost(window, topmost);
@@ -1587,7 +2539,7 @@ fn hide_native(window: &Window) {
 /// Puts the window above (or among) ordinary windows (§11).
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn set_topmost(window: &Window, topmost: bool) {
+pub(crate) fn set_topmost(window: &Window, topmost: bool) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
@@ -1688,6 +2640,11 @@ fn icon(cx: &mut App, path: &str, edge: u32) -> Option<Arc<RenderImage>> {
 /// Puts what the worker said into the state.
 fn apply_reply(cx: &mut App, reply: WorkerReply) {
     match reply {
+        WorkerReply::Health {
+            group,
+            slot,
+            health,
+        } => apply_health(cx, group, slot, health),
         WorkerReply::Icon { key, image } => {
             if let Some(quick_launch) = state_mut(cx) {
                 let timed_out = quick_launch
@@ -1718,10 +2675,7 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                 return;
             }
             let close_after_launch = quick_launch.config.window.close_after_launch;
-            let started = matches!(
-                &outcome,
-                Ok(LaunchOutcome::Started | LaunchOutcome::Activated)
-            );
+            let started = counts_as_usage(&outcome);
             let folder = match outcome {
                 Ok(LaunchOutcome::OpenFolder(path)) => Some(path),
                 Ok(LaunchOutcome::Started | LaunchOutcome::Activated) => None,
@@ -1740,28 +2694,85 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                 record_usage(cx, &group, slot);
             }
             if let Some(path) = folder {
-                // The main window may be hidden in the tray, and Q5 makes that
-                // the normal case: a tab opened in a hidden window is invisible.
-                // Asking the tray to show it is the same request its own menu
-                // sends, and it is handled by the existing publisher loop — the
-                // quick launch does not touch the tray state itself (B2).
-                crate::tray::request_show();
-                if !crate::explorer_link::request(path.clone()) {
-                    // M1 has no fallback: the main process is always there when
-                    // this window is up, so a refusal means it is shutting down.
-                    // The resident-mode fallback is §15.1's, in M2.
-                    tracing::info!(
-                        target: "quick_launch",
-                        "no LumaFiles window to open {} in",
-                        path.display()
-                    );
-                }
+                open_in_explorer(cx, path);
             }
-            if close_after_launch {
+            if hides_after_action(close_after_launch, is_locked(cx)) {
                 hide(cx);
             }
         }
     }
+}
+
+/// Whether what just happened hides the window (§11.1): a pinned window stays
+/// for the launch and the reveal, and only `Esc` and the chord hide it.
+fn hides_after_action(close_after_launch: bool, locked: bool) -> bool {
+    close_after_launch && !locked
+}
+
+/// Whether one outcome counts as a use (§6): starting, activating and opening a
+/// folder all do; a decision or a failure does not.
+fn counts_as_usage(outcome: &std::result::Result<LaunchOutcome, LaunchError>) -> bool {
+    matches!(
+        outcome,
+        Ok(LaunchOutcome::Started | LaunchOutcome::Activated | LaunchOutcome::OpenFolder(_))
+    )
+}
+
+/// Shows a path in LumaFiles: a folder to open, or a file to select in its
+/// folder (§12.2, B2).
+///
+/// One function for the folder items and for `Shift`+click, because both have
+/// the same two cases: the Explorer is in this process but its window may be
+/// hidden in the tray, or there is no Explorer here at all (§15.1).
+pub(crate) fn open_in_explorer(cx: &mut App, path: PathBuf) {
+    match state(cx).map_or(Mode::Main, |quick_launch| quick_launch.mode) {
+        Mode::Main => open_in_main_window(path),
+        Mode::Standalone => open_without_explorer(cx, path),
+    }
+}
+
+/// The Explorer is here: show its window first, then hand it the path.
+fn open_in_main_window(path: PathBuf) {
+    // The same request the tray's own menu sends, handled by the existing
+    // publisher loop; the quick launch does not touch the tray state itself.
+    crate::tray::request_show();
+    if !crate::explorer_link::request(path.clone()) {
+        tracing::info!(
+            target: "quick_launch",
+            "no LumaFiles window to open {} in",
+            path.display()
+        );
+    }
+}
+
+/// No Explorer here (§15.1): the main program takes it through the IPC,
+/// and when it is not running a copy of this executable is started with the
+/// path, which opens or selects it the way the shell does.
+///
+/// The spawn happens on a background task: a process call on the foreground is
+/// what §18 forbids.
+fn open_without_explorer(cx: &mut App, path: PathBuf) {
+    cx.background_spawn(async move {
+        if crate::ipc::request_open(&path) {
+            return;
+        }
+        let Some(executable) = std::env::current_exe().ok() else {
+            tracing::warn!(
+                target: "quick_launch",
+                "no executable to open {} with",
+                path.display()
+            );
+            return;
+        };
+        if let Err(error) = std::process::Command::new(executable).arg(&path).spawn() {
+            tracing::warn!(
+                target: "quick_launch",
+                "could not start LumaFiles for {}: {error}",
+                path.display()
+            );
+        }
+    })
+    .detach();
 }
 
 /// Tells the user that one item would not start, in one line (§8.5).
@@ -1782,7 +2793,8 @@ fn report_launch_failure(cx: &mut App, name: &str, error: &LaunchError) {
 }
 
 /// Starts the item in `slot` of the current group (§12.2).
-fn activate(cx: &mut App, slot: u32) {
+/// Starts the item in `slot` the way the click asked for (§12.2).
+pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
     let Some(quick_launch) = state(cx) else {
         return;
     };
@@ -1799,7 +2811,7 @@ fn activate(cx: &mut App, slot: u32) {
         "launching the selected item"
     );
     let (item, group_id) = (item.clone(), group.id.clone());
-    let mode = if item.admin {
+    let mode = if kind == ClickKind::Admin || item.admin {
         LaunchMode::Admin
     } else {
         LaunchMode::Normal
@@ -1848,14 +2860,12 @@ fn select_group(cx: &mut App, index: usize) {
 /// Moves the keyboard selection by `delta` cells, skipping empty slots and
 /// stopping at the edges without wrapping (§12.2).
 fn move_selection(cx: &mut App, delta: i64) {
+    // The arrow keys walk what the window shows: the filtered slots, or every
+    // slot when nothing is typed.
+    let occupied = filtered_slots(cx);
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
-    let Some(group) = quick_launch.config.groups.get(quick_launch.group) else {
-        return;
-    };
-    let mut occupied: Vec<u32> = group.items.iter().map(|item| item.slot).collect();
-    occupied.sort_unstable();
     let Some(first) = occupied.first().copied() else {
         quick_launch.slot = None;
         return;
@@ -1890,16 +2900,66 @@ fn move_selection(cx: &mut App, delta: i64) {
 /// Makes sure one item is selected, so `Enter` has something to start and the
 /// grid has a highlighted cell (§12.2).
 fn ensure_selection(cx: &mut App) {
+    let kept = filtered_slots(cx);
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
-    if quick_launch.slot.is_some() {
+    // A selection the filter no longer keeps is replaced, so Enter cannot start
+    // an item that is not on screen.
+    if quick_launch.slot.is_some_and(|slot| kept.contains(&slot)) {
         return;
     }
-    let Some(group) = quick_launch.config.groups.get(quick_launch.group) else {
-        return;
+    quick_launch.slot = kept.first().copied();
+}
+
+/// Shows where an item lives in LumaFiles (§12.2, `Shift`+click).
+///
+/// The path is expanded here because the Explorer needs the real one; the
+/// expansion is string work, not a filesystem read.
+pub(crate) fn reveal_item(cx: &mut App, slot: u32) -> bool {
+    let Some(state) = state(cx) else {
+        return false;
     };
-    quick_launch.slot = group.items.iter().map(|item| item.slot).min();
+    let Some(item) = state
+        .config
+        .groups
+        .get(state.group)
+        .and_then(|group| group.items.iter().find(|item| item.slot == slot))
+    else {
+        return false;
+    };
+    let Some(path) = expanded_path(cx, item) else {
+        return false;
+    };
+    open_in_explorer(cx, path);
+    true
+}
+
+/// The text the "copy" entry puts on the clipboard: the item's path (§12.2).
+pub(crate) fn copy_text(cx: &App, slot: u32) -> Option<String> {
+    let state = state(cx)?;
+    let item = state
+        .config
+        .groups
+        .get(state.group)?
+        .items
+        .iter()
+        .find(|item| item.slot == slot)?;
+    Some(
+        expanded_path(cx, item)
+            .map(|path| path.to_string_lossy().to_string())
+            .or_else(|| item.path.clone())
+            .unwrap_or_default(),
+    )
+}
+
+/// One item's path with the variables of §7 resolved, using the context built at init (S2).
+fn expanded_path(cx: &App, item: &Item) -> Option<PathBuf> {
+    let state = state(cx)?;
+    let raw = item.path.as_deref()?.trim();
+    nohrs_services::launch::expand(raw, &state.expand)
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// The message the footer shows, if the last launch failed.
@@ -2048,9 +3108,9 @@ mod tests {
             for item in &items {
                 let key = IconKey::new(item.path.as_deref().unwrap_or_default(), 48);
                 cache.insert(key.clone(), None);
-                let _ = cache.get(&key);
+                cache.get(&key);
             }
-            let _ = grid_cells_for_timing(&items);
+            grid_cells_for_timing(&items);
             timings.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         timings.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
@@ -2109,6 +3169,790 @@ mod tests {
             .unwrap_or_default();
         cx.set_global(state);
         slots
+    }
+
+    /// §9: a custom icon may name an index inside a program.
+    #[test]
+    fn a_custom_icon_can_name_an_index_inside_a_program() {
+        assert_eq!(
+            split_icon_index("C:\\Windows\\System32\\shell32.dll,3"),
+            Some(("C:\\Windows\\System32\\shell32.dll", 3))
+        );
+        assert_eq!(split_icon_index("icone.png"), None);
+        assert_eq!(split_icon_index("programa.exe,"), None);
+        assert_eq!(split_icon_index(",4"), None);
+        assert_eq!(
+            split_icon_index("C:\\pasta,com,9"),
+            Some(("C:\\pasta,com", 9)),
+            "the last comma is the separator"
+        );
+    }
+
+    /// §12.3: a group gets the first free `group_<n>` id.
+    #[test]
+    fn a_new_group_gets_the_first_free_id() {
+        let mut config = QuickLaunchConfig::default();
+        config.groups = vec![
+            Group {
+                id: "group_1".to_string(),
+                name: "Um".to_string(),
+                items: Vec::new(),
+            },
+            Group {
+                id: "group_3".to_string(),
+                name: "Tres".to_string(),
+                items: Vec::new(),
+            },
+        ];
+        assert_eq!(next_group_id(&config), "group_2");
+    }
+
+    /// §12.2, B1: a drop walks over taken slots instead of replacing what is there.
+    #[gpui::test]
+    fn placing_items_never_overwrites_a_slot(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            group.items = vec![Item::new(3, "app", "Tres"), Item::new(4, "app", "Quatro")];
+            install(cx, vec![group]);
+            let placed = vec![
+                Item::new(0, "file", "A"),
+                Item::new(0, "file", "B"),
+                Item::new(0, "file", "C"),
+            ];
+            assert!(place_items(cx, 0, 2, placed));
+            let slots: Vec<u32> = state(cx)
+                .map(|state| {
+                    state.config.groups[0]
+                        .items
+                        .iter()
+                        .map(|item| item.slot)
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(slots, vec![2, 3, 4, 5, 6]);
+            let name = |cx: &gpui::App, slot: u32| item_at(cx, 0, slot).map(|item| item.name);
+            assert_eq!(name(cx, 2), Some("A".to_string()));
+            assert_eq!(name(cx, 3), Some("Tres".to_string()), "the old item stays");
+            assert_eq!(
+                name(cx, 4),
+                Some("Quatro".to_string()),
+                "the old item stays"
+            );
+            assert_eq!(name(cx, 5), Some("B".to_string()));
+            assert_eq!(name(cx, 6), Some("C".to_string()));
+            // A single drop onto a taken cell goes after it.
+            assert!(place_items(cx, 0, 3, vec![Item::new(0, "file", "D")]));
+            assert_eq!(
+                item_at(cx, 0, 7).map(|item| item.name),
+                Some("D".to_string())
+            );
+            assert_eq!(name(cx, 3), Some("Tres".to_string()));
+        });
+    }
+
+    /// §12.2: a move or a drop into a group goes to its first empty slot, and
+    /// past the last item when nothing is empty.
+    #[test]
+    fn a_move_lands_in_the_first_empty_slot() {
+        let mut group = group_of(0);
+        group.items = vec![
+            Item::new(0, "app", "A"),
+            Item::new(1, "app", "B"),
+            Item::new(3, "app", "D"),
+        ];
+        assert_eq!(first_free_slot(&group), 2);
+        group.items.push(Item::new(2, "app", "C"));
+        assert_eq!(first_free_slot(&group), 4);
+        assert_eq!(first_free_slot(&group_of(0)), 0);
+    }
+
+    /// §12.3, S1: the kind comes from the metadata the caller read on a background
+    /// task, and the reader answers about paths that are not there.
+    #[test]
+    fn a_kind_comes_from_the_metadata_the_caller_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("Uma pasta");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(path_is_directory(&folder));
+        assert!(!path_is_directory(&folder.join("nao-existe")));
+        // The flag decides, not a second look at the disk.
+        assert_eq!(item_for_path(&folder, 0, true).kind, "folder");
+        assert_eq!(item_for_path(&folder, 0, false).kind, "file");
+    }
+
+    /// §12.3: what a picked or dropped path becomes.
+    #[test]
+    fn a_picked_path_becomes_the_item_its_extension_says() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("Uma pasta");
+        std::fs::create_dir(&folder).unwrap();
+        let folder_item = item_from_path(&folder, 3);
+        assert_eq!(folder_item.kind, "folder");
+        assert_eq!(folder_item.name, "Uma pasta");
+        assert_eq!(folder_item.slot, 3);
+
+        let shortcut = directory.path().join("atalho.lnk");
+        std::fs::write(&shortcut, b"").unwrap();
+        assert_eq!(item_from_path(&shortcut, 0).kind, "app");
+
+        let document = directory.path().join("notas.txt");
+        std::fs::write(&document, b"oi").unwrap();
+        let document_item = item_from_path(&document, 0);
+        assert_eq!(document_item.kind, "file");
+        assert_eq!(document_item.name, "notas");
+    }
+
+    /// §6: the usage key of one item.
+    #[test]
+    fn a_usage_record_is_named_after_its_group_and_slot() {
+        assert_eq!(usage_key_name("general", 7), "usage_general_7");
+    }
+
+    /// §5.2, §12.3: a read-only file refuses every edit.
+    /// §6: a folder opened from the quick launch is a use; a refused or
+    /// failed start is not.
+    #[test]
+    fn opening_a_folder_counts_as_a_use() {
+        let folder = LaunchOutcome::OpenFolder(std::path::PathBuf::from("C:\\"));
+        assert!(counts_as_usage(&Ok(folder)));
+        assert!(counts_as_usage(&Ok(LaunchOutcome::Started)));
+        assert!(counts_as_usage(&Ok(LaunchOutcome::Activated)));
+        assert!(!counts_as_usage(&Ok(LaunchOutcome::Cancelled)));
+        assert!(!counts_as_usage(&Err(LaunchError::NotFound(
+            std::path::PathBuf::from("C:\\nao\\existe.exe")
+        ))));
+    }
+
+    /// §15.1: the resident process and the main one differ in where a folder goes,
+    /// which is the only thing the mode changes.
+    #[gpui::test]
+    fn the_mode_says_which_process_this_is(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert_eq!(state(cx).map(|state| state.mode), Some(Mode::Main));
+            if let Some(state) = state_mut(cx) {
+                state.mode = Mode::Standalone;
+            }
+            assert_eq!(
+                state(cx).map(|state| state.mode),
+                Some(Mode::Standalone),
+                "a folder then goes through the IPC instead of the Explorer"
+            );
+        });
+    }
+
+    /// A store that keeps its keys in memory, for the records S3 migrates.
+    #[derive(Clone, Default)]
+    struct TestStore(std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>);
+
+    impl KvStore for TestStore {
+        fn get(&self, key: &KvKey) -> nohrs_store::Result<Option<Vec<u8>>> {
+            Ok(self
+                .0
+                .lock()
+                .ok()
+                .and_then(|map| map.get(key.as_str()).cloned()))
+        }
+
+        fn put(&self, key: &KvKey, value: &[u8]) -> nohrs_store::Result<()> {
+            if let Ok(mut map) = self.0.lock() {
+                map.insert(key.as_str().to_string(), value.to_vec());
+            }
+            Ok(())
+        }
+
+        fn delete(&self, key: &KvKey) -> nohrs_store::Result<()> {
+            if let Ok(mut map) = self.0.lock() {
+                map.remove(key.as_str());
+            }
+            Ok(())
+        }
+
+        fn list_namespace(&self, _namespace: &str) -> nohrs_store::Result<Vec<(KvKey, Vec<u8>)>> {
+            Ok(Vec::new())
+        }
+
+        fn batch(&self, ops: Vec<KvOp>) -> nohrs_store::Result<()> {
+            if let Ok(mut map) = self.0.lock() {
+                for op in ops {
+                    match op {
+                        KvOp::Put { key, value } => {
+                            map.insert(key.as_str().to_string(), value);
+                        }
+                        KvOp::Delete { key } => {
+                            map.remove(key.as_str());
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// §12.1, R2: every item a drop or the picker places asks for a check of its own.
+    #[gpui::test]
+    fn a_placed_item_is_checked_at_once(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            group.items = vec![Item::new(0, "app", "A")];
+            install(cx, vec![group]);
+            let placed = vec![Item::new(0, "file", "B"), Item::new(0, "file", "C")];
+            assert!(place_items(cx, 0, 1, placed));
+            let checks = state(cx)
+                .map(|state| state.health_checks.clone())
+                .unwrap_or_default();
+            assert_eq!(
+                checks,
+                vec![("general".to_string(), 1), ("general".to_string(), 2)],
+                "one check per placed item, on the slots it landed in"
+            );
+            // Nothing is placed when the file is read-only, and no check is asked.
+            if let Some(state) = state_mut(cx) {
+                state.status = Status::ReadOnly("schema_version 99".to_string());
+                state.health_checks.clear();
+            }
+            assert!(!place_items(cx, 0, 4, vec![Item::new(0, "file", "D")]));
+            assert!(
+                state(cx).is_some_and(|state| state.health_checks.is_empty()),
+                "a refused place asks for nothing"
+            );
+        });
+    }
+
+    /// §12.2, R1: moving an item takes its own health and usage with it, and leaves
+    /// every other slot's records alone — including the one it lands on in the
+    /// destination group.
+    #[gpui::test]
+    fn a_move_takes_its_own_records_not_the_destination_slot_s(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut source = group_of(0);
+            source.id = "a".to_string();
+            source.items = vec![Item::new(0, "app", "X"), Item::new(5, "app", "Y")];
+            let mut target = group_of(0);
+            target.id = "b".to_string();
+            install(cx, vec![source, target]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            apply_health(cx, "a".to_string(), 0, Health::Missing);
+            apply_health(cx, "a".to_string(), 5, Health::Ok);
+            let x = KvKey::new(KV_NAMESPACE, "usage_a_0").expect("valid key");
+            let y = KvKey::new(KV_NAMESPACE, "usage_a_5").expect("valid key");
+            store.put(&x, b"x").expect("the test store");
+            store.put(&y, b"y").expect("the test store");
+            // Y (slot 5) moves to the empty group B, whose free slot 0 is also
+            // where X's records would be found by a shadowed source slot.
+            assert!(move_item_to_group(cx, 0, 5, 1));
+        });
+        cx.run_until_parked();
+        // X keeps both records.
+        let health = cx.update(|cx| (health_of(cx, 0, 0), health_of(cx, 0, 5)));
+        assert_eq!(health.0, Some(Health::Missing), "X keeps its health answer");
+        assert_eq!(health.1, None, "nothing is left at the old slot");
+        let moved = cx.update(|cx| health_of(cx, 1, 0));
+        assert_eq!(moved, Some(Health::Ok), "Y took its own answer along");
+        let x = KvKey::new(KV_NAMESPACE, "usage_a_0").expect("valid key");
+        assert_eq!(store.get(&x).expect("the test store"), Some(b"x".to_vec()));
+        let y = KvKey::new(KV_NAMESPACE, "usage_a_5").expect("valid key");
+        assert_eq!(store.get(&y).expect("the test store"), None);
+        let moved_usage = KvKey::new(KV_NAMESPACE, "usage_b_0").expect("valid key");
+        assert_eq!(
+            store.get(&moved_usage).expect("the test store"),
+            Some(b"y".to_vec())
+        );
+    }
+
+    /// §6, S3: a moved item takes its usage record with it, in one transaction.
+    #[gpui::test]
+    fn a_move_takes_the_usage_record_along(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut source = group_of(0);
+            source.id = "general".to_string();
+            source.items = vec![Item::new(0, "app", "A")];
+            let mut target = group_of(0);
+            target.id = "dev".to_string();
+            install(cx, vec![source, target]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let key = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            store.put(&key, b"count").expect("the test store");
+            assert!(move_item_to_group(cx, 0, 0, 1));
+        });
+        cx.run_until_parked();
+        let moved = KvKey::new(KV_NAMESPACE, "usage_dev_0").expect("valid key");
+        assert_eq!(
+            store.get(&moved).expect("the test store"),
+            Some(b"count".to_vec())
+        );
+        let old = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        assert_eq!(store.get(&old).expect("the test store"), None);
+    }
+
+    /// §6, S3: a swap exchanges the two usage records.
+    #[gpui::test]
+    fn a_swap_exchanges_the_usage_records(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            group.items = vec![Item::new(0, "app", "A"), Item::new(2, "app", "B")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let first = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            let second = KvKey::new(KV_NAMESPACE, "usage_general_2").expect("valid key");
+            store.put(&first, b"um").expect("the test store");
+            store.put(&second, b"dois").expect("the test store");
+            assert!(swap_slots(cx, 0, 0, 2));
+        });
+        cx.run_until_parked();
+        let first = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        let second = KvKey::new(KV_NAMESPACE, "usage_general_2").expect("valid key");
+        assert_eq!(
+            store.get(&first).expect("the test store"),
+            Some(b"dois".to_vec())
+        );
+        assert_eq!(
+            store.get(&second).expect("the test store"),
+            Some(b"um".to_vec())
+        );
+    }
+
+    /// §11.1: the pin flips `topmost`, marks the state for the throttle, and the window
+    /// keeps its place until Esc or the chord.
+    #[gpui::test]
+    fn the_pin_flips_topmost_and_asks_for_a_save(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert!(!is_locked(cx));
+            assert!(toggle_lock(cx));
+            assert!(is_locked(cx));
+            assert!(
+                state(cx).is_some_and(|state| state.pending_save),
+                "a writable file saves the pin through the throttle"
+            );
+            assert!(!toggle_lock(cx));
+            assert!(!is_locked(cx));
+        });
+    }
+
+    /// §11.1: a read-only file still pins the window, but never asks for a save.
+    #[gpui::test]
+    fn a_read_only_file_pins_without_saving(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            if let Some(state) = state_mut(cx) {
+                state.status = Status::ReadOnly("schema_version 99".to_string());
+            }
+            assert!(toggle_lock(cx));
+            assert!(is_locked(cx), "the pin works for this session");
+            assert!(
+                state(cx).is_some_and(|state| !state.pending_save),
+                "nothing is written for a file that cannot be written"
+            );
+        });
+    }
+
+    /// §11.1: a pinned window stays after a launch and after a reveal; `Esc` and the
+    /// chord are the ways out.
+    #[test]
+    fn a_pinned_window_does_not_hide_after_an_action() {
+        assert!(hides_after_action(true, false));
+        assert!(!hides_after_action(true, true));
+        assert!(!hides_after_action(false, false));
+    }
+
+    /// §11.1: a hot reload that changes `topmost` updates the state the button reads.
+    #[gpui::test]
+    fn a_reload_changes_the_pin(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert!(!is_locked(cx));
+            let mut config = QuickLaunchConfig::default();
+            config.window.topmost = true;
+            apply_loaded(
+                cx,
+                FileRead {
+                    hash: 12345,
+                    parsed: Some(Ok(Parsed {
+                        config,
+                        warnings: Vec::new(),
+                    })),
+                },
+            );
+            assert!(is_locked(cx), "the button follows the file");
+        });
+    }
+
+    /// §12.3, S4: a path edited to a folder turns the item into a folder, and one that
+    /// points nowhere keeps the kind it had.
+    #[gpui::test]
+    fn an_edited_path_judges_the_kind_again(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("Uma pasta");
+        std::fs::create_dir(&folder).unwrap();
+        let folder_text = folder.to_string_lossy().to_string();
+        // A program that is already there: the sandbox refuses to create an .exe.
+        let program_text = "C:\\Windows\\System32\\cmd.exe".to_string();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            let mut item = Item::new(0, "app", "A");
+            item.path = Some(program_text.clone());
+            group.items = vec![item];
+            install(cx, vec![group]);
+            // A program edited to a folder becomes a folder.
+            assert!(edit_item(cx, 0, 0, "A", &folder_text, "", false));
+        });
+        cx.run_until_parked();
+        let kind = cx.update(|cx| item_at(cx, 0, 0).map(|item| item.kind));
+        assert_eq!(kind, Some("folder".to_string()));
+        cx.update(|cx| {
+            // A folder edited back to a program becomes an app again.
+            assert!(edit_item(cx, 0, 0, "A", &program_text, "", false));
+        });
+        cx.run_until_parked();
+        let kind = cx.update(|cx| item_at(cx, 0, 0).map(|item| item.kind));
+        assert_eq!(kind, Some("app".to_string()));
+        cx.update(|cx| {
+            // A path that is not there keeps the kind: the health check reports it.
+            assert!(edit_item(
+                cx,
+                0,
+                0,
+                "A",
+                "C:\\nao\\existe\\nada.exe",
+                "",
+                false
+            ));
+        });
+        cx.run_until_parked();
+        let kind = cx.update(|cx| item_at(cx, 0, 0).map(|item| item.kind));
+        assert_eq!(kind, Some("app".to_string()));
+    }
+
+    /// §7, S2: the context is state, not something the foreground reads a file for.
+    #[gpui::test]
+    fn the_expansion_context_is_built_once(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(0)]);
+            let stored = state(cx).map(|state| state.expand.program_dir.clone());
+            assert_eq!(
+                stored,
+                Some(ExpandContext::current().program_dir),
+                "the state holds the context every path expansion uses"
+            );
+            let mut item = Item::new(0, "folder", "Pasta");
+            item.path = Some("{luma}".to_string());
+            let expanded = expanded_path(cx, &item);
+            assert_eq!(
+                expanded,
+                stored.map(std::path::PathBuf::from),
+                "{{luma}} expands from the stored context"
+            );
+        });
+    }
+
+    /// §12.1, B3: an edit forgets the old answer and asks for a new one.
+    #[gpui::test]
+    fn an_edit_forgets_the_health_of_that_item(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(2);
+            group.id = "general".to_string();
+            install(cx, vec![group]);
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            assert!(is_missing(cx, 0, 0));
+            assert!(edit_item(
+                cx,
+                0,
+                0,
+                "Novo",
+                "C:\\Windows\\System32\\notepad.exe",
+                "",
+                false
+            ));
+            assert_eq!(
+                health_of(cx, 0, 0),
+                None,
+                "the grey mark is gone until the icon thread answers"
+            );
+            // A second item keeps its answer: only the edited slot is cleared.
+            apply_health(cx, "general".to_string(), 1, Health::Missing);
+            assert!(put_item(cx, 0, 1, Item::new(1, "app", "Outro")));
+            assert_eq!(health_of(cx, 0, 1), None);
+        });
+    }
+
+    /// §12.1, B3: swapping two slots swaps their answers with them.
+    #[gpui::test]
+    fn a_swap_takes_the_health_along(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            group.items = vec![Item::new(0, "app", "A"), Item::new(2, "app", "B")];
+            install(cx, vec![group]);
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            apply_health(cx, "general".to_string(), 2, Health::Ok);
+            assert!(swap_slots(cx, 0, 0, 2));
+            assert_eq!(health_of(cx, 0, 2), Some(Health::Missing));
+            assert_eq!(health_of(cx, 0, 0), Some(Health::Ok));
+            // A move into a free slot carries the answer but leaves nothing
+            // behind.
+            assert!(swap_slots(cx, 0, 0, 5));
+            assert_eq!(health_of(cx, 0, 5), Some(Health::Ok));
+            assert_eq!(health_of(cx, 0, 0), None);
+        });
+    }
+
+    /// §12.1, B3: an item moved to another group takes its answer there.
+    #[gpui::test]
+    fn a_move_takes_the_health_to_the_new_group(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut source = group_of(0);
+            source.id = "general".to_string();
+            source.items = vec![Item::new(0, "app", "A")];
+            let mut target = group_of(0);
+            target.id = "dev".to_string();
+            install(cx, vec![source, target]);
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            assert!(move_item_to_group(cx, 0, 0, 1));
+            assert_eq!(health_of(cx, 0, 0), None, "nothing left behind");
+            assert_eq!(health_of(cx, 1, 0), Some(Health::Missing));
+        });
+    }
+
+    /// §12.1, B3: deleting an item or a group drops its answers.
+    #[gpui::test]
+    fn deletes_drop_the_health(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(2);
+            group.id = "general".to_string();
+            let mut second = group_of(1);
+            second.id = "dev".to_string();
+            install(cx, vec![group, second]);
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            apply_health(cx, "general".to_string(), 1, Health::Missing);
+            apply_health(cx, "dev".to_string(), 0, Health::Missing);
+            assert!(delete_item(cx, 0, 0));
+            assert_eq!(health_of(cx, 0, 0), None);
+            assert_eq!(health_of(cx, 0, 1), Some(Health::Missing));
+            assert!(delete_group(cx, 0, true));
+            assert_eq!(health_of(cx, 0, 1), None, "the whole group's answers go");
+            // The group left keeps its own answer, now under index 0.
+            assert_eq!(health_of(cx, 0, 0), Some(Health::Missing));
+        });
+    }
+    /// §12.1: a broken item is greyed by the view, and one that is fine is
+    /// not. The answers live in the state, never in the file.
+    #[gpui::test]
+    fn health_marks_only_the_broken_items(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(2);
+            group.id = "general".to_string();
+            install(cx, vec![group]);
+            assert!(!is_missing(cx, 0, 0), "nothing is checked yet");
+            apply_health(cx, "general".to_string(), 0, Health::Missing);
+            assert!(is_missing(cx, 0, 0));
+            apply_health(cx, "general".to_string(), 1, Health::Ok);
+            assert!(!is_missing(cx, 0, 1));
+            assert_eq!(health_of(cx, 0, 0), Some(Health::Missing));
+            assert_eq!(
+                state(cx).map(|state| state.health.len()),
+                Some(2),
+                "the answers are kept beside the configuration"
+            );
+            assert!(
+                state(cx).is_some_and(|state| state.config.groups[0].items.len() == 2),
+                "the file still has its items"
+            );
+        });
+    }
+
+    /// §12.2: typing filters the current group by name and tags, and the
+    /// arrow keys walk only what is left.
+    #[gpui::test]
+    fn typing_filters_the_group_by_name_and_tags(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            let mut editor = Item::new(0, "app", "Editor de texto");
+            editor.tags = vec!["escrever".to_string()];
+            let mut terminal = Item::new(4, "app", "Terminal");
+            terminal.tags = vec!["shell".to_string()];
+            group.items = vec![editor, terminal];
+            install(cx, vec![group]);
+
+            set_filter(cx, "term".to_string());
+            assert_eq!(filtered_slots(cx), vec![4]);
+            ensure_selection(cx);
+            assert_eq!(state(cx).and_then(|state| state.slot), Some(4));
+
+            // A tag matches too.
+            set_filter(cx, "escrever".to_string());
+            assert_eq!(filtered_slots(cx), vec![0]);
+
+            // Nothing matches: no slot to select, so Enter has nothing to start.
+            set_filter(cx, "zzz".to_string());
+            assert!(filtered_slots(cx).is_empty());
+            ensure_selection(cx);
+            assert_eq!(state(cx).and_then(|state| state.slot), None);
+
+            set_filter(cx, String::new());
+            assert_eq!(filtered_slots(cx), vec![0, 4]);
+        });
+    }
+
+    /// §12.2: the arrow keys step through the filtered slots only.
+    #[gpui::test]
+    fn the_arrow_keys_walk_the_filtered_slots(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                Item::new(0, "app", "Alfa"),
+                Item::new(2, "app", "Beta"),
+                Item::new(4, "app", "Alfa dois"),
+            ];
+            install(cx, vec![group]);
+            set_filter(cx, "alfa".to_string());
+            ensure_selection(cx);
+            assert_eq!(state(cx).and_then(|state| state.slot), Some(0));
+            move_selection(cx, 1);
+            assert_eq!(state(cx).and_then(|state| state.slot), Some(4));
+            move_selection(cx, 1);
+            assert_eq!(
+                state(cx).and_then(|state| state.slot),
+                Some(4),
+                "the edge stops instead of wrapping"
+            );
+            move_selection(cx, -1);
+            assert_eq!(state(cx).and_then(|state| state.slot), Some(0));
+        });
+    }
+
+    #[gpui::test]
+    fn a_read_only_file_refuses_edits(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1), group_of(1)]);
+            if let Some(state) = state_mut(cx) {
+                state.status = Status::ReadOnly("quebrado".to_string());
+            }
+            assert!(!put_item(cx, 0, 4, Item::new(4, "app", "Novo")));
+            assert!(!edit_item(cx, 0, 0, "Nome", "C:\\a.exe", "", false));
+            assert!(!add_group(cx).is_some());
+            assert!(!rename_group(cx, 0, "Outro"));
+            assert!(!delete_item(cx, 0, 0));
+            assert!(!delete_group(cx, 1, true));
+            assert!(state(cx).is_some_and(|state| state.config.groups.len() == 2));
+        });
+    }
+
+    /// §12.3: adding, editing, replacing, renaming and deleting, all through the
+    /// state layer so the throttle sees one edit.
+    #[gpui::test]
+    fn editing_a_group_and_its_items(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1), group_of(1)]);
+            assert!(put_item(cx, 0, 4, Item::new(4, "app", "Novo")));
+            assert_eq!(
+                item_at(cx, 0, 4).map(|item| item.name),
+                Some("Novo".to_string())
+            );
+            // One slot holds one item: a second put replaces the first.
+            assert!(put_item(cx, 0, 4, Item::new(4, "app", "Outro")));
+            assert_eq!(
+                state(cx).map(|state| state.config.groups[0]
+                    .items
+                    .iter()
+                    .filter(|item| item.slot == 4)
+                    .count()),
+                Some(1)
+            );
+            assert!(edit_item(
+                cx,
+                0,
+                4,
+                " Renomeado ",
+                "C:\\Windows\\System32\\notepad.exe",
+                " /a",
+                true
+            ));
+            let edited = item_at(cx, 0, 4).unwrap();
+            assert_eq!(edited.name, "Renomeado");
+            assert_eq!(edited.args.as_deref(), Some("/a"));
+            assert!(edited.admin);
+            // An empty name or path cancels the edit (§12.3).
+            assert!(!edit_item(cx, 0, 4, " ", "C:\\a.exe", "", false));
+            assert!(!edit_item(cx, 0, 4, "Nome", "  ", "", false));
+
+            let index = add_group(cx).expect("a writable file can add a group");
+            assert_eq!(
+                state(cx).map(|state| state.config.groups[index].id.clone()),
+                Some("group_1".to_string())
+            );
+            assert!(!rename_group(cx, index, "  "));
+            assert!(rename_group(cx, index, "Dev"));
+            assert_eq!(
+                state(cx).map(|state| state.config.groups[index].name.clone()),
+                Some("Dev".to_string())
+            );
+
+            assert!(delete_item(cx, 0, 4));
+            assert_eq!(item_at(cx, 0, 4), None);
+            // A non-empty group needs the confirmation, an empty one does not.
+            let other = add_group(cx).unwrap();
+            assert!(delete_group(cx, other, false));
+            assert!(add_group(cx).is_some());
+        });
+    }
+
+    /// §12.2: moving between slots swaps when the target is taken, and moving to
+    /// another group takes its first free slot.
+    #[gpui::test]
+    fn moving_items_between_slots_and_groups(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut source = group_of(0);
+            source.items = vec![Item::new(0, "app", "A"), Item::new(2, "app", "B")];
+            let mut target = group_of(0);
+            target.items = vec![Item::new(1, "app", "C")];
+            install(cx, vec![source, target]);
+
+            assert!(swap_slots(cx, 0, 0, 2));
+            let name_at = |cx: &gpui::App, slot: u32| item_at(cx, 0, slot).map(|item| item.name);
+            assert_eq!(name_at(cx, 0), Some("B".to_string()));
+            assert_eq!(name_at(cx, 2), Some("A".to_string()));
+            // A free target slot just moves the item.
+            assert!(swap_slots(cx, 0, 0, 3));
+            assert_eq!(name_at(cx, 3), Some("B".to_string()));
+            assert_eq!(name_at(cx, 0), None);
+
+            assert!(move_item_to_group(cx, 0, 2, 1));
+            assert_eq!(
+                item_at(cx, 1, 0).map(|item| item.name),
+                Some("A".to_string()),
+                "the free slot 0 of the target group takes it"
+            );
+            assert!(!move_item_to_group(cx, 0, 9, 1), "nothing there to move");
+        });
+    }
+
+    /// §12.3: the last group cannot be removed, nor can a non-empty one without
+    /// the confirmation.
+    #[gpui::test]
+    fn deleting_groups_respects_the_last_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert!(!delete_group(cx, 0, true));
+
+            install(cx, vec![group_of(1), group_of(2)]);
+            assert!(!delete_group(cx, 1, false), "it has items");
+            assert!(delete_group(cx, 1, true));
+            assert_eq!(state(cx).map(|state| state.config.groups.len()), Some(1));
+        });
     }
 
     #[gpui::test]
@@ -2241,7 +4085,7 @@ mod tests {
         let icons = Worker::start("test-icons", {
             let replies = replies.clone();
             let blocked = blocked.clone();
-            move |receiver: std_mpsc::Receiver<IconRequest>| {
+            move |receiver: std_mpsc::Receiver<IconWorkerRequest>| {
                 run_icon_worker(receiver, replies, move |_context, _path, _edge| {
                     let (lock, condvar) = &*blocked;
                     let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
@@ -2264,11 +4108,11 @@ mod tests {
         });
 
         // One icon request, which the icon thread takes and then hangs on.
-        icons.send(IconRequest {
+        icons.send(IconWorkerRequest::Icon(IconRequest {
             key: IconKey::new("bloqueado", 32),
             path: "C:\\nao\\existe".to_string(),
             queued: Instant::now(),
-        });
+        }));
         std::thread::sleep(Duration::from_millis(50));
 
         // The launch must be answered within 100 ms even though the icon thread
@@ -2295,7 +4139,7 @@ mod tests {
                 assert_eq!(generation, 7);
                 assert_eq!(outcome, Ok(LaunchOutcome::Started));
             }
-            WorkerReply::Icon { .. } => panic!("the icon thread answered first"),
+            _ => panic!("the icon thread answered first"),
         }
 
         // Let the icon thread go, then stop both as the exit path does.
@@ -2349,7 +4193,7 @@ mod tests {
 
     /// R1: the KV read can finish after the window has drawn. The restored group
     /// must then be the one the bar shows, the one whose items the tiles draw,
-    /// and the one the selection points into ??which needs the frame invalidated
+    /// and the one the selection points into — which needs the frame invalidated
     /// and the old group's slot dropped.
     #[gpui::test]
     fn a_group_restored_after_the_first_frame_is_the_one_shown(cx: &mut gpui::TestAppContext) {
@@ -2598,6 +4442,14 @@ mod tests {
             pending_hide: false,
             revision: 0,
             pending_usage: None,
+            filter: String::new(),
+            health: HashMap::new(),
+            health_started: false,
+            health_queue: VecDeque::new(),
+            mode: Mode::Main,
+            #[cfg(test)]
+            health_checks: Vec::new(),
+            expand: ExpandContext::current(),
         }
     }
 

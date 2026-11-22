@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 use nohrs_core::config::quick_launch::Item;
 use nohrs_core::telemetry::LogErr;
 use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HWND, LPARAM, MAX_PATH};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+    DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ, SelectObject,
+};
 use windows::Win32::System::Diagnostics::Debug::{
     FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
 };
@@ -30,16 +34,247 @@ use windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
-    SwitchToThisWindow,
+    BringWindowToTop, DI_NORMAL, DestroyIcon, DrawIconEx, EnumWindows, GW_OWNER, GetIconInfo,
+    GetWindow, GetWindowThreadProcessId, HICON, ICONINFO, IsIconic, IsWindowVisible,
+    LR_DEFAULTCOLOR, PrivateExtractIconsW, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow,
+    ShowWindow, SwitchToThisWindow,
 };
 use windows::core::{BOOL, Error as WindowsError, PCWSTR, PWSTR};
 
 use crate::launch::{
-    Health, KIND_APP, KIND_URL, LaunchAction, LaunchError, LaunchMode, LaunchOutcome,
-    LaunchRequest, expand, item_path, validate_url,
+    ExpandContext, Health, KIND_APP, KIND_FILE, KIND_URL, LaunchAction, LaunchError, LaunchMode,
+    LaunchOutcome, LaunchRequest, expand, item_path, validate_url,
 };
+
+/// A document (`file`): the Shell picks the program and the verb is left to it
+/// (§8.2). No activation: a document is never "already running".
+pub(crate) struct FileAction;
+
+impl LaunchAction for FileAction {
+    fn kind(&self) -> &str {
+        KIND_FILE
+    }
+
+    fn health(&self, item: &Item, context: &ExpandContext) -> Health {
+        match item_path(item, context) {
+            Ok(path) if path.is_file() => Health::Ok,
+            Ok(_) => Health::Missing,
+            Err(LaunchError::Expand(error)) => Health::Invalid(error.to_string()),
+            Err(error) => Health::Invalid(error.to_string()),
+        }
+    }
+
+    fn launch(&self, item: &Item, request: &LaunchRequest) -> Result<LaunchOutcome, LaunchError> {
+        let path = item_path(item, &request.expand)?;
+        if !path.is_file() {
+            return Err(LaunchError::NotFound(path));
+        }
+        let directory = match item.cwd.as_deref().map(str::trim) {
+            Some(raw) if !raw.is_empty() => Some(expand(raw, &request.expand)?),
+            _ => path.parent().map(Path::to_path_buf),
+        };
+        // `administrative` false leaves `lpVerb` null, which is what §8.2 asks
+        // for: the Shell uses the type's default verb.
+        start(
+            &path.to_string_lossy(),
+            item.args.as_deref(),
+            directory.as_deref(),
+            false,
+        )
+    }
+}
+
+/// The length of the fixed file-name buffer the Shell's icon call takes, NUL
+/// included (§9, B4).
+const MAX_PATH_LIMIT: usize = 260;
+
+/// The icon at `index` inside `path` (`"exe,索引"`, §9).
+///
+/// The Shell extracts it at the size the window wants; the pixels come out of a
+/// top-down 32-bit DIB as the premultiplied BGRA the icon path expects.
+#[allow(unsafe_code)]
+pub fn indexed_icon(path: &str, index: u32, edge: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let edge_px = i32::try_from(edge).ok()?;
+    let index = i32::try_from(index).ok()?;
+    // The binding takes the file name as the classic fixed 260-wide buffer, and
+    // it reads it as a NUL-terminated string: a longer path would leave the
+    // buffer unterminated and lose its tail, so it is refused here (B4).
+    let wide_path: Vec<u16> = path.encode_utf16().collect();
+    if wide_path.len() >= MAX_PATH_LIMIT {
+        tracing::debug!(
+            target: "launch",
+            length = wide_path.len(),
+            "the icon path does not fit the Shell's 260-unit buffer"
+        );
+        return None;
+    }
+    let mut name = [0u16; MAX_PATH_LIMIT];
+    for (target, source) in name.iter_mut().zip(wide_path) {
+        *target = source;
+    }
+    let mut icon = HICON::default();
+    let mut identifier = 0u32;
+    // SAFETY: a buffer this call owns and the icon slot it fills. The icon it
+    // returns is owned by the guard below.
+    let extracted = unsafe {
+        PrivateExtractIconsW(
+            &name,
+            index,
+            edge_px,
+            edge_px,
+            Some(core::slice::from_mut(&mut icon)),
+            Some(&raw mut identifier),
+            LR_DEFAULTCOLOR.0,
+        )
+    };
+    if extracted == 0 || icon.is_invalid() {
+        return None;
+    }
+    // SAFETY: the icon came from the extraction above; the guard destroys it.
+    let icon = unsafe { IconGuard::new(icon) };
+    unsafe { pixels_of_icon(&icon, edge_px) }
+}
+
+/// A device context, released when it goes out of scope.
+#[allow(unsafe_code)]
+struct Dc(HDC);
+
+#[allow(unsafe_code)]
+impl Drop for Dc {
+    fn drop(&mut self) {
+        // SAFETY: the handle was created by `CreateCompatibleDC` and is released
+        // exactly once, here.
+        unsafe { DeleteDC(self.0) }.ok().log_err();
+    }
+}
+
+/// A bitmap or icon handle, released when it goes out of scope.
+#[allow(unsafe_code)]
+struct Bitmap(HBITMAP);
+
+#[allow(unsafe_code)]
+impl Bitmap {
+    /// Takes ownership of a bitmap another call made, skipping the null handle
+    /// `GetIconInfo` reports for an icon without one.
+    unsafe fn from_icon_bitmap(bitmap: HBITMAP) -> Option<Self> {
+        (!bitmap.is_invalid()).then_some(Self(bitmap))
+    }
+}
+
+#[allow(unsafe_code)]
+impl Drop for Bitmap {
+    fn drop(&mut self) {
+        // SAFETY: the handle is one this process owns and is released once.
+        unsafe { DeleteObject(HGDIOBJ(self.0.0)) }.ok().log_err();
+    }
+}
+
+/// An icon, released when it goes out of scope.
+#[allow(unsafe_code)]
+struct IconGuard(HICON);
+
+#[allow(unsafe_code)]
+impl IconGuard {
+    /// Takes ownership of `icon`.
+    unsafe fn new(icon: HICON) -> Self {
+        Self(icon)
+    }
+}
+
+#[allow(unsafe_code)]
+impl Drop for IconGuard {
+    fn drop(&mut self) {
+        // SAFETY: the icon is one this process owns and is released once.
+        unsafe { DestroyIcon(self.0) }.log_err();
+    }
+}
+
+/// Draws one icon into a top-down 32-bit DIB and copies the pixels out.
+///
+/// Unsafe because GDI has no safe bindings; every handle is owned by a guard
+/// and released when this returns, whatever the outcome (B5).
+#[allow(unsafe_code)]
+unsafe fn pixels_of_icon(icon: &IconGuard, edge: i32) -> Option<(Vec<u8>, u32, u32)> {
+    let mut information = ICONINFO::default();
+    // SAFETY: the icon is valid and the structure is this call's output.
+    unsafe { GetIconInfo(icon.0, &mut information) }.ok()?;
+    // SAFETY: both bitmaps were made by `GetIconInfo`; the guards release them.
+    let _coloured = unsafe { Bitmap::from_icon_bitmap(information.hbmColor) };
+    let _mask = unsafe { Bitmap::from_icon_bitmap(information.hbmMask) };
+
+    // SAFETY: a screen-compatible DC with no bitmap of its own; the guard
+    // releases it.
+    let device = unsafe { Dc(CreateCompatibleDC(None)) };
+    if device.0.is_invalid() {
+        return None;
+    }
+    let header = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: u32::try_from(core::mem::size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
+            biWidth: edge,
+            // Top-down, so the bytes come out in reading order.
+            biHeight: -edge,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..BITMAPINFOHEADER::default()
+        },
+        ..BITMAPINFO::default()
+    };
+    let mut bits: *mut core::ffi::c_void = core::ptr::null_mut();
+    // SAFETY: `bits` is the out parameter of this call and is valid while the
+    // bitmap lives; the guard releases the bitmap.
+    let bitmap = unsafe {
+        CreateDIBSection(
+            Some(device.0),
+            &header,
+            DIB_RGB_COLORS,
+            &raw mut bits,
+            None,
+            0,
+        )
+    };
+    let Ok(bitmap) = bitmap else {
+        return None;
+    };
+    let bitmap = Bitmap(bitmap);
+
+    // SAFETY: every handle is owned here; the old object is put back before the
+    // DC goes away, and the pixels are copied before the bitmap is released.
+    unsafe {
+        let previous = SelectObject(device.0, HGDIOBJ(bitmap.0.0));
+        let drawn = DrawIconEx(device.0, 0, 0, icon.0, edge, edge, 0, None, DI_NORMAL);
+        SelectObject(device.0, previous);
+        // A failed draw leaves the bitmap transparent; caching that would show
+        // an empty tile as a real icon (B5).
+        drawn.ok()?;
+    }
+
+    let edge = usize::try_from(edge).ok()?;
+    if bits.is_null() {
+        return None;
+    }
+    // SAFETY: the DIB is 32 bits per pixel and `edge * edge` pixels were
+    // allocated for it; it is copied before the guards release it.
+    let pixels =
+        unsafe { core::slice::from_raw_parts(bits as *const u8, edge * edge * 4) }.to_vec();
+    Some((
+        premultiply_bgra(pixels),
+        u32::try_from(edge).ok()?,
+        u32::try_from(edge).ok()?,
+    ))
+}
+/// The DIB gives straight BGRA; the icon path works in premultiplied values.
+fn premultiply_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        let scale = |channel: u8| ((u16::from(channel) * alpha + 127) / 255) as u8;
+        pixel[0] = scale(pixel[0]);
+        pixel[1] = scale(pixel[1]);
+        pixel[2] = scale(pixel[2]);
+    }
+    pixels
+}
 
 /// An application or shortcut, started through the Shell.
 pub(crate) struct AppAction;
@@ -455,6 +690,14 @@ mod tests {
         assert!(found, "cmd.exe should be running");
     }
 
+    /// §9, B4: a path the Shell's buffer cannot hold is refused instead of
+    /// being truncated into an unterminated buffer.
+    #[test]
+    fn an_icon_path_of_300_characters_is_refused() {
+        let long = format!("C:\\{}.exe", "a".repeat(297));
+        assert!(long.chars().count() >= 300);
+        assert_eq!(super::indexed_icon(&long, 0, 32), None);
+    }
     #[test]
     #[ignore = "starts a real process; run by hand for the PR"]
     fn a_program_that_is_not_there_is_reported_as_not_found() {

@@ -10,22 +10,28 @@
 //! Everything the state owns is read through [`super`]; nothing here keeps a
 //! second copy of the configuration (§13).
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, FocusHandle, ImageSource, IntoElement, KeyDownEvent, Render, RenderImage,
-    Subscription, Task, UniformListScrollHandle, WeakEntity, Window, WindowControlArea, div, img,
-    px, rgb, uniform_list,
+    AnyElement, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, ImageSource, IntoElement,
+    KeyDownEvent, PathPromptOptions, Render, RenderImage, SharedString, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, WindowControlArea, div, img, px, rgb,
+    uniform_list,
 };
 use gpui_component::{
-    Icon, IconName,
+    Icon, IconName, WindowExt as _,
     button::{Button, ButtonRounded, ButtonVariant, ButtonVariants as _},
-    menu::{DropdownMenu as _, PopupMenuItem},
+    checkbox::Checkbox,
+    input::{Input, InputEvent, InputState},
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
 };
 use nohrs_core::config::quick_launch::{ActionKind, Item, MAX_SLOT, View};
+use nohrs_core::telemetry::LogErr;
 use nohrs_ui::theme::theme;
 
 use super::AUTO_HIDE_DELAY;
@@ -56,7 +62,55 @@ pub(crate) struct QuickLaunchView {
     /// changed (S6). Rebuilding it clones the group's items, so it is not done
     /// per frame.
     frame: Option<Frame>,
+    /// The item editor open over the window, if any (§12.3).
+    editor: Option<Editor>,
+    /// The group whose name is being edited in place, if any (§12.3).
+    renaming: Option<Rename>,
     _activation: Subscription,
+}
+
+/// The four fields the edit dialog offers (§12.3).
+struct Editor {
+    group: usize,
+    slot: u32,
+    name: Entity<InputState>,
+    path: Entity<InputState>,
+    args: Entity<InputState>,
+    /// "Run as administrator", toggled by the checkbox and read on confirm.
+    admin: Rc<Cell<bool>>,
+}
+
+/// The in-place name editor of one group (§12.3).
+struct Rename {
+    group: usize,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
+/// One item being dragged inside the window (§12.2).
+#[derive(Clone)]
+struct ItemDrag {
+    group: usize,
+    slot: u32,
+}
+
+/// What the pointer carries while an item is dragged.
+struct ItemDragPreview {
+    name: SharedString,
+}
+
+impl Render for ItemDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(rgb(theme::bg_hover()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .text_xs()
+            .child(self.name.clone())
+    }
 }
 
 /// Everything a frame draws that does not change from frame to frame.
@@ -69,6 +123,9 @@ struct Frame {
     columns: usize,
     cell_size: f32,
     list_columns: usize,
+    /// True while a filter is typed: the grid packs the matches instead of
+    /// leaving the holes their slots would leave (§12.2).
+    packed: bool,
 }
 
 impl QuickLaunchView {
@@ -93,6 +150,8 @@ impl QuickLaunchView {
             hide_task: None,
             scroll_handle: UniformListScrollHandle::new(),
             frame: None,
+            editor: None,
+            renaming: None,
             _activation: subscription,
         }
     }
@@ -146,12 +205,45 @@ impl QuickLaunchView {
             cx.stop_propagation();
             return;
         }
+        // Typing filters the current group (§12.2). Escape then clears the
+        // filter before it hides.
+        if let Some(text) = event.keystroke.key_char.as_deref()
+            && !modifiers.control
+            && !modifiers.platform
+            && !modifiers.alt
+            && text.chars().count() == 1
+            && !text.chars().next().is_some_and(char::is_control)
+        {
+            let mut filter = super::filter(cx).to_string();
+            filter.push_str(text);
+            super::set_filter(cx, filter);
+            super::ensure_selection(cx);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if key == "backspace" && !super::filter(cx).is_empty() {
+            let mut filter = super::filter(cx).to_string();
+            filter.pop();
+            super::set_filter(cx, filter);
+            super::ensure_selection(cx);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         let handled = match key.as_str() {
-            // M1 has no filter, so Escape always hides (§12.2). The window is
-            // already in hand, so the hide goes through it: asking GPUI for the
-            // window it is currently updating fails with "window not found".
+            // Escape clears the filter first and only then hides (§12.2). The
+            // window is already in hand, so the hide goes through it: asking GPUI
+            // for the window it is currently updating fails with "window not
+            // found".
             "escape" => {
-                super::hide_in(cx, window);
+                if !super::filter(cx).is_empty() {
+                    super::set_filter(cx, String::new());
+                    super::ensure_selection(cx);
+                    cx.notify();
+                } else {
+                    super::hide_in(cx, window);
+                }
                 true
             }
             "left" => {
@@ -172,7 +264,12 @@ impl QuickLaunchView {
             }
             "enter" => {
                 if let Some(slot) = super::state(cx).and_then(|quick_launch| quick_launch.slot) {
-                    super::activate(cx, slot);
+                    let kind = if modifiers.control {
+                        super::ClickKind::Admin
+                    } else {
+                        super::ClickKind::Plain
+                    };
+                    super::activate_with(cx, slot, kind);
                 }
                 true
             }
@@ -185,19 +282,329 @@ impl QuickLaunchView {
         }
     }
 
-    /// A click selects the cell and starts what is in it (§12.2).
-    fn clicked(&mut self, slot: u32, cx: &mut Context<Self>) {
+    /// Opens the editor for one item (§12.3).
+    ///
+    /// Deferred: the menu that calls this runs inside the window's update, and
+    /// the dialog puts an input field in that same window (the M1 abort came
+    /// from exactly that shape).
+    fn edit_item(&mut self, group: usize, slot: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            weak.update(cx, |view, cx| view.edit_item_now(group, slot, window, cx))
+                .ok();
+        });
+    }
+
+    fn edit_item_now(
+        &mut self,
+        group: usize,
+        slot: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = super::item_at(cx, group, slot) else {
+            return;
+        };
+        let name = input_with(window, cx, &item.name);
+        let path = input_with(window, cx, item.path.as_deref().unwrap_or_default());
+        let args = input_with(window, cx, item.args.as_deref().unwrap_or_default());
+        self.editor = Some(Editor {
+            group,
+            slot,
+            name: name.clone(),
+            path,
+            args,
+            admin: Rc::new(Cell::new(item.admin)),
+        });
+        name.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Saves the four fields through the state layer (§12.3).
+    fn confirm_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        let name = editor.name.read(cx).value().to_string();
+        let path = editor.path.read(cx).value().to_string();
+        let args = editor.args.read(cx).value().to_string();
+        let admin = editor.admin.get();
+        super::edit_item(cx, editor.group, editor.slot, &name, &path, &args, admin);
+        cx.notify();
+    }
+
+    /// Adds what the file picker returned to the slot the menu was opened on
+    /// (§12.3, §12.2): the first path fills that slot, the rest follow.
+    fn new_item_at(
+        &mut self,
+        group: usize,
+        slot: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !super::editable(cx) {
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: Some(SharedString::from(nohrs_core::t!(
+                "Escolher um arquivo ou uma pasta"
+            ))),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let picked = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                _ => return,
+            };
+            // S1: the kind of each picked path is decided on a background task;
+            // the items are placed once the answers are in (and B1 keeps them off
+            // the slots that are taken).
+            let items = cx
+                .background_spawn(async move {
+                    picked
+                        .iter()
+                        .map(|path| {
+                            let is_dir = super::path_is_directory(path);
+                            super::item_for_path(path, 0, is_dir)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |_view, _window, cx| {
+                super::place_items(cx, group, slot, items);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    /// Adds a group and starts the inline rename the specification asks for
+    /// (§12.3).
+    fn add_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let Some(index) = super::add_group(cx) else {
+                return;
+            };
+            weak.update(cx, |view, cx| {
+                view.start_rename(index, window, cx);
+            })
+            .ok();
+        });
+    }
+
+    /// Puts one input field in the group bar and gives it the keyboard (§12.3).
+    fn start_rename(&mut self, group: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = super::state(cx)
+            .and_then(|state| state.config().groups.get(group))
+            .map(|group| group.name.clone())
+        else {
+            return;
+        };
+        let input = input_with(window, cx, &name);
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |view, _input, event: &InputEvent, _window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    view.commit_rename(cx);
+                    cx.notify();
+                }
+            },
+        );
+        let focus = input.clone();
+        self.renaming = Some(Rename {
+            group,
+            input,
+            _subscription: subscription,
+        });
+        window.defer(cx, move |window, cx| {
+            focus.update(cx, |state, cx| state.focus(window, cx));
+        });
+        cx.notify();
+    }
+
+    /// An empty name cancels the rename (§12.3).
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(rename) = self.renaming.take() else {
+            return;
+        };
+        let name = rename.input.read(cx).value().to_string();
+        super::rename_group(cx, rename.group, &name);
+    }
+
+    /// Removes a group; a non-empty one asks first (§12.3). The last group
+    /// cannot be removed, and the menu item is greyed out for it.
+    fn delete_group(&mut self, group: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let empty = super::state(cx)
+            .and_then(|state| state.config().groups.get(group))
+            .is_some_and(|group| group.items.is_empty());
+        if empty {
+            super::delete_group(cx, group, false);
+            cx.notify();
+            return;
+        }
+        let weak = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            window.open_dialog(cx, move |dialog, _window, _cx| {
+                let confirm = weak.clone();
+                dialog
+                    .confirm()
+                    .title(nohrs_core::t!("Excluir grupo"))
+                    .button_props(
+                        gpui_component::dialog::DialogButtonProps::default()
+                            .cancel_text(nohrs_core::t!("Cancelar"))
+                            .ok_text(nohrs_core::t!("Excluir")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(nohrs_core::t!("O grupo e os itens dele serão excluídos.")),
+                    )
+                    .on_ok(move |_, _window, cx| {
+                        confirm
+                            .update(cx, |_view, cx| {
+                                super::delete_group(cx, group, true);
+                                cx.notify();
+                            })
+                            .log_err();
+                        true
+                    })
+            });
+        });
+    }
+
+    /// Removes one item and its usage record (§12.2, §6).
+    fn delete_item(&mut self, group: usize, slot: u32, cx: &mut Context<Self>) {
+        super::delete_item(cx, group, slot);
+        cx.notify();
+    }
+
+    /// The "浏览…" button of the editor: picks a path and puts it in the field
+    /// (§12.3).
+    fn browse_for_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: false,
+            prompt: Some(SharedString::from(nohrs_core::t!("Escolher um caminho"))),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let picked = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                _ => return,
+            };
+            let Some(path) = picked.first() else {
+                return;
+            };
+            let text = path.to_string_lossy().to_string();
+            this.update_in(cx, |view, window, cx| {
+                let Some(editor) = view.editor.as_ref() else {
+                    return;
+                };
+                let path = editor.path.clone();
+                path.update(cx, |state, cx| state.set_value(text, window, cx));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Flips the pin: applies it to the window now and saves it unless the file
+    /// is read-only (§11.1).
+    fn toggle_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locked = super::toggle_lock(cx);
+        super::set_topmost(window, locked);
+        cx.notify();
+    }
+
+    /// A click selects the cell and does what its modifiers ask for (§12.2).
+    fn clicked(&mut self, slot: u32, kind: super::ClickKind, cx: &mut Context<Self>) {
         if let Some(quick_launch) = super::state_mut(cx) {
             quick_launch.slot = Some(slot);
         }
-        super::activate(cx, slot);
+        match kind {
+            super::ClickKind::Reveal => {
+                // The Explorer takes the foreground; this window goes away the way
+                // it does after a launch, unless it is pinned (§11.1).
+                super::reveal_item(cx, slot);
+                if !super::is_locked(cx) {
+                    super::hide(cx);
+                }
+            }
+            kind => super::activate_with(cx, slot, kind),
+        }
+    }
+
+    /// A file or folder dropped from outside takes the first free slot at or
+    /// after the one it landed on, and the rest of the drop follows it. Nothing
+    /// already in the group is replaced (§12.2, B1).
+    fn drop_paths(
+        &mut self,
+        group: usize,
+        slot: u32,
+        paths: &[std::path::PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if !super::editable(cx) || paths.is_empty() {
+            return;
+        }
+        // S1: whether each path is a folder needs the disk, so it is asked on a
+        // background task and the items are placed once the answers are in.
+        let paths = paths.to_vec();
+        cx.spawn(async move |this, cx| {
+            let items = cx
+                .background_spawn(async move {
+                    paths
+                        .iter()
+                        .map(|path| {
+                            let is_dir = super::path_is_directory(path);
+                            super::item_for_path(path, 0, is_dir)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |_view, cx| {
+                super::place_items(cx, group, slot, items);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    /// An item dragged onto another slot: they swap when it is taken (§12.2).
+    fn drop_item(&mut self, drag: &ItemDrag, group: usize, slot: u32, cx: &mut Context<Self>) {
+        if drag.group == group {
+            super::swap_slots(cx, group, drag.slot, slot);
+        } else {
+            super::move_item_to_group(cx, drag.group, drag.slot, group);
+        }
+        cx.notify();
+    }
+
+    /// An item dragged onto the group bar: first free slot, else appended.
+    fn drop_item_on_group(&mut self, drag: &ItemDrag, group: usize, cx: &mut Context<Self>) {
+        super::move_item_to_group(cx, drag.group, drag.slot, group);
+        cx.notify();
     }
 }
 
 impl Render for QuickLaunchView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some((revision, selected, configured_icon_size)) = super::state(cx)
-            .map(|state| (state.revision, state.slot, state.config().window.icon_size))
+        let Some((revision, selected, configured_icon_size, group, editable)) = super::state(cx)
+            .map(|state| {
+                (
+                    state.revision,
+                    state.slot,
+                    state.config().window.icon_size,
+                    state.group,
+                    state.status.can_save(),
+                )
+            })
         else {
             return div().size_full();
         };
@@ -231,7 +638,15 @@ impl Render for QuickLaunchView {
                 let items: Vec<Item> = config
                     .groups
                     .get(current)
-                    .map(|group| group.items.clone())
+                    .map(|group| {
+                        let kept = super::filtered_slots(cx);
+                        group
+                            .items
+                            .iter()
+                            .filter(|item| kept.contains(&item.slot))
+                            .cloned()
+                            .collect()
+                    })
                     .unwrap_or_default();
                 (
                     groups,
@@ -240,9 +655,10 @@ impl Render for QuickLaunchView {
                     usize::from(config.window.columns.max(1)),
                     f32::from(config.window.cell_size),
                     usize::from(config.window.list_columns.max(1)),
+                    !state.filter.trim().is_empty(),
                 )
             };
-            let (groups, items, view, columns, cell_size, list_columns) = planned;
+            let (groups, items, view, columns, cell_size, list_columns, packed) = planned;
             // The icons are asked for here, once per rebuild, because
             // `super::icon` needs the mutable state.
             let drawn: Rc<Vec<Drawn>> = Rc::new(
@@ -272,6 +688,7 @@ impl Render for QuickLaunchView {
                 columns,
                 cell_size,
                 list_columns,
+                packed,
             });
         }
         let Some(frame) = self.frame.as_ref() else {
@@ -283,10 +700,25 @@ impl Render for QuickLaunchView {
         let columns = frame.columns;
         let cell_size = frame.cell_size;
         let list_columns = frame.list_columns;
+        let packed = frame.packed;
 
-        let title_bar = self.render_title_bar();
-        let group_bar = render_group_bar(&groups, cx);
+        let filter_text = super::filter(cx).to_string();
+        let filtered_count = drawn.len();
+        let title_bar = self.render_title_bar(editable, cx);
+        let group_bar = render_group_bar(&groups, self.renaming.as_ref(), editable, cx);
         let entity = cx.entity().downgrade();
+        let missing: Rc<HashMap<u32, bool>> = Rc::new(
+            super::state(cx)
+                .and_then(|state| state.config().groups.get(group))
+                .map(|current| {
+                    current
+                        .items
+                        .iter()
+                        .map(|item| (item.slot, super::is_missing(cx, group, item.slot)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
 
         let content: AnyElement = if loading {
             centered_note(nohrs_core::t!("Carregando…"))
@@ -296,6 +728,9 @@ impl Render for QuickLaunchView {
             list_view(
                 &drawn,
                 selected,
+                group,
+                editable,
+                &missing,
                 list_columns,
                 icon_edge,
                 &entity,
@@ -305,9 +740,13 @@ impl Render for QuickLaunchView {
             grid_view(
                 &drawn,
                 selected,
+                group,
+                editable,
+                &missing,
                 columns,
                 cell_size,
                 icon_edge,
+                packed,
                 &entity,
                 &self.scroll_handle,
             )
@@ -322,6 +761,29 @@ impl Render for QuickLaunchView {
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key_down))
             .child(title_bar);
+        if !filter_text.is_empty() {
+            root = root.child(
+                div()
+                    .flex_shrink_0()
+                    .h(px(24.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .child(nohrs_core::t!("Filtrar"))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::accent()))
+                            .child(filter_text.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::muted()))
+                            .child(nohrs_core::tf!("{n} itens", n = filtered_count)),
+                    ),
+            );
+        }
         if let Some(reason) = read_only {
             root = root.child(
                 div()
@@ -345,7 +807,16 @@ impl Render for QuickLaunchView {
                         .min_w(px(0.0))
                         .flex()
                         .flex_col()
-                        .child(content),
+                        .child(content)
+                        .on_drop(cx.listener(
+                            move |view, paths: &gpui::ExternalPaths, _window, cx| {
+                                if editable {
+                                    let target = super::next_free_slot(cx, group);
+                                    let paths = paths.paths().to_vec();
+                                    view.drop_paths(group, target, &paths, cx);
+                                }
+                            },
+                        )),
                 ),
             )
             .when_some(message, |this, message| {
@@ -361,13 +832,16 @@ impl Render for QuickLaunchView {
                         .child(message),
                 )
             });
+        if let Some(overlay) = editor_overlay(self.editor.as_ref(), &entity) {
+            root = root.child(overlay);
+        }
         root
     }
 }
 
 impl QuickLaunchView {
     /// The title bar: the drag area, the title, and the "⋯" menu (§15.0).
-    fn render_title_bar(&self) -> AnyElement {
+    fn render_title_bar(&mut self, editable: bool, cx: &mut Context<Self>) -> AnyElement {
         div()
             .h(px(TITLE_BAR_HEIGHT))
             .flex_shrink_0()
@@ -401,6 +875,7 @@ impl QuickLaunchView {
                     .flex()
                     .items_center()
                     .pr(px(6.0))
+                    .child(lock_button(editable, cx))
                     .child(
                         Button::new("quick-launch-menu")
                             .icon(Icon::new(IconName::Ellipsis).size_4())
@@ -426,6 +901,32 @@ impl QuickLaunchView {
             )
             .into_any_element()
     }
+}
+
+/// The pin: keeps the window on top and out of its own hiding rules (§11.1).
+fn lock_button(editable: bool, cx: &mut Context<QuickLaunchView>) -> AnyElement {
+    let locked = super::is_locked(cx);
+    // The tooltip says what a click does, and warns that a read-only file keeps
+    // the change only for this session.
+    let mut tooltip = if locked {
+        nohrs_core::t!("Desafixar").to_string()
+    } else {
+        nohrs_core::t!("Fixar: a janela não se esconde e fica na frente").to_string()
+    };
+    if !editable {
+        tooltip.push(' ');
+        tooltip.push_str(nohrs_core::t!("(não será salvo)"));
+    }
+    Button::new("quick-launch-lock")
+        .icon(Icon::empty().path("icons/pin.svg").size_4())
+        .tooltip(tooltip)
+        .rounded(ButtonRounded::Large)
+        .with_variant(ButtonVariant::Ghost)
+        .when(locked, |button| button.text_color(rgb(theme::accent())))
+        .on_click(cx.listener(move |view, _, window, cx| {
+            view.toggle_lock(window, cx);
+        }))
+        .into_any_element()
 }
 
 /// One item as it is drawn: the entry and the picture it got, if any.
@@ -510,8 +1011,14 @@ fn centered_note(note: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-/// The bar the group names sit in (§12.1).
-fn render_group_bar(groups: &[(String, bool)], cx: &mut Context<QuickLaunchView>) -> AnyElement {
+/// The bar the group names sit in (§12.1), with the M2 menu and the rename
+/// field (§12.3).
+fn render_group_bar(
+    groups: &[(String, bool)],
+    renaming: Option<&Rename>,
+    editable: bool,
+    cx: &mut Context<QuickLaunchView>,
+) -> AnyElement {
     let mut bar = div()
         .w(px(GROUP_BAR_WIDTH))
         .flex_shrink_0()
@@ -523,8 +1030,24 @@ fn render_group_bar(groups: &[(String, bool)], cx: &mut Context<QuickLaunchView>
         .gap_1()
         .border_r_1()
         .border_color(rgb(theme::border()));
+    let last_group = groups.len() <= 1;
     for (index, (name, active)) in groups.iter().enumerate() {
         let active = *active;
+        // The group being renamed shows its field instead of its name (§12.3).
+        if let Some(rename) = renaming.filter(|rename| rename.group == index) {
+            bar = bar.child(
+                div()
+                    .h(px(28.0))
+                    .px(px(4.0))
+                    .flex()
+                    .items_center()
+                    .child(Input::new(&rename.input)),
+            );
+            continue;
+        }
+        let entity = cx.entity().downgrade();
+        let menu_entity = entity.clone();
+        let entity_drop = entity.clone();
         bar = bar.child(
             div()
                 .id(("quick-launch-group", index))
@@ -547,6 +1070,47 @@ fn render_group_bar(groups: &[(String, bool)], cx: &mut Context<QuickLaunchView>
                 .on_click(cx.listener(move |_view, _, _window, cx| {
                     super::select_group(cx, index);
                 }))
+                .on_drop(move |drag: &ItemDrag, _window, cx| {
+                    // An item dropped on the bar joins that group: first free
+                    // slot, else appended (§12.2).
+                    if editable {
+                        entity_drop
+                            .update(cx, |view, cx| view.drop_item_on_group(drag, index, cx))
+                            .log_err();
+                    }
+                })
+                .context_menu(move |menu, _window, _cx| {
+                    let add = menu_entity.clone();
+                    let rename = menu_entity.clone();
+                    let delete = menu_entity.clone();
+                    menu.item(
+                        PopupMenuItem::new(nohrs_core::t!("Novo grupo"))
+                            .disabled(!editable)
+                            .on_click(move |_, window, cx| {
+                                add.update(cx, |view, cx| view.add_group(window, cx))
+                                    .log_err();
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(nohrs_core::t!("Renomear"))
+                            .disabled(!editable)
+                            .on_click(move |_, window, cx| {
+                                rename
+                                    .update(cx, |view, cx| view.start_rename(index, window, cx))
+                                    .log_err();
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(nohrs_core::t!("Excluir"))
+                            .disabled(!editable || last_group)
+                            .on_click(move |_, window, cx| {
+                                delete
+                                    .update(cx, |view, cx| view.delete_group(index, window, cx))
+                                    .log_err();
+                            }),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
@@ -560,27 +1124,47 @@ fn render_group_bar(groups: &[(String, bool)], cx: &mut Context<QuickLaunchView>
     bar.into_any_element()
 }
 
+/// The cells of a filtered grid: the matches packed in slot order, then one
+/// empty row (§12.2).
+fn packed_cells(items: &[Item], columns: usize) -> Vec<Option<Item>> {
+    let columns = columns.max(1);
+    let rows = items.len().div_ceil(columns).saturating_add(1);
+    let mut cells: Vec<Option<Item>> = items.iter().cloned().map(Some).collect();
+    cells.resize(rows.saturating_mul(columns), None);
+    cells
+}
+
 /// The grid (§12.1), virtualized by row.
+#[allow(clippy::too_many_arguments)]
 fn grid_view(
     drawn: &[Drawn],
     selected: Option<u32>,
+    group: usize,
+    editable: bool,
+    missing: &HashMap<u32, bool>,
     columns: usize,
     cell_size: f32,
     icon_edge: u32,
+    packed: bool,
     entity: &WeakEntity<QuickLaunchView>,
     scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
     let items: Vec<Item> = drawn.iter().map(|drawn| drawn.item.clone()).collect();
-    let cells = grid_cells(&items, columns);
+    let cells = if packed {
+        packed_cells(&items, columns)
+    } else {
+        grid_cells(&items, columns)
+    };
     let rows = cells.len().div_ceil(columns.max(1));
     let cells = Rc::new(cells);
     let drawn = Rc::new(drawn.to_vec());
     // The icon of a cell is the one the item got; the cell index is the slot.
-    let pictures_by_slot: std::collections::HashMap<u32, Option<Arc<RenderImage>>> = drawn
+    let pictures_by_slot: HashMap<u32, Option<Arc<RenderImage>>> = drawn
         .iter()
         .map(|entry| (entry.item.slot, entry.image.clone()))
         .collect();
     let pictures_by_slot = Rc::new(pictures_by_slot);
+    let missing = Rc::new(missing.clone());
     let entity = entity.clone();
     uniform_list(
         "quick-launch-grid",
@@ -602,10 +1186,15 @@ fn grid_view(
                             let image = pictures_by_slot
                                 .get(&item.slot)
                                 .and_then(|image| image.clone());
-                            line = line
-                                .child(tile(item, image, selected, cell_size, icon_edge, &entity));
+                            let missing = missing.get(&item.slot).copied().unwrap_or(false);
+                            line = line.child(tile(
+                                item, image, selected, missing, group, editable, cell_size,
+                                icon_edge, &entity,
+                            ));
                         }
-                        None => {
+                        None if packed => {
+                            // While filtering the empty cells are only the
+                            // padding of the last row: there is no slot to add to.
                             line = line.child(
                                 div()
                                     .w(px(cell_size))
@@ -613,6 +1202,11 @@ fn grid_view(
                                     .flex_shrink_0()
                                     .rounded(px(8.0)),
                             );
+                        }
+                        None => {
+                            let slot = u32::try_from(index).unwrap_or(MAX_SLOT);
+                            line =
+                                line.child(empty_cell(slot, group, editable, cell_size, &entity));
                         }
                     }
                 }
@@ -627,9 +1221,13 @@ fn grid_view(
 }
 
 /// The list (§12.1): `list_columns` columns of rows, virtualized by row.
+#[allow(clippy::too_many_arguments)]
 fn list_view(
     drawn: &[Drawn],
     selected: Option<u32>,
+    group: usize,
+    editable: bool,
+    missing: &HashMap<u32, bool>,
     list_columns: usize,
     icon_edge: u32,
     entity: &WeakEntity<QuickLaunchView>,
@@ -638,6 +1236,7 @@ fn list_view(
     let list_columns = list_columns.max(1);
     let rows = drawn.len().div_ceil(list_columns);
     let drawn = Rc::new(drawn.to_vec());
+    let missing = Rc::new(missing.clone());
     let entity = entity.clone();
     uniform_list(
         "quick-launch-list",
@@ -651,12 +1250,10 @@ fn list_view(
                     match drawn.get(index) {
                         Some(entry) => {
                             let selected = selected == Some(entry.item.slot);
-                            line = line.child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .child(row_of(entry, selected, icon_edge, &entity)),
-                            );
+                            let missing = missing.get(&entry.item.slot).copied().unwrap_or(false);
+                            line = line.child(div().flex_1().min_w(px(0.0)).child(row_of(
+                                entry, selected, missing, group, editable, icon_edge, &entity,
+                            )));
                         }
                         None => line = line.child(div().flex_1()),
                     }
@@ -671,17 +1268,166 @@ fn list_view(
     .into_any_element()
 }
 
+/// An empty cell: the drop target of the next milestone's drags, and the place
+/// the "new item" menu hangs from (§12.2, §12.3).
+fn empty_cell(
+    slot: u32,
+    group: usize,
+    editable: bool,
+    cell_size: f32,
+    entity: &WeakEntity<QuickLaunchView>,
+) -> AnyElement {
+    let handle = entity.clone();
+    div()
+        .id(("quick-launch-empty", slot))
+        .w(px(cell_size))
+        .h(px(cell_size))
+        .flex_shrink_0()
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(theme::bg_hover())))
+        .context_menu(move |menu, _window, _cx| {
+            let handle = handle.clone();
+            menu.item(
+                PopupMenuItem::new(nohrs_core::t!("Novo item"))
+                    .disabled(!editable)
+                    .on_click(move |_, window, cx| {
+                        handle
+                            .update(cx, |view, cx| view.new_item_at(group, slot, window, cx))
+                            .log_err();
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
+/// The menu of one item (§12.2, M2 rows).
+fn item_menu(
+    menu: PopupMenu,
+    group: usize,
+    slot: u32,
+    editable: bool,
+    entity: &WeakEntity<QuickLaunchView>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let admin = entity.clone();
+    let reveal = entity.clone();
+    let edit = entity.clone();
+    let copy = entity.clone();
+    let delete = entity.clone();
+    let menu = menu
+        .item(
+            PopupMenuItem::new(nohrs_core::t!("Executar como administrador"))
+                .disabled(!editable)
+                .on_click(move |_, _window, cx| {
+                    admin
+                        .update(cx, |view, cx| {
+                            view.clicked(slot, super::ClickKind::Admin, cx);
+                        })
+                        .log_err();
+                }),
+        )
+        .item(
+            PopupMenuItem::new(nohrs_core::t!("Abrir localização")).on_click(
+                move |_, _window, cx| {
+                    reveal
+                        .update(cx, |_view, cx| {
+                            super::reveal_item(cx, slot);
+                            super::hide(cx);
+                        })
+                        .log_err();
+                },
+            ),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new(nohrs_core::t!("Editar"))
+                .disabled(!editable)
+                .on_click(move |_, window, cx| {
+                    edit.update(cx, |view, cx| view.edit_item(group, slot, window, cx))
+                        .log_err();
+                }),
+        )
+        .item(
+            PopupMenuItem::new(nohrs_core::t!("Copiar caminho")).on_click(move |_, _window, cx| {
+                copy.update(cx, |_view, cx| {
+                    if let Some(text) = super::copy_text(cx, slot) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                })
+                .log_err();
+            }),
+        );
+
+    // "Move to group ▸" lists every other group; with a single group there is
+    // nowhere to move to and the entry is left out (§12.2).
+    let groups: Vec<(usize, String)> = super::state(cx)
+        .map(|state| {
+            state
+                .config()
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != group)
+                .map(|(index, group)| (index, group.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let menu = if groups.is_empty() {
+        menu
+    } else {
+        let for_submenu = entity.clone();
+        let submenu = PopupMenu::build(window, cx, move |submenu, _window, _cx| {
+            let mut submenu = submenu;
+            for (index, name) in groups {
+                let handle = for_submenu.clone();
+                submenu = submenu.item(PopupMenuItem::new(name).on_click(move |_, _window, cx| {
+                    handle
+                        .update(cx, |view, cx| {
+                            view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
+                        })
+                        .log_err();
+                }));
+            }
+            submenu
+        });
+        menu.item(PopupMenuItem::submenu(
+            nohrs_core::t!("Mover para"),
+            submenu,
+        ))
+    };
+
+    menu.separator().item(
+        PopupMenuItem::new(nohrs_core::t!("Excluir"))
+            .disabled(!editable)
+            .on_click(move |_, _window, cx| {
+                delete
+                    .update(cx, |view, cx| view.delete_item(group, slot, cx))
+                    .log_err();
+            }),
+    )
+}
+
 /// One grid tile.
+#[allow(clippy::too_many_arguments)]
 fn tile(
     item: &Item,
     image: Option<Arc<RenderImage>>,
     selected: bool,
+    missing: bool,
+    group: usize,
+    editable: bool,
     cell_size: f32,
     icon_edge: u32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
+    let menu_handle = entity.clone();
+    let entity_drop = entity.clone();
     let slot = item.slot;
+    let drag_name = SharedString::from(item.name.clone());
+    let drop_handle = entity.clone();
     div()
         .id(("quick-launch-tile", slot))
         .w(px(cell_size))
@@ -696,8 +1442,35 @@ fn tile(
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .on_click(move |_, _window, cx| {
-            let _ = handle.update(cx, |view, cx| view.clicked(slot, cx));
+        .on_click(move |event, _window, cx| {
+            handle
+                .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
+                .log_err();
+        })
+        .when(editable, |this| {
+            this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
+                cx.new(|_| ItemDragPreview {
+                    name: drag_name.clone(),
+                })
+            })
+        })
+        .on_drop(move |drag: &ItemDrag, _window, cx| {
+            if editable {
+                drop_handle
+                    .update(cx, |view, cx| view.drop_item(drag, group, slot, cx))
+                    .log_err();
+            }
+        })
+        .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
+            if editable {
+                let paths = paths.paths().to_vec();
+                entity_drop
+                    .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
+                    .log_err();
+            }
+        })
+        .context_menu(move |menu, window, cx| {
+            item_menu(menu, group, slot, editable, &menu_handle, window, cx)
         })
         .child(picture(item, image.as_ref(), icon_edge))
         .child(
@@ -708,8 +1481,18 @@ fn tile(
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .text_xs()
+                // An item that is known to be broken is grey (§12.1).
+                .when(missing, |this| this.text_color(rgb(theme::muted())))
                 .child(item.name.clone()),
         )
+        .when(missing, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::danger()))
+                    .child(nohrs_core::t!("Indisponível")),
+            )
+        })
         .into_any_element()
 }
 
@@ -717,10 +1500,17 @@ fn tile(
 fn row_of(
     drawn: &Drawn,
     selected: bool,
+    missing: bool,
+    group: usize,
+    editable: bool,
     icon_edge: u32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
+    let menu_handle = entity.clone();
+    let entity_drop = entity.clone();
+    let drop_handle = entity.clone();
+    let drag_name = SharedString::from(drawn.item.name.clone());
     let item = &drawn.item;
     let slot = item.slot;
     let subtitle = match item.action_kind() {
@@ -739,8 +1529,35 @@ fn row_of(
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .on_click(move |_, _window, cx| {
-            let _ = handle.update(cx, |view, cx| view.clicked(slot, cx));
+        .on_click(move |event, _window, cx| {
+            handle
+                .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
+                .log_err();
+        })
+        .when(editable, |this| {
+            this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
+                cx.new(|_| ItemDragPreview {
+                    name: drag_name.clone(),
+                })
+            })
+        })
+        .on_drop(move |drag: &ItemDrag, _window, cx| {
+            if editable {
+                drop_handle
+                    .update(cx, |view, cx| view.drop_item(drag, group, slot, cx))
+                    .log_err();
+            }
+        })
+        .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
+            if editable {
+                let paths = paths.paths().to_vec();
+                entity_drop
+                    .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
+                    .log_err();
+            }
+        })
+        .context_menu(move |menu, window, cx| {
+            item_menu(menu, group, slot, editable, &menu_handle, window, cx)
         })
         .child(picture(item, drawn.image.as_ref(), icon_edge))
         .child(
@@ -755,6 +1572,7 @@ fn row_of(
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .text_sm()
+                        .when(missing, |this| this.text_color(rgb(theme::muted())))
                         .child(item.name.clone()),
                 )
                 .when(!subtitle.is_empty(), |this| {
@@ -767,9 +1585,154 @@ fn row_of(
                             .text_color(rgb(theme::muted()))
                             .child(subtitle),
                     )
+                })
+                .when(missing, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::danger()))
+                            .child(nohrs_core::t!("Indisponível")),
+                    )
                 }),
         )
         .into_any_element()
+}
+
+/// What a click's modifiers ask for (§12.2).
+fn click_kind(event: &ClickEvent) -> super::ClickKind {
+    match event {
+        ClickEvent::Mouse(mouse) if mouse.down.modifiers.control => super::ClickKind::Admin,
+        ClickEvent::Mouse(mouse) if mouse.down.modifiers.shift => super::ClickKind::Reveal,
+        _ => super::ClickKind::Plain,
+    }
+}
+
+/// One labelled input of the editor (§12.3).
+fn field(label: &'static str, input: &Entity<InputState>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_xs().text_color(rgb(theme::muted())).child(label))
+        .child(Input::new(input))
+        .into_any_element()
+}
+
+/// The editor card: the four fields of §12.3 and its two buttons.
+///
+/// It is drawn inside the window instead of through `window.open_dialog` because
+/// "浏览…" has to put the picked path into an input field after an async platform
+/// call, and only the view can hand out the window for that.
+fn editor_overlay(
+    editor: Option<&Editor>,
+    entity: &WeakEntity<QuickLaunchView>,
+) -> Option<AnyElement> {
+    let editor = editor?;
+    let name = editor.name.clone();
+    let path = editor.path.clone();
+    let args = editor.args.clone();
+    let admin = editor.admin.clone();
+    let admin_value = admin.get();
+    let browse = entity.clone();
+    let confirm = entity.clone();
+    let cancel = entity.clone();
+    Some(
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000080))
+            .child(
+                div()
+                    .w(px(520.0))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p(px(16.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(theme::bg()))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .child(div().text_sm().child(nohrs_core::t!("Editar item")))
+                    .child(field(nohrs_core::t!("Nome"), &name))
+                    .child(
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .child(field(nohrs_core::t!("Caminho"), &path)),
+                            )
+                            .child(
+                                Button::new("quick-launch-browse")
+                                    .label(nohrs_core::t!("Procurar…"))
+                                    .on_click(move |_, window, cx| {
+                                        browse
+                                            .update(cx, |view, cx| {
+                                                view.browse_for_path(window, cx);
+                                            })
+                                            .log_err();
+                                    }),
+                            ),
+                    )
+                    .child(field(nohrs_core::t!("Argumentos"), &args))
+                    .child(
+                        Checkbox::new("quick-launch-admin")
+                            .label(nohrs_core::t!("Executar como administrador"))
+                            .checked(admin_value)
+                            .on_click(move |checked, _window, cx| {
+                                admin.set(*checked);
+                                cx.refresh_windows();
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("quick-launch-cancel")
+                                    .label(nohrs_core::t!("Cancelar"))
+                                    .on_click(move |_, _window, cx| {
+                                        cancel
+                                            .update(cx, |view, cx| {
+                                                view.editor = None;
+                                                cx.notify();
+                                            })
+                                            .log_err();
+                                    }),
+                            )
+                            .child(
+                                Button::new("quick-launch-confirm")
+                                    .label(nohrs_core::t!("Confirmar"))
+                                    .on_click(move |_, _window, cx| {
+                                        confirm
+                                            .update(cx, |view, cx| {
+                                                view.confirm_editor(cx);
+                                            })
+                                            .log_err();
+                                    }),
+                            ),
+                    ),
+            )
+            .into_any_element(),
+    )
+}
+
+/// One input field with its opening text.
+fn input_with(
+    window: &mut Window,
+    cx: &mut Context<QuickLaunchView>,
+    text: &str,
+) -> Entity<InputState> {
+    cx.new(|cx| InputState::new(window, cx).default_value(text.to_string()))
 }
 
 #[cfg(test)]
@@ -791,6 +1754,18 @@ mod tests {
         assert!(cells[1].is_none(), "slot 1 is empty");
         assert!(cells[2].is_none(), "slot 2 is empty");
         assert_eq!(cells[3].as_ref().map(|item| item.name.as_str()), Some("B"));
+    }
+
+    #[test]
+    fn a_filtered_grid_packs_the_matches_and_keeps_one_empty_row() {
+        let matches = vec![item(2, "A"), item(7, "B"), item(9, "C")];
+        let cells = packed_cells(&matches, 2);
+        assert_eq!(cells.len(), 6, "two rows of matches and one padding row");
+        assert_eq!(cells[0].as_ref().map(|item| item.slot), Some(2));
+        assert_eq!(cells[1].as_ref().map(|item| item.slot), Some(7));
+        assert_eq!(cells[2].as_ref().map(|item| item.slot), Some(9));
+        assert!(cells[3..].iter().all(Option::is_none));
+        assert_eq!(packed_cells(&[], 4).len(), 4, "an empty filter keeps a row");
     }
 
     #[test]
