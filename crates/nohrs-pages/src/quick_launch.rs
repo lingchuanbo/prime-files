@@ -846,6 +846,9 @@ pub(crate) struct QuickLaunch {
     health_started: bool,
     /// Which process this is (§15.1).
     mode: Mode,
+    /// The single-item health checks this session asked for, for the tests (R2).
+    #[cfg(test)]
+    health_checks: Vec<(String, u32)>,
     /// The variables a path may contain (§7), built once: reading `config.toml` for them on the foreground is
     /// what S2 removed.
     expand: ExpandContext,
@@ -1024,6 +1027,8 @@ fn recheck_health(cx: &mut App, group: usize, slot: u32) {
         .and_then(|group| group.items.iter().find(|item| item.slot == slot))
         .cloned();
     state.health.remove(&(group_id.clone(), slot));
+    #[cfg(test)]
+    state.health_checks.push((group_id.clone(), slot));
     if let Some(item) = item
         && let Some(workers) = state.workers.as_ref()
     {
@@ -1516,15 +1521,22 @@ pub(crate) fn place_items(cx: &mut App, group: usize, start: u32, items: Vec<Ite
         return false;
     };
     let mut cursor = start;
+    let mut placed = Vec::with_capacity(items.len());
     for mut item in items {
         let slot = next_free_slot_from(target, cursor);
         item.slot = slot;
         target.items.push(item);
+        placed.push(slot);
         cursor = slot.saturating_add(1);
     }
     target.items.sort_by_key(|item| item.slot);
     state.touch();
     mark_dirty(cx);
+    // R2: a new item is checked at once, on the same path an edit takes, so a
+    // path that is already broken is grey before the window is drawn again.
+    for slot in placed {
+        recheck_health(cx, group, slot);
+    }
     true
 }
 
@@ -1760,6 +1772,8 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         health_started: false,
         health_queue: VecDeque::new(),
         mode,
+        #[cfg(test)]
+        health_checks: Vec::new(),
         expand: ExpandContext::current(),
     });
 
@@ -3376,6 +3390,37 @@ mod tests {
         }
     }
 
+    /// §12.1, R2: every item a drop or the picker places asks for a check of its own.
+    #[gpui::test]
+    fn a_placed_item_is_checked_at_once(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            group.items = vec![Item::new(0, "app", "A")];
+            install(cx, vec![group]);
+            let placed = vec![Item::new(0, "file", "B"), Item::new(0, "file", "C")];
+            assert!(place_items(cx, 0, 1, placed));
+            let checks = state(cx)
+                .map(|state| state.health_checks.clone())
+                .unwrap_or_default();
+            assert_eq!(
+                checks,
+                vec![("general".to_string(), 1), ("general".to_string(), 2)],
+                "one check per placed item, on the slots it landed in"
+            );
+            // Nothing is placed when the file is read-only, and no check is asked.
+            if let Some(state) = state_mut(cx) {
+                state.status = Status::ReadOnly("schema_version 99".to_string());
+                state.health_checks.clear();
+            }
+            assert!(!place_items(cx, 0, 4, vec![Item::new(0, "file", "D")]));
+            assert!(
+                state(cx).is_some_and(|state| state.health_checks.is_empty()),
+                "a refused place asks for nothing"
+            );
+        });
+    }
+
     /// §12.2, R1: moving an item takes its own health and usage with it, and leaves
     /// every other slot's records alone — including the one it lands on in the
     /// destination group.
@@ -4402,6 +4447,8 @@ mod tests {
             health_started: false,
             health_queue: VecDeque::new(),
             mode: Mode::Main,
+            #[cfg(test)]
+            health_checks: Vec::new(),
             expand: ExpandContext::current(),
         }
     }
