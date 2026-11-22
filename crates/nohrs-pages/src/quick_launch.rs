@@ -1365,7 +1365,8 @@ pub(crate) fn move_item_to_group(
     item.slot = slot;
     target.items.push(item);
     target.items.sort_by_key(|item| item.slot);
-    // B3: the answer follows the item into its new group and slot.
+    // B3 and S3: the answer and the usage record follow the item into its new
+    // group and slot.
     let from_id = state
         .config
         .groups
@@ -1376,11 +1377,14 @@ pub(crate) fn move_item_to_group(
         .groups
         .get(to_group)
         .map(|group| group.id.clone());
-    if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
+    if let (Some(from_id), Some(to_id)) = (from_id.clone(), to_id.clone()) {
         move_health(state, (&from_id, slot), (&to_id, slot));
     }
     state.touch();
     mark_dirty(cx);
+    if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
+        move_usage(cx, (from_id, slot), (to_id, slot));
+    }
     true
 }
 
@@ -1411,12 +1415,17 @@ pub(crate) fn swap_slots(cx: &mut App, group: usize, from: u32, to: u32) -> bool
         parked.slot = from;
     }
     target.items.sort_by_key(|item| item.slot);
-    // B3: the answers belong to the items, not to the slots.
-    if let Some(group_id) = state.config.groups.get(group).map(|group| group.id.clone()) {
-        move_health(state, (&group_id, from), (&group_id, to));
+    // B3 and S3: the answers and the usage records belong to the items, not to
+    // the slots.
+    let group_id = state.config.groups.get(group).map(|group| group.id.clone());
+    if let Some(group_id) = group_id.as_deref() {
+        move_health(state, (group_id, from), (group_id, to));
     }
     state.touch();
     mark_dirty(cx);
+    if let Some(group_id) = group_id {
+        swap_usage(cx, group_id, from, to);
+    }
     true
 }
 
@@ -1539,6 +1548,67 @@ pub(crate) fn path_is_directory(path: &Path) -> bool {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
     item_for_path(path, slot, path.is_dir())
+}
+
+/// Moves one item's usage record to the place it went, in one transaction
+/// (S3): the old key is removed only when the new one is written.
+fn move_usage(cx: &mut App, from: (String, u32), to: (String, u32)) {
+    let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
+        return;
+    };
+    cx.background_spawn(async move {
+        let (Ok(from_key), Ok(to_key)) = (
+            KvKey::new(KV_NAMESPACE, &usage_key_name(&from.0, from.1)),
+            KvKey::new(KV_NAMESPACE, &usage_key_name(&to.0, to.1)),
+        ) else {
+            return;
+        };
+        let Some(value) = kv.get(&from_key).log_err().flatten() else {
+            return;
+        };
+        kv.batch(vec![
+            KvOp::Put { key: to_key, value },
+            KvOp::Delete { key: from_key },
+        ])
+        .log_err();
+    })
+    .detach();
+}
+
+/// Swaps the usage records of two slots of one group, in one transaction (S3).
+fn swap_usage(cx: &mut App, group_id: String, first: u32, second: u32) {
+    let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
+        return;
+    };
+    cx.background_spawn(async move {
+        let (Ok(first_key), Ok(second_key)) = (
+            KvKey::new(KV_NAMESPACE, &usage_key_name(&group_id, first)),
+            KvKey::new(KV_NAMESPACE, &usage_key_name(&group_id, second)),
+        ) else {
+            return;
+        };
+        let first_value = kv.get(&first_key).log_err().flatten();
+        let second_value = kv.get(&second_key).log_err().flatten();
+        let mut ops = Vec::new();
+        match second_value {
+            Some(value) => ops.push(KvOp::Put {
+                key: first_key.clone(),
+                value,
+            }),
+            None => ops.push(KvOp::Delete {
+                key: first_key.clone(),
+            }),
+        }
+        match first_value {
+            Some(value) => ops.push(KvOp::Put {
+                key: second_key,
+                value,
+            }),
+            None => ops.push(KvOp::Delete { key: second_key }),
+        }
+        kv.batch(ops).log_err();
+    })
+    .detach();
 }
 
 /// The KV key of one item's usage record (§6).
@@ -3198,6 +3268,113 @@ mod tests {
                 "a folder then goes through the IPC instead of the Explorer"
             );
         });
+    }
+
+    /// A store that keeps its keys in memory, for the records S3 migrates.
+    #[derive(Clone, Default)]
+    struct TestStore(std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>);
+
+    impl KvStore for TestStore {
+        fn get(&self, key: &KvKey) -> nohrs_store::Result<Option<Vec<u8>>> {
+            Ok(self
+                .0
+                .lock()
+                .ok()
+                .and_then(|map| map.get(key.as_str()).cloned()))
+        }
+
+        fn put(&self, key: &KvKey, value: &[u8]) -> nohrs_store::Result<()> {
+            if let Ok(mut map) = self.0.lock() {
+                map.insert(key.as_str().to_string(), value.to_vec());
+            }
+            Ok(())
+        }
+
+        fn delete(&self, key: &KvKey) -> nohrs_store::Result<()> {
+            if let Ok(mut map) = self.0.lock() {
+                map.remove(key.as_str());
+            }
+            Ok(())
+        }
+
+        fn list_namespace(&self, _namespace: &str) -> nohrs_store::Result<Vec<(KvKey, Vec<u8>)>> {
+            Ok(Vec::new())
+        }
+
+        fn batch(&self, ops: Vec<KvOp>) -> nohrs_store::Result<()> {
+            if let Ok(mut map) = self.0.lock() {
+                for op in ops {
+                    match op {
+                        KvOp::Put { key, value } => {
+                            map.insert(key.as_str().to_string(), value);
+                        }
+                        KvOp::Delete { key } => {
+                            map.remove(key.as_str());
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// §6, S3: a moved item takes its usage record with it, in one transaction.
+    #[gpui::test]
+    fn a_move_takes_the_usage_record_along(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut source = group_of(0);
+            source.id = "general".to_string();
+            source.items = vec![Item::new(0, "app", "A")];
+            let mut target = group_of(0);
+            target.id = "dev".to_string();
+            install(cx, vec![source, target]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let key = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            store.put(&key, b"count").expect("the test store");
+            assert!(move_item_to_group(cx, 0, 0, 1));
+        });
+        cx.run_until_parked();
+        let moved = KvKey::new(KV_NAMESPACE, "usage_dev_0").expect("valid key");
+        assert_eq!(
+            store.get(&moved).expect("the test store"),
+            Some(b"count".to_vec())
+        );
+        let old = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        assert_eq!(store.get(&old).expect("the test store"), None);
+    }
+
+    /// §6, S3: a swap exchanges the two usage records.
+    #[gpui::test]
+    fn a_swap_exchanges_the_usage_records(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.id = "general".to_string();
+            group.items = vec![Item::new(0, "app", "A"), Item::new(2, "app", "B")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let first = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            let second = KvKey::new(KV_NAMESPACE, "usage_general_2").expect("valid key");
+            store.put(&first, b"um").expect("the test store");
+            store.put(&second, b"dois").expect("the test store");
+            assert!(swap_slots(cx, 0, 0, 2));
+        });
+        cx.run_until_parked();
+        let first = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        let second = KvKey::new(KV_NAMESPACE, "usage_general_2").expect("valid key");
+        assert_eq!(
+            store.get(&first).expect("the test store"),
+            Some(b"dois".to_vec())
+        );
+        assert_eq!(
+            store.get(&second).expect("the test store"),
+            Some(b"um".to_vec())
+        );
     }
 
     /// §11.1: the pin flips `topmost`, marks the state for the throttle, and the window
