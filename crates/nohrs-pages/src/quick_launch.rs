@@ -1052,6 +1052,42 @@ fn move_health(state: &mut QuickLaunch, from: (&str, u32), to: (&str, u32)) {
 fn forget_group_health(state: &mut QuickLaunch, group_id: &str) {
     state.health.retain(|(id, _), _| id != group_id);
 }
+/// Whether the window is pinned (§11.1): the pin button's state and the
+/// `topmost` the configuration already had.
+pub(crate) fn is_locked(cx: &App) -> bool {
+    state(cx).is_some_and(|quick_launch| quick_launch.config.window.topmost)
+}
+
+/// Flips the pin and returns its new state (§11.1).
+///
+/// A read-only file still toggles for this session; only a writable one marks
+/// the state for the throttle, so the pin is kept on the next start too.
+pub(crate) fn toggle_lock(cx: &mut App) -> bool {
+    let Some(quick_launch) = state_mut(cx) else {
+        return false;
+    };
+    quick_launch.config.window.topmost = !quick_launch.config.window.topmost;
+    let locked = quick_launch.config.window.topmost;
+    let save = quick_launch.status.can_save();
+    quick_launch.touch();
+    if save {
+        mark_dirty(cx);
+    }
+    locked
+}
+
+/// Applies `topmost` to the open window, for a hot reload that changed it
+/// (§11.1).
+fn sync_topmost(cx: &mut App, topmost: bool) {
+    let Some(handle) = live_window(cx) else {
+        return;
+    };
+    handle
+        .update(cx, |_root, window, _cx| set_topmost(window, topmost))
+        .log_err();
+    cx.refresh_windows();
+}
+
 /// Whether one item is known to be broken, so the view can grey it (§12.1).
 pub(crate) fn is_missing(cx: &App, group: usize, slot: u32) -> bool {
     health_of(cx, group, slot).is_some_and(|health| health != Health::Ok)
@@ -1128,6 +1164,7 @@ pub(crate) fn item_at(cx: &App, group: usize, slot: u32) -> Option<Item> {
 
 /// Puts `item` in `slot` of `group`, replacing whatever was there: one slot
 /// holds one entry (§12.1).
+#[cfg_attr(not(test), allow(dead_code))] // M3's settings page replaces items too
 pub(crate) fn put_item(cx: &mut App, group: usize, slot: u32, mut item: Item) -> bool {
     if !editable(cx) {
         return false;
@@ -1720,7 +1757,11 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     let groups = quick_launch.config.groups.len();
     quick_launch.group = quick_launch.group.min(groups.saturating_sub(1));
     quick_launch.slot = None;
+    let topmost = quick_launch.config.window.topmost;
     quick_launch.touch();
+    // §11.1: a `topmost` changed in the file reaches the window that is already
+    // open; the pin button reads the same field.
+    sync_topmost(cx, topmost);
     restore_last_group(cx);
     ensure_selection(cx);
     sync_hotkey(cx);
@@ -2332,7 +2373,7 @@ fn hide_native(window: &Window) {
 /// Puts the window above (or among) ordinary windows (§11).
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn set_topmost(window: &Window, topmost: bool) {
+pub(crate) fn set_topmost(window: &Window, topmost: bool) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
@@ -2489,11 +2530,17 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
             if let Some(path) = folder {
                 open_in_explorer(cx, path);
             }
-            if close_after_launch {
+            if hides_after_action(close_after_launch, is_locked(cx)) {
                 hide(cx);
             }
         }
     }
+}
+
+/// Whether what just happened hides the window (§11.1): a pinned window stays
+/// for the launch and the reveal, and only `Esc` and the chord hide it.
+fn hides_after_action(close_after_launch: bool, locked: bool) -> bool {
+    close_after_launch && !locked
 }
 
 /// Whether one outcome counts as a use (§6): starting, activating and opening a
@@ -3112,6 +3159,72 @@ mod tests {
                 Some(Mode::Standalone),
                 "a folder then goes through the IPC instead of the Explorer"
             );
+        });
+    }
+
+    /// §11.1: the pin flips `topmost`, marks the state for the throttle, and the window
+    /// keeps its place until Esc or the chord.
+    #[gpui::test]
+    fn the_pin_flips_topmost_and_asks_for_a_save(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert!(!is_locked(cx));
+            assert!(toggle_lock(cx));
+            assert!(is_locked(cx));
+            assert!(
+                state(cx).is_some_and(|state| state.pending_save),
+                "a writable file saves the pin through the throttle"
+            );
+            assert!(!toggle_lock(cx));
+            assert!(!is_locked(cx));
+        });
+    }
+
+    /// §11.1: a read-only file still pins the window, but never asks for a save.
+    #[gpui::test]
+    fn a_read_only_file_pins_without_saving(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            if let Some(state) = state_mut(cx) {
+                state.status = Status::ReadOnly("schema_version 99".to_string());
+            }
+            assert!(toggle_lock(cx));
+            assert!(is_locked(cx), "the pin works for this session");
+            assert!(
+                state(cx).is_some_and(|state| !state.pending_save),
+                "nothing is written for a file that cannot be written"
+            );
+        });
+    }
+
+    /// §11.1: a pinned window stays after a launch and after a reveal; `Esc` and the
+    /// chord are the ways out.
+    #[test]
+    fn a_pinned_window_does_not_hide_after_an_action() {
+        assert!(hides_after_action(true, false));
+        assert!(!hides_after_action(true, true));
+        assert!(!hides_after_action(false, false));
+    }
+
+    /// §11.1: a hot reload that changes `topmost` updates the state the button reads.
+    #[gpui::test]
+    fn a_reload_changes_the_pin(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert!(!is_locked(cx));
+            let mut config = QuickLaunchConfig::default();
+            config.window.topmost = true;
+            apply_loaded(
+                cx,
+                FileRead {
+                    hash: 12345,
+                    parsed: Some(Ok(Parsed {
+                        config,
+                        warnings: Vec::new(),
+                    })),
+                },
+            );
+            assert!(is_locked(cx), "the button follows the file");
         });
     }
 

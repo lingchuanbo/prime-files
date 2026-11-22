@@ -2440,4 +2440,11 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Se eliminarán el grupo y sus elementos.",
     ),
     ("Procurar…", "Browse…", "Examinar…"),
+    (
+        "Fixar: a janela não se esconde e fica na frente",
+        "Pin: the window stays visible and on top",
+        "Fijar: la ventana no se oculta y queda delante",
+    ),
+    ("Desafixar", "Unpin", "Desfijar"),
+    ("(não será salvo)", "(not saved)", "(no se guardará)"),
 ];

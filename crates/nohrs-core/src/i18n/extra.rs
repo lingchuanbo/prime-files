@@ -7564,4 +7564,37 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "浏览…",
         ],
     ),
+    (
+        "Fixar: a janela não se esconde e fica na frente",
+        [
+            "Épingler : la fenêtre ne se masque pas et reste au premier plan",
+            "Anheften: Das Fenster bleibt sichtbar und im Vordergrund",
+            "Fissa: la finestra non si nasconde e resta in primo piano",
+            "Закрепить: окно не скрывается и остаётся поверх",
+            "固定: ウィンドウは非表示にならず、最前面に表示されます",
+            "锁定：窗口不会自动隐藏，并保持在最前",
+        ],
+    ),
+    (
+        "Desafixar",
+        [
+            "Détacher",
+            "Lösen",
+            "Sblocca",
+            "Открепить",
+            "固定を解除",
+            "解除锁定",
+        ],
+    ),
+    (
+        "(não será salvo)",
+        [
+            "(non enregistré)",
+            "(wird nicht gespeichert)",
+            "(non verrà salvato)",
+            "(не сохранится)",
+            "（保存されません）",
+            "（不会保存）",
+        ],
+    ),
 ];

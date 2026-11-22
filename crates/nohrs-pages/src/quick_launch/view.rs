@@ -505,6 +505,14 @@ impl QuickLaunchView {
         .detach();
     }
 
+    /// Flips the pin: applies it to the window now and saves it unless the file
+    /// is read-only (§11.1).
+    fn toggle_lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locked = super::toggle_lock(cx);
+        super::set_topmost(window, locked);
+        cx.notify();
+    }
+
     /// A click selects the cell and does what its modifiers ask for (§12.2).
     fn clicked(&mut self, slot: u32, kind: super::ClickKind, cx: &mut Context<Self>) {
         if let Some(quick_launch) = super::state_mut(cx) {
@@ -512,10 +520,12 @@ impl QuickLaunchView {
         }
         match kind {
             super::ClickKind::Reveal => {
-                // The Explorer takes the foreground; this window goes away the
-                // way it does after a launch.
+                // The Explorer takes the foreground; this window goes away the way
+                // it does after a launch, unless it is pinned (§11.1).
                 super::reveal_item(cx, slot);
-                super::hide(cx);
+                if !super::is_locked(cx) {
+                    super::hide(cx);
+                }
             }
             kind => super::activate_with(cx, slot, kind),
         }
@@ -670,7 +680,7 @@ impl Render for QuickLaunchView {
 
         let filter_text = super::filter(cx).to_string();
         let filtered_count = drawn.len();
-        let title_bar = self.render_title_bar();
+        let title_bar = self.render_title_bar(editable, cx);
         let group_bar = render_group_bar(&groups, self.renaming.as_ref(), editable, cx);
         let entity = cx.entity().downgrade();
         let missing: Rc<HashMap<u32, bool>> = Rc::new(
@@ -807,7 +817,7 @@ impl Render for QuickLaunchView {
 
 impl QuickLaunchView {
     /// The title bar: the drag area, the title, and the "⋯" menu (§15.0).
-    fn render_title_bar(&self) -> AnyElement {
+    fn render_title_bar(&mut self, editable: bool, cx: &mut Context<Self>) -> AnyElement {
         div()
             .h(px(TITLE_BAR_HEIGHT))
             .flex_shrink_0()
@@ -841,6 +851,7 @@ impl QuickLaunchView {
                     .flex()
                     .items_center()
                     .pr(px(6.0))
+                    .child(lock_button(editable, cx))
                     .child(
                         Button::new("quick-launch-menu")
                             .icon(Icon::new(IconName::Ellipsis).size_4())
@@ -866,6 +877,32 @@ impl QuickLaunchView {
             )
             .into_any_element()
     }
+}
+
+/// The pin: keeps the window on top and out of its own hiding rules (§11.1).
+fn lock_button(editable: bool, cx: &mut Context<QuickLaunchView>) -> AnyElement {
+    let locked = super::is_locked(cx);
+    // The tooltip says what a click does, and warns that a read-only file keeps
+    // the change only for this session.
+    let mut tooltip = if locked {
+        nohrs_core::t!("Desafixar").to_string()
+    } else {
+        nohrs_core::t!("Fixar: a janela não se esconde e fica na frente").to_string()
+    };
+    if !editable {
+        tooltip.push(' ');
+        tooltip.push_str(nohrs_core::t!("(não será salvo)"));
+    }
+    Button::new("quick-launch-lock")
+        .icon(Icon::empty().path("icons/pin.svg").size_4())
+        .tooltip(tooltip)
+        .rounded(ButtonRounded::Large)
+        .with_variant(ButtonVariant::Ghost)
+        .when(locked, |button| button.text_color(rgb(theme::accent())))
+        .on_click(cx.listener(move |view, _, window, cx| {
+            view.toggle_lock(window, cx);
+        }))
+        .into_any_element()
 }
 
 /// One item as it is drawn: the entry and the picture it got, if any.
