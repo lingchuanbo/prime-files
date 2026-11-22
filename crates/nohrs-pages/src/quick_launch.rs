@@ -988,6 +988,13 @@ fn start_health_check(cx: &mut App) {
 
 /// Records one answer, so the view can grey the item (§12.1).
 fn apply_health(cx: &mut App, group: String, slot: u32, health: Health) {
+    tracing::debug!(
+        target: "quick_launch",
+        group = %group,
+        slot,
+        ?health,
+        "health checked"
+    );
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
@@ -1386,6 +1393,11 @@ fn delete_usage(cx: &mut App, entries: Vec<(String, u32)>) {
     if ops.is_empty() {
         return;
     }
+    tracing::debug!(
+        target: "quick_launch",
+        keys = ops.len(),
+        "deleting the usage records of removed items"
+    );
     cx.background_spawn(async move {
         kv.batch(ops).log_err();
     })
