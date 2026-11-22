@@ -765,6 +765,19 @@ impl Restored {
     }
 }
 
+/// Which process the quick launch is running in (§15.1).
+///
+/// The window is the same in both; what changes is where a folder goes and
+/// how a chord the main program already holds is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Beside the main window and its Explorer (§15.0).
+    Main,
+    /// Alone, in `LumaFiles launcher`: no Explorer, no tray, no `state.redb`
+    /// (§15.1).
+    Standalone,
+}
+
 /// What the binary injects so the window can own a global chord without this
 /// crate depending on the launcher crate (§3.4, §10).
 ///
@@ -831,6 +844,8 @@ pub(crate) struct QuickLaunch {
     health: HashMap<(String, u32), Health>,
     /// Whether the health pass has been scheduled for this session.
     health_started: bool,
+    /// Which process this is (§15.1).
+    mode: Mode,
     /// The items still to check (§12.1).
     health_queue: VecDeque<(String, u32, Item)>,
 }
@@ -1381,7 +1396,7 @@ fn delete_usage(cx: &mut App, entries: Vec<(String, u32)>) {
 ///
 /// Called once from the binary, before the first window is drawn. The file is
 /// read on a background task, so nothing here waits on the disk (§5.1).
-pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
+pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode: Mode) {
     if state(cx).is_some() {
         return;
     }
@@ -1432,6 +1447,7 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
         health: HashMap::new(),
         health_started: false,
         health_queue: VecDeque::new(),
+        mode,
     });
 
     // One task answers everything the worker says, for the process's lifetime.
@@ -1699,6 +1715,21 @@ fn sync_hotkey(cx: &mut App) {
             tracing::info!(target: "quick_launch", "listening on {wanted}");
         }
         Err(error) => {
+            // §15.1: the same user may run the main program and the resident
+            // one; the chord the first registered is the one that answers, and the
+            // second says so at info level only.
+            if crate::ipc::is_running() {
+                tracing::info!(
+                    target: "quick_launch",
+                    "the hotkey {wanted:?} is held by the running LumaFiles: {error}"
+                );
+                if let Some(quick_launch) = state_mut(cx) {
+                    quick_launch.hotkey = None;
+                    quick_launch.hotkey_text = None;
+                    quick_launch.hotkey_error = None;
+                }
+                return;
+            }
             tracing::warn!(target: "quick_launch", "the hotkey {wanted:?} is unavailable: {error}");
             // The chord that was working goes back: a typo in the file must not
             // leave the window with no way to be summoned (§10).
@@ -2329,21 +2360,9 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                 record_usage(cx, &group, slot);
             }
             if let Some(path) = folder {
-                // The main window may be hidden in the tray, and Q5 makes that
-                // the normal case: a tab opened in a hidden window is invisible.
-                // Asking the tray to show it is the same request its own menu
-                // sends, and it is handled by the existing publisher loop — the
-                // quick launch does not touch the tray state itself (B2).
-                crate::tray::request_show();
-                if !crate::explorer_link::request(path.clone()) {
-                    // M1 has no fallback: the main process is always there when
-                    // this window is up, so a refusal means it is shutting down.
-                    // The resident-mode fallback is §15.1's, in M2.
-                    tracing::info!(
-                        target: "quick_launch",
-                        "no LumaFiles window to open {} in",
-                        path.display()
-                    );
+                match state(cx).map_or(Mode::Main, |quick_launch| quick_launch.mode) {
+                    Mode::Main => open_folder_in_main_window(path),
+                    Mode::Standalone => open_folder_without_explorer(cx, path),
                 }
             }
             if close_after_launch {
@@ -2360,6 +2379,52 @@ fn counts_as_usage(outcome: &std::result::Result<LaunchOutcome, LaunchError>) ->
         outcome,
         Ok(LaunchOutcome::Started | LaunchOutcome::Activated | LaunchOutcome::OpenFolder(_))
     )
+}
+
+/// Opens a folder in this process's Explorer (§15.0): the main window
+/// may be hidden in the tray, and Q5 makes that the normal case, so the tray
+/// is asked to show it first.
+fn open_folder_in_main_window(path: PathBuf) {
+    // The same request the tray's own menu sends, handled by the existing
+    // publisher loop; the quick launch does not touch the tray state itself.
+    crate::tray::request_show();
+    if !crate::explorer_link::request(path.clone()) {
+        tracing::info!(
+            target: "quick_launch",
+            "no LumaFiles window to open {} in",
+            path.display()
+        );
+    }
+}
+
+/// Opens a folder with no Explorer in this process (§15.1): the main
+/// program takes it through the IPC, and when it is not running a copy of this
+/// executable is started with the path, which opens it the way the shell does.
+///
+/// The spawn happens on a background task: a process call on the foreground is
+/// what §18 forbids.
+fn open_folder_without_explorer(cx: &mut App, path: PathBuf) {
+    cx.background_spawn(async move {
+        if crate::ipc::request_open(&path) {
+            return;
+        }
+        let Some(executable) = std::env::current_exe().ok() else {
+            tracing::warn!(
+                target: "quick_launch",
+                "no executable to open {} with",
+                path.display()
+            );
+            return;
+        };
+        if let Err(error) = std::process::Command::new(executable).arg(&path).spawn() {
+            tracing::warn!(
+                target: "quick_launch",
+                "could not start LumaFiles for {}: {error}",
+                path.display()
+            );
+        }
+    })
+    .detach();
 }
 
 /// Tells the user that one item would not start, in one line (§8.5).
@@ -2850,6 +2915,24 @@ mod tests {
         assert!(!counts_as_usage(&Err(LaunchError::NotFound(
             std::path::PathBuf::from("C:\\nao\\existe.exe")
         ))));
+    }
+
+    /// §15.1: the resident process and the main one differ in where a folder goes,
+    /// which is the only thing the mode changes.
+    #[gpui::test]
+    fn the_mode_says_which_process_this_is(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert_eq!(state(cx).map(|state| state.mode), Some(Mode::Main));
+            if let Some(state) = state_mut(cx) {
+                state.mode = Mode::Standalone;
+            }
+            assert_eq!(
+                state(cx).map(|state| state.mode),
+                Some(Mode::Standalone),
+                "a folder then goes through the IPC instead of the Explorer"
+            );
+        });
     }
 
     /// §12.1: a broken item is greyed by the view, and one that is fine is
@@ -3550,6 +3633,7 @@ mod tests {
             health: HashMap::new(),
             health_started: false,
             health_queue: VecDeque::new(),
+            mode: Mode::Main,
         }
     }
 

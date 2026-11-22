@@ -91,6 +91,15 @@ impl NohrsApp {
                 // Resident mode: nohrs is a background process whose only job is
                 // to answer the global hotkey, so it must outlive each dismissal
                 // of the launcher window.
+                // §15.1: the quick launch runs here too, with the same
+                // initialization function but no store: redb is a single-process
+                // lock, and the main program must keep its tabs and session.
+                nohrs_pages::quick_launch::init(
+                    app,
+                    None,
+                    QUICK_LAUNCH_HOTKEY,
+                    nohrs_pages::quick_launch::Mode::Standalone,
+                );
                 if let Err(error) = nohrs_launcher::open_keep_alive_window(app) {
                     tracing::error!("failed to open the keep-alive window: {error}");
                 }
@@ -118,7 +127,12 @@ impl NohrsApp {
             // summons it (docs/QuickDock-… §5, §10, §15.0). The store is shared
             // with the tabs: the window position and the last group live there
             // (§6).
-            nohrs_pages::quick_launch::init(app, store.clone(), QUICK_LAUNCH_HOTKEY);
+            nohrs_pages::quick_launch::init(
+                app,
+                store.clone(),
+                QUICK_LAUNCH_HOTKEY,
+                nohrs_pages::quick_launch::Mode::Main,
+            );
 
             // The trash ledger, on the platforms whose OS trash records nothing
             // (macOS). Without it the explorer's Delete is a one-way door: the
