@@ -633,6 +633,14 @@ mod tests {
         assert!(found, "cmd.exe should be running");
     }
 
+    /// §9, B4: a path the Shell's buffer cannot hold is refused instead of
+    /// being truncated into an unterminated buffer.
+    #[test]
+    fn an_icon_path_of_300_characters_is_refused() {
+        let long = format!("C:\\{}.exe", "a".repeat(297));
+        assert!(long.chars().count() >= 300);
+        assert_eq!(super::indexed_icon(&long, 0, 32), None);
+    }
     #[test]
     #[ignore = "starts a real process; run by hand for the PR"]
     fn a_program_that_is_not_there_is_reported_as_not_found() {
