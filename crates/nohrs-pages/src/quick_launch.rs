@@ -487,6 +487,15 @@ fn icon_image(context: &ExpandContext, raw: &str, edge: u32) -> Option<Arc<Rende
             return None;
         }
     };
+    // `"exe,索引"` names an icon inside a program rather than the program's
+    // first icon, and the Shell's index-free extraction cannot express it (§9).
+    if let Some((program, index)) = split_icon_index(raw)
+        && let Ok(program) = nohrs_services::launch::expand(program, context)
+        && let Some((pixels, width, height)) =
+            nohrs_services::launch::indexed_icon(&program.to_string_lossy(), index, edge)
+    {
+        return thumbnails::render_image(width, height, pixels).map(Arc::new);
+    }
     // A custom `.png` is the picture itself; anything else asks the Shell, which
     // knows `.ico`, programs and folders (§9).
     if file
@@ -507,6 +516,20 @@ fn icon_image(context: &ExpandContext, raw: &str, edge: u32) -> Option<Arc<Rende
         write_icon_cache(&cache, &bytes);
     }
     Some(Arc::new(image))
+}
+
+/// Splits `"program.exe,3"` into the program and the icon index (§9).
+///
+/// A path may itself contain a comma, so the split is the last one and only
+/// counts when what follows it is a number.
+fn split_icon_index(raw: &str) -> Option<(&str, u32)> {
+    let (path, index) = raw.rsplit_once(',')?;
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let index = index.trim().parse::<u32>().ok()?;
+    Some((path, index))
 }
 
 /// Writes one cached icon, and prunes the cache when it grew too large.
@@ -2594,6 +2617,23 @@ mod tests {
             .unwrap_or_default();
         cx.set_global(state);
         slots
+    }
+
+    /// §9: a custom icon may name an index inside a program.
+    #[test]
+    fn a_custom_icon_can_name_an_index_inside_a_program() {
+        assert_eq!(
+            split_icon_index("C:\\Windows\\System32\\shell32.dll,3"),
+            Some(("C:\\Windows\\System32\\shell32.dll", 3))
+        );
+        assert_eq!(split_icon_index("icone.png"), None);
+        assert_eq!(split_icon_index("programa.exe,"), None);
+        assert_eq!(split_icon_index(",4"), None);
+        assert_eq!(
+            split_icon_index("C:\\pasta,com,9"),
+            Some(("C:\\pasta,com", 9)),
+            "the last comma is the separator"
+        );
     }
 
     /// §12.3: a group gets the first free `group_<n>` id.

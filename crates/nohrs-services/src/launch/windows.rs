@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 use nohrs_core::config::quick_launch::Item;
 use nohrs_core::telemetry::LogErr;
 use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HWND, LPARAM, MAX_PATH};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+    DeleteDC, DeleteObject, HGDIOBJ, SelectObject,
+};
 use windows::Win32::System::Diagnostics::Debug::{
     FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
 };
@@ -30,16 +34,190 @@ use windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
-    SwitchToThisWindow,
+    BringWindowToTop, DI_NORMAL, DestroyIcon, DrawIconEx, EnumWindows, GW_OWNER, GetIconInfo,
+    GetWindow, GetWindowThreadProcessId, HICON, ICONINFO, IsIconic, IsWindowVisible,
+    LR_DEFAULTCOLOR, PrivateExtractIconsW, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow,
+    ShowWindow, SwitchToThisWindow,
 };
 use windows::core::{BOOL, Error as WindowsError, PCWSTR, PWSTR};
 
 use crate::launch::{
-    Health, KIND_APP, KIND_URL, LaunchAction, LaunchError, LaunchMode, LaunchOutcome,
-    LaunchRequest, expand, item_path, validate_url,
+    ExpandContext, Health, KIND_APP, KIND_FILE, KIND_URL, LaunchAction, LaunchError, LaunchMode,
+    LaunchOutcome, LaunchRequest, expand, item_path, validate_url,
 };
+
+/// A document (`file`): the Shell picks the program and the verb is left to it
+/// (§8.2). No activation: a document is never "already running".
+pub(crate) struct FileAction;
+
+impl LaunchAction for FileAction {
+    fn kind(&self) -> &str {
+        KIND_FILE
+    }
+
+    fn health(&self, item: &Item, context: &ExpandContext) -> Health {
+        match item_path(item, context) {
+            Ok(path) if path.is_file() => Health::Ok,
+            Ok(_) => Health::Missing,
+            Err(LaunchError::Expand(error)) => Health::Invalid(error.to_string()),
+            Err(error) => Health::Invalid(error.to_string()),
+        }
+    }
+
+    fn launch(&self, item: &Item, request: &LaunchRequest) -> Result<LaunchOutcome, LaunchError> {
+        let path = item_path(item, &request.expand)?;
+        if !path.is_file() {
+            return Err(LaunchError::NotFound(path));
+        }
+        let directory = match item.cwd.as_deref().map(str::trim) {
+            Some(raw) if !raw.is_empty() => Some(expand(raw, &request.expand)?),
+            _ => path.parent().map(Path::to_path_buf),
+        };
+        // `administrative` false leaves `lpVerb` null, which is what §8.2 asks
+        // for: the Shell uses the type's default verb.
+        start(
+            &path.to_string_lossy(),
+            item.args.as_deref(),
+            directory.as_deref(),
+            false,
+        )
+    }
+}
+
+/// The icon at `index` inside `path` (`"exe,索引"`, §9).
+///
+/// The Shell extracts it at the size the window wants; the pixels come out of a
+/// top-down 32-bit DIB as the premultiplied BGRA the icon path expects.
+#[allow(unsafe_code)] // the Shell's icon extraction and GDI have no safe bindings
+pub fn indexed_icon(path: &str, index: u32, edge: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let edge_px = i32::try_from(edge).ok()?;
+    let index = i32::try_from(index).ok()?;
+    // The binding takes the file name as the classic fixed 260-wide buffer.
+    let mut name = [0u16; 260];
+    for (target, source) in name.iter_mut().zip(path.encode_utf16()) {
+        *target = source;
+    }
+    let mut icon = HICON::default();
+    let mut identifier = 0u32;
+    // SAFETY: a buffer this call owns and the icon slot it fills; the icon it
+    // returns is destroyed below.
+    let extracted = unsafe {
+        PrivateExtractIconsW(
+            &name,
+            index,
+            edge_px,
+            edge_px,
+            Some(core::slice::from_mut(&mut icon)),
+            Some(&raw mut identifier),
+            LR_DEFAULTCOLOR.0,
+        )
+    };
+    if extracted == 0 || icon.is_invalid() {
+        return None;
+    }
+    // SAFETY: the icon came from the extraction above and is ours to destroy.
+    let pixels = unsafe { pixels_of_icon(icon, edge_px) };
+    let _ = unsafe { DestroyIcon(icon) };
+    pixels
+}
+
+/// Draws one icon into a top-down 32-bit DIB and copies the pixels out.
+///
+/// Unsafe because GDI has no safe bindings; every handle created here is
+/// released before the function returns.
+#[allow(unsafe_code)]
+unsafe fn pixels_of_icon(icon: HICON, edge: i32) -> Option<(Vec<u8>, u32, u32)> {
+    let mut information = ICONINFO::default();
+    // SAFETY: the icon is valid and the structure is this call's output.
+    unsafe { GetIconInfo(icon, &mut information) }.ok()?;
+    let coloured = information.hbmColor;
+    let mask = information.hbmMask;
+
+    // SAFETY: a screen-compatible DC with no bitmap of its own, deleted below.
+    let device = unsafe { CreateCompatibleDC(None) };
+    if device.is_invalid() {
+        // SAFETY: both bitmaps were made by `GetIconInfo`.
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(coloured.0));
+            let _ = DeleteObject(HGDIOBJ(mask.0));
+        }
+        return None;
+    }
+    let header = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: u32::try_from(core::mem::size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
+            biWidth: edge,
+            // Top-down, so the bytes come out in reading order.
+            biHeight: -edge,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..BITMAPINFOHEADER::default()
+        },
+        ..BITMAPINFO::default()
+    };
+    let mut bits: *mut core::ffi::c_void = core::ptr::null_mut();
+    // SAFETY: `bits` is the out parameter of this call and is valid while the
+    // bitmap lives.
+    let bitmap = unsafe {
+        CreateDIBSection(
+            Some(device),
+            &header,
+            DIB_RGB_COLORS,
+            &raw mut bits,
+            None,
+            0,
+        )
+    };
+    let Some(bitmap) = bitmap.ok() else {
+        // SAFETY: the handles were made by this function or by `GetIconInfo`.
+        unsafe {
+            let _ = DeleteDC(device);
+            let _ = DeleteObject(HGDIOBJ(coloured.0));
+            let _ = DeleteObject(HGDIOBJ(mask.0));
+        }
+        return None;
+    };
+
+    // SAFETY: every handle belongs to this function; the old object is put back
+    // before the DC goes away, and the pixels are copied before the bitmap is
+    // deleted.
+    let pixels = unsafe {
+        let previous = SelectObject(device, HGDIOBJ(bitmap.0));
+        let _ = DrawIconEx(device, 0, 0, icon, edge, edge, 0, None, DI_NORMAL);
+        SelectObject(device, previous);
+        let pixels = match (usize::try_from(edge), bits.is_null()) {
+            (Ok(edge), false) => {
+                let length = edge.saturating_mul(edge).saturating_mul(4);
+                Some(core::slice::from_raw_parts(bits as *const u8, length).to_vec())
+            }
+            _ => None,
+        };
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(device);
+        let _ = DeleteObject(HGDIOBJ(coloured.0));
+        let _ = DeleteObject(HGDIOBJ(mask.0));
+        pixels
+    };
+
+    Some((
+        premultiply_bgra(pixels?),
+        u32::try_from(edge).ok()?,
+        u32::try_from(edge).ok()?,
+    ))
+}
+
+/// The DIB gives straight BGRA; the icon path works in premultiplied values.
+fn premultiply_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        let scale = |channel: u8| ((u16::from(channel) * alpha + 127) / 255) as u8;
+        pixel[0] = scale(pixel[0]);
+        pixel[1] = scale(pixel[1]);
+        pixel[2] = scale(pixel[2]);
+    }
+    pixels
+}
 
 /// An application or shortcut, started through the Shell.
 pub(crate) struct AppAction;

@@ -64,6 +64,8 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # The icon at an index inside a program: GetDIBits needs GDI (§9).
+    "Win32_Graphics_Gdi",
 ] }
 
 [dev-dependencies]

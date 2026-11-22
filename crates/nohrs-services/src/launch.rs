@@ -34,7 +34,7 @@ pub const KIND_FILE: &str = "file";
 pub const KIND_URL: &str = "url";
 
 /// The kind names this milestone implements.
-pub const BUILTIN_KINDS: [&str; 3] = [KIND_APP, KIND_FOLDER, KIND_URL];
+pub const BUILTIN_KINDS: [&str; 4] = [KIND_APP, KIND_FOLDER, KIND_URL, KIND_FILE];
 
 /// Why a stored path could not be turned into a real one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -318,8 +318,12 @@ impl LaunchRegistry {
     /// The registry with this milestone's kinds registered.
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
-        let builtins: Vec<Box<dyn LaunchAction>> =
-            vec![Box::new(FolderAction), url_action(), app_action()];
+        let builtins: Vec<Box<dyn LaunchAction>> = vec![
+            Box::new(FolderAction),
+            url_action(),
+            app_action(),
+            file_action(),
+        ];
         for action in builtins {
             // The kinds are distinct constants; a duplicate would be a mistake
             // in this file, and is reported rather than silently replacing.
@@ -388,6 +392,23 @@ fn item_path(item: &Item, context: &ExpandContext) -> Result<PathBuf, LaunchErro
     }
 }
 
+/// The icon at `index` inside `path` (`"exe,索引"`, §9), as premultiplied BGRA
+/// and its width and height.
+///
+/// `None` on a platform without the Shell, and for a path or index the Shell
+/// cannot read.
+pub fn indexed_icon(path: &str, index: u32, edge: u32) -> Option<(Vec<u8>, u32, u32)> {
+    #[cfg(windows)]
+    {
+        windows::indexed_icon(path, index, edge)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, index, edge);
+        None
+    }
+}
+
 /// A folder, handed back to the pages layer to open as a tab (§8.1).
 ///
 /// Platform-independent on purpose: it touches no system API, so the same code
@@ -425,6 +446,16 @@ fn app_action() -> Box<dyn LaunchAction> {
 #[cfg(not(windows))]
 fn app_action() -> Box<dyn LaunchAction> {
     Box::new(UnsupportedAction { kind: KIND_APP })
+}
+
+#[cfg(windows)]
+fn file_action() -> Box<dyn LaunchAction> {
+    Box::new(windows::FileAction)
+}
+
+#[cfg(not(windows))]
+fn file_action() -> Box<dyn LaunchAction> {
+    Box::new(UnsupportedAction { kind: KIND_FILE })
 }
 
 #[cfg(windows)]
