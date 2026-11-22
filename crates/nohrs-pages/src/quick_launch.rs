@@ -846,6 +846,9 @@ pub(crate) struct QuickLaunch {
     health_started: bool,
     /// Which process this is (§15.1).
     mode: Mode,
+    /// The variables a path may contain (§7), built once: reading `config.toml` for them on the foreground is
+    /// what S2 removed.
+    expand: ExpandContext,
     /// The items still to check (§12.1).
     health_queue: VecDeque<(String, u32, Item)>,
 }
@@ -1629,6 +1632,7 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         health_started: false,
         health_queue: VecDeque::new(),
         mode,
+        expand: ExpandContext::current(),
     });
 
     // One task answers everything the worker says, for the process's lifetime.
@@ -2807,11 +2811,11 @@ pub(crate) fn copy_text(cx: &App, slot: u32) -> Option<String> {
     )
 }
 
-/// One item's path with the variables of §7 resolved.
-fn expanded_path(_cx: &App, item: &Item) -> Option<PathBuf> {
-    let context = ExpandContext::current();
+/// One item's path with the variables of §7 resolved, using the context built at init (S2).
+fn expanded_path(cx: &App, item: &Item) -> Option<PathBuf> {
+    let state = state(cx)?;
     let raw = item.path.as_deref()?.trim();
-    nohrs_services::launch::expand(raw, &context)
+    nohrs_services::launch::expand(raw, &state.expand)
         .ok()
         .map(PathBuf::from)
 }
@@ -3259,6 +3263,28 @@ mod tests {
                 },
             );
             assert!(is_locked(cx), "the button follows the file");
+        });
+    }
+
+    /// §7, S2: the context is state, not something the foreground reads a file for.
+    #[gpui::test]
+    fn the_expansion_context_is_built_once(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(0)]);
+            let stored = state(cx).map(|state| state.expand.program_dir.clone());
+            assert_eq!(
+                stored,
+                Some(ExpandContext::current().program_dir),
+                "the state holds the context every path expansion uses"
+            );
+            let mut item = Item::new(0, "folder", "Pasta");
+            item.path = Some("{luma}".to_string());
+            let expanded = expanded_path(cx, &item);
+            assert_eq!(
+                expanded,
+                stored.map(std::path::PathBuf::from),
+                "{{luma}} expands from the stored context"
+            );
         });
     }
 
@@ -4050,6 +4076,7 @@ mod tests {
             health_started: false,
             health_queue: VecDeque::new(),
             mode: Mode::Main,
+            expand: ExpandContext::current(),
         }
     }
 
