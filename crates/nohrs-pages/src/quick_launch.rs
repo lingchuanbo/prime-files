@@ -2349,7 +2349,7 @@ mod tests {
 
     /// R1: the KV read can finish after the window has drawn. The restored group
     /// must then be the one the bar shows, the one whose items the tiles draw,
-    /// and the one the selection points into ??which needs the frame invalidated
+    /// and the one the selection points into — which needs the frame invalidated
     /// and the old group's slot dropped.
     #[gpui::test]
     fn a_group_restored_after_the_first_frame_is_the_one_shown(cx: &mut gpui::TestAppContext) {

@@ -253,4 +253,4 @@ cargo doc --no-deps --all-features --workspace
    [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
    ```
 
-   同じ理由で、`powershell` (5.1) と `pwsh` (7+) を取り違えないこと。この環境の `pwsh` ツールは 5.1 で動いている。
+   同じ理由で、`powershell` (5.1) と `pwsh` (7+) を取り違えないこと。
