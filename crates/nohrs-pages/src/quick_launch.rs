@@ -44,9 +44,9 @@ use nohrs_core::config::quick_launch::{
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::launch::LaunchRegistry;
 use nohrs_services::launch::{
-    ExpandContext, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
+    ExpandContext, Health, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
 };
-use nohrs_store::{KvKey, KvStore};
+use nohrs_store::{KvKey, KvOp, KvStore};
 use serde::{Deserialize, Serialize};
 
 use crate::explorer::thumbnails;
@@ -745,6 +745,13 @@ pub(crate) struct QuickLaunch {
     revision: u64,
     /// The item a launch was asked for; counted only once it started (S7).
     pending_usage: Option<(String, u32)>,
+    /// What the user typed to filter the current group (§12.2, M2).
+    filter: String,
+    /// The health of each item, by group id and slot (§12.1, M2). Runtime state,
+    /// never written to the file.
+    health: HashMap<(String, u32), Health>,
+    /// Whether the health pass has been scheduled for this session.
+    health_started: bool,
 }
 
 impl Global for QuickLaunch {}
@@ -791,6 +798,368 @@ fn state(cx: &App) -> Option<&QuickLaunch> {
 fn state_mut(cx: &mut App) -> Option<&mut QuickLaunch> {
     cx.has_global::<QuickLaunch>()
         .then(|| cx.global_mut::<QuickLaunch>())
+}
+
+/// Whether editing is allowed: the file parsed and may be written back (§5.2).
+pub(crate) fn editable(cx: &App) -> bool {
+    state(cx).is_some_and(|state| state.status.can_save())
+}
+
+/// What the user typed to filter the current group, empty when not filtering.
+pub(crate) fn filter(cx: &App) -> &str {
+    state(cx)
+        .map(|state| state.filter.as_str())
+        .unwrap_or_default()
+}
+
+/// Replaces the filter text and drops the keyboard slot: the old slot may not be
+/// on screen any more (§12.2).
+pub(crate) fn set_filter(cx: &mut App, text: String) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    state.filter = text;
+    state.slot = None;
+    state.touch();
+}
+
+/// The health of one item, when it has been checked (§12.1).
+pub(crate) fn health_of(cx: &App, group: usize, slot: u32) -> Option<Health> {
+    let state = state(cx)?;
+    let id = state.config.groups.get(group)?.id.as_str();
+    state.health.get(&(id.to_string(), slot)).cloned()
+}
+
+/// Whether one item is known to be broken, so the view can grey it (§12.1).
+pub(crate) fn is_missing(cx: &App, group: usize, slot: u32) -> bool {
+    health_of(cx, group, slot).is_some_and(|health| health != Health::Ok)
+}
+
+/// The item in `slot` of the group at `group`, if the slot is taken.
+pub(crate) fn item_at(cx: &App, group: usize, slot: u32) -> Option<Item> {
+    let state = state(cx)?;
+    state
+        .config
+        .groups
+        .get(group)?
+        .items
+        .iter()
+        .find(|item| item.slot == slot)
+        .cloned()
+}
+
+/// Puts `item` in `slot` of `group`, replacing whatever was there: one slot
+/// holds one entry (§12.1).
+pub(crate) fn put_item(cx: &mut App, group: usize, slot: u32, mut item: Item) -> bool {
+    if !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    item.slot = slot;
+    target.items.retain(|existing| existing.slot != slot);
+    target.items.push(item);
+    target.items.sort_by_key(|item| item.slot);
+    state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// Applies the four fields the edit dialog offers (§12.3): name, path,
+/// arguments and "run as administrator".
+pub(crate) fn edit_item(
+    cx: &mut App,
+    group: usize,
+    slot: u32,
+    name: &str,
+    path: &str,
+    args: &str,
+    admin: bool,
+) -> bool {
+    let name = name.trim();
+    let path = path.trim();
+    // An item without a name would be an empty tile, and one without a path
+    // could never start: the dialog treats both as "cancel".
+    if name.is_empty() || path.is_empty() || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
+        return false;
+    };
+    item.name = name.to_string();
+    item.path = Some(path.to_string());
+    let args = args.trim();
+    item.args = (!args.is_empty()).then(|| args.to_string());
+    item.admin = admin;
+    state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// Adds a group at the end and makes it the current one (§12.3). The caller
+/// starts the inline rename the specification asks for.
+pub(crate) fn add_group(cx: &mut App) -> Option<usize> {
+    if !editable(cx) {
+        return None;
+    }
+    let state = state_mut(cx)?;
+    let id = next_group_id(&state.config);
+    let index = state.config.groups.len();
+    state.config.groups.push(Group {
+        id,
+        name: nohrs_core::t!("Novo grupo").to_string(),
+        items: Vec::new(),
+    });
+    state.group = index;
+    state.slot = None;
+    state.touch();
+    mark_dirty(cx);
+    Some(index)
+}
+
+/// Renames a group; an empty name cancels (§12.3).
+pub(crate) fn rename_group(cx: &mut App, index: usize, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(group) = state.config.groups.get_mut(index) else {
+        return false;
+    };
+    group.name = name.to_string();
+    state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// Removes a group and its usage records. The last group cannot be removed
+/// (§12.3), and neither can a group with items in it unless `force`.
+pub(crate) fn delete_group(cx: &mut App, index: usize, force: bool) -> bool {
+    if !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    if state.config.groups.len() <= 1 {
+        return false;
+    }
+    let removed: Vec<(String, u32)> = {
+        let Some(group) = state.config.groups.get(index) else {
+            return false;
+        };
+        if !force && !group.items.is_empty() {
+            return false;
+        }
+        let id = group.id.clone();
+        group
+            .items
+            .iter()
+            .map(|item| (id.clone(), item.slot))
+            .collect()
+    };
+    state.config.groups.remove(index);
+    state.group = state.group.min(state.config.groups.len().saturating_sub(1));
+    state.slot = None;
+    state.touch();
+    mark_dirty(cx);
+    delete_usage(cx, removed);
+    true
+}
+
+/// Removes one item and the usage record it left behind (§6, §12.3).
+pub(crate) fn delete_item(cx: &mut App, group: usize, slot: u32) -> bool {
+    if !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(id) = state.config.groups.get(group).map(|group| group.id.clone()) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    let before = target.items.len();
+    target.items.retain(|item| item.slot != slot);
+    if target.items.len() == before {
+        return false;
+    }
+    if state.slot == Some(slot) {
+        state.slot = None;
+    }
+    state.touch();
+    mark_dirty(cx);
+    delete_usage(cx, vec![(id, slot)]);
+    true
+}
+
+/// Moves an item to the first empty slot of another group, or past its last item
+/// when the group is full (§12.2, "drag to the group bar").
+pub(crate) fn move_item_to_group(
+    cx: &mut App,
+    from_group: usize,
+    slot: u32,
+    to_group: usize,
+) -> bool {
+    if from_group == to_group || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(source) = state.config.groups.get_mut(from_group) else {
+        return false;
+    };
+    let Some(position) = source.items.iter().position(|item| item.slot == slot) else {
+        return false;
+    };
+    let mut item = source.items.remove(position);
+    let Some(target) = state.config.groups.get_mut(to_group) else {
+        // Put it back: the destination vanished between the menu and the click.
+        state
+            .config
+            .groups
+            .get_mut(from_group)
+            .map(|source| source.items.push(item));
+        return false;
+    };
+    item.slot = first_free_slot(target);
+    target.items.push(item);
+    target.items.sort_by_key(|item| item.slot);
+    state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// Moves an item to another slot of its own group; when the target is taken the
+/// two swap (§12.2).
+pub(crate) fn swap_slots(cx: &mut App, group: usize, from: u32, to: u32) -> bool {
+    if from == to || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(target) = state.config.groups.get_mut(group) else {
+        return false;
+    };
+    // Both positions are found before anything is retagged: looking the target
+    // up afterwards would find the item that just moved into it.
+    let Some(position) = target.items.iter().position(|item| item.slot == from) else {
+        return false;
+    };
+    let occupied = target.items.iter().position(|item| item.slot == to);
+    if let Some(moved) = target.items.get_mut(position) {
+        moved.slot = to;
+    }
+    if let Some(occupied) = occupied
+        && let Some(parked) = target.items.get_mut(occupied)
+    {
+        parked.slot = from;
+    }
+    target.items.sort_by_key(|item| item.slot);
+    state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// The first group id of the form `group_<n>` that nothing uses (§12.3).
+fn next_group_id(config: &QuickLaunchConfig) -> String {
+    let mut index = 1u32;
+    loop {
+        let candidate = format!("group_{index}");
+        if !config.groups.iter().any(|group| group.id == candidate) {
+            return candidate;
+        }
+        index = index.saturating_add(1);
+    }
+}
+
+/// The lowest slot a group does not occupy, or one past its highest slot.
+fn first_free_slot(group: &Group) -> u32 {
+    let mut candidate = 0u32;
+    let mut used: Vec<u32> = group.items.iter().map(|item| item.slot).collect();
+    used.sort_unstable();
+    for slot in used {
+        if slot == candidate {
+            candidate = candidate.saturating_add(1);
+        } else if slot > candidate {
+            break;
+        }
+    }
+    candidate
+}
+
+/// The item a path picked or dropped into `slot` becomes (§12.3): an executable
+/// or shortcut is an `app`, a folder a `folder`, everything else a `file`.
+pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+    let kind = if path.is_dir() {
+        "folder"
+    } else if matches!(
+        extension.as_deref(),
+        Some("exe" | "lnk" | "com" | "bat" | "cmd")
+    ) {
+        "app"
+    } else {
+        "file"
+    };
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or_default()
+        .to_string();
+    let mut item = Item::new(slot, kind, name);
+    item.path = Some(path.to_string_lossy().to_string());
+    item
+}
+
+/// The KV key of one item's usage record (§6).
+fn usage_key_name(group: &str, slot: u32) -> String {
+    format!("usage_{group}_{slot}")
+}
+
+/// Deletes usage records in one transaction, off the foreground (§6, §12.3).
+fn delete_usage(cx: &mut App, entries: Vec<(String, u32)>) {
+    if entries.is_empty() {
+        return;
+    }
+    let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
+        return;
+    };
+    let ops: Vec<KvOp> = entries
+        .iter()
+        .filter_map(|(group, slot)| {
+            KvKey::new(KV_NAMESPACE, &usage_key_name(group, *slot))
+                .ok()
+                .map(|key| KvOp::Delete { key })
+        })
+        .collect();
+    if ops.is_empty() {
+        return;
+    }
+    cx.background_spawn(async move {
+        kv.batch(ops).log_err();
+    })
+    .detach();
 }
 
 /// Installs the state, starts watching the file and starts the worker thread.
@@ -844,6 +1213,9 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks) {
         pending_hide: false,
         revision: 0,
         pending_usage: None,
+        filter: String::new(),
+        health: HashMap::new(),
+        health_started: false,
     });
 
     // One task answers everything the worker says, for the process's lifetime.
@@ -1239,9 +1611,8 @@ fn save_in_background(cx: &mut App) {
 
 /// Marks the state as changed, and starts the throttle if it is not running.
 ///
-/// The editor that calls this arrives with the settings page (M3); the save path
-/// it feeds is part of §5.2, so it is here and tested now.
-#[allow(dead_code)]
+/// Every edit goes through here: the event handlers never write the file
+/// themselves (§12.3).
 fn mark_dirty(cx: &mut App) {
     let Some(quick_launch) = state_mut(cx) else {
         return;
@@ -2111,6 +2482,191 @@ mod tests {
         slots
     }
 
+    /// §12.3: a group gets the first free `group_<n>` id.
+    #[test]
+    fn a_new_group_gets_the_first_free_id() {
+        let mut config = QuickLaunchConfig::default();
+        config.groups = vec![
+            Group {
+                id: "group_1".to_string(),
+                name: "Um".to_string(),
+                items: Vec::new(),
+            },
+            Group {
+                id: "group_3".to_string(),
+                name: "Tres".to_string(),
+                items: Vec::new(),
+            },
+        ];
+        assert_eq!(next_group_id(&config), "group_2");
+    }
+
+    /// §12.2: a move or a drop into a group goes to its first empty slot, and
+    /// past the last item when nothing is empty.
+    #[test]
+    fn a_move_lands_in_the_first_empty_slot() {
+        let mut group = group_of(0);
+        group.items = vec![
+            Item::new(0, "app", "A"),
+            Item::new(1, "app", "B"),
+            Item::new(3, "app", "D"),
+        ];
+        assert_eq!(first_free_slot(&group), 2);
+        group.items.push(Item::new(2, "app", "C"));
+        assert_eq!(first_free_slot(&group), 4);
+        assert_eq!(first_free_slot(&group_of(0)), 0);
+    }
+
+    /// §12.3: what a picked or dropped path becomes.
+    #[test]
+    fn a_picked_path_becomes_the_item_its_extension_says() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("Uma pasta");
+        std::fs::create_dir(&folder).unwrap();
+        let folder_item = item_from_path(&folder, 3);
+        assert_eq!(folder_item.kind, "folder");
+        assert_eq!(folder_item.name, "Uma pasta");
+        assert_eq!(folder_item.slot, 3);
+
+        let shortcut = directory.path().join("atalho.lnk");
+        std::fs::write(&shortcut, b"").unwrap();
+        assert_eq!(item_from_path(&shortcut, 0).kind, "app");
+
+        let document = directory.path().join("notas.txt");
+        std::fs::write(&document, b"oi").unwrap();
+        let document_item = item_from_path(&document, 0);
+        assert_eq!(document_item.kind, "file");
+        assert_eq!(document_item.name, "notas");
+    }
+
+    /// §6: the usage key of one item.
+    #[test]
+    fn a_usage_record_is_named_after_its_group_and_slot() {
+        assert_eq!(usage_key_name("general", 7), "usage_general_7");
+    }
+
+    /// §5.2, §12.3: a read-only file refuses every edit.
+    #[gpui::test]
+    fn a_read_only_file_refuses_edits(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1), group_of(1)]);
+            if let Some(state) = state_mut(cx) {
+                state.status = Status::ReadOnly("quebrado".to_string());
+            }
+            assert!(!put_item(cx, 0, 4, Item::new(4, "app", "Novo")));
+            assert!(!edit_item(cx, 0, 0, "Nome", "C:\\a.exe", "", false));
+            assert!(!add_group(cx).is_some());
+            assert!(!rename_group(cx, 0, "Outro"));
+            assert!(!delete_item(cx, 0, 0));
+            assert!(!delete_group(cx, 1, true));
+            assert!(state(cx).is_some_and(|state| state.config.groups.len() == 2));
+        });
+    }
+
+    /// §12.3: adding, editing, replacing, renaming and deleting, all through the
+    /// state layer so the throttle sees one edit.
+    #[gpui::test]
+    fn editing_a_group_and_its_items(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1), group_of(1)]);
+            assert!(put_item(cx, 0, 4, Item::new(4, "app", "Novo")));
+            assert_eq!(
+                item_at(cx, 0, 4).map(|item| item.name),
+                Some("Novo".to_string())
+            );
+            // One slot holds one item: a second put replaces the first.
+            assert!(put_item(cx, 0, 4, Item::new(4, "app", "Outro")));
+            assert_eq!(
+                state(cx).map(|state| state.config.groups[0]
+                    .items
+                    .iter()
+                    .filter(|item| item.slot == 4)
+                    .count()),
+                Some(1)
+            );
+            assert!(edit_item(
+                cx,
+                0,
+                4,
+                " Renomeado ",
+                "C:\\Windows\\System32\\notepad.exe",
+                " /a",
+                true
+            ));
+            let edited = item_at(cx, 0, 4).unwrap();
+            assert_eq!(edited.name, "Renomeado");
+            assert_eq!(edited.args.as_deref(), Some("/a"));
+            assert!(edited.admin);
+            // An empty name or path cancels the edit (§12.3).
+            assert!(!edit_item(cx, 0, 4, " ", "C:\\a.exe", "", false));
+            assert!(!edit_item(cx, 0, 4, "Nome", "  ", "", false));
+
+            let index = add_group(cx).expect("a writable file can add a group");
+            assert_eq!(
+                state(cx).map(|state| state.config.groups[index].id.clone()),
+                Some("group_1".to_string())
+            );
+            assert!(!rename_group(cx, index, "  "));
+            assert!(rename_group(cx, index, "Dev"));
+            assert_eq!(
+                state(cx).map(|state| state.config.groups[index].name.clone()),
+                Some("Dev".to_string())
+            );
+
+            assert!(delete_item(cx, 0, 4));
+            assert_eq!(item_at(cx, 0, 4), None);
+            // A non-empty group needs the confirmation, an empty one does not.
+            let other = add_group(cx).unwrap();
+            assert!(delete_group(cx, other, false));
+            assert!(add_group(cx).is_some());
+        });
+    }
+
+    /// §12.2: moving between slots swaps when the target is taken, and moving to
+    /// another group takes its first free slot.
+    #[gpui::test]
+    fn moving_items_between_slots_and_groups(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut source = group_of(0);
+            source.items = vec![Item::new(0, "app", "A"), Item::new(2, "app", "B")];
+            let mut target = group_of(0);
+            target.items = vec![Item::new(1, "app", "C")];
+            install(cx, vec![source, target]);
+
+            assert!(swap_slots(cx, 0, 0, 2));
+            let name_at = |cx: &gpui::App, slot: u32| item_at(cx, 0, slot).map(|item| item.name);
+            assert_eq!(name_at(cx, 0), Some("B".to_string()));
+            assert_eq!(name_at(cx, 2), Some("A".to_string()));
+            // A free target slot just moves the item.
+            assert!(swap_slots(cx, 0, 0, 3));
+            assert_eq!(name_at(cx, 3), Some("B".to_string()));
+            assert_eq!(name_at(cx, 0), None);
+
+            assert!(move_item_to_group(cx, 0, 2, 1));
+            assert_eq!(
+                item_at(cx, 1, 0).map(|item| item.name),
+                Some("A".to_string()),
+                "the free slot 0 of the target group takes it"
+            );
+            assert!(!move_item_to_group(cx, 0, 9, 1), "nothing there to move");
+        });
+    }
+
+    /// §12.3: the last group cannot be removed, nor can a non-empty one without
+    /// the confirmation.
+    #[gpui::test]
+    fn deleting_groups_respects_the_last_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert!(!delete_group(cx, 0, true));
+
+            install(cx, vec![group_of(1), group_of(2)]);
+            assert!(!delete_group(cx, 1, false), "it has items");
+            assert!(delete_group(cx, 1, true));
+            assert_eq!(state(cx).map(|state| state.config.groups.len()), Some(1));
+        });
+    }
+
     #[gpui::test]
     fn the_arrow_keys_skip_empty_slots_and_stop_at_the_edges(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -2598,6 +3154,9 @@ mod tests {
             pending_hide: false,
             revision: 0,
             pending_usage: None,
+            filter: String::new(),
+            health: HashMap::new(),
+            health_started: false,
         }
     }
 
