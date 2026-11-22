@@ -38,6 +38,7 @@
 | [0007](./0007-cloudflare-hosting.md) | web ホスティングは Cloudflare Pages + Workers + R2 | Accepted |
 | [0008](./0008-web-design-system.md) | web のデザイン北極星は zed.dev、FE は Tailwind v4 + Radix 再スキン | Accepted |
 | [0009](./0009-drop-fts5-ngram-in-tantivy.md) | 全文・部分一致とも tantivy に集約し SQLite FTS5 を採用しない | Accepted |
+| [0010](./0010-tc-plugin-kinds-and-native-bridge.md) | 插件按 TC 三类划分，WASM 原生之外加进程外 TC 兼容路线（LumaFiles fork） | Accepted |
 
 ## 命名規約
 

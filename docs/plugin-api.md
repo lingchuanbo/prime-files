@@ -1,5 +1,7 @@
 # Plugin API — WIT World
 
+> **⚠ LumaFiles fork（2026-11-22）：本文的 WIT world（`nohrs:plugin@0.1.0`，commands / decorations / previews / events）已被 [ADR 0010](./adr/0010-tc-plugin-kinds-and-native-bridge.md) 取代**，改为 `lumafiles:plugin@0.2.0` 的三个 world（`fs-plugin` / `viewer-plugin` / `content-plugin`），定义见 [`LumaPlugin-SDK开发指南.md`](./LumaPlugin-SDK开发指南.md) §3。本文的 host imports（§2：logging / kv / cache / network / clipboard 等）作为能力清单仍可参考。
+
 > Status: Draft (P4 で実装)
 > Related: [`docs/plugin-overview.md`](./plugin-overview.md), [`docs/plugin-permissions.md`](./plugin-permissions.md), [`docs/persistence.md`](./persistence.md)
 

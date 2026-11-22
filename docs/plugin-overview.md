@@ -1,5 +1,7 @@
 # Plugin System — Overview
 
+> **LumaFiles fork（2026-11-22）：插件类型和宿主架构由 [ADR 0010](./adr/0010-tc-plugin-kinds-and-native-bridge.md) 扩展**：插件按 Total Commander 划分为文件系统、查看器、内容三类；在本文的 WASM 原生路线之外，新增进程外的 TC 64 位插件兼容路线。实现规格见 [`LumaPlugin-设计与边界约定.md`](./LumaPlugin-设计与边界约定.md)，插件作者文档见 [`LumaPlugin-SDK开发指南.md`](./LumaPlugin-SDK开发指南.md)。本文的运行时、权限、分发部分仍然有效。
+
 > Status: Draft (P4 で実装)
 > Related: [`ROADMAP.md`](./ROADMAP.md), [`docs/plugin-api.md`](./plugin-api.md), [`docs/plugin-permissions.md`](./plugin-permissions.md), [`docs/plugin-distribution.md`](./plugin-distribution.md), [`docs/plugin-templates.md`](./plugin-templates.md), [ADR 0005 (wit-bindgen-component-model)](./adr/0005-wit-bindgen-component-model.md)
 

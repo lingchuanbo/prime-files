@@ -204,6 +204,8 @@ ROADMAP 本体には判断の要点のみを記し、詳細は次の設計ドキ
 
 ## Phase 4 — Plugin Host (0.3.0)
 
+> **LumaFiles fork（2026-11-22）**：插件系统按 [ADR 0010](./adr/0010-tc-plugin-kinds-and-native-bridge.md) 重新规划为 P0 技术验证 → P1 内容插件 → P2 查看器 → P3 文件系统 → P4 WASM 原生 → P5 生态 → P6 压缩包插件，其中 TC 兼容层（P0–P3）先于本 Phase 的 WASM 宿主。阶段定义以 [`LumaPlugin-设计与边界约定.md`](./LumaPlugin-设计与边界约定.md) §15 为准。
+
 **ゴール**: WASM Component Model ベースのプラグインホストと、3 言語のテンプレを揃える。
 
 ### Core
