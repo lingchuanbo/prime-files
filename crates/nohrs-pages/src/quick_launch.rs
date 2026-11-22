@@ -2123,6 +2123,9 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
         quick_launch.visible = true;
     }
     ensure_selection(cx);
+    // §12.1: the items are checked once the window has been shown, a batch at a
+    // time, on the icon thread.
+    start_health_check(cx);
     handle
         .update(cx, |_root, window, _cx| {
             set_topmost(window, topmost);
