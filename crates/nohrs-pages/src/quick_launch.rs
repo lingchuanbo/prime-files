@@ -36,8 +36,6 @@ use gpui::{
     WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size,
 };
 use gpui_component::Root;
-use gpui_component::WindowExt as _;
-use gpui_component::notification::Notification;
 use nohrs_core::config::ConfigWatcher;
 use nohrs_core::config::paths;
 use nohrs_core::config::quick_launch::{
@@ -1756,20 +1754,13 @@ fn report_launch_failure(cx: &mut App, name: &str, error: &LaunchError) {
         name = name,
         error = error
     );
+    // The bottom line of the window is the one-line report §8.5 asks for. A
+    // `push_notification` here would ask the window for it while the window's
+    // own `Root` is being updated, and GPUI aborts on that nested update.
     if let Some(quick_launch) = state_mut(cx) {
-        quick_launch.message = Some(message.clone());
+        quick_launch.message = Some(message);
     }
-    let Some(handle) = live_window(cx) else {
-        return;
-    };
-    handle
-        .update(cx, |_root, window, cx| {
-            window.push_notification(
-                Notification::error(message).title(nohrs_core::t!("Inicialização rápida")),
-                cx,
-            );
-        })
-        .log_err();
+    cx.refresh_windows();
 }
 
 /// Starts the item in `slot` of the current group (§12.2).
