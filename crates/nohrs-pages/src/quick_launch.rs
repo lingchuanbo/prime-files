@@ -768,14 +768,15 @@ impl QuickLaunch {
         self.slot = None;
     }
 
-    /// Whether the quick launch is part of keeping the process alive: the chord
-    /// is registered and the file asks for it (§15.0).
-    /// Notes that what the window draws has changed.
+    /// Notes that what the window draws has changed, so the view rebuilds its
+    /// cached frame: the configuration, the group, the items or their icons
+    /// (S6).
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
 
     /// Whether the quick launch is part of keeping the process alive: the chord
+    /// is registered and the file asks for it (§15.0).
     fn keeps_running(&self) -> bool {
         self.hotkey.is_some() && self.config.window.keep_running
     }
