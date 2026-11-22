@@ -114,6 +114,72 @@ colors = ["#ef4444", "#f97316", "#fb923c", "#22c55e"]
 
 设置页的「空间热力图」分组可以改颜色依据、阈值和四档颜色; 写入的就是上面三项。`color = "kind"` 时按文件夹/图片/视频/音频/文档/压缩包/程序着色, 与大小无关。阈值必须是三个递减的正整数, 颜色必须是四个 `#rrggbb`; 不合法时保留默认值并给出诊断。
 
+### クイック起動 (`quicklaunch.toml`)
+
+クイック起動の設定は `config.toml` のセクションではなく、**独立した `quicklaunch.toml`** に置く。
+UI から編集するとファイル全体を書き直すため、`config.toml` の手書きコメントを巻き込まないように
+分けている。場所は有効な設定ディレクトリの直下
+(`paths::quick_launch_file()`)。XDG なら `$XDG_CONFIG_HOME/nohrs/quicklaunch.toml`
+(未設定時は `~/.config/nohrs/quicklaunch.toml`)、ポータブルモードなら
+`userdata/quicklaunch.toml`。抽出したアイコンのキャッシュは
+`cache/quick_launch_icons` (ポータブルモードでは `userdata/cache/quick_launch_icons`) に置く。
+
+```toml
+schema_version = 1
+
+[window]
+hotkey = "ctrl+alt+Space"   # global-hotkey の形式。空文字なら OS に登録しない
+view = "grid"               # "grid" | "list"
+columns = 8                 # 2..=16
+cell_size = 96              # 64..=160
+icon_size = 48              # 16/24/32/48/64/96 のどれか (他の値は最も近いもの)
+list_columns = 2            # 1..=3
+auto_hide = true
+topmost = false
+close_after_launch = true
+on_running = "activate"     # "activate" | "new"
+keep_running = true
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "app"                # app | folder | file | url | uwp | command | group | plugin:<id>
+name = "Editor"
+path = "%ProgramFiles%\\Notepad++\\notepad++.exe"
+args = ""
+```
+
+- `[window]` は省略可能で、欠けたキーは既定値になる。`[[group]]` の `id` と `name`、
+  `[[group.item]]` の `slot` / `type` / `name` は必須。項目の任意フィールドは
+  `id` / `path` / `args` / `cwd` / `admin` / `icon` / `tags` / `items` / `extra`。
+- ファイルが無い場合は `general` という空のグループ 1 つを持つ既定設定をメモリ上でだけ使い、
+  最初の編集までファイルを作らない。
+- 構文・型・未知フィールドのエラーと、このビルドより新しい `schema_version` は
+  **読み取り専用**として扱う。画面に理由を出し、UI からの保存を拒否する
+  (新しいビルドのフィールドを消してしまわないため)。
+- 数値の範囲外は丸め、`id` の不正・名前の空・スロットや id の重複は該当項目を捨てて警告にする。
+  警告はログに出し、起動は止めない。UTF-8 BOM 付きのファイルも読める
+  (PowerShell 5.1 や旧版のメモ帳が書き込むため)。
+- 書き込みは 300 ms にまとめ、一時ファイル → `fsync` → `.bak` → rename の順で行う。
+  書き直すため、手書きのコメントと整形は失われる。
+- 変更は監視されており、外部で編集された場合も内容のハッシュが変わった時点で読み直す。
+
+JSON Schema は [`quicklaunch.schema.json`](./quicklaunch.schema.json) にコミットしており、
+VS Code (Even Better TOML 拡張) などで補完と検証に使える。`config.toml` と同じく
+`schemars` から生成し、キーをソートして Rust 固有の integer `format` を落とすため
+byte-for-byte で再現できる:
+
+```bash
+cargo run -p nohrs-core --example quicklaunch_schema > docs/quicklaunch.schema.json
+```
+
+`nohrs-core` のユニットテスト (`the_committed_schema_is_up_to_date`) が、コミット済みファイルと
+生成結果の一致を `cargo test` のたびに確認する。仕様と実装の詳細は
+[`launcher.md`](./launcher.md) の「クイック起動」節を参照。
+
 ---
 
 ## 3. ロード戦略 (4 層 override)
