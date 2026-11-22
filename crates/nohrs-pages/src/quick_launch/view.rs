@@ -31,6 +31,7 @@ use gpui_component::{
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
 };
 use nohrs_core::config::quick_launch::{ActionKind, Item, MAX_SLOT, View};
+use nohrs_core::telemetry::LogErr;
 use nohrs_ui::theme::theme;
 
 use super::AUTO_HIDE_DELAY;
@@ -442,7 +443,6 @@ impl QuickLaunchView {
         window.defer(cx, move |window, cx| {
             window.open_dialog(cx, move |dialog, _window, _cx| {
                 let confirm = weak.clone();
-                let close = weak.clone();
                 dialog
                     .confirm()
                     .title(nohrs_core::t!("Excluir grupo"))
@@ -457,14 +457,13 @@ impl QuickLaunchView {
                             .child(nohrs_core::t!("O grupo e os itens dele serão excluídos.")),
                     )
                     .on_ok(move |_, _window, cx| {
-                        let _ = confirm.update(cx, |_view, cx| {
-                            super::delete_group(cx, group, true);
-                            cx.notify();
-                        });
+                        confirm
+                            .update(cx, |_view, cx| {
+                                super::delete_group(cx, group, true);
+                                cx.notify();
+                            })
+                            .log_err();
                         true
-                    })
-                    .on_close(move |_, _window, cx| {
-                        let _ = close.update(cx, |_view, _cx| {});
                     })
             });
         });
@@ -799,7 +798,7 @@ impl Render for QuickLaunchView {
                         .child(message),
                 )
             });
-        if let Some(overlay) = editor_overlay(self.editor.as_ref(), &entity, cx) {
+        if let Some(overlay) = editor_overlay(self.editor.as_ref(), &entity) {
             root = root.child(overlay);
         }
         root
@@ -1014,8 +1013,9 @@ fn render_group_bar(
                     // An item dropped on the bar joins that group: first free
                     // slot, else appended (§12.2).
                     if editable {
-                        let _ = entity_drop
-                            .update(cx, |view, cx| view.drop_item_on_group(drag, index, cx));
+                        entity_drop
+                            .update(cx, |view, cx| view.drop_item_on_group(drag, index, cx))
+                            .log_err();
                     }
                 })
                 .context_menu(move |menu, _window, _cx| {
@@ -1026,15 +1026,17 @@ fn render_group_bar(
                         PopupMenuItem::new(nohrs_core::t!("Novo grupo"))
                             .disabled(!editable)
                             .on_click(move |_, window, cx| {
-                                let _ = add.update(cx, |view, cx| view.add_group(window, cx));
+                                add.update(cx, |view, cx| view.add_group(window, cx))
+                                    .log_err();
                             }),
                     )
                     .item(
                         PopupMenuItem::new(nohrs_core::t!("Renomear"))
                             .disabled(!editable)
                             .on_click(move |_, window, cx| {
-                                let _ = rename
-                                    .update(cx, |view, cx| view.start_rename(index, window, cx));
+                                rename
+                                    .update(cx, |view, cx| view.start_rename(index, window, cx))
+                                    .log_err();
                             }),
                     )
                     .separator()
@@ -1042,8 +1044,9 @@ fn render_group_bar(
                         PopupMenuItem::new(nohrs_core::t!("Excluir"))
                             .disabled(!editable || last_group)
                             .on_click(move |_, window, cx| {
-                                let _ = delete
-                                    .update(cx, |view, cx| view.delete_group(index, window, cx));
+                                delete
+                                    .update(cx, |view, cx| view.delete_group(index, window, cx))
+                                    .log_err();
                             }),
                     )
                 })
@@ -1228,8 +1231,9 @@ fn empty_cell(
                 PopupMenuItem::new(nohrs_core::t!("Novo item"))
                     .disabled(!editable)
                     .on_click(move |_, window, cx| {
-                        let _ =
-                            handle.update(cx, |view, cx| view.new_item_at(group, slot, window, cx));
+                        handle
+                            .update(cx, |view, cx| view.new_item_at(group, slot, window, cx))
+                            .log_err();
                     }),
             )
         })
@@ -1256,18 +1260,22 @@ fn item_menu(
             PopupMenuItem::new(nohrs_core::t!("Executar como administrador"))
                 .disabled(!editable)
                 .on_click(move |_, _window, cx| {
-                    let _ = admin.update(cx, |view, cx| {
-                        view.clicked(slot, super::ClickKind::Admin, cx);
-                    });
+                    admin
+                        .update(cx, |view, cx| {
+                            view.clicked(slot, super::ClickKind::Admin, cx);
+                        })
+                        .log_err();
                 }),
         )
         .item(
             PopupMenuItem::new(nohrs_core::t!("Abrir localização")).on_click(
                 move |_, _window, cx| {
-                    let _ = reveal.update(cx, |_view, cx| {
-                        super::reveal_item(cx, slot);
-                        super::hide(cx);
-                    });
+                    reveal
+                        .update(cx, |_view, cx| {
+                            super::reveal_item(cx, slot);
+                            super::hide(cx);
+                        })
+                        .log_err();
                 },
             ),
         )
@@ -1276,16 +1284,18 @@ fn item_menu(
             PopupMenuItem::new(nohrs_core::t!("Editar"))
                 .disabled(!editable)
                 .on_click(move |_, window, cx| {
-                    let _ = edit.update(cx, |view, cx| view.edit_item(group, slot, window, cx));
+                    edit.update(cx, |view, cx| view.edit_item(group, slot, window, cx))
+                        .log_err();
                 }),
         )
         .item(
             PopupMenuItem::new(nohrs_core::t!("Copiar caminho")).on_click(move |_, _window, cx| {
-                let _ = copy.update(cx, |_view, cx| {
+                copy.update(cx, |_view, cx| {
                     if let Some(text) = super::copy_text(cx, slot) {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
-                });
+                })
+                .log_err();
             }),
         );
 
@@ -1312,9 +1322,11 @@ fn item_menu(
             for (index, name) in groups {
                 let handle = for_submenu.clone();
                 submenu = submenu.item(PopupMenuItem::new(name).on_click(move |_, _window, cx| {
-                    let _ = handle.update(cx, |view, cx| {
-                        view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
-                    });
+                    handle
+                        .update(cx, |view, cx| {
+                            view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
+                        })
+                        .log_err();
                 }));
             }
             submenu
@@ -1329,7 +1341,9 @@ fn item_menu(
         PopupMenuItem::new(nohrs_core::t!("Excluir"))
             .disabled(!editable)
             .on_click(move |_, _window, cx| {
-                let _ = delete.update(cx, |view, cx| view.delete_item(group, slot, cx));
+                delete
+                    .update(cx, |view, cx| view.delete_item(group, slot, cx))
+                    .log_err();
             }),
     )
 }
@@ -1368,7 +1382,9 @@ fn tile(
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
         .on_click(move |event, _window, cx| {
-            let _ = handle.update(cx, |view, cx| view.clicked(slot, click_kind(event), cx));
+            handle
+                .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
+                .log_err();
         })
         .when(editable, |this| {
             this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
@@ -1379,13 +1395,17 @@ fn tile(
         })
         .on_drop(move |drag: &ItemDrag, _window, cx| {
             if editable {
-                let _ = drop_handle.update(cx, |view, cx| view.drop_item(drag, group, slot, cx));
+                drop_handle
+                    .update(cx, |view, cx| view.drop_item(drag, group, slot, cx))
+                    .log_err();
             }
         })
         .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
             if editable {
                 let paths = paths.paths().to_vec();
-                let _ = entity_drop.update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx));
+                entity_drop
+                    .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
+                    .log_err();
             }
         })
         .context_menu(move |menu, window, cx| {
@@ -1449,7 +1469,9 @@ fn row_of(
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
         .on_click(move |event, _window, cx| {
-            let _ = handle.update(cx, |view, cx| view.clicked(slot, click_kind(event), cx));
+            handle
+                .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
+                .log_err();
         })
         .when(editable, |this| {
             this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
@@ -1460,13 +1482,17 @@ fn row_of(
         })
         .on_drop(move |drag: &ItemDrag, _window, cx| {
             if editable {
-                let _ = drop_handle.update(cx, |view, cx| view.drop_item(drag, group, slot, cx));
+                drop_handle
+                    .update(cx, |view, cx| view.drop_item(drag, group, slot, cx))
+                    .log_err();
             }
         })
         .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
             if editable {
                 let paths = paths.paths().to_vec();
-                let _ = entity_drop.update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx));
+                entity_drop
+                    .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
+                    .log_err();
             }
         })
         .context_menu(move |menu, window, cx| {
@@ -1539,9 +1565,7 @@ fn field(label: &'static str, input: &Entity<InputState>) -> AnyElement {
 fn editor_overlay(
     editor: Option<&Editor>,
     entity: &WeakEntity<QuickLaunchView>,
-    cx: &mut Context<QuickLaunchView>,
 ) -> Option<AnyElement> {
-    let _ = cx;
     let editor = editor?;
     let name = editor.name.clone();
     let path = editor.path.clone();
@@ -1589,9 +1613,11 @@ fn editor_overlay(
                                 Button::new("quick-launch-browse")
                                     .label(nohrs_core::t!("Procurar…"))
                                     .on_click(move |_, window, cx| {
-                                        let _ = browse.update(cx, |view, cx| {
-                                            view.browse_for_path(window, cx);
-                                        });
+                                        browse
+                                            .update(cx, |view, cx| {
+                                                view.browse_for_path(window, cx);
+                                            })
+                                            .log_err();
                                     }),
                             ),
                     )
@@ -1614,19 +1640,23 @@ fn editor_overlay(
                                 Button::new("quick-launch-cancel")
                                     .label(nohrs_core::t!("Cancelar"))
                                     .on_click(move |_, _window, cx| {
-                                        let _ = cancel.update(cx, |view, cx| {
-                                            view.editor = None;
-                                            cx.notify();
-                                        });
+                                        cancel
+                                            .update(cx, |view, cx| {
+                                                view.editor = None;
+                                                cx.notify();
+                                            })
+                                            .log_err();
                                     }),
                             )
                             .child(
                                 Button::new("quick-launch-confirm")
                                     .label(nohrs_core::t!("Confirmar"))
                                     .on_click(move |_, _window, cx| {
-                                        let _ = confirm.update(cx, |view, cx| {
-                                            view.confirm_editor(cx);
-                                        });
+                                        confirm
+                                            .update(cx, |view, cx| {
+                                                view.confirm_editor(cx);
+                                            })
+                                            .log_err();
                                     }),
                             ),
                     ),

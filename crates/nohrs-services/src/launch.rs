@@ -404,7 +404,7 @@ pub fn indexed_icon(path: &str, index: u32, edge: u32) -> Option<(Vec<u8>, u32, 
     }
     #[cfg(not(windows))]
     {
-        let _ = (path, index, edge);
+        let (_, _, _) = (path, index, edge);
         None
     }
 }

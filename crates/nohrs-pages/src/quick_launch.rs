@@ -2895,9 +2895,9 @@ mod tests {
             for item in &items {
                 let key = IconKey::new(item.path.as_deref().unwrap_or_default(), 48);
                 cache.insert(key.clone(), None);
-                let _ = cache.get(&key);
+                cache.get(&key);
             }
-            let _ = grid_cells_for_timing(&items);
+            grid_cells_for_timing(&items);
             timings.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         timings.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
