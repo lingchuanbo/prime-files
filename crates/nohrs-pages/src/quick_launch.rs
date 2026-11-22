@@ -939,7 +939,13 @@ fn read_quick_launch(path: &Path) -> FileRead {
     bytes.hash(&mut hasher);
     let hash = hasher.finish();
     let parsed = match String::from_utf8(bytes) {
-        Ok(text) => Some(nohrs_core::config::quick_launch::parse(&text)),
+        Ok(text) => {
+            // Windows PowerShell 5.1 and old Notepad save UTF-8 with a
+            // byte-order mark, which TOML has no place for: a user who edits the
+            // file once would otherwise land in the read-only state (§4.2 v2.3).
+            let text = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
+            Some(nohrs_core::config::quick_launch::parse(text))
+        }
         Err(error) => Some(Err(QuickLaunchError::Parse {
             line: 1,
             column: 1,
@@ -2397,6 +2403,27 @@ mod tests {
                 "the frame built for the old group is stale"
             );
         });
+    }
+
+    /// R2 (§4.2 v2.3): a file that starts with a UTF-8 byte-order mark parses,
+    /// so it is not taken for a broken file and shown read-only.
+    #[test]
+    fn a_file_that_starts_with_a_byte_order_mark_parses() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("quicklaunch.toml");
+        let text = "schema_version = 1\n\n[[group]]\nid = \"general\"\nname = \"Geral\"\n";
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(text.as_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let read = read_quick_launch(&path);
+        let parsed = read
+            .parsed
+            .expect("the file is there")
+            .expect("a byte-order mark is not a parse error");
+        assert_eq!(parsed.config.groups.len(), 1);
+        assert_eq!(parsed.config.groups[0].id, "general");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
     }
 
     #[test]
