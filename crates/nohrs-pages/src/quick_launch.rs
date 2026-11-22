@@ -1000,14 +1000,25 @@ fn restore_last_group(cx: &mut App) {
     let Some(id) = quick_launch.restored.last_group.clone() else {
         return;
     };
-    if let Some(index) = quick_launch
+    let Some(index) = quick_launch
         .config
         .groups
         .iter()
         .position(|group| group.id == id)
-    {
-        quick_launch.group = index;
+    else {
+        return;
+    };
+    if index == quick_launch.group {
+        return;
     }
+    quick_launch.group = index;
+    // The window may already have drawn, and its frame still holds the old
+    // group's names and tiles; the slot it selected belongs to that group too.
+    // Dropping the slot and bumping the revision is what makes the next frame
+    // show the restored group in the bar, in the tiles and in the selection
+    // (R1).
+    quick_launch.slot = None;
+    quick_launch.touch();
 }
 
 /// Whether the process must stay alive for the quick launch to be summonable
@@ -2327,6 +2338,65 @@ mod tests {
             _ => panic!("the panic must be reported as a reply"),
         }
         launch.stop(Duration::from_millis(500));
+    }
+
+    /// R1: the KV read can finish after the window has drawn. The restored group
+    /// must then be the one the bar shows, the one whose items the tiles draw,
+    /// and the one the selection points into ??which needs the frame invalidated
+    /// and the old group's slot dropped.
+    #[gpui::test]
+    fn a_group_restored_after_the_first_frame_is_the_one_shown(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(0, "app", "A")];
+            let mut dev = group_of(0);
+            dev.id = "dev".to_string();
+            dev.name = "Dev".to_string();
+            dev.items = vec![Item::new(5, "app", "D")];
+            install(cx, vec![general, dev]);
+
+            // The first frame has already been built from this revision, and the
+            // keyboard is on a slot of the first group.
+            let drawn_revision = state(cx).map(|state| state.revision).unwrap_or(0);
+            if let Some(state) = state_mut(cx) {
+                state.slot = Some(0);
+            }
+
+            // The store answers late: the file was already read, so
+            // `apply_loaded` runs the restore a second time.
+            if let Some(state) = state_mut(cx) {
+                state.restored.last_group = Some("dev".to_string());
+            }
+            restore_last_group(cx);
+            ensure_selection(cx);
+
+            let quick_launch = state(cx).expect("the state is installed");
+            assert_eq!(
+                quick_launch.group, 1,
+                "the restored group is the current one"
+            );
+            assert_eq!(
+                quick_launch.group().map(|group| group.name.as_str()),
+                Some("Dev"),
+                "the bar draws the restored group"
+            );
+            assert_eq!(
+                quick_launch.slot,
+                Some(5),
+                "the selection is the first slot of the group that is drawn"
+            );
+            assert!(
+                quick_launch.group().is_some_and(|group| group
+                    .items
+                    .iter()
+                    .any(|item| Some(item.slot) == quick_launch.slot)),
+                "the selected slot belongs to the drawn group"
+            );
+            assert_ne!(
+                quick_launch.revision, drawn_revision,
+                "the frame built for the old group is stale"
+            );
+        });
     }
 
     #[test]
