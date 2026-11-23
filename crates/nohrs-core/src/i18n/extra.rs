@@ -8187,4 +8187,92 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "无法保存命令。请检查 shell 和脚本。",
         ],
     ),
+    (
+        "Executar estes comandos?",
+        [
+            "Exécuter ces commandes ?",
+            "Diese Befehle ausführen?",
+            "Eseguire questi comandi?",
+            "Выполнить эти команды?",
+            "これらのコマンドを実行しますか？",
+            "运行这些命令？",
+        ],
+    ),
+    (
+        "Este grupo não tem itens válidos.",
+        [
+            "Ce groupe n’a aucun élément valide.",
+            "Diese Gruppe hat keine gültigen Einträge.",
+            "Questo gruppo non ha elementi validi.",
+            "В этой группе нет допустимых элементов.",
+            "このグループには有効な項目がありません。",
+            "此分组没有有效的项目。",
+        ],
+    ),
+    (
+        "{failed} de {total} itens não iniciaram: {names}",
+        [
+            "{failed} sur {total} éléments n’ont pas démarré : {names}",
+            "{failed} von {total} Einträgen wurden nicht gestartet: {names}",
+            "{failed} di {total} elementi non sono stati avviati: {names}",
+            "Не запущено элементов: {failed} из {total}: {names}",
+            "{total} 件中 {failed} 件が起動しませんでした: {names}",
+            "{total} 个项目中有 {failed} 个未启动：{names}",
+        ],
+    ),
+    (
+        "{skipped} itens do grupo excedem o limite de {limit} e não serão iniciados.",
+        [
+            "{skipped} éléments du groupe dépassent la limite de {limit} et ne démarreront pas.",
+            "{skipped} Einträge der Gruppe überschreiten das Limit von {limit} und werden nicht gestartet.",
+            "{skipped} elementi del gruppo superano il limite di {limit} e non verranno avviati.",
+            "Элементов группы сверх лимита {limit}: {skipped}; они не будут запущены.",
+            "グループの項目が上限 {limit} を超えるため、{skipped} 件は起動しません。",
+            "分组有 {skipped} 个项目超出 {limit} 的限制，不会启动。",
+        ],
+    ),
+    (
+        "Só o nome pode ser alterado aqui; edite os outros campos na página de configurações.",
+        [
+            "Seul le nom peut être modifié ici ; modifiez les autres champs dans la page de configuration.",
+            "Hier kann nur der Name geändert werden; die anderen Felder werden auf der Einstellungsseite bearbeitet.",
+            "Qui si può cambiare solo il nome; modifica gli altri campi nella pagina delle impostazioni.",
+            "Здесь можно изменить только имя; остальные поля изменяются на странице настроек.",
+            "ここでは名前だけを変更できます。その他の項目は設定ページで編集してください。",
+            "此处只能修改名称；其他字段请在设置页面中编辑。",
+        ],
+    ),
+    (
+        "Incluir itens",
+        [
+            "Inclure des éléments",
+            "Einträge einschließen",
+            "Includi elementi",
+            "Включить элементы",
+            "含める項目",
+            "包含的项目",
+        ],
+    ),
+    (
+        "A ordem dos cliques é a ordem de início.",
+        [
+            "L’ordre des clics est l’ordre de démarrage.",
+            "Die Reihenfolge der Klicks ist die Startreihenfolge.",
+            "L’ordine dei clic è l’ordine di avvio.",
+            "Порядок нажатий — это порядок запуска.",
+            "クリックした順に起動します。",
+            "点击顺序即启动顺序。",
+        ],
+    ),
+    (
+        "Não foi possível salvar o grupo. Confira o nome e os itens.",
+        [
+            "Impossible d’enregistrer le groupe. Vérifiez le nom et les éléments.",
+            "Die Gruppe konnte nicht gespeichert werden. Prüfen Sie Name und Einträge.",
+            "Impossibile salvare il gruppo. Controlla il nome e gli elementi.",
+            "Не удалось сохранить группу. Проверьте имя и элементы.",
+            "グループを保存できませんでした。名前と項目を確認してください。",
+            "无法保存分组。请检查名称和项目。",
+        ],
+    ),
 ];

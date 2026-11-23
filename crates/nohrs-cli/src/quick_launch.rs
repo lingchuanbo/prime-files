@@ -132,6 +132,13 @@ pub struct RunArgs {
     /// Start the item elevated, whatever the file says.
     #[arg(long)]
     pub admin: bool,
+
+    /// Run a group even though it contains commands (D6, §17.2 E.5).
+    ///
+    /// The window asks before the first run of a command; a terminal has no
+    /// dialog, so the flag is the confirmation.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Flags for `noh quick-launch check`.
@@ -398,10 +405,14 @@ impl<'a> Session<'a> {
 
     #[cfg(windows)]
     fn run_item(&mut self, args: &RunArgs) -> io::Result<u8> {
-        let item = match self.item_for(&args.group, args.slot)? {
+        let target = match self.item_for(&args.group, args.slot)? {
             Ok(item) => item,
             Err(code) => return Ok(code),
         };
+        if target.item.action_kind() == model::ActionKind::Group {
+            return self.run_group(&target.group, &target.item, target.on_running, args);
+        }
+        let item = target;
         let mode = if args.admin {
             LaunchMode::Admin
         } else {
@@ -444,6 +455,113 @@ impl<'a> Session<'a> {
     #[cfg(not(windows))]
     fn run_item(&mut self, _args: &RunArgs) -> io::Result<u8> {
         writeln!(self.output, "quick-launch run is only supported on Windows")?;
+        Ok(FAILURE)
+    }
+
+    /// Runs a `group` item's entries in order (§17.2 E.5).
+    ///
+    /// The rules are the window's (§17.2 E.1): nested groups are flattened,
+    /// duplicates and cycles are skipped, at most [`model::MAX_GROUP_REFERENCES`]
+    /// entries start, `ask` behaves as `activate`, and every folder is opened in
+    /// LumaFiles afterwards. A group with a command requires `--yes` (D6): the
+    /// whole group is refused otherwise, before anything starts.
+    #[cfg(windows)]
+    fn run_group(
+        &mut self,
+        group: &model::Group,
+        item: &model::Item,
+        on_running: model::OnRunning,
+        args: &RunArgs,
+    ) -> io::Result<u8> {
+        let plan = expand_group(group, item);
+        if plan.excess > 0 {
+            writeln!(
+                self.errors,
+                "warning: {:?} has {} items beyond the limit of {}; they will not start",
+                item.name,
+                plan.excess,
+                model::MAX_GROUP_REFERENCES
+            )?;
+        }
+        if plan.items.is_empty() {
+            return self.fail(format_args!("{:?} has no item to start", item.name));
+        }
+        let commands: Vec<&str> = plan
+            .items
+            .iter()
+            .filter(|entry| entry.action_kind() == model::ActionKind::Command)
+            .map(|entry| entry.name.as_str())
+            .collect();
+        if !commands.is_empty() && !args.yes {
+            return self.fail(format_args!(
+                "{:?} contains commands ({}); pass --yes to run the group",
+                item.name,
+                commands.join(", ")
+            ));
+        }
+        // §17.2 F.3: a terminal has no dialog, so `ask` is `activate`.
+        let on_running = match on_running {
+            model::OnRunning::Ask => model::OnRunning::Activate,
+            other => other,
+        };
+        let _apartment = match nohrs_services::launch::ComApartment::enter() {
+            Ok(apartment) => apartment,
+            Err(error) => return self.fail(format_args!("could not initialize COM: {error}")),
+        };
+        let registry = LaunchRegistry::with_builtins();
+        let expand = ExpandContext::current();
+        let total = plan.items.len();
+        let mut failed: Vec<String> = Vec::new();
+        let mut folders: Vec<(PathBuf, String)> = Vec::new();
+        for entry in plan.items {
+            let mode = if args.admin || entry.admin {
+                LaunchMode::Admin
+            } else {
+                LaunchMode::Normal
+            };
+            let request = LaunchRequest {
+                mode,
+                on_running,
+                expand: expand.clone(),
+            };
+            match registry.launch(&entry, &request) {
+                Ok(LaunchOutcome::Started) => {
+                    writeln!(self.output, "started {:?}", entry.name)?;
+                }
+                Ok(LaunchOutcome::Activated) => {
+                    writeln!(self.output, "activated {:?}", entry.name)?;
+                }
+                // The user answered "no" to the UAC prompt: a decision, not a
+                // failure (§8.2).
+                Ok(LaunchOutcome::Cancelled) => {
+                    writeln!(
+                        self.output,
+                        "cancelled {:?}: the elevation prompt was declined",
+                        entry.name
+                    )?;
+                }
+                Ok(LaunchOutcome::OpenFolder(folder)) => folders.push((folder, entry.name)),
+                Err(error) => {
+                    writeln!(self.errors, "noh quick-launch: {:?}: {error}", entry.name)?;
+                    failed.push(entry.name);
+                }
+            }
+        }
+        for (folder, name) in folders {
+            if self.open_in_luma_files(&folder, &name)? != 0 {
+                failed.push(name);
+            }
+        }
+        if failed.is_empty() {
+            return Ok(0);
+        }
+        writeln!(
+            self.errors,
+            "noh quick-launch: {} of {} items did not start: {}",
+            failed.len(),
+            total,
+            failed.join(", ")
+        )?;
         Ok(FAILURE)
     }
 
@@ -595,6 +713,7 @@ impl<'a> Session<'a> {
             ))?));
         };
         Ok(Ok(RunTarget {
+            group: found.clone(),
             item: item.clone(),
             on_running: config.window.on_running,
         }))
@@ -653,6 +772,8 @@ impl<'a> Session<'a> {
 /// The item `run` resolved, with the window setting its launch needs.
 #[cfg(windows)]
 struct RunTarget {
+    /// The group the item belongs to: a `group` item expands inside it.
+    group: model::Group,
     item: model::Item,
     on_running: model::OnRunning,
 }
@@ -670,6 +791,65 @@ fn config_or_default(parsed: &Option<model::Parsed>) -> Cow<'_, QuickLaunchConfi
 /// The lowest slot no item of `group` occupies.
 fn first_free_slot(group: &model::Group) -> Option<u32> {
     (0..=MAX_SLOT).find(|slot| group.items.iter().all(|item| item.slot != *slot))
+}
+
+/// What `noh ql run` expands a `group` item into (§17.2 E.1).
+#[cfg(windows)]
+#[derive(Debug, Default, PartialEq)]
+struct GroupPlan {
+    /// The entries to start, in reference order, nested groups flattened.
+    items: Vec<model::Item>,
+    /// Entries left out because the plan was already full.
+    excess: usize,
+}
+
+/// Follows a `group` item's references inside its own group (§17.2 E.1).
+///
+/// The same rules the window applies: only ids of this group are found, an id
+/// that was already expanded is skipped (which breaks a cycle), nested groups
+/// are followed up to [`model::MAX_GROUP_NESTING`] levels, and the plan stops at
+/// [`model::MAX_GROUP_REFERENCES`] entries.
+#[cfg(windows)]
+fn expand_group(group: &model::Group, item: &model::Item) -> GroupPlan {
+    fn walk(
+        group: &model::Group,
+        references: &[String],
+        depth: usize,
+        visited: &mut std::collections::HashSet<String>,
+        plan: &mut GroupPlan,
+    ) {
+        for reference in references {
+            let Some(found) = group
+                .items
+                .iter()
+                .find(|candidate| candidate.id.as_deref() == Some(reference.as_str()))
+            else {
+                continue;
+            };
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            if found.action_kind() == model::ActionKind::Group {
+                if depth < model::MAX_GROUP_NESTING {
+                    walk(group, &found.items, depth + 1, visited, plan);
+                }
+                continue;
+            }
+            if plan.items.len() < model::MAX_GROUP_REFERENCES {
+                plan.items.push(found.clone());
+            } else {
+                plan.excess = plan.excess.saturating_add(1);
+            }
+        }
+    }
+
+    let mut plan = GroupPlan::default();
+    let mut visited = std::collections::HashSet::new();
+    if let Some(id) = &item.id {
+        visited.insert(id.clone());
+    }
+    walk(group, &item.items, 0, &mut visited, &mut plan);
+    plan
 }
 
 /// The one-word state [`Health`] reports, shared by the text and JSON output.

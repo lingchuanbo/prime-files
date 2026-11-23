@@ -78,6 +78,9 @@ struct Editor {
     args: Entity<InputState>,
     /// "Run as administrator", toggled by the checkbox and read on confirm.
     admin: Rc<Cell<bool>>,
+    /// A `group` item only offers its name here; everything else is edited in
+    /// the settings page (§17.2 E.4).
+    group_item: bool,
 }
 
 /// The in-place name editor of one group (§12.3).
@@ -319,6 +322,7 @@ impl QuickLaunchView {
         let name = input_with(window, cx, &item.name);
         let path = input_with(window, cx, item.path.as_deref().unwrap_or_default());
         let args = input_with(window, cx, item.args.as_deref().unwrap_or_default());
+        let group_item = item.action_kind() == ActionKind::Group;
         self.editor = Some(Editor {
             group,
             slot,
@@ -326,17 +330,27 @@ impl QuickLaunchView {
             path,
             args,
             admin: Rc::new(Cell::new(item.admin)),
+            group_item,
         });
         name.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
     /// Saves the four fields through the state layer (§12.3).
+    ///
+    /// A `group` item only writes its name: its path, arguments and working
+    /// directory are not part of it, and its entries are chosen in the settings
+    /// page (§17.2 E.4).
     fn confirm_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
         };
         let name = editor.name.read(cx).value().to_string();
+        if editor.group_item {
+            super::rename_item(cx, editor.group, editor.slot, &name);
+            cx.notify();
+            return;
+        }
         let path = editor.path.read(cx).value().to_string();
         let args = editor.args.read(cx).value().to_string();
         let admin = editor.admin.get();
@@ -850,6 +864,14 @@ impl Render for QuickLaunchView {
             // §17.2 D.3: the script may not take more than 60% of the window.
             let script_height = f32::from(window.bounds().size.height) * 0.6;
             root = root.child(command_overlay(&confirmation, script_height.max(120.0)));
+        }
+        if let Some(confirmation) = super::group_confirmation(cx) {
+            // §17.2 E.1: the untrusted commands of the group share one dialog.
+            let script_height = f32::from(window.bounds().size.height) * 0.6;
+            root = root.child(group_command_overlay(
+                &confirmation,
+                script_height.max(120.0),
+            ));
         }
         root
     }
@@ -1652,6 +1674,62 @@ fn editor_overlay(
     let browse = entity.clone();
     let confirm = entity.clone();
     let cancel = entity.clone();
+    let fields = if editor.group_item {
+        // §17.2 E.4: only the name changes here; the rest belongs to the
+        // settings page, which is where the group's entries are chosen.
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(field(nohrs_core::t!("Nome"), &name))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::muted()))
+                    .child(nohrs_core::t!(
+                        "Só o nome pode ser alterado aqui; edite os outros campos na página de configurações."
+                    )),
+            )
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(field(nohrs_core::t!("Nome"), &name))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(field(nohrs_core::t!("Caminho"), &path)),
+                    )
+                    .child(
+                        Button::new("quick-launch-browse")
+                            .label(nohrs_core::t!("Procurar…"))
+                            .on_click(move |_, window, cx| {
+                                browse
+                                    .update(cx, |view, cx| {
+                                        view.browse_for_path(window, cx);
+                                    })
+                                    .log_err();
+                            }),
+                    ),
+            )
+            .child(field(nohrs_core::t!("Argumentos"), &args))
+            .child(
+                Checkbox::new("quick-launch-admin")
+                    .label(nohrs_core::t!("Executar como administrador"))
+                    .checked(admin_value)
+                    .on_click(move |checked, _window, cx| {
+                        admin.set(*checked);
+                        cx.refresh_windows();
+                    }),
+            )
+    };
     Some(
         div()
             .absolute()
@@ -1674,40 +1752,7 @@ fn editor_overlay(
                     .border_1()
                     .border_color(rgb(theme::border()))
                     .child(div().text_sm().child(nohrs_core::t!("Editar item")))
-                    .child(field(nohrs_core::t!("Nome"), &name))
-                    .child(
-                        div()
-                            .flex()
-                            .items_end()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .child(field(nohrs_core::t!("Caminho"), &path)),
-                            )
-                            .child(
-                                Button::new("quick-launch-browse")
-                                    .label(nohrs_core::t!("Procurar…"))
-                                    .on_click(move |_, window, cx| {
-                                        browse
-                                            .update(cx, |view, cx| {
-                                                view.browse_for_path(window, cx);
-                                            })
-                                            .log_err();
-                                    }),
-                            ),
-                    )
-                    .child(field(nohrs_core::t!("Argumentos"), &args))
-                    .child(
-                        Checkbox::new("quick-launch-admin")
-                            .label(nohrs_core::t!("Executar como administrador"))
-                            .checked(admin_value)
-                            .on_click(move |checked, _window, cx| {
-                                admin.set(*checked);
-                                cx.refresh_windows();
-                            }),
-                    )
+                    .child(fields)
                     .child(
                         div()
                             .flex()
@@ -1847,6 +1892,145 @@ fn command_overlay(confirmation: &super::CommandConfirmation, script_height: f32
                     .label(nohrs_core::t!("Executar"))
                     .on_click(|_, _window, cx| {
                         super::confirm_pending_command(cx);
+                    }),
+            ),
+    );
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(0x00000080))
+        .child(card)
+        .into_any_element()
+}
+
+/// The first-run confirmation of a group (§17.2 E.1): every untrusted command
+/// the batch would run, listed together before anything starts.
+///
+/// `script_height` is the part of the window the list may take, as in the
+/// single-command dialog.
+fn group_command_overlay(
+    confirmation: &super::GroupConfirmation,
+    script_height: f32,
+) -> AnyElement {
+    let mut list = div()
+        .id("quick-launch-group-commands")
+        .max_h(px(script_height))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap_2();
+    for command in &confirmation.commands {
+        let cwd = command.cwd.clone().unwrap_or_else(|| "—".to_string());
+        let mut entry = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(command.name.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(rgb(theme::fg_secondary()))
+                    .child(format!("{}: {}", nohrs_core::t!("Shell"), command.shell))
+                    .child(format!("{}: {cwd}", nohrs_core::t!("Pasta de trabalho"))),
+            );
+        if command.hidden {
+            entry = entry.child(
+                div()
+                    .rounded(px(6.0))
+                    .p(px(8.0))
+                    .text_xs()
+                    .bg(rgb(theme::accent_subtle()))
+                    .text_color(rgb(theme::danger()))
+                    .child(nohrs_core::t!(
+                        "Vai rodar em segundo plano, sem janela visível."
+                    )),
+            );
+        }
+        entry = entry.child(
+            div()
+                .p(px(10.0))
+                .rounded(px(6.0))
+                .bg(rgb(theme::gray_100()))
+                .border_1()
+                .border_color(rgb(theme::border()))
+                .font_family("Mono")
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .text_color(rgb(theme::fg()))
+                .child(command.script.clone()),
+        );
+        list = list.child(entry);
+    }
+    let mut card = div()
+        .w(px(560.0))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p(px(16.0))
+        .rounded(px(10.0))
+        .bg(rgb(theme::bg()))
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .child(
+            div()
+                .text_sm()
+                .child(nohrs_core::t!("Executar estes comandos?")),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::muted()))
+                .child(nohrs_core::t!(
+                    "Este comando roda com as suas permissões. Confira o conteúdo antes de continuar."
+                )),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(confirmation.name.clone()),
+        )
+        .child(list);
+    if !confirmation.remembered {
+        card = card.child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::warning()))
+                .child(nohrs_core::t!(
+                    "Sem armazenamento: a confirmação vale até fechar o programa."
+                )),
+        );
+    }
+    card = card.child(
+        div()
+            .flex()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("quick-launch-group-cancel")
+                    .label(nohrs_core::t!("Cancelar"))
+                    .on_click(|_, _window, cx| {
+                        super::cancel_pending_command(cx);
+                    }),
+            )
+            .child(
+                Button::new("quick-launch-group-run")
+                    .label(nohrs_core::t!("Executar"))
+                    .on_click(|_, _window, cx| {
+                        super::confirm_pending_group(cx);
                     }),
             ),
     );

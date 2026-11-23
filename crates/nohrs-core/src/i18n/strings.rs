@@ -2634,4 +2634,40 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Could not save the command. Check the shell and the script.",
         "No se pudo guardar el comando. Revisa el shell y el script.",
     ),
+    (
+        "Executar estes comandos?",
+        "Run these commands?",
+        "¿Ejecutar estos comandos?",
+    ),
+    (
+        "Este grupo não tem itens válidos.",
+        "This group has no item that can start.",
+        "Este grupo no tiene elementos válidos.",
+    ),
+    (
+        "{failed} de {total} itens não iniciaram: {names}",
+        "{failed} of {total} items did not start: {names}",
+        "{failed} de {total} elementos no se iniciaron: {names}",
+    ),
+    (
+        "{skipped} itens do grupo excedem o limite de {limit} e não serão iniciados.",
+        "{skipped} items of the group exceed the limit of {limit} and will not start.",
+        "{skipped} elementos del grupo superan el límite de {limit} y no se iniciarán.",
+    ),
+    (
+        "Só o nome pode ser alterado aqui; edite os outros campos na página de configurações.",
+        "Only the name can be changed here; edit the other fields on the settings page.",
+        "Solo se puede cambiar el nombre aquí; edita los demás campos en la página de configuración.",
+    ),
+    ("Incluir itens", "Include items", "Incluir elementos"),
+    (
+        "A ordem dos cliques é a ordem de início.",
+        "The order of the clicks is the order they start in.",
+        "El orden de los clics es el orden de inicio.",
+    ),
+    (
+        "Não foi possível salvar o grupo. Confira o nome e os itens.",
+        "Could not save the group. Check the name and the items.",
+        "No se pudo guardar el grupo. Revisa el nombre y los elementos.",
+    ),
 ];

@@ -437,3 +437,101 @@ fn run_names_a_group_that_does_not_exist() {
         stderr(&missing)
     );
 }
+
+/// A file with one group whose `bundle` item references `editor` and `script`
+/// (§17.2 E.5).
+#[cfg(windows)]
+fn write_group_file(root: &Path) {
+    let path = config_file(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"schema_version = 1
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "app"
+name = "Editor"
+id = "editor"
+path = "C:\\Windows\\notepad.exe"
+
+[[group.item]]
+slot = 1
+type = "command"
+name = "Script"
+id = "script"
+
+[group.item.extra]
+shell = "cmd"
+script = "echo ok"
+
+[[group.item]]
+slot = 2
+type = "group"
+name = "Pacote"
+id = "bundle"
+items = ["editor", "script"]
+"#,
+    )
+    .unwrap();
+}
+
+/// D6 (§17.2 E.5): a group with a command child is refused as a whole unless
+/// `--yes` confirms it, and nothing is started.
+#[test]
+#[cfg(windows)]
+fn run_refuses_a_group_with_a_command_without_yes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_group_file(root);
+
+    let refused = noh(root, &["ql", "run", "general", "2"]);
+    assert_eq!(exit_code(&refused), 1, "{}", stderr(&refused));
+    let errors = stderr(&refused);
+    assert!(errors.contains("contains commands"), "{errors}");
+    assert!(errors.contains("--yes"), "{errors}");
+    assert!(
+        stdout(&refused).is_empty(),
+        "the whole group is refused, so nothing is started: {}",
+        stdout(&refused)
+    );
+}
+
+/// §17.2 E.2: a group whose references do not lead anywhere cannot be run.
+#[test]
+#[cfg(windows)]
+fn run_refuses_a_group_with_no_valid_reference() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let path = config_file(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"schema_version = 1
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "group"
+name = "Vazio"
+id = "empty"
+items = ["ghost"]
+"#,
+    )
+    .unwrap();
+
+    let refused = noh(root, &["ql", "run", "general", "0"]);
+    assert_eq!(exit_code(&refused), 1, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("no item to start"),
+        "{}",
+        stderr(&refused)
+    );
+}

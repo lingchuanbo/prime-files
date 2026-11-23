@@ -39,8 +39,8 @@ use gpui_component::Root;
 use nohrs_core::config::ConfigWatcher;
 use nohrs_core::config::paths;
 use nohrs_core::config::quick_launch::{
-    ActionKind, CommandSpec, Group, Item, OnRunning, Parsed, QuickLaunchConfig, QuickLaunchError,
-    View, Warning, WindowSettings, command_spec,
+    ActionKind, CommandSpec, Group, Item, MAX_GROUP_NESTING, MAX_GROUP_REFERENCES, OnRunning,
+    Parsed, QuickLaunchConfig, QuickLaunchError, View, Warning, WindowSettings, command_spec,
 };
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::launch::LaunchRegistry;
@@ -96,6 +96,9 @@ const TRUSTED_PREFIX: &str = "trusted_";
 
 /// How many hex characters of the SHA-256 digest name a trust record (§17.2 D.1).
 const TRUST_KEY_HEX_LENGTH: usize = 32;
+
+/// The item `type` that bundles other items of its group (§17.2 E).
+pub(crate) const KIND_GROUP: &str = "group";
 
 /// How the state came to hold its configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +228,12 @@ struct StartRequest {
     on_running: OnRunning,
     /// Echoed back so a reply the window has moved on from is dropped (§8.4).
     generation: u64,
+    /// The group launch this request belongs to, when it is one (§17.2 E.1).
+    ///
+    /// A batch sends several requests that share one id, so their replies are
+    /// counted together instead of each one closing the window and counting a
+    /// use of its own.
+    batch: Option<u64>,
 }
 
 /// One health request for the `quick-launch-icons` thread.
@@ -248,6 +257,8 @@ struct IconRequest {
 enum WorkerReply {
     Launched {
         generation: u64,
+        /// The batch the request belonged to, echoed as it was sent (§17.2 E.1).
+        batch: Option<u64>,
         name: String,
         outcome: std::result::Result<LaunchOutcome, LaunchError>,
     },
@@ -394,6 +405,7 @@ fn run_launch_worker(
     let context = ExpandContext::current();
     while let Ok(request) = receiver.recv() {
         let generation = request.generation;
+        let batch = request.batch;
         let name = request.item.name.clone();
         let launch_request = LaunchRequest {
             mode: request.mode,
@@ -413,6 +425,7 @@ fn run_launch_worker(
         replies
             .try_send(WorkerReply::Launched {
                 generation,
+                batch,
                 name,
                 outcome,
             })
@@ -846,6 +859,77 @@ fn command_needs_confirmation(
     (!quick_launch.restored.trusted.contains(&trust_key)).then_some((spec, trust_key))
 }
 
+/// What launching one `group` item expands to (§17.2 E.1).
+#[derive(Debug, Default, PartialEq)]
+struct GroupPlan {
+    /// The entries to start, in the order the references name them, with nested
+    /// groups flattened into their own entries.
+    items: Vec<Item>,
+    /// How many entries were left out because the plan is already full.
+    excess: usize,
+}
+
+/// Follows one `group` item's references inside its own group (§17.2 E.1).
+///
+/// Only ids of the same group are found, so a reference to another group is
+/// ignored; an id that was already expanded is skipped, which is what breaks a
+/// cycle the parser may have repaired but a hand-built state can still hold.
+/// Nested groups are followed up to [`MAX_GROUP_NESTING`] levels, and the plan
+/// stops at [`MAX_GROUP_REFERENCES`] entries, reporting the rest as `excess`.
+fn expand_group(group_items: &[Item], group_item: &Item) -> GroupPlan {
+    fn walk(
+        group_items: &[Item],
+        references: &[String],
+        depth: usize,
+        visited: &mut HashSet<String>,
+        plan: &mut GroupPlan,
+    ) {
+        for reference in references {
+            let Some(item) = group_items
+                .iter()
+                .find(|candidate| candidate.id.as_deref() == Some(reference.as_str()))
+            else {
+                continue;
+            };
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            if item.action_kind() == ActionKind::Group {
+                if depth < MAX_GROUP_NESTING {
+                    walk(group_items, &item.items, depth + 1, visited, plan);
+                }
+                continue;
+            }
+            if plan.items.len() < MAX_GROUP_REFERENCES {
+                plan.items.push(item.clone());
+            } else {
+                plan.excess = plan.excess.saturating_add(1);
+            }
+        }
+    }
+
+    let mut plan = GroupPlan::default();
+    let mut visited: HashSet<String> = HashSet::new();
+    // The item that was clicked must not be expanded through one of its own
+    // references: the parser drops that reference, but the runtime rule has to
+    // hold for a state that was edited in memory too.
+    if let Some(id) = &group_item.id {
+        visited.insert(id.clone());
+    }
+    walk(group_items, &group_item.items, 0, &mut visited, &mut plan);
+    plan
+}
+
+/// The health of a `group` item (§17.2 E.2): `Invalid` when no reference leads
+/// to an entry, `Ok` otherwise. The entries keep their own health answers.
+fn group_health(group_items: &[Item], group_item: &Item) -> Health {
+    if expand_group(group_items, group_item).items.is_empty() {
+        Health::Invalid(nohrs_core::t!("Este grupo não tem itens válidos.").to_string())
+    } else {
+        Health::Ok
+    }
+}
+
 /// Which process the quick launch is running in (§15.1).
 ///
 /// The window is the same in both; what changes is where a folder goes and
@@ -933,6 +1017,82 @@ pub(crate) struct CommandConfirmation {
     pub(crate) remembered: bool,
 }
 
+/// One untrusted `command` of a group, waiting for the group's single
+/// confirmation (§17.2 E.1).
+struct PendingGroupCommand {
+    /// The command itself: the launch uses this copy.
+    item: Item,
+    /// What the dialog shows and what the trust key was built from.
+    spec: CommandSpec,
+    /// The key written when the user clicks "Run" (§17.2 D.1).
+    trust_key: String,
+}
+
+/// A `group` item whose untrusted commands are waiting for one confirmation
+/// (§17.2 E.1). Cancelling it aborts the whole group.
+struct PendingGroup {
+    /// The group the item belongs to, by id: a renamed group keeps its usage.
+    group: String,
+    /// The slot of the group item, which is the only item usage is recorded on.
+    slot: u32,
+    /// What the group's tile shows, for the dialog's heading.
+    name: String,
+    /// The expanded entries, in launch order.
+    plan: GroupPlan,
+    /// Every command of the plan that is not trusted yet.
+    commands: Vec<PendingGroupCommand>,
+    /// How the click asked for the launch, kept until the dialog answers.
+    kind: ClickKind,
+}
+
+/// What the window's group dialog draws (§17.2 E.1): every untrusted command of
+/// the group, listed together.
+pub(crate) struct GroupConfirmation {
+    /// What the group's tile shows.
+    pub(crate) name: String,
+    /// The commands the "Run" button would trust and start.
+    pub(crate) commands: Vec<GroupCommandConfirmation>,
+    /// Whether this process has a store, so the confirmation survives a restart
+    /// (§17.2 D.5).
+    pub(crate) remembered: bool,
+}
+
+/// One command listed by the group dialog (§17.2 E.1).
+pub(crate) struct GroupCommandConfirmation {
+    /// What the command's tile shows.
+    pub(crate) name: String,
+    /// The shell the script runs through.
+    pub(crate) shell: &'static str,
+    /// The working directory as written, when one is set.
+    pub(crate) cwd: Option<String>,
+    /// Whether the script runs without a console window.
+    pub(crate) hidden: bool,
+    /// The whole script, shown as written.
+    pub(crate) script: String,
+}
+
+/// The group launch in flight (§17.2 E.1): replies are counted until the whole
+/// batch has answered, and only then is the footer set, the usage recorded and
+/// the window hidden.
+struct PendingLaunchBatch {
+    /// The shared id the requests carried, and the generation they answer with.
+    generation: u64,
+    /// The group item usage is recorded on, once anything started.
+    usage: (String, u32),
+    /// How many requests were sent, for the partial-failure message.
+    total: usize,
+    /// How many answers are still to come.
+    remaining: usize,
+    /// The entries whose launch failed, by name, in reply order.
+    failed: Vec<String>,
+    /// The folders the entries asked to open, in reply order.
+    folders: Vec<PathBuf>,
+    /// Whether at least one entry started, activated or opened a folder.
+    used: bool,
+    /// Entries left out of the plan because it was already full.
+    excess: usize,
+}
+
 /// The in-memory state, read and written through the GPUI global (§13).
 pub(crate) struct QuickLaunch {
     config: QuickLaunchConfig,
@@ -974,6 +1134,11 @@ pub(crate) struct QuickLaunch {
     message: Option<String>,
     /// A command waiting for the user's first-run confirmation (§17.2 D.3).
     pending_command: Option<PendingCommand>,
+    /// A group waiting for the user's confirmation of its untrusted commands
+    /// (§17.2 E.1).
+    pending_group: Option<PendingGroup>,
+    /// A group launch whose replies are still being counted (§17.2 E.1).
+    pending_batch: Option<PendingLaunchBatch>,
     /// A hide asked for while GPUI had the window out for an update. The 400 ms
     /// tick performs it, outside any update, rather than the request being lost.
     pending_hide: bool,
@@ -1115,6 +1280,23 @@ fn start_health_check(cx: &mut App) {
                     let Some((group, slot, item)) = quick_launch.health_queue.pop_front() else {
                         break;
                     };
+                    // A group's health is its references (§17.2 E.2), which is
+                    // string work on the state already in memory: no Shell call
+                    // is involved, so it can be answered here.
+                    if item.action_kind() == ActionKind::Group {
+                        let health = quick_launch
+                            .config
+                            .groups
+                            .iter()
+                            .find(|candidate| candidate.id == group)
+                            .map(|candidate| group_health(&candidate.items, &item));
+                        if let Some(health) = health {
+                            quick_launch.health.insert((group, slot), health);
+                            quick_launch.touch();
+                        }
+                        sent = sent.saturating_add(1);
+                        continue;
+                    }
                     let workers = quick_launch.workers.as_ref()?;
                     workers.send_health(HealthRequest {
                         group,
@@ -1126,7 +1308,10 @@ fn start_health_check(cx: &mut App) {
                 (sent > 0).then_some(sent)
             });
             match batch {
-                Ok(Some(_)) => continue,
+                Ok(Some(_)) => {
+                    cx.update(|cx| cx.refresh_windows()).log_err();
+                    continue;
+                }
                 _ => return,
             }
         }
@@ -1171,9 +1356,25 @@ fn recheck_health(cx: &mut App, group: usize, slot: u32) {
     state.health.remove(&(group_id.clone(), slot));
     #[cfg(test)]
     state.health_checks.push((group_id.clone(), slot));
-    if let Some(item) = item
-        && let Some(workers) = state.workers.as_ref()
-    {
+    let Some(item) = item else {
+        return;
+    };
+    // A group's references are checked against the state in memory (§17.2 E.2),
+    // not on the worker thread: nothing outside the process is involved.
+    if item.action_kind() == ActionKind::Group {
+        let health = state
+            .config
+            .groups
+            .iter()
+            .find(|candidate| candidate.id == group_id)
+            .map(|candidate| group_health(&candidate.items, &item));
+        if let Some(health) = health {
+            state.health.insert((group_id, slot), health);
+            state.touch();
+        }
+        return;
+    }
+    if let Some(workers) = state.workers.as_ref() {
         workers.send_health(HealthRequest {
             group: group_id,
             slot,
@@ -1501,6 +1702,10 @@ pub(crate) struct ItemEdit {
     /// keeps the item's `extra` as it is, which is what the window's edit dialog
     /// and every other kind of item need.
     pub command: Option<CommandEdit>,
+    /// The slots a `group` item launches, in start order (§17.2 E.3). `None`
+    /// leaves the item's references as they are, which is what every other kind
+    /// of item wants; the settings form fills it when the kind is `group`.
+    pub group_items: Option<Vec<u32>>,
 }
 
 /// What the settings page's form knows about a `command` item (§17.2 A.3).
@@ -1516,6 +1721,39 @@ pub(crate) struct CommandEdit {
     pub keep_open: bool,
 }
 
+/// Writes the ids a saved `group` item refers to (§17.2 E.3), giving an id to
+/// every item that has none: the group item itself, then the selected entries in
+/// start order.
+///
+/// An id is `item_<slot>`; when another item of the group already holds that id,
+/// `_2`, `_3`… is appended until it is free. All of it happens in the caller's
+/// single write, so the references cannot be saved half-assigned.
+fn group_selection_ids(items: &mut [Item], own_slot: u32, selected: &[u32]) -> Vec<String> {
+    fn assign(items: &mut [Item], slot: u32) -> Option<String> {
+        let index = items.iter().position(|item| item.slot == slot)?;
+        if let Some(id) = items.get(index).and_then(|item| item.id.clone()) {
+            return Some(id);
+        }
+        let mut candidate = format!("item_{slot}");
+        let mut suffix = 1u32;
+        while items
+            .iter()
+            .any(|item| item.id.as_deref() == Some(candidate.as_str()))
+        {
+            suffix = suffix.saturating_add(1);
+            candidate = format!("item_{slot}_{suffix}");
+        }
+        items.get_mut(index)?.id = Some(candidate.clone());
+        Some(candidate)
+    }
+
+    assign(items, own_slot);
+    selected
+        .iter()
+        .filter_map(|slot| assign(items, *slot))
+        .collect()
+}
+
 /// Applies the item form of the settings page (§17.1 B), with the rules of the
 /// window's edit dialog: no empty name or path, no edits while the file is
 /// read-only, a fresh health check and a kind judged again from a new path.
@@ -1525,7 +1763,9 @@ pub(crate) struct CommandEdit {
 pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit) -> bool {
     let name = edit.name.trim();
     let path = edit.path.trim();
-    // A command has no path; the rest of the form still needs one.
+    // A `group` has no path and a `command` keeps its target in `extra`; the
+    // rest of the form still needs one.
+    let is_group = edit.kind == KIND_GROUP;
     let command_extra = match (edit.kind.as_str(), edit.command.as_ref()) {
         (KIND_COMMAND, Some(command)) => {
             let mut probe = Item::new(0, KIND_COMMAND, "command");
@@ -1551,7 +1791,7 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     let is_command = command_extra.is_some();
     // An item without a name would be an empty tile, and one without a path
     // could never start: the form treats both as "cancel".
-    if name.is_empty() || (!is_command && path.is_empty()) || !editable(cx) {
+    if name.is_empty() || (!is_command && !is_group && path.is_empty()) || !editable(cx) {
         return false;
     }
     let cwd = edit.cwd.trim();
@@ -1570,6 +1810,16 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     let Some(target) = state.config.groups.get_mut(group) else {
         return false;
     };
+    // A `group`'s references, and the ids they need, are settled before the
+    // item itself is borrowed: this is the one write that may touch several
+    // items of the group (§17.2 E.3).
+    let references = is_group.then(|| {
+        group_selection_ids(
+            &mut target.items,
+            slot,
+            edit.group_items.as_deref().unwrap_or_default(),
+        )
+    });
     let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
         return false;
     };
@@ -1578,7 +1828,7 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     // those and changing one would change what the entry means.
     if !matches!(
         edit.kind.as_str(),
-        "app" | "folder" | "file" | "url" | "uwp" | KIND_COMMAND
+        "app" | "folder" | "file" | "url" | "uwp" | KIND_COMMAND | KIND_GROUP
     ) && edit.kind != item.kind
     {
         return false;
@@ -1587,13 +1837,18 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     let previous_path = item.path.clone();
     item.kind = edit.kind.clone();
     item.name = name.to_string();
-    item.path = (!is_command).then(|| path.to_string());
+    item.path = (!is_command && !is_group).then(|| path.to_string());
     let args = edit.args.trim();
-    item.args = (!args.is_empty()).then(|| args.to_string());
-    item.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+    item.args = (!is_group && !args.is_empty()).then(|| args.to_string());
+    item.cwd = (!is_group && !cwd.is_empty()).then(|| cwd.to_string());
     let icon = edit.icon.trim();
     item.icon = (!icon.is_empty()).then(|| icon.to_string());
-    item.admin = if is_command { false } else { edit.admin };
+    item.admin = if is_command || is_group {
+        false
+    } else {
+        edit.admin
+    };
+    item.items = references.unwrap_or_default();
     item.tags = edit
         .tags
         .iter()
@@ -1615,7 +1870,7 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     // S4: a path that now points at a folder (or a program) changes the kind, so
     // the item keeps working after the edit. An unchanged path keeps the kind
     // the form chose.
-    if path_changed && !is_command {
+    if path_changed && !is_command && !is_group {
         retype_after_edit(cx, group, slot, &previous_kind);
     }
     if let Some(trust_key) = trust_key {
@@ -1656,6 +1911,7 @@ pub(crate) fn edit_item(
             icon: item.icon.unwrap_or_default(),
             tags: item.tags,
             command: None,
+            group_items: None,
         },
     );
     // The dialog judges the kind after every edit, as it did before the form
@@ -1665,6 +1921,36 @@ pub(crate) fn edit_item(
         retype_after_edit(cx, group, slot, &previous_kind);
     }
     edited
+}
+
+/// Renames one item without touching anything else (§17.2 E.4).
+///
+/// The window's edit dialog offers only the name for a `group` item: its path,
+/// arguments and working directory do not exist, and its contents are chosen in
+/// the settings page.
+pub(crate) fn rename_item(cx: &mut App, group: usize, slot: u32, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(item) = state
+        .config
+        .groups
+        .get_mut(group)
+        .and_then(|target| target.items.iter_mut().find(|item| item.slot == slot))
+    else {
+        return false;
+    };
+    if item.name == name {
+        return true;
+    }
+    item.name = name.to_string();
+    state.touch();
+    mark_dirty(cx);
+    true
 }
 
 /// Adds a group at the end and makes it the current one (§12.3). The caller
@@ -2134,6 +2420,8 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         generation: 0,
         message: None,
         pending_command: None,
+        pending_group: None,
+        pending_batch: None,
         pending_hide: false,
         revision: 0,
         pending_usage: None,
@@ -3030,6 +3318,7 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
         }
         WorkerReply::Launched {
             generation,
+            batch,
             name,
             outcome,
         } => {
@@ -3037,6 +3326,10 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                 return;
             };
             if generation != quick_launch.generation {
+                return;
+            }
+            if let Some(batch_id) = batch {
+                apply_batch_reply(cx, batch_id, &name, outcome);
                 return;
             }
             let close_after_launch = quick_launch.config.window.close_after_launch;
@@ -3066,6 +3359,91 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
             }
         }
     }
+}
+
+/// Counts one group entry's answer, and finishes the batch when it was the last
+/// (§17.2 E.1).
+///
+/// Nothing is recorded per entry: the group item is the one that was used, and
+/// the footer, the folders and the hide wait for the whole batch (§17.2 E.1).
+fn apply_batch_reply(
+    cx: &mut App,
+    batch_id: u64,
+    name: &str,
+    outcome: std::result::Result<LaunchOutcome, LaunchError>,
+) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let Some(batch) = quick_launch.pending_batch.as_mut() else {
+        return;
+    };
+    if batch.generation != batch_id {
+        return;
+    }
+    match &outcome {
+        Ok(LaunchOutcome::Cancelled) => {}
+        Ok(LaunchOutcome::OpenFolder(path)) => {
+            batch.used = true;
+            batch.folders.push(path.clone());
+        }
+        Ok(LaunchOutcome::Started | LaunchOutcome::Activated) => batch.used = true,
+        Err(error) => {
+            tracing::warn!(
+                target: "quick_launch",
+                "could not launch {name:?} from a group: {error}"
+            );
+            batch.failed.push(name.to_string());
+        }
+    }
+    batch.remaining = batch.remaining.saturating_sub(1);
+    if batch.remaining > 0 {
+        return;
+    }
+    let Some(batch) = state_mut(cx).and_then(|quick_launch| quick_launch.pending_batch.take())
+    else {
+        return;
+    };
+    finish_batch(cx, batch);
+}
+
+/// What happens once every entry of a group has answered (§17.2 E.1): one
+/// footer line when anything failed, the folders one by one, one usage record on
+/// the group item, and one decision about hiding the window.
+fn finish_batch(cx: &mut App, batch: PendingLaunchBatch) {
+    if batch.used {
+        record_usage(cx, &batch.usage.0, batch.usage.1);
+    }
+    for folder in batch.folders {
+        open_in_explorer(cx, folder);
+    }
+    let message = if !batch.failed.is_empty() {
+        Some(nohrs_core::tf!(
+            "{failed} de {total} itens não iniciaram: {names}",
+            failed = batch.failed.len(),
+            total = batch.total,
+            names = batch.failed.join(", ")
+        ))
+    } else if batch.excess > 0 {
+        Some(nohrs_core::tf!(
+            "{skipped} itens do grupo excedem o limite de {limit} e não serão iniciados.",
+            skipped = batch.excess,
+            limit = MAX_GROUP_REFERENCES
+        ))
+    } else {
+        None
+    };
+    let close_after_launch =
+        state(cx).is_some_and(|quick_launch| quick_launch.config.window.close_after_launch);
+    if let Some(quick_launch) = state_mut(cx) {
+        quick_launch.message = message;
+    }
+    // The window is hidden once, after the whole batch (§17.2 E.1), and only
+    // when something actually started — the same rule as one item (§8.5).
+    if batch.used && hides_after_action(close_after_launch, is_locked(cx)) {
+        hide(cx);
+    }
+    cx.refresh_windows();
 }
 
 /// Whether what just happened hides the window (§11.1): a pinned window stays
@@ -3162,6 +3540,9 @@ fn report_launch_failure(cx: &mut App, name: &str, error: &LaunchError) {
 /// A `command` whose trust key is not in the restored set stops here: the window
 /// shows its confirmation dialog instead, and only that dialog's "Run" calls
 /// [`confirm_pending_command`] (§17.2 D.3).
+///
+/// A `group` is expanded and started here instead of being sent to the registry
+/// (§17.2 E.1).
 pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
     let Some(quick_launch) = state(cx) else {
         return;
@@ -3179,6 +3560,18 @@ pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
         "launching the selected item"
     );
     let (item, group_id) = (item.clone(), group.id.clone());
+    if item.action_kind() == ActionKind::Group {
+        let group_items = quick_launch
+            .config
+            .groups
+            .iter()
+            .find(|candidate| candidate.id == group_id)
+            .map(|candidate| candidate.items.clone())
+            .unwrap_or_default();
+        let visible = quick_launch.visible;
+        activate_group(cx, &group_id, &group_items, slot, &item, kind, visible);
+        return;
+    }
     let mode = launch_mode(&item, kind);
     let confirmation = command_needs_confirmation(quick_launch, &item);
     let visible = quick_launch.visible;
@@ -3206,12 +3599,124 @@ pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
     send_launch(cx, item, group_id, slot, mode);
 }
 
+/// Expands and starts one `group` item (§17.2 E.1).
+///
+/// The whole group is refused when one of its commands still needs its first-run
+/// confirmation and the user cancels: the commands are collected into one
+/// overlay rather than one per command, and nothing is sent before it answers.
+fn activate_group(
+    cx: &mut App,
+    group_id: &str,
+    group_items: &[Item],
+    slot: u32,
+    group_item: &Item,
+    kind: ClickKind,
+    visible: bool,
+) {
+    let plan = expand_group(group_items, group_item);
+    if plan.items.is_empty() {
+        if let Some(quick_launch) = state_mut(cx) {
+            quick_launch.message =
+                Some(nohrs_core::t!("Este grupo não tem itens válidos.").to_string());
+            quick_launch.touch();
+        }
+        cx.refresh_windows();
+        return;
+    }
+    let commands: Vec<PendingGroupCommand> = {
+        let Some(quick_launch) = state(cx) else {
+            return;
+        };
+        plan.items
+            .iter()
+            .filter_map(|child| {
+                command_needs_confirmation(quick_launch, child).map(|(spec, trust_key)| {
+                    PendingGroupCommand {
+                        item: child.clone(),
+                        spec,
+                        trust_key,
+                    }
+                })
+            })
+            .collect()
+    };
+    if commands.is_empty() {
+        send_group_launch(cx, group_id.to_string(), slot, plan, kind);
+        return;
+    }
+    // The dialog lives in the quick-launch window, so a summon from the
+    // Launcher's `@` shows it first (§17.2 D.4).
+    if !visible && let Err(error) = show(cx) {
+        tracing::warn!(target: "quick_launch", "could not show the window: {error}");
+    }
+    if let Some(quick_launch) = state_mut(cx) {
+        quick_launch.message = None;
+        quick_launch.pending_group = Some(PendingGroup {
+            group: group_id.to_string(),
+            slot,
+            name: group_item.name.clone(),
+            plan,
+            commands,
+            kind,
+        });
+        quick_launch.touch();
+    }
+    cx.refresh_windows();
+}
+
+/// Sends one start request per entry of a group, all under one generation and
+/// batch id (§17.2 E.1).
+fn send_group_launch(cx: &mut App, group: String, slot: u32, plan: GroupPlan, kind: ClickKind) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let generation = quick_launch.generation.wrapping_add(1);
+    quick_launch.generation = generation;
+    // D9: `ask` is not asked per entry inside a group; it behaves as `activate`.
+    let on_running = group_on_running(quick_launch.config.window.on_running);
+    let total = plan.items.len();
+    quick_launch.message = None;
+    quick_launch.pending_usage = None;
+    quick_launch.pending_batch = Some(PendingLaunchBatch {
+        generation,
+        usage: (group, slot),
+        total,
+        remaining: total,
+        failed: Vec::new(),
+        folders: Vec::new(),
+        used: false,
+        excess: plan.excess,
+    });
+    if let Some(workers) = quick_launch.workers.as_ref() {
+        for item in plan.items {
+            let mode = launch_mode(&item, kind);
+            workers.send_launch(StartRequest {
+                item: Box::new(item),
+                mode,
+                on_running,
+                generation,
+                batch: Some(generation),
+            });
+        }
+    }
+    cx.refresh_windows();
+}
+
 /// The launch mode one click asks for (§8.1): `Ctrl` or an item marked `admin`.
 fn launch_mode(item: &Item, kind: ClickKind) -> LaunchMode {
     if kind == ClickKind::Admin || item.admin {
         LaunchMode::Admin
     } else {
         LaunchMode::Normal
+    }
+}
+
+/// D9 (§17.2 F.3): a group does not ask per entry, so `ask` behaves as
+/// `activate` inside one.
+fn group_on_running(on_running: OnRunning) -> OnRunning {
+    match on_running {
+        OnRunning::Ask => OnRunning::Activate,
+        other => other,
     }
 }
 
@@ -3225,20 +3730,27 @@ fn send_launch(cx: &mut App, item: Item, group: String, slot: u32, mode: LaunchM
     quick_launch.generation = generation;
     quick_launch.message = None;
     quick_launch.pending_usage = Some((group, slot));
+    // A single launch replaces whatever group was in flight: its replies are
+    // already stale, because the generation moved on.
+    quick_launch.pending_batch = None;
     if let Some(workers) = quick_launch.workers.as_ref() {
         workers.send_launch(StartRequest {
             item: Box::new(item),
             mode,
             on_running,
             generation,
+            batch: None,
         });
     }
     cx.refresh_windows();
 }
 
-/// Whether a command dialog is waiting for an answer (§17.2 D.3).
+/// Whether a command dialog is waiting for an answer (§17.2 D.3), or a group
+/// dialog is (§17.2 E.1).
 pub(crate) fn command_waiting(cx: &App) -> bool {
-    state(cx).is_some_and(|quick_launch| quick_launch.pending_command.is_some())
+    state(cx).is_some_and(|quick_launch| {
+        quick_launch.pending_command.is_some() || quick_launch.pending_group.is_some()
+    })
 }
 
 /// What the window's command dialog shows, if one is waiting (§17.2 D.3).
@@ -3251,6 +3763,27 @@ pub(crate) fn command_confirmation(cx: &App) -> Option<CommandConfirmation> {
         cwd: pending.item.cwd.clone(),
         hidden: pending.spec.hidden,
         script: pending.spec.script.clone(),
+        remembered: quick_launch.kv.is_some(),
+    })
+}
+
+/// What the window's group dialog shows, if one is waiting (§17.2 E.1).
+pub(crate) fn group_confirmation(cx: &App) -> Option<GroupConfirmation> {
+    let quick_launch = state(cx)?;
+    let pending = quick_launch.pending_group.as_ref()?;
+    Some(GroupConfirmation {
+        name: pending.name.clone(),
+        commands: pending
+            .commands
+            .iter()
+            .map(|command| GroupCommandConfirmation {
+                name: command.item.name.clone(),
+                shell: command.spec.shell.as_str(),
+                cwd: command.item.cwd.clone(),
+                hidden: command.spec.hidden,
+                script: command.spec.script.clone(),
+            })
+            .collect(),
         remembered: quick_launch.kv.is_some(),
     })
 }
@@ -3306,16 +3839,80 @@ pub(crate) fn confirm_pending_command(cx: &mut App) {
 }
 
 /// "Cancel": forget the pending command, start nothing, report nothing
-/// (§17.2 D.3).
+/// (§17.2 D.3). A pending group is the same decision for its whole batch
+/// (§17.2 E.1).
 pub(crate) fn cancel_pending_command(cx: &mut App) {
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
-    if quick_launch.pending_command.take().is_none() {
+    let cancelled = quick_launch.pending_command.take().is_some();
+    let cancelled_group = quick_launch.pending_group.take().is_some();
+    if !cancelled && !cancelled_group {
         return;
     }
     quick_launch.touch();
     cx.refresh_windows();
+}
+
+/// "Run" for a group (§17.2 E.1): writes every trust key, then sends the whole
+/// batch. Cancelling instead drops the pending group untouched, so the whole
+/// group is refused.
+pub(crate) fn confirm_pending_group(cx: &mut App) {
+    let Some(pending) = state_mut(cx).and_then(|quick_launch| quick_launch.pending_group.take())
+    else {
+        return;
+    };
+    let kv = {
+        let Some(quick_launch) = state_mut(cx) else {
+            return;
+        };
+        for command in &pending.commands {
+            remember_trust_in_memory(quick_launch, &command.trust_key);
+        }
+        quick_launch.touch();
+        quick_launch.kv.clone()
+    };
+    cx.refresh_windows();
+    let PendingGroup {
+        group,
+        slot,
+        plan,
+        commands,
+        kind,
+        ..
+    } = pending;
+    let key_names: Vec<String> = commands
+        .iter()
+        .map(|command| format!("{TRUSTED_PREFIX}{}", command.trust_key))
+        .collect();
+    cx.spawn(async move |cx| {
+        if let Some(kv) = kv {
+            let written = cx
+                .background_spawn(async move {
+                    let mut written = true;
+                    for key_name in key_names {
+                        let Ok(key) = KvKey::new(KV_NAMESPACE, &key_name) else {
+                            written = false;
+                            continue;
+                        };
+                        if kv.put(&key, b"true").is_err() {
+                            written = false;
+                        }
+                    }
+                    written
+                })
+                .await;
+            if !written {
+                tracing::warn!(
+                    target: "quick_launch",
+                    "could not remember the group's commands' trust in the store"
+                );
+            }
+        }
+        cx.update(|cx| send_group_launch(cx, group, slot, plan, kind))
+            .ok();
+    })
+    .detach();
 }
 
 /// Adds one trust key to the in-memory set and, when there is a store, writes it
@@ -4628,6 +5225,7 @@ mod tests {
                     icon: String::new(),
                     tags: Vec::new(),
                     command: None,
+                    group_items: None,
                 }
             ));
             assert!(!move_group(cx, 0, 1));
@@ -4715,6 +5313,7 @@ mod tests {
                 icon: "C:\\icone.png".to_string(),
                 tags: vec![" um ".to_string(), String::new(), "dois".to_string()],
                 command: None,
+                group_items: None,
             };
             assert!(update_item(cx, 0, 2, &edit));
             let item = item_at(cx, 0, 2).expect("the item is still there");
@@ -5076,6 +5675,7 @@ mod tests {
             mode: LaunchMode::Normal,
             on_running: OnRunning::Activate,
             generation: 7,
+            batch: None,
         });
         let deadline = Instant::now() + Duration::from_millis(100);
         let mut answer = None;
@@ -5130,6 +5730,7 @@ mod tests {
             mode: LaunchMode::Normal,
             on_running: OnRunning::Activate,
             generation: 42,
+            batch: None,
         });
         match reply_receiver.recv_blocking() {
             Ok(WorkerReply::Launched {
@@ -5580,6 +6181,7 @@ mod tests {
                     hidden: false,
                     keep_open: false,
                 }),
+                group_items: None,
             };
             assert!(update_item(cx, 0, 1, &edit));
         });
@@ -5699,6 +6301,496 @@ mod tests {
         );
     }
 
+    /// A leaf item that can be referenced by a `group` item (§17.2 E).
+    fn group_leaf(slot: u32, id: &str) -> Item {
+        let mut item = Item::new(slot, "app", id);
+        item.id = Some(id.to_string());
+        item
+    }
+
+    /// A `group` item with `references`, in start order.
+    fn group_bundle(slot: u32, id: &str, references: &[&str]) -> Item {
+        let mut item = Item::new(slot, KIND_GROUP, id);
+        item.id = Some(id.to_string());
+        item.items = references
+            .iter()
+            .map(|reference| reference.to_string())
+            .collect();
+        item
+    }
+
+    /// §17.2 E.1: references start in order, a nested group is flattened where it
+    /// appears, and an id that was already expanded is skipped.
+    #[test]
+    fn group_references_start_in_order_and_flatten_nesting() {
+        let items = vec![
+            group_leaf(0, "a"),
+            group_leaf(1, "b"),
+            group_leaf(2, "c"),
+            group_leaf(3, "d"),
+            group_bundle(4, "inner", &["c", "d"]),
+            group_bundle(5, "outer", &["b", "inner", "a", "a"]),
+        ];
+        let plan = expand_group(&items, &items[5]);
+        let names: Vec<&str> = plan.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["b", "c", "d", "a"]);
+        assert_eq!(plan.excess, 0, "nothing was left out");
+    }
+
+    /// §17.2 E.1: a cycle in memory is broken by the visited set instead of
+    /// recursing forever; the parse repairs one, but the runtime must not hang.
+    #[test]
+    fn group_references_break_a_cycle() {
+        let items = vec![
+            group_leaf(0, "x"),
+            group_bundle(1, "a", &["b"]),
+            group_bundle(2, "b", &["a", "x"]),
+        ];
+        let plan = expand_group(&items, &items[1]);
+        let names: Vec<&str> = plan.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["x"]);
+    }
+
+    /// §17.2 E.1: a plan stops at sixteen entries and reports the rest instead of
+    /// starting them.
+    #[test]
+    fn group_references_stop_at_the_entry_limit() {
+        let mut items: Vec<Item> = (0..20)
+            .map(|slot| Item {
+                slot,
+                ..group_leaf(slot, &format!("i{slot}"))
+            })
+            .collect();
+        let references: Vec<String> = items.iter().filter_map(|item| item.id.clone()).collect();
+        let reference_text: Vec<&str> = references.iter().map(String::as_str).collect();
+        items.push(group_bundle(20, "all", &reference_text));
+        let plan = expand_group(&items, &items[20]);
+        assert_eq!(plan.items.len(), MAX_GROUP_REFERENCES);
+        assert_eq!(plan.excess, 20 - MAX_GROUP_REFERENCES);
+        assert_eq!(
+            plan.items.first().map(|item| item.name.as_str()),
+            Some("i0"),
+            "the first references start"
+        );
+    }
+
+    /// §17.2 E.1: a reference that names another group's item is not found in
+    /// this group, so it is ignored.
+    #[test]
+    fn group_references_ignore_other_groups() {
+        let group = vec![group_leaf(0, "a")];
+        let mut bundle = group_bundle(1, "outer", &["a", "foreign"]);
+        bundle.id = Some("outer".to_string());
+        let plan = expand_group(&group, &bundle);
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(plan.excess, 0, "a missing reference is not an overflow");
+    }
+
+    /// §17.2 E.1: nesting is followed up to [`MAX_GROUP_NESTING`] levels.
+    #[test]
+    fn group_references_stop_at_the_nesting_limit() {
+        let build = |links: usize| {
+            let mut items = vec![group_leaf(0, "leaf")];
+            let mut references = vec!["leaf".to_string()];
+            for index in 0..links {
+                let id = format!("n{index}");
+                let reference_text: Vec<&str> = references.iter().map(String::as_str).collect();
+                items.push(group_bundle(
+                    u32::try_from(index + 1).unwrap_or(1),
+                    &id,
+                    &reference_text,
+                ));
+                references = vec![id];
+            }
+            let last = references.first().cloned().unwrap_or_default();
+            let outer_reference: Vec<&str> = vec![last.as_str()];
+            items.push(group_bundle(
+                u32::try_from(links + 1).unwrap_or(1),
+                "outer",
+                &outer_reference,
+            ));
+            items
+        };
+        let allowed = build(MAX_GROUP_NESTING);
+        let plan = expand_group(&allowed, allowed.last().expect("the outer bundle"));
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["leaf"],
+            "eight nested groups still reach the leaf"
+        );
+        let too_deep = build(MAX_GROUP_NESTING + 1);
+        let plan = expand_group(&too_deep, too_deep.last().expect("the outer bundle"));
+        assert!(plan.items.is_empty(), "the ninth level is not followed");
+    }
+
+    /// §17.2 E.2: a group with no valid reference is invalid; one with a
+    /// reference is ok, and its entries keep their own answers.
+    #[test]
+    fn a_group_is_invalid_only_without_a_valid_reference() {
+        let items = vec![group_leaf(0, "a")];
+        assert_eq!(
+            group_health(&items, &group_bundle(1, "empty", &[])),
+            Health::Invalid(nohrs_core::t!("Este grupo não tem itens válidos.").to_string())
+        );
+        assert_eq!(
+            group_health(&items, &group_bundle(2, "ghost", &["ghost"])),
+            Health::Invalid(nohrs_core::t!("Este grupo não tem itens válidos.").to_string())
+        );
+        assert_eq!(
+            group_health(&items, &group_bundle(3, "real", &["a"])),
+            Health::Ok
+        );
+    }
+
+    /// D9: inside a group `ask` behaves as `activate`.
+    #[test]
+    fn asking_inside_a_group_becomes_activating() {
+        assert_eq!(group_on_running(OnRunning::Ask), OnRunning::Activate);
+        assert_eq!(group_on_running(OnRunning::New), OnRunning::New);
+        assert_eq!(group_on_running(OnRunning::Activate), OnRunning::Activate);
+    }
+
+    /// §17.2 E.1: untrusted commands of the whole plan share one dialog, and
+    /// cancelling it starts nothing.
+    #[gpui::test]
+    fn untrusted_group_commands_share_one_confirmation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                group_leaf(1, "a"),
+                command_item(2, "echo um"),
+                command_item(3, "echo dois"),
+                group_bundle(4, "inner", &["c"]),
+                group_bundle(0, "bundle", &["a", "b", "inner"]),
+            ];
+            group.items[1].id = Some("b".to_string());
+            group.items[2].id = Some("c".to_string());
+            group.items[2].name = "Dois".to_string();
+            group.items[1].name = "Um".to_string();
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let installed = state(cx).expect("the state is installed");
+            assert!(
+                installed.pending_command.is_none(),
+                "a group does not use the single-command dialog"
+            );
+            let pending = installed
+                .pending_group
+                .as_ref()
+                .expect("the group dialog is waiting");
+            assert_eq!(pending.commands.len(), 2, "one entry per untrusted command");
+            assert_eq!(installed.generation, 0, "nothing was sent to the launcher");
+            let confirmation = group_confirmation(cx).expect("the dialog has content");
+            assert_eq!(confirmation.name, "bundle");
+            let names: Vec<&str> = confirmation
+                .commands
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["Um", "Dois"]);
+            assert_eq!(confirmation.commands[0].script, "echo um");
+            assert_eq!(confirmation.commands[1].script, "echo dois");
+            cancel_pending_command(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_group.is_none(), "cancel closes the dialog");
+            assert!(
+                state.pending_batch.is_none(),
+                "cancel refuses the whole group"
+            );
+            assert_eq!(state.generation, 0, "nothing started");
+        });
+        // "Run" trusts every command and only then sends the whole batch.
+        cx.update(|cx| {
+            activate_with(cx, 0, ClickKind::Plain);
+            confirm_pending_group(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_group.is_none(), "Run closes the dialog");
+            assert_eq!(state.restored.trusted.len(), 2, "both keys are remembered");
+            let batch = state
+                .pending_batch
+                .as_ref()
+                .expect("the whole group is in flight");
+            assert_eq!(batch.total, 3, "the non-command entry starts too");
+            assert_eq!(state.generation, 1, "one batch, one generation");
+        });
+    }
+
+    /// §17.2 E.1: once every entry has answered, one footer line names the ones
+    /// that did not start, and only then is the batch finished.
+    #[gpui::test]
+    fn a_group_reports_partial_failures_in_one_line(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                group_leaf(1, "a"),
+                group_leaf(2, "b"),
+                group_leaf(3, "c"),
+                group_bundle(0, "bundle", &["a", "b", "c"]),
+            ];
+            group.items[1].name = "A".to_string();
+            group.items[2].name = "B".to_string();
+            group.items[3].name = "C".to_string();
+            group.items[0].name = "Pacote".to_string();
+            install(cx, vec![group]);
+            activate_with(cx, 0, ClickKind::Plain);
+            let installed = state(cx).expect("the state is installed");
+            let batch = installed
+                .pending_batch
+                .as_ref()
+                .expect("the batch is in flight");
+            assert_eq!(batch.total, 3);
+            assert_eq!(
+                installed.message, None,
+                "nothing is reported before the end"
+            );
+            let generation = installed.generation;
+            apply_reply(
+                cx,
+                WorkerReply::Launched {
+                    generation,
+                    batch: Some(generation),
+                    name: "A".to_string(),
+                    outcome: Ok(LaunchOutcome::Started),
+                },
+            );
+            apply_reply(
+                cx,
+                WorkerReply::Launched {
+                    generation,
+                    batch: Some(generation),
+                    name: "B".to_string(),
+                    outcome: Err(LaunchError::NotFound(PathBuf::from("C:\\nao\\existe"))),
+                },
+            );
+            let after_one = state(cx).expect("the state is installed");
+            assert!(
+                after_one.pending_batch.is_some(),
+                "one answer is still missing"
+            );
+            assert_eq!(after_one.message, None, "no line before the batch ends");
+            apply_reply(
+                cx,
+                WorkerReply::Launched {
+                    generation,
+                    batch: Some(generation),
+                    name: "C".to_string(),
+                    outcome: Err(LaunchError::NotFound(PathBuf::from("C:\\nao\\existe"))),
+                },
+            );
+            let after_all = state(cx).expect("the state is installed");
+            assert!(after_all.pending_batch.is_none(), "the batch is finished");
+            assert_eq!(
+                after_all.message.as_deref(),
+                Some(
+                    nohrs_core::tf!(
+                        "{failed} de {total} itens não iniciaram: {names}",
+                        failed = 2,
+                        total = 3,
+                        names = "B, C"
+                    )
+                    .as_str()
+                )
+            );
+        });
+    }
+
+    /// §17.2 E.1: entries past the limit are not started, and the footer says how
+    /// many were left out.
+    #[gpui::test]
+    fn a_group_reports_entries_past_the_limit(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            for slot in 1..=18u32 {
+                let id = format!("i{slot}");
+                let mut item = group_leaf(slot, &id);
+                item.name = format!("Item {slot}");
+                group.items.push(item);
+            }
+            let references: Vec<String> = (1..=18u32).map(|slot| format!("i{slot}")).collect();
+            let reference_text: Vec<&str> = references.iter().map(String::as_str).collect();
+            group.items.push(group_bundle(0, "bundle", &reference_text));
+            install(cx, vec![group]);
+            activate_with(cx, 0, ClickKind::Plain);
+            let generation = state(cx).map(|state| state.generation).unwrap_or(0);
+            let total = state(cx)
+                .and_then(|state| state.pending_batch.as_ref().map(|batch| batch.total))
+                .unwrap_or(0);
+            assert_eq!(total, MAX_GROUP_REFERENCES);
+            for slot in 1..=u32::try_from(MAX_GROUP_REFERENCES).unwrap_or(16) {
+                apply_reply(
+                    cx,
+                    WorkerReply::Launched {
+                        generation,
+                        batch: Some(generation),
+                        name: format!("Item {slot}"),
+                        outcome: Ok(LaunchOutcome::Started),
+                    },
+                );
+            }
+            let state = state(cx).expect("the state is installed");
+            assert_eq!(
+                state.message.as_deref(),
+                Some(
+                    nohrs_core::tf!(
+                        "{skipped} itens do grupo excedem o limite de {limit} e não serão iniciados.",
+                        skipped = 2,
+                        limit = MAX_GROUP_REFERENCES
+                    )
+                    .as_str()
+                )
+            );
+        });
+    }
+
+    /// §17.2 E.1: the use is recorded on the group item only, never on the
+    /// entries it started.
+    #[gpui::test]
+    fn a_group_records_usage_only_on_itself(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                group_leaf(1, "a"),
+                group_leaf(2, "b"),
+                group_bundle(0, "bundle", &["a", "b"]),
+            ];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let generation = state(cx).map(|state| state.generation).unwrap_or(0);
+            for name in ["a", "b"] {
+                apply_reply(
+                    cx,
+                    WorkerReply::Launched {
+                        generation,
+                        batch: Some(generation),
+                        name: name.to_string(),
+                        outcome: Ok(LaunchOutcome::Started),
+                    },
+                );
+            }
+            assert!(
+                state(cx).is_some_and(|state| state.pending_usage.is_none()),
+                "a batch never uses the single item's pending record"
+            );
+        });
+        cx.run_until_parked();
+        let usage = |slot: u32| {
+            let key = KvKey::new(KV_NAMESPACE, &format!("usage_general_{slot}"))
+                .expect("a valid usage key");
+            store.get(&key).expect("the test store")
+        };
+        let group_usage = usage(0).expect("the group counted one use");
+        assert!(
+            String::from_utf8_lossy(&group_usage).contains("\"count\":1"),
+            "the record is a usage count: {group_usage:?}"
+        );
+        assert!(usage(1).is_none(), "the first entry is not counted");
+        assert!(usage(2).is_none(), "the second entry is not counted");
+    }
+
+    /// §17.2 E.3: saving a group gives ids to the items that had none, avoids a
+    /// collision by appending `_2`, and writes the references in pick order in
+    /// the same edit.
+    #[gpui::test]
+    fn saving_a_group_assigns_ids_without_collisions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                {
+                    let mut item = Item::new(0, KIND_GROUP, "Pacote");
+                    item.items = vec!["item_1".to_string()];
+                    item
+                },
+                Item::new(1, "app", "Um"),
+                {
+                    let mut item = Item::new(2, "app", "Dois");
+                    item.id = Some("item_1".to_string());
+                    item
+                },
+                Item::new(3, "app", "Tres"),
+            ];
+            install(cx, vec![group]);
+            let edit = ItemEdit {
+                kind: KIND_GROUP.to_string(),
+                name: "Pacote".to_string(),
+                path: String::new(),
+                args: String::new(),
+                cwd: String::new(),
+                admin: false,
+                icon: String::new(),
+                tags: Vec::new(),
+                command: None,
+                group_items: Some(vec![2, 1, 3]),
+            };
+            let revision = state(cx).map(|state| state.revision).unwrap_or(0);
+            assert!(update_item(cx, 0, 0, &edit));
+            let item = item_at(cx, 0, 0).expect("the group is still there");
+            assert_eq!(
+                item.id.as_deref(),
+                Some("item_0"),
+                "the group gets an id too"
+            );
+            assert_eq!(
+                item.items,
+                vec![
+                    "item_1".to_string(),
+                    "item_1_2".to_string(),
+                    "item_3".to_string()
+                ],
+                "pick order, and the taken id gets a suffix"
+            );
+            assert_eq!(
+                item_at(cx, 0, 1).and_then(|item| item.id),
+                Some("item_1_2".to_string())
+            );
+            assert_eq!(
+                item_at(cx, 0, 2).and_then(|item| item.id),
+                Some("item_1".to_string()),
+                "an existing id is kept"
+            );
+            assert_eq!(
+                item_at(cx, 0, 3).and_then(|item| item.id),
+                Some("item_3".to_string())
+            );
+            assert!(
+                state(cx).is_some_and(|state| state.pending_save),
+                "the whole assignment is one throttled write"
+            );
+            assert!(
+                state(cx).map(|state| state.revision).unwrap_or(0) > revision,
+                "the window is told what changed"
+            );
+            // Saving the same selection again is stable: no new ids, no `_3`.
+            assert!(update_item(cx, 0, 0, &edit));
+            assert_eq!(
+                item_at(cx, 0, 0).map(|item| item.items),
+                Some(vec![
+                    "item_1".to_string(),
+                    "item_1_2".to_string(),
+                    "item_3".to_string()
+                ])
+            );
+        });
+    }
+
     fn sample_state() -> QuickLaunch {
         QuickLaunch {
             config: QuickLaunchConfig {
@@ -5734,6 +6826,8 @@ mod tests {
             generation: 0,
             message: None,
             pending_command: None,
+            pending_group: None,
+            pending_batch: None,
             pending_hide: false,
             revision: 0,
             pending_usage: None,
