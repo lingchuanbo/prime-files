@@ -30,9 +30,13 @@
 // a real file on disk is the point here.
 #![allow(clippy::unwrap_used, clippy::disallowed_methods)]
 
+// Used by the non-Windows tests below.
+#[cfg(not(target_os = "windows"))]
 use std::process::Command;
 
+#[cfg(not(target_os = "windows"))]
 use nohrs_services::fs::ops;
+#[cfg(not(target_os = "windows"))]
 use nohrs_services::fs::trash::{self, Store};
 
 /// A name no real file would have, so a run that fails between trashing and
@@ -43,6 +47,7 @@ use nohrs_services::fs::trash::{self, Store};
 /// leftover from an interrupted run is matched by name, size and modification
 /// time, so a fixed name would let a later run locate the *stale* copy, pass
 /// every assertion, and leave the file it actually trashed behind.
+#[cfg(not(target_os = "windows"))]
 fn fixture_name() -> String {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

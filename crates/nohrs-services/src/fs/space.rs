@@ -508,7 +508,7 @@ fn is_hidden(name: &str, metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        return metadata.file_attributes() & 0x2 != 0;
+        metadata.file_attributes() & 0x2 != 0
     }
     #[cfg(not(windows))]
     {
@@ -644,6 +644,9 @@ pub fn layout_with_hidden(
     tiles
 }
 
+// One argument per piece of the recursion's state; a struct would only move the
+// same eight fields into a declaration somewhere else.
+#[allow(clippy::too_many_arguments)]
 fn place_children(
     node: &SpaceNode,
     area: Rect,
