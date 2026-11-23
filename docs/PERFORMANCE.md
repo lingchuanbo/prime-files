@@ -839,3 +839,23 @@ O5a; comparar com ela ficaria com a diferença de duas builds. O cenário 2 agor
 recebe o instantâneo com o carimbo `built` ajustado a cada rodada (o arquivo
 `target\tmp\perf\index-fresh.idx` envelhece), senão ele mede reconstrução em vez de
 carga.
+
+#### O1: carga em fluxo
+
+`load` passou a ler o arquivo por um `BufReader`: cabeçalho, contagem de segmentos e,
+por segmento, os comprimentos, as entradas em blocos de 4.096 e as duas strings
+direto no tamanho declarado, em vez de `std::fs::read` do arquivo inteiro (261 MB)
+seguido de cópia de cada segmento. Todo comprimento é conferido contra o que resta
+do arquivo antes de ser alocado, e o arquivo tem de terminar exatamente onde o
+último segmento termina — um byte a mais devolve `None` (teste novo).
+
+| Cenário 2 (carga do instantâneo fresco) | Antes | Depois | Δ |
+|---|---:|---:|---:|
+| pico privado | 615,6 MB | **529,2 MB** | **−86,4 MB** |
+| estável privado | 530,2 MB | 529,0 MB | −1,2 MB |
+| pico de working set | 545,5 MB | 458,5 MB | −87,0 MB |
+
+O ganho é o buffer do arquivo inteiro, que existia só durante a carga: o pico agora
+é o próprio valor estável. Não é o 1/4 de GB estimado no plano — o buffer era
+liberado depressa, como a diferença de 83 MB entre pico e estável do O0 já dizia —,
+mas passa do limite de 50 MB combinado para manter a mudança.
