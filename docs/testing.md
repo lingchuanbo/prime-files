@@ -254,3 +254,20 @@ cargo doc --no-deps --all-features --workspace
    ```
 
    同じ理由で、`powershell` (5.1) と `pwsh` (7+) を取り違えないこと。
+
+4. **`nohrs-cli` の 4 つのログテストは、開発機では portable モードのせいで失敗する。**
+   `crates/nohrs-cli/tests/log_command_leaves_the_log_alone.rs` はログが
+   `$XDG_STATE_HOME` の下に置かれることを前提にしているが、
+   `target\release\userdata\config.toml` に `portable_mode = true` があると
+   アプリは（テスト用の子プロセスも含めて）すべての `XDG_*` を無視し、
+   ログは実行ファイルの隣に書かれる。`main` でも同じく失敗する既知の問題で、
+   テストの不備ではなく環境の性質による。
+   実行するときは、先に `target\release\userdata` を一時的に別名へ退避するか、
+   CI のきれいな環境で走らせる。**この 4 件は「M3 で壊れた」ものではない。**
+
+5. **`nohrs-cli` の統合テストは、バイナリを一時ディレクトリへコピーしてから実行する。**
+   `CARGO_BIN_EXE_noh` は `target\release\noh.exe` を指し、その隣の `userdata` が
+   portable モードを有効にしてしまう（3. と同じ罠）。コピー先には `userdata` が無いので、
+   `XDG_CONFIG_HOME` などの隔離がそのまま効く。
+   `crates/nohrs-cli/tests/quick_launch.rs` の `binary_under_test()` がその実装で、
+   プロセスごとに一度だけコピーする。
