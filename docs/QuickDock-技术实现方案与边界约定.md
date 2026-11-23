@@ -1,4 +1,4 @@
-# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.6
+# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.7
 
 > v2.1（2026-11-22）：写入 Q1–Q5 的确认结果，新增 §15.0（主程序常驻）和 §15.1（常驻模式）。
 > v2.2（2026-11-22，M1 验收后）：§8.4 改为启动、图标两条线程。M1 的具体问题见 `docs/QuickLaunch-M1-验收报告.md`。
@@ -6,6 +6,7 @@
 > v2.4（2026-11-22，M2 开工前）：新增 §12.3，规定 M2 的添加和编辑界面。
 > v2.5（2026-11-22）：新增 §11.1 锁定按钮。
 > v2.6（2026-11-23）：新增 §17.1，M3 实现细则。
+> v2.7（2026-11-23，M3 验收后）：更正 §17.1 B 中 `gpui_keys_to_hotkey` 的位置，改放到 `nohrs-core`。
 
 > 这是一份**实现规格**，执行方（DeepSeek）按它写代码。写着“必须 / 禁止”的条款不能自行改动；没写到的情况按 §19 处理。
 > 需求见 `docs/LumaFiles-快速启动工具方案.md`。两份文档有冲突时，**以本文为准**。
@@ -589,7 +590,7 @@ CLI（`nohrs-cli`）不能依赖 gpui，也就不能依赖 `nohrs-pages`。它�
 | 条目 | 先在下拉框选分组，再看条目列表（名称、类型、路径），选中一个条目后显示完整表单 | 表单字段：类型（只能选 app / folder / file / url；未知类型只读显示）、名称、路径（带“浏览…”）、参数、工作目录（带“浏览…”）、以管理员运行、图标、标签（逗号分隔）。保存走新增的 `update_item(cx, group, slot, ItemEdit)`，规则同 `edit_item`（名称和路径不能为空、只读时拒绝、`recheck_health`、路径变化时按 S4 重新判断类型）。`edit_item` 改成调用 `update_item`，不保留两套逻辑 |
 | 文件 | 文件路径（只读显示）、“打开 quicklaunch.toml”、“在 LumaFiles 中显示” | 打开文件在后台用 `ShellExecuteExW`（verb 为 NULL）；按钮旁显示提示 `t!("Editar pela interface reescreve o arquivo e remove os comentários.")`。只读状态时，在本组顶部用红字显示原因，并把其他三组的所有控件置灰 |
 
-- **热键录制**：复用 settings 已有的 `RecordShortcut` / `record_key` 机制。录到的 gpui 按键（`ctrl-alt-space`）用新增的纯函数 `gpui_keys_to_hotkey(&str) -> Option<String>` 转成 global-hotkey 的写法（`ctrl+alt+Space`），放在 `nohrs-launcher/src/hotkey.rs`，并写测试，覆盖修饰键顺序、字母、数字、F 键、空格、无法转换的键。录完后通过 `sync_hotkey` 注册：
+- **热键录制**：复用 settings 已有的 `RecordShortcut` / `record_key` 机制。录到的 gpui 按键（`ctrl-alt-space`）用新增的纯函数 `gpui_keys_to_hotkey(&str) -> Option<String>` 转成 global-hotkey 的写法（`ctrl+alt+Space`），放在 **`nohrs-core`**（v2.7 更正：v2.6 写的是 `nohrs-launcher/src/hotkey.rs`，但设置页所在的 `nohrs-pages` 不能依赖 `nohrs-launcher`），并写测试，覆盖修饰键顺序、字母、数字、F 键、空格、无法转换的键。录完后通过 `sync_hotkey` 注册：
   - 成功：行尾显示“已注册”；
   - 失败：显示 `hotkey_error`，并保留原来的热键（M1 已实现这一点）；
   - 与 Launcher 的热键相同：显示“和搜索启动器的热键冲突”。
