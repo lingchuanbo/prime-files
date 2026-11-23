@@ -1,4 +1,4 @@
-# Clippy 基线清理 — 规格与边界约定 v1.0
+# Clippy 基线清理 — 规格与边界约定 v1.1
 
 > 起点：`main` @ `4c3d372`（Merge Quick Launch M4）
 > 分支：`chore/clippy-baseline`
@@ -107,3 +107,36 @@ cargo build --release -p nohrs -p nohrs-cli
 - 不升级依赖，不改 `rust-toolchain.toml`、`clippy.toml`、`[workspace.lints]`。
 - 不碰 `third_party/gpui`。
 - 不加 CI（以后另立项）。
+
+## 9. 第 0 步盘点复查（v1.1，复查方根据 `target\tmp\cb0-*.txt`）
+
+| crate | 条数 |
+|---|---|
+| nohrs-core | 14 |
+| nohrs-services | 11 |
+| nohrs-indexer | 5（`precedence`、`chunks_exact_to_chunks`、`type_complexity`、`manual_range_contains`、`disallowed_methods` 各 1） |
+| nohrs（全部在 build.rs） | 4 |
+| nohrs-pages | 97（去掉 lib 和 test 两个 target 重复报的同一位置后是 95） |
+| nohrs-cli | 4（全部是 dead_code） |
+| nohrs-launcher / models / store / ui | 0 |
+
+**更正 pages 的划分**：产品代码 **31** 条，测试代码 **64** 条（`#[cfg(test)] mod tests` 内的也算测试代码，例如 `everything.rs` 5062–5639 行、`search_window.rs`、`archive_ops.rs`、`navigation.rs` 等文件里的测试模块）。E 步用 `--lib` 检查，本来就不会编译 `cfg(test)`，按这个检查分步即可。
+
+**`precedence`（indexer）**：加括号时要**保持现在的运算顺序**（也就是写出编译器现在实际的结合方式），不要按“看起来应该是”的意思改。如果现在的顺序看起来不对，列为可疑点。
+
+**两个可疑点的结论（都不是 bug，按下面的方式合并，行为不变）**：
+1. `explorer/page.rs:1881`：第一个条件 `!tab_menu_recent && tab_list_menu.is_some()` 已经被第二个条件里的 `tab_list_menu.is_some()` 完全覆盖，是多余的分支（后面的 fly-out 判断同样要求 `tab_list_menu.is_none()`，说明“最近关闭”本来就只出现在标签页右键菜单里）。改成：
+   ```rust
+   let recent_heading = if self.recently_closed.is_empty() || self.tab_list_menu.is_some() {
+       None
+   } else {
+       Some(rows.len())
+   };
+   ```
+2. `explorer/path_edit.rs:79`：UNC 分支放在前面，是为了让网络地址**不去调用** `path.is_dir()`（上方注释写明会卡住窗口）。用短路的 `||` 合并，顺序不变：
+   ```rust
+   let target = if super::network::is_unc(&typed) || path.is_dir() {
+   ```
+   上方那段关于网络地址的注释保留，并补半句“`is_unc` 必须写在前面”。
+
+**顺带发现，不在本次范围内**：`page.rs:1905` 的 `"最近关闭 ({})"` 是写死的中文，没有经过 `t!`，其他语言的界面也会显示中文。登记到以后的 i18n 清理，本次不改。
