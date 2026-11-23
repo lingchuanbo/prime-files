@@ -1441,10 +1441,16 @@ fn close_apps_picker(section: &mut Section) {
 
 /// Opens or closes the installed-app picker (§17.2 B.5).
 ///
-/// The Apps folder is enumerated on a background task the first time the
-/// picker opens, and the answer is kept for the session: a foreground thread
-/// must not do this work (§18), and walking the folder again for every click
-/// would only add latency.
+/// The Apps folder is enumerated once, on a thread of its own, the first time the
+/// picker opens, and the answer is kept for the session: a foreground thread must
+/// not do this work (§18), and walking the folder again for every click would only
+/// add latency.
+///
+/// The thread is not a GPUI pool thread on purpose: a pool thread may have been
+/// COM-initialised earlier, and with another apartment model
+/// `CoInitializeEx` answers `RPC_E_CHANGED_MODE` (§8.4). A one-shot thread, named
+/// for its job, starts clean; it answers through a channel so the foreground never
+/// waits on it.
 fn choose_app(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
     let section = &mut page.quick_launch;
     if section.apps_picker {
@@ -1459,18 +1465,36 @@ fn choose_app(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
     }
     section.apps_loading = true;
     section.apps_error = None;
-    let enumeration = cx.background_spawn(async {
-        let _apartment = ComApartment::enter()?;
-        installed_apps()
-    });
+    let (sender, receiver) = async_channel::bounded(1);
+    let spawned = std::thread::Builder::new()
+        .name("quick-launch-apps".to_string())
+        .spawn(move || {
+            let outcome = ComApartment::enter()
+                .and_then(|_apartment| installed_apps())
+                .map_err(|error| error.to_string());
+            if let Err(error) = sender.send_blocking(outcome) {
+                tracing::debug!(target: "quick_launch", "the app list was not wanted: {error}");
+            }
+        });
+    if let Err(error) = spawned {
+        section.apps_loading = false;
+        section.apps_error = Some(format!("could not start the app list thread: {error}"));
+        cx.notify();
+        return;
+    }
     cx.spawn(async move |this, cx| {
-        let outcome = enumeration.await;
+        // The channel is the hand-off: `recv` yields as soon as the thread answers,
+        // and the foreground task never blocks.
+        let outcome = match receiver.recv().await {
+            Ok(outcome) => outcome,
+            Err(error) => Err(format!("the app list thread stopped: {error}")),
+        };
         this.update(cx, |page, cx| {
             let section = &mut page.quick_launch;
             section.apps_loading = false;
             match outcome {
                 Ok(apps) => section.apps = Some(apps),
-                Err(error) => section.apps_error = Some(error.to_string()),
+                Err(error) => section.apps_error = Some(error),
             }
             cx.notify();
         })
