@@ -230,3 +230,26 @@ c910528 Add the clippy baseline spec
 - `nohrs-indexer` 的 `bin` 和 `nohrs` 的 `bin` 只有在 lib 编译干净之后才会被 lint 到：这次因此多修了 `indexer/src/main.rs` 的 1 条、`nohrs/src/app.rs` 2 条、`nohrs/src/cli.rs` 1 条 —— 它们都在第 0 步的盘点之外，属于“以前从没被检查过”的部分。
 - 规格 §7 已按实际执行线程填好（3 行）。
 - 没有改 `clippy.toml`、`[workspace.lints]`、`rust-toolchain.toml`，没有加 `#![allow(clippy::all)]`，没有升级依赖，没有碰 `third_party/gpui`。
+
+
+---
+
+## 复查第 1 轮（复查方，2026-11-23，HEAD 851c3b4）
+
+复查方式：直接读 git 对象，逐个提交看 diff（c910528…851c3b4，共 10 个提交）；另用脚本检查每个新增的 `allow(clippy::disallowed_methods)`，确认它管辖的范围里确实调用了 `std::fs::read`、`write` 或 `read_to_string`。
+
+**通过的部分**：A–E 步的修改都是等价改写，行为不变（逐处核对过 `network.rs` 里 match guard 的改法：`connect_interactive` 返回 true 时改走 `_ => {}`，和原来一样什么都不做；`settings.rs` 里的 `&& let` 只在条件为真时才执行 `take()`；`precedence` 只加了括号）。两个可疑点按 §9 的写法合并，没有加 allow。dead code 用 `#[cfg(unix)]` 限定。测试数量不变（pages 改动的文件里 `#[test]` 修改前后都是 91 个），没有新增 `#[ignore]`，也没有新增 `mod.rs`。
+
+**必须修改**：
+
+| # | 问题 | 要求 |
+|---|---|---|
+| R1 | **日志测试在非 Windows 平台上会操作开发者真实的日志。** 新代码去掉了 `XDG_STATE_HOME`，又默认“日志目录 = 可执行文件所在目录”，可这只在 Windows 上成立（`paths::log_dir()` 只在 `#[cfg(windows)]` 下才返回 exe 目录）。在 Linux/macOS 上，`noh log clear --force` 会清空 `~/.local/state/nohrs/logs`，而且 4 个测试都会失败（CI 跑 Linux） | 子进程**始终**设置 `XDG_STATE_HOME=<本文件专用的临时目录>`。测试里的 `log_dir()` 按平台区分：Windows 用副本所在目录，其他平台用 `<state>/nohrs/logs`。只有 Windows 需要 `Mutex` 轮流执行 |
+| R2 | **代码、注释、文档三方说法不一致。** 实际上日志测试用的是共享的 `binary_under_test()` 目录加 `Mutex`，`copy_for_test()` 根本没被调用：它是真正的 dead code，被 `#[allow(dead_code)]` 掩盖了，而且那条注释是错的。`binary_under_test()` 上那条“log tests only need copy_into”的注释也是错的。`copy_into` 仍然会重命名，和报告 §7、`docs/testing.md` §7 第 4/5 条写的“每个测试单独复制、不重命名”对不上 | 删掉 `copy_for_test()`；去掉两处 `#[allow(dead_code)]`（两个测试 target 都会用到 `binary_under_test()`，不再需要）；按代码的**实际做法**重写报告 §7 和 `docs/testing.md` §7 第 4/5 条 |
+| R3 | **有 6 个新增的 `allow(clippy::disallowed_methods)` 管辖范围里没有任何文件读写**，说明当时并没有看清楚 clippy 报的位置 | 删掉这 6 个（连同前面那行注释）：`everything.rs:56`（`search_tests` 模块）、`:1119`（`push`）、`:1772`（`index_status_poll_tests`）、`:2819`（代码块）、`navigation.rs:76`（`LISTING_WAIT` 常量）、`:686`（`OPENED_WITH_DEFAULT_APP`）。验证方法：把本分支**所有新增**的 `allow(clippy::disallowed_methods)` 临时改成 `expect(...)`，跑一遍 §2 的 clippy，凡是报 `unfulfilled lint expectation` 的都删掉，然后把留下的改回 `allow`（`expect` 在某些平台上可能不满足，所以不保留） |
+| R4 | **`settings.rs` 里 `read_config_table` 的理由写错了。** 它不只在启动时调用：配置热重载（`nohrs-pages/src/root.rs:672`，位于 `this.update_in` 里）也会在 **UI 线程**上调用 `load_from_files` → `read_config_table` | 改正注释（启动时调用一次，之后每次配置文件变化都在 UI 线程上再调用），并把它补登到规格 §7 表格和报告 §2 表格（线程一栏标“UI 线程”） |
+
+**这次不改，但需要登记**：
+- 在 Windows 上，`quick_launch.rs` 的测试和日志测试共用同一个副本目录，quick_launch 的子进程会把日志写进这个目录。cargo 默认按顺序一个个跑测试二进制，加上 `turn()` 会先清理，所以现在没有问题。但如果以后改用 nextest 这类并行执行器，就需要给两者分开目录。把这一点写进 `docs/testing.md` §7 第 5 条。
+
+**R1–R4 都改完后**：重跑 §2 的全部门槛命令；另外在 cli 测试里确认 4 个日志测试仍然通过，并且对 `log_command_leaves_the_log_alone.rs` 单独跑一次 `cargo clippy -p nohrs-cli --tests --no-deps`。
