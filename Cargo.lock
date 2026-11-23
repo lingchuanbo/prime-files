@@ -4429,7 +4429,6 @@ dependencies = [
  "nohrs-store",
  "serde_json",
  "tempfile",
- "windows 0.61.3",
 ]
 
 [[package]]

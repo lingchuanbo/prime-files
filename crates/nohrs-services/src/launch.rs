@@ -22,7 +22,10 @@ use std::path::PathBuf;
 use nohrs_core::config::quick_launch::{Item, OnRunning};
 
 #[cfg(windows)]
+#[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub use windows::ComApartment;
 
 /// `type` of an application item.
 pub const KIND_APP: &str = "app";
@@ -406,6 +409,21 @@ pub fn indexed_icon(path: &str, index: u32, edge: u32) -> Option<(Vec<u8>, u32, 
     {
         let (_, _, _) = (path, index, edge);
         None
+    }
+}
+
+/// A COM apartment, which does not exist on this platform (§8.4).
+///
+/// The Shell calls `app`, `file` and `url` make are Windows-only, so there is no
+/// apartment to enter; the type is here so a caller can be written once.
+#[cfg(not(windows))]
+pub struct ComApartment;
+
+#[cfg(not(windows))]
+impl ComApartment {
+    /// Does nothing here.
+    pub fn enter() -> Result<Self, LaunchError> {
+        Ok(Self)
     }
 }
 

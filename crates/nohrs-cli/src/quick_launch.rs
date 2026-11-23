@@ -378,7 +378,7 @@ impl<'a> Session<'a> {
         let registry = LaunchRegistry::with_builtins();
         // A console process starts with no COM apartment and the Shell is COM
         // (§8.4); the guard releases it when this command ends.
-        let _apartment = match com::Apartment::enter() {
+        let _apartment = match nohrs_services::launch::ComApartment::enter() {
             Ok(apartment) => apartment,
             Err(error) => return self.fail(format_args!("could not initialize COM: {error}")),
         };
@@ -667,42 +667,6 @@ fn load(path: &Path) -> Result<Option<model::Parsed>, LoadError> {
     // here.
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
     model::parse(text).map(Some).map_err(LoadError::Parse)
-}
-
-/// The STA apartment the one-shot `run` command puts the current thread in.
-#[cfg(windows)]
-mod com {
-    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
-    use windows::core::Error;
-
-    /// An apartment entered on this thread, left when it is dropped.
-    pub(super) struct Apartment {
-        initialized: bool,
-    }
-
-    impl Apartment {
-        /// Enters an STA apartment.
-        #[allow(unsafe_code)]
-        pub(super) fn enter() -> Result<Self, Error> {
-            // SAFETY: no arguments outlive the call, and a successful one is
-            // balanced by `CoUninitialize` in `drop`.
-            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
-                .ok()
-                .map(|()| Self { initialized: true })
-        }
-    }
-
-    impl Drop for Apartment {
-        #[allow(unsafe_code)]
-        fn drop(&mut self) {
-            if !self.initialized {
-                return;
-            }
-            // SAFETY: balances the successful `CoInitializeEx` in `enter`; every
-            // object made through the apartment has been released by now.
-            unsafe { CoUninitialize() };
-        }
-    }
 }
 
 #[cfg(test)]
