@@ -347,8 +347,8 @@ schema_version = 1
 hotkey = "ctrl+alt+Space"   # global-hotkey の形式。空文字なら登録しない
 view = "grid"               # "grid" | "list"
 columns = 8                 # 2..=16
-cell_size = 96              # 64..=160
-icon_size = 48              # 16/24/32/48/64/96 のどれか (他は最も近い値)
+cell_size = 100             # 64..=160
+icon_size = 64              # 16/24/32/48/64 のどれか (他は最も近い値)
 list_columns = 2            # 1..=3
 auto_hide = true
 topmost = false

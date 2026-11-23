@@ -2700,4 +2700,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "New folder item",
         "Nuevo elemento de carpeta",
     ),
+    (
+        "Máximo de colunas; a janela mostra menos quando não cabem.",
+        "Most columns; a narrower window shows fewer.",
+        "Máximo de columnas; una ventana más estrecha muestra menos.",
+    ),
 ];

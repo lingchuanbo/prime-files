@@ -3688,6 +3688,14 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
         let quick_launch = cx.new(|cx| QuickLaunchView::new(window, cx));
         cx.new(|cx| Root::new(quick_launch, window, cx))
     })?;
+    // §11: the window can be resized by its edges. On Windows a `PopUp` is created
+    // without the resize border, so it is added once the window exists.
+    #[cfg(windows)]
+    handle
+        .update(cx, |_root, window, _cx| {
+            platform::enable_resize_border(window)
+        })
+        .log_err();
     if let Some(quick_launch) = state_mut(cx) {
         quick_launch.window = Some(handle);
         quick_launch.visible = true;
@@ -5055,12 +5063,49 @@ pub fn poll_reload(cx: &mut App) {
 #[allow(unsafe_code)]
 mod platform {
 
+    use gpui::Window;
+    use nohrs_core::telemetry::LogErr;
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::Foundation::{LPARAM, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromPoint,
     };
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetCursorPos, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_THICKFRAME,
+    };
     use windows::core::BOOL;
+
+    /// Gives the window the resize border a borderless pop-up is created without.
+    ///
+    /// The frame itself stays invisible: the window's client area covers the whole
+    /// window, so only the hit-testing changes.
+    #[allow(unsafe_code)]
+    pub fn enable_resize_border(window: &Window) {
+        let Some(hwnd) = crate::ipc::window_hwnd(window) else {
+            return;
+        };
+        let handle = HWND(hwnd as *mut core::ffi::c_void);
+        // SAFETY: the handle is the live window's; reading and writing its style is
+        // the documented way to add a border.
+        let style = unsafe { GetWindowLongW(handle, GWL_STYLE) } | (WS_THICKFRAME.0 as i32);
+        // SAFETY: the same live handle, and a style value the API accepts.
+        unsafe { SetWindowLongW(handle, GWL_STYLE, style) };
+        // SAFETY: no buffer is involved; the flags ask for a frame recalculation
+        // only, so the window keeps its place and its size.
+        unsafe {
+            SetWindowPos(
+                handle,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+        }
+        .log_err();
+    }
 
     /// The index of the monitor under the pointer, in `EnumDisplayMonitors`
     /// order — which is what `DisplayId` counts on this platform.

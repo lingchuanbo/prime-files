@@ -45,7 +45,7 @@ pub const DEFAULT_HOTKEY: &str = "ctrl+alt+Space";
 pub const DEFAULT_GROUP_ID: &str = "general";
 
 /// The icon sizes an item may ask for, smallest first.
-pub const ICON_SIZES: [u16; 6] = [16, 24, 32, 48, 64, 96];
+pub const ICON_SIZES: [u16; 5] = [16, 24, 32, 48, 64];
 
 /// How the window lays its items out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -108,8 +108,8 @@ impl Default for WindowSettings {
             hotkey: DEFAULT_HOTKEY.to_string(),
             view: View::Grid,
             columns: 8,
-            cell_size: 96,
-            icon_size: 48,
+            cell_size: 100,
+            icon_size: 64,
             list_columns: 2,
             auto_hide: true,
             topmost: false,
@@ -868,7 +868,7 @@ fn validate_window(window: &mut WindowSettings, warnings: &mut Vec<Warning>) {
     let columns = clamp("window.columns", i64::from(window.columns), 2, 16);
     window.columns = u8::try_from(columns).unwrap_or(2);
     let cell_size = clamp("window.cell_size", i64::from(window.cell_size), 64, 160);
-    window.cell_size = u16::try_from(cell_size).unwrap_or(96);
+    window.cell_size = u16::try_from(cell_size).unwrap_or(100);
     let list_columns = clamp("window.list_columns", i64::from(window.list_columns), 1, 3);
     window.list_columns = u8::try_from(list_columns).unwrap_or(1);
     let icon_size = i64::from(window.icon_size);
@@ -1429,8 +1429,8 @@ colors = true
         assert_eq!(window.hotkey, "ctrl+alt+Space");
         assert_eq!(window.view, View::Grid);
         assert_eq!(window.columns, 8);
-        assert_eq!(window.cell_size, 96);
-        assert_eq!(window.icon_size, 48);
+        assert_eq!(window.cell_size, 100);
+        assert_eq!(window.icon_size, 64);
         assert_eq!(window.list_columns, 2);
         assert!(window.auto_hide);
         assert!(!window.topmost);
@@ -1590,7 +1590,8 @@ list_columns = 0
         assert_eq!(nearest_icon_size(20), 16);
         assert_eq!(nearest_icon_size(21), 24);
         assert_eq!(nearest_icon_size(48), 48);
-        assert_eq!(nearest_icon_size(200), 96);
+        assert_eq!(nearest_icon_size(200), 64);
+        assert_eq!(nearest_icon_size(96), 64, "96 is no longer offered");
         assert_eq!(nearest_icon_size(-5), 16);
     }
 

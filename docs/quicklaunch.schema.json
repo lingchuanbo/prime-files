@@ -161,7 +161,7 @@
           "type": "boolean"
         },
         "cell_size": {
-          "default": 96,
+          "default": 100,
           "description": "Grid cell edge in logical pixels, clamped to `64..=160`.",
           "maximum": 65535,
           "minimum": 0,
@@ -185,7 +185,7 @@
           "type": "string"
         },
         "icon_size": {
-          "default": 48,
+          "default": 64,
           "description": "Icon edge in logical pixels; any other value snaps to the nearest of\n[`ICON_SIZES`].",
           "maximum": 65535,
           "minimum": 0,
@@ -243,11 +243,11 @@
       "$ref": "#/$defs/WindowSettings",
       "default": {
         "auto_hide": true,
-        "cell_size": 96,
+        "cell_size": 100,
         "close_after_launch": true,
         "columns": 8,
         "hotkey": "ctrl+alt+Space",
-        "icon_size": 48,
+        "icon_size": 64,
         "keep_running": true,
         "list_columns": 2,
         "on_running": "activate",

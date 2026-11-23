@@ -206,9 +206,16 @@ impl QuickLaunchView {
             cx.stop_propagation();
             return;
         }
-        let columns = super::state(cx)
-            .map(|quick_launch| i64::from(quick_launch.config().window.columns))
-            .unwrap_or(8);
+        let (cell_size, max_columns) = super::state(cx)
+            .map(|quick_launch| {
+                let window = &quick_launch.config().window;
+                (
+                    f32::from(window.cell_size),
+                    usize::from(window.columns.max(1)),
+                )
+            })
+            .unwrap_or((100.0, 8));
+        let columns = i64::try_from(fitted_columns(window, cell_size, max_columns)).unwrap_or(8);
         if modifiers.alt
             && !modifiers.control
             && !modifiers.platform
@@ -745,10 +752,14 @@ impl Render for QuickLaunchView {
         let groups = frame.groups.clone();
         let drawn = frame.drawn.clone();
         let view = frame.view;
-        let columns = frame.columns;
         let cell_size = frame.cell_size;
+        // The configured count is the maximum; the window's width decides how many
+        // actually fit (and a narrow window shows fewer).
+        let columns = fitted_columns(window, cell_size, frame.columns);
         let list_columns = frame.list_columns;
         let packed = frame.packed;
+        let grid_icon = grid_icon_size(configured_icon_size, cell_size);
+        let list_icon = list_icon_size(configured_icon_size);
 
         let filter_text = super::filter(cx).to_string();
         let filtered_count = drawn.len();
@@ -784,7 +795,7 @@ impl Render for QuickLaunchView {
                 group_editable,
                 &missing,
                 list_columns,
-                icon_edge,
+                list_icon,
                 &entity,
                 &self.scroll_handle,
             )
@@ -798,7 +809,7 @@ impl Render for QuickLaunchView {
                 &missing,
                 columns,
                 cell_size,
-                icon_edge,
+                grid_icon,
                 packed,
                 &entity,
                 &self.scroll_handle,
@@ -1017,12 +1028,16 @@ fn type_icon(item: &Item) -> Icon {
 }
 
 /// The picture of one item: the extracted icon, or the type's icon.
-fn picture(item: &Item, image: Option<&Arc<RenderImage>>, edge: u32) -> AnyElement {
+///
+/// `size` is in logical pixels: the image may have been extracted at a larger
+/// physical size for the display's scale, and drawing it at that size would make
+/// every icon bigger than the one the settings ask for.
+fn picture(item: &Item, image: Option<&Arc<RenderImage>>, size: f32) -> AnyElement {
     match image {
         Some(image) => img(ImageSource::Render(image.clone()))
-            .size(px(edge as f32))
+            .size(px(size))
             .into_any_element(),
-        None => type_icon(item).size(px(edge as f32)).into_any_element(),
+        None => type_icon(item).size(px(size)).into_any_element(),
     }
 }
 
@@ -1033,6 +1048,39 @@ fn group_shortcut(key: &str) -> Option<usize> {
     }
     let digit = key.chars().next()?.to_digit(10)?;
     usize::try_from(digit).ok()?.checked_sub(1)
+}
+
+/// The gap between two grid cells, in logical pixels (the row's `gap_1`).
+const CELL_GAP: f32 = 4.0;
+
+/// The icon edge a cell gets: the configured size, kept small enough that the
+/// name's line still fits under it.
+fn grid_icon_size(configured: u16, cell_size: f32) -> f32 {
+    f32::from(configured).clamp(16.0, cell_size - NAME_LINE_HEIGHT - 12.0)
+}
+
+/// The icon edge a list row gets: a row is 44 tall, so the configured size is
+/// capped to leave room for its two lines of text.
+fn list_icon_size(configured: u16) -> f32 {
+    f32::from(configured).clamp(16.0, LIST_ROW_HEIGHT - 16.0)
+}
+
+/// How many cells of `cell_size` fit in `width`, never more than `max_columns`.
+fn fit_columns(width: f32, cell_size: f32, max_columns: usize) -> usize {
+    let cell = cell_size.max(1.0);
+    let fit = ((width + CELL_GAP) / (cell + CELL_GAP)).floor();
+    let fit = if fit.is_finite() && fit >= 1.0 {
+        usize::try_from(fit as u64).unwrap_or(1)
+    } else {
+        1
+    };
+    fit.min(max_columns.max(1)).max(1)
+}
+
+/// [`fit_columns`] for the window's width, once the group bar is taken out.
+fn fitted_columns(window: &Window, cell_size: f32, max_columns: usize) -> usize {
+    let width = f32::from(window.viewport_size().width) - GROUP_BAR_WIDTH;
+    fit_columns(width, cell_size, max_columns)
 }
 
 /// The grid's cells, in reading order, with the items placed by slot (§12.1).
@@ -1217,7 +1265,7 @@ fn grid_view(
     missing: &HashMap<u32, bool>,
     columns: usize,
     cell_size: f32,
-    icon_edge: u32,
+    icon_size: f32,
     packed: bool,
     entity: &WeakEntity<QuickLaunchView>,
     scroll_handle: &UniformListScrollHandle,
@@ -1269,7 +1317,7 @@ fn grid_view(
                                 editable,
                                 group_editable,
                                 cell_size,
-                                icon_edge,
+                                icon_size,
                                 &entity,
                             ));
                         }
@@ -1316,7 +1364,7 @@ fn list_view(
     group_editable: bool,
     missing: &HashMap<u32, bool>,
     list_columns: usize,
-    icon_edge: u32,
+    icon_size: f32,
     entity: &WeakEntity<QuickLaunchView>,
     scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
@@ -1345,7 +1393,7 @@ fn list_view(
                                 group,
                                 editable,
                                 group_editable,
-                                icon_edge,
+                                icon_size,
                                 &entity,
                             )));
                         }
@@ -1555,7 +1603,7 @@ fn tile(
     editable: bool,
     group_editable: bool,
     cell_size: f32,
-    icon_edge: u32,
+    icon_size: f32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
@@ -1617,7 +1665,7 @@ fn tile(
                 cx,
             )
         })
-        .child(picture(item, image.as_ref(), icon_edge))
+        .child(picture(item, image.as_ref(), icon_size))
         .child(
             div()
                 .max_w(px(cell_size - 6.0))
@@ -1650,7 +1698,7 @@ fn row_of(
     group: usize,
     editable: bool,
     group_editable: bool,
-    icon_edge: u32,
+    icon_size: f32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
@@ -1715,7 +1763,7 @@ fn row_of(
                 cx,
             )
         })
-        .child(picture(item, drawn.image.as_ref(), icon_edge))
+        .child(picture(item, drawn.image.as_ref(), icon_size))
         .child(
             div()
                 .flex_1()
@@ -2242,6 +2290,31 @@ fn input_with(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The grid shows as many columns as fit the window, up to the configured
+    /// maximum, and never fewer than one.
+    #[test]
+    fn the_grid_shows_the_columns_that_fit_the_window() {
+        let wide = 980.0 - GROUP_BAR_WIDTH;
+        assert_eq!(fit_columns(wide, 100.0, 8), 8);
+        assert_eq!(fit_columns(240.0, 100.0, 8), 2);
+        assert_eq!(
+            fit_columns(1200.0, 100.0, 8),
+            8,
+            "the setting is the maximum"
+        );
+        assert_eq!(fit_columns(1200.0, 100.0, 16), 11);
+        assert_eq!(fit_columns(0.0, 100.0, 8), 1, "narrower than a cell");
+        assert_eq!(fit_columns(50.0, 100.0, 8), 1);
+    }
+
+    /// The icon is the configured size unless the cell is too small for it.
+    #[test]
+    fn the_icon_fits_the_cell_it_is_drawn_in() {
+        assert_eq!(grid_icon_size(64, 100.0), 64.0);
+        assert_eq!(grid_icon_size(64, 64.0), 34.0);
+        assert_eq!(list_icon_size(64), 28.0);
+    }
 
     fn item(slot: u32, name: &str) -> Item {
         Item::new(slot, "app", name)

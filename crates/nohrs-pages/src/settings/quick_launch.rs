@@ -44,10 +44,11 @@ const COLUMNS: [(&str, u8); 7] = [
 ];
 
 /// The cell sizes offered, inside the `64..=160` of §4.
-const CELL_SIZES: [(&str, u16); 7] = [
+const CELL_SIZES: [(&str, u16); 8] = [
     ("64", 64),
     ("80", 80),
     ("96", 96),
+    ("100", 100),
     ("112", 112),
     ("128", 128),
     ("144", 144),
@@ -55,14 +56,7 @@ const CELL_SIZES: [(&str, u16); 7] = [
 ];
 
 /// The icon sizes offered; the file accepts only these (§4).
-const ICON_SIZES: [(&str, u16); 6] = [
-    ("16", 16),
-    ("24", 24),
-    ("32", 32),
-    ("48", 48),
-    ("64", 64),
-    ("96", 96),
-];
+const ICON_SIZES: [(&str, u16); 5] = [("16", 16), ("24", 24), ("32", 32), ("48", 48), ("64", 64)];
 
 /// The list-view column counts offered, inside the `1..=3` of §4.
 const LIST_COLUMNS: [(&str, u8); 3] = [("1", 1), ("2", 2), ("3", 3)];
@@ -272,9 +266,9 @@ impl Section {
                     cx,
                 ),
             ),
-            Row::new(
+            Row::hint(
                 t!("Colunas"),
-                None,
+                t!("Máximo de colunas; a janela mostra menos quando não cabem."),
                 page.chips_when(
                     "quick-launch-columns",
                     &numbered(&COLUMNS, window.columns, Action::Columns),
