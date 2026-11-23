@@ -733,6 +733,12 @@ estável de 744 MB, registrado aqui para não ser confundido com o número de ci
 | 7. Janela fechada, processo residente, 10 min | 221.9 MB | 148.4 MB | 115.5 MB | 1160 | 55 | 51 |
 | 8. Abrir e fechar a pasta grande 10 vezes | 327.6 MB | 173.0 MB | 213.5 MB | 1168 | 55 | 50 |
 
+O cenário **2b** (carregar o instantâneo com o carimbo *original*, que faz o app
+refazer o índice em seguida) foi acrescentado depois do O0, com o mesmo instrumento
+e o mesmo perfil: base de **1.094,4 MB de pico e 757,7 MB estáveis** (mediana de três
+rodadas). É o estado em que a maioria dos usuários está, porque o instantâneo passa
+de seis horas.
+
 **O que os números dizem.** A base ociosa é 134.9 MB (cenário 1, estável).
 O índice próprio soma 371.0 MB ao estável e 453.9 MB ao pico (cenário 2: 505.9 MB
 estável) — a tabela e as strings que o plano estimou em ~350 MB, medidas.
@@ -766,7 +772,9 @@ de nomes do perfil anterior (258 MB em `cache\everything.idx`); ela acontece em
 todas as rodadas por igual e não aparece na memória privada, só no disco. O
 cenário 2 substitui esse arquivo pelo instantâneo do teste antes de medir.
 
-O perfil real guardava 752 MB de logs em `~\.local\state\nohrs\logs`; o app
+Os logs reais desta máquina ficam em `target\release\userdata\state\logs`
+(752,4 MB em sete arquivos); a mesma coleção está no perfil não portátil,
+`~\.local\state\nohrs\logs`, que é a origem da cópia de migração. O app
 copia o perfil anterior para um perfil portátil novo na primeira execução, e
 essa cópia acontecia dentro da janela de amostragem de cada rodada. Para o
 baseline ser do app e não da cópia, os logs foram movidos para
@@ -798,4 +806,36 @@ primeira é a que apaga o loop.
 | 2026-11-16 | 64,4 MB | não medido |
 | 2026-11-17 | 48 KB | — |
 
-No total, `~/.local/state/nohrs/logs` guardava 752 MB em sete arquivos.
+No total, `target\release\userdata\state\logs` guarda 752,4 MB em sete arquivos
+(e o perfil não portátil, `~\.local\state\nohrs\logs`, tem a mesma coleção).
+
+---
+
+#### O2 + O2b: capacidade sobrando e reconstrução por partição
+
+`Segment::shrink` solta o que a tabela cresceu além do tamanho: `names`, `lower`,
+`pinyin`, `entries`, `non_ascii` e `paths`. Ele é chamado quando uma partição fica
+pronta — o fim da caminhada de um disco (que é o mesmo caminho do primeiro índice e
+da reconstrução, então o O2b sai no mesmo ponto: cada partição é encolhida assim que
+termina, enquanto a próxima ainda está sendo lida e o índice antigo continua
+servindo as buscas) e o fim da passagem de pinyin de uma partição carregada.
+
+| Cenário | Antes (pico / estável) | Depois (pico / estável) | Δ estável |
+|---|---:|---:|---:|
+| 2. carga do instantâneo fresco | 615,4 / 531,8 MB | 615,6 / 530,2 MB | −1,6 MB |
+| 2b. carga e reconstrução | **1.094,4 / 757,7 MB** | **1.031,2 / 579,8 MB** | **−177,9 MB** |
+
+A carga não muda: o `Vec<Entry>` já nasce com a capacidade exata e as duas strings
+vêm de um `String::from_utf8` do tamanho certo, então o `shrink` ali não tem o que
+soltar (a passagem de pinyin cresce pouco). O ganho está na reconstrução, que era o
+estado comum: **−63 MB de pico e −178 MB estáveis**, porque a tabela nova é
+encolhida partição a partição enquanto ela cresce, em vez de guardar até o fim a
+capacidade que o `push` reservou.
+
+Os números "antes" desta tabela foram refeitos na mesma máquina, com o mesmo
+instrumento e minutos antes do "depois" (o código do O2 guardado com `git stash` e
+devolvido em seguida), porque a tabela do O0 foi medida com um binário anterior ao
+O5a; comparar com ela ficaria com a diferença de duas builds. O cenário 2 agora
+recebe o instantâneo com o carimbo `built` ajustado a cada rodada (o arquivo
+`target\tmp\perf\index-fresh.idx` envelhece), senão ele mede reconstrução em vez de
+carga.

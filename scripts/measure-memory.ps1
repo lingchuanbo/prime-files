@@ -208,6 +208,22 @@ function Save-Screenshot {
     Write-Host "  screenshot: $Path"
 }
 
+function Update-IndexStamp {
+    # The file header is magic (8 bytes), then the `built` stamp as little-endian
+    # seconds. A stamp older than six hours makes the app walk the drives again
+    # after loading, which is scenario 2b, not this one.
+    param([string]$Path)
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite)
+    try {
+        $stream.Position = 8
+        $bytes = [BitConverter]::GetBytes([int64]$now)
+        $stream.Write($bytes, 0, 8)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Get-Sample {
     param([System.Diagnostics.Process]$Process, [double]$Seconds)
     $Process.Refresh()
@@ -384,7 +400,11 @@ function Invoke-Scenario {
                     $indexSource = Join-Path $UserData 'cache\everything.idx'
                 }
                 if (Test-Path $indexSource) {
-                    Copy-Item -LiteralPath $indexSource -Destination (Join-Path $runInfo.UserData 'cache\everything.idx')
+                    $copied = Join-Path $runInfo.UserData 'cache\everything.idx'
+                    Copy-Item -LiteralPath $indexSource -Destination $copied
+                    # The fixture ages out after six hours; stamping the copy keeps
+                    # this scenario on the load path instead of the rebuild one.
+                    Update-IndexStamp -Path $copied
                 }
                 $process = Start-App -ExePath $runInfo.Exe
                 Start-Sleep -Seconds 4
@@ -406,6 +426,38 @@ function Invoke-Scenario {
                             $stableSince = 0.0
                         }
                         if ($stableSince -ge 10) { $done = $true; break }
+                    }
+                    Start-Sleep -Milliseconds 900
+                }
+            }
+
+            'index_stale' {
+                # The snapshot with its original stamp: the app loads it and, since
+                # it is older than six hours, walks the drives again. This is the
+                # state most users are in, and O2 is measured on it.
+                $indexSource = Join-Path $UserData 'cache\everything.idx'
+                if (Test-Path $indexSource) {
+                    Copy-Item -LiteralPath $indexSource -Destination (Join-Path $runInfo.UserData 'cache\everything.idx')
+                }
+                $process = Start-App -ExePath $runInfo.Exe
+                Start-Sleep -Seconds 4
+                $process = Wait-Window -ExePath $runInfo.Exe
+                Focus-App -Process $process
+                Send-Keys -Keys '^+f' -DelayMs 1500
+                Send-Keys -Keys 'a' -DelayMs 500
+                $peak = 0.0
+                $settled = 0
+                while ($watch.Elapsed.TotalSeconds -lt 300 -and -not $process.HasExited) {
+                    $sample = Get-Sample -Process $process -Seconds $watch.Elapsed.TotalSeconds
+                    $samples.Add($sample)
+                    if ($sample.private_mb -gt $peak) { $peak = [double]$sample.private_mb }
+                    # Loading plus walking raises the peak and then lets it go; once
+                    # it has dropped and stayed put the scenario is over.
+                    if ($peak -gt 300 -and $sample.private_mb -lt $peak * 0.95) {
+                        $settled += 1
+                        if ($settled -ge 15) { break }
+                    } else {
+                        $settled = 0
                     }
                     Start-Sleep -Milliseconds 900
                 }
@@ -596,7 +648,7 @@ if (-not (Test-Path (Join-Path $ProfileDir 'userdata'))) {
 }
 
 $scenarios = if ($All) {
-    @('cold', 'index', 'bigfolder', 'photos', 'dualpane', 'folders', 'background', 'openclose')
+    @('cold', 'index', 'index_stale', 'bigfolder', 'photos', 'dualpane', 'folders', 'background', 'openclose')
 } elseif ($Scenario) {
     @($Scenario)
 } else {
@@ -607,7 +659,9 @@ $serviceStopped = $false
 $results = New-Object 'System.Collections.Generic.List[object]'
 try {
     foreach ($name in $scenarios) {
-        if ($name -eq 'index') { $serviceStopped = Set-IndexerService -Running $false }
+        if ($name -eq 'index' -or $name -eq 'index_stale') {
+            $serviceStopped = Set-IndexerService -Running $false
+        }
         foreach ($run in 1..$Runs) {
             Write-Host ("scenario {0}, run {1}/{2}" -f $name, $run, $Runs)
             try {
@@ -629,7 +683,9 @@ try {
                 })
             }
         }
-        if ($name -eq 'index' -and $serviceStopped) { $serviceStopped = -not (Set-IndexerService -Running $true) }
+        if (($name -eq 'index' -or $name -eq 'index_stale') -and $serviceStopped) {
+            $serviceStopped = -not (Set-IndexerService -Running $true)
+        }
     }
 } finally {
     if ($serviceStopped) { Set-IndexerService -Running $true | Out-Null }

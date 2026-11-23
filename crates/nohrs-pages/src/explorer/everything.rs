@@ -202,6 +202,23 @@ impl Segment {
             .unwrap_or("")
     }
 
+    /// Releases the spare capacity a finished table outgrew.
+    ///
+    /// The walk and the pinyin pass grow their vectors by pushing, so a finished
+    /// segment can hold twice its data in capacity; a loaded one grows its pinyin
+    /// and `non_ascii` the same way. Once a segment is finished it is never pushed
+    /// into again (the same table is searched from), so the surplus can go. It is
+    /// deliberately not called while a walk is still filling a segment: shrinking
+    /// there would copy the whole table every few pushes.
+    fn shrink(&mut self) {
+        self.names.shrink_to_fit();
+        self.lower.shrink_to_fit();
+        self.pinyin.shrink_to_fit();
+        self.entries.shrink_to_fit();
+        self.non_ascii.shrink_to_fit();
+        self.paths.shrink_to_fit();
+    }
+
     fn path(&self, index: u32) -> String {
         if let Some(path) = self.paths.get(index as usize) {
             return path.clone();
@@ -1324,14 +1341,18 @@ fn build(
                 tracing::warn!("could not save the everything index so far: {error}");
             }
         };
-        let segment = Arc::new(walk_drive(
+        let mut segment = walk_drive(
             &drive,
             table,
             progress.clone(),
             WALKERS,
             platform::list,
             &mut checkpoint,
-        ));
+        );
+        // O2b: the partition just finished, so its surplus goes now, while the
+        // walk of the next drive and the old index are still in memory too.
+        segment.shrink();
+        let segment = Arc::new(segment);
         tracing::info!(
             drive = %drive,
             entries = segment.entries.len(),
@@ -3595,6 +3616,8 @@ fn load_segment(bytes: &[u8], at: usize, current: bool) -> Option<(Segment, usiz
             }
         }
     }
+    // O2: the pinyin pass may have doubled the strings it appends to.
+    segment.shrink();
     Some((segment, lower_end))
 }
 
