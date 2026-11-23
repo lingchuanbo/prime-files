@@ -109,3 +109,52 @@ M4 合入 main 后，删除临时分支：`m3-backup`、`m3-tip-before-c-fix`、
 
 ## 8. 合入条件（更新）
 R1、R2、R3 修复，BoBO 重测第 8 项，并验证 R2：在 Windows 上通过“新建条目”能选中 notepad.exe，通过“新建文件夹条目”能选中文件夹。之后合入 main 并清理临时分支。
+
+
+---
+
+# 复查（第 2 轮，2026-11-23 17:05）
+
+> 审查对象：883805b（R1）、2fc14c9、e4d5e2e（R2）、713c30f（R3）、5c44316（报告）。
+> 报告恢复情况：执行方用 `git reset --hard` 丢掉了工作区中未提交的报告，之后按原文重新写入。我把它与我写入的原文逐段比对：第 7 节、R2、R3、第 8 节的内容一致，只是在第 8 节前多了一条 `---` 分隔线、空行数量不同，**没有内容缺失**。今后执行方**禁止**对含有未提交改动的工作区使用 `reset --hard`、`checkout -- .`、`stash drop` 等会丢弃改动的命令（见第 D 节）。
+> 结论：R1、R3 通过；**R2 引入了一个会导致崩溃的问题（R4），必须先修**。
+
+## A. 逐项确认
+
+| 项 | 结果 | 依据 |
+|---|---|---|
+| R1 | ✅ | `group_command_overlay` 已改用 `crate::terminal::code_font()` |
+| R2 快速启动窗口部分 | ✅ | 新增 `path_prompt` / `path_prompt_for` / `folder_entry_offered`，用注入参数做了测试；`new_item_at` 用 `Either`，在 Windows 上即只选文件；“新建文件夹条目”只在平台不能混选时出现（`if !folder_entry_offered(..) { menu } else { menu.item(..) }` 是双重否定，结论正确，但不好读，见 S1）；`browse_for_path` 按条目类型选择 |
+| R2 设置页部分 | ❌ 见 R4 | |
+| R3 | ✅ | 第 240 行改为 `t!("Ir para ele")`，`Ativar` 未改动 |
+| 翻译 | ✅ | `Novo item de pasta` 和 `Escolher uma pasta` 的 9 种语言都已补齐 |
+
+## B. 必须修
+
+- **R4 设置页点击“浏览…”会让程序崩溃（R2 引入）。** `settings/quick_launch.rs` 的 `browse()` 新增了 `cx.entity().read(cx)` 来读取表单类型。可是 `browse` 是在 `cx.listener(move |_page, _event, window, cx| browse(field, window, cx))` 里调用的，这时 `SettingsPage` 正在被 gpui 更新（处于借出状态）。`EntityMap::read` 找不到这个实体，就会执行 `double_lease_panic("read")`，**直接 panic**。也就是说，在设置页条目表单里点“路径”或“工作目录”旁边的“浏览…”，程序就会崩溃。
+  - **修复**：listener 改为 `move |page, _event, window, cx| browse(page, field, window, cx)`，`browse` 增加 `page: &SettingsPage` 参数，从 `page.quick_launch.form` 读取类型，删掉 `cx.entity().read(cx)`。
+  - **测试**：在 `#[gpui::test]` 里构造一个 SettingsPage，表单类型分别为 `folder` 和 `app`，通过 listener 路径（或者在 `entity.update` 闭包内）调用 `browse`，断言不会 panic。如果 prompt 在测试平台上无法创建，就把选择逻辑抽成纯函数 `browse_want(field, kind) -> PathWant` 来测，同时保证 `browse` 内部不再读取实体本身。
+  - 另外，在整个 `nohrs-pages` 里搜索 `cx.entity().read(cx)` 和 `cx.entity().update(`，确认没有其他在 listener 或 update 内部读取自身实体的地方，结果写进 PR 描述。
+
+## C. 建议（随 R4 一起改）
+
+- **S1** 菜单里那段双重否定改成正面写法：`let menu = menu.item(新建条目); if super::folder_entry_offered(..) { menu.item(新建文件夹条目) } else { menu }`。
+- **S2** 设置页在 `Files` 模式下，提示文案仍然是 `Escolher um arquivo ou uma pasta`（“选择文件或文件夹”）。这段文字会显示为对话框的确定按钮，改成已有的 `Escolher um caminho`（“选择路径”），和编辑浮层保持一致。
+
+## D. 执行方操作约束（新增，长期有效）
+
+- 工作区里有**任何未提交的改动**（包括 BoBO 或复查方写入的文档）时，禁止使用 `git reset --hard`、`git checkout -- <路径>`、`git restore`（会丢弃改动的用法）、`git clean -f`、`git stash drop`。需要重写提交历史时，先 `git stash push -u`，或者先把这些改动单独提交。
+- 临时备份分支按 `backup/<里程碑>-<说明>` 命名，合入后统一删除。
+
+## E. 重测（R4 修复后，BoBO 执行）
+
+1. **Launcher 的 `@`**：按 **Ctrl+Shift+Space**，只输入 `@`：
+   - 能列出所有快速启动条目，包括文件夹分组里的程序；
+   - 计算器、charmap 只出现一次；
+   - 输入 `@char` 回车，打开字符映射表。
+2. **新建条目**：快速启动窗口里右键空格子 → **新建条目**，能选中 `C:\Windows\System32\notepad.exe` 并成功添加。
+3. **新建文件夹条目**：右键空格子 → **新建文件夹条目**，能选中一个文件夹并添加为文件夹类型。
+4. **设置页的“浏览…”（验证 R4）**：设置 → 快速启动 → 条目 → 选一个**应用**类型的条目 → 点“路径”旁的“浏览…”，**程序不崩溃**，能选中文件。再选一个**文件夹**类型的条目，点“浏览…”，能选中文件夹。最后点“工作目录”旁的“浏览…”，能选中文件夹。
+
+## F. 合入条件
+R4 修好（S1、S2 一起改），并且 E 节 4 项重测全部通过，之后合入 main，清理临时分支（包括 `m4-before-r2-docfix`）。
