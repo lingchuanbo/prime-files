@@ -70,3 +70,42 @@ M4 合入 main 后，删除临时分支：`m3-backup`、`m3-tip-before-c-fix`、
 | 8 `on_running` 只对 `.exe` 生效 | 接受，与 §8.3 一致 |
 | 9 动态分组的刷新时机 | 确认，与 G.2、G.3 一致 |
 | 10 手测 | 见第 4 节 |
+
+## 7. 手测结果（BoBO，2026-11-23 16:21，使用 15:28 编译的版本）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | UWP（计算器） | ✅ |
+| 2 | 命令脚本与首次运行确认 | ✅ |
+| 3 | 隐藏窗口运行的提示 | ✅ |
+| 4 | group 一次启动多个条目 | ✅ |
+| 5 | `on_running = ask` 三个按钮 | ✅ |
+| 6 | 文件夹分组只读、不写回 | ✅ |
+| 7 | 最近使用 / 最常使用 | ✅ |
+| 8 | Launcher 里的 `@` | ⚠ **待重测**：截图显示的是**快速启动窗口**（标题“快速启动”，过滤框里是 `@`，结果 0 项），不是 Launcher。快速启动窗口的过滤只匹配名称和标签，输入 `@` 得到 0 项是预期行为。需要用 **Ctrl+Shift+Space** 打开 Launcher 后再测 |
+
+**测试中发现的缺陷（准备步骤中触发）**：
+
+### R2. 在 Windows 上，“新建条目”和“浏览…”只能选文件夹，选不了程序（从 M2 就存在）
+- gpui 的 Windows 实现中，只要 `directories: true` 就会加上 `FOS_PICKFOLDERS`，对话框就只能选文件夹（`can_select_mixed_files_and_dirs()` 返回 `false`，源码注释也写明了“只能二选一”）。我们传的是 `files: true, directories: true`，在 Windows 上结果就是**只能选文件夹**。BoBO 实测：选 notepad.exe 时提示失败，对话框显示的是目录。
+- 受影响的位置：
+  1. `quick_launch/view.rs` `new_item_at`（右键空格子 → 新建条目）
+  2. `quick_launch/view.rs` `browse_for_path`（编辑浮层的“浏览…”）
+  3. `settings/quick_launch.rs` `browse` 中 `Field::Path` 的分支（`files: !cwd` 仍然带着 `directories: true`）
+  - 不受影响：`browse` 的工作目录分支、`new_group` 选文件夹（这两处本来就只需要文件夹）。
+- M2 手测第 1 项（右键空格子新建条目并选 exe）当时记为通过，应该是用拖入代替了，实际没有走到这条路径。
+- **修复**：
+  - 新增一个辅助函数 `path_prompt(cx, want: PathWant { Files, Folders, Either }, multiple, prompt) -> PathPromptOptions`。当 `Either` 且 `cx.can_select_mixed_files_and_dirs()` 为 false 时，改为**只选文件**（`files: true, directories: false`）。三个调用处都改用它。
+  - 右键空格子的菜单：保留“新建条目”（选文件，可以多选），并在它**下面**新增“新建文件夹条目”（只选文件夹，可以多选）。新文案用 `t!("Novo item de pasta")`，中文为“新建文件夹条目”，9 种语言都要补齐。平台本身支持同时选文件和文件夹时，不显示这个新菜单项。
+  - 编辑浮层和设置页的“浏览…”：条目类型是 `folder` 时只选文件夹，其他类型只选文件。
+  - 选回来的路径仍然走原来的 `path_is_directory` 和 `item_for_path`，类型判断不变。
+  - 测试：`path_prompt` 在支持和不支持同时选两种的情况下各返回什么（用参数注入，不依赖平台）；菜单项只在不支持时出现。
+
+### R3. “当程序已经打开时”的第一个选项中文显示为“启用”
+- 设置页第 240 行用的是 `t!("Ativar")`，这个键同时给 Everything MFT 的“启用 / 停用”按钮使用（`settings.rs:2868`），所以中文是“启用”。在这里表达的是“激活已有窗口”，读起来像一个开关。
+- **修复**：这里改用已有的键 `t!("Ir para ele")`（中文“切换到它”，9 种语言已经齐全，F 节的询问框也用的是它）。**不要**修改 `Ativar` 的翻译，否则会影响 Everything 的按钮。
+
+---
+
+## 8. 合入条件（更新）
+R1、R2、R3 修复，BoBO 重测第 8 项，并验证 R2：在 Windows 上通过“新建条目”能选中 notepad.exe，通过“新建文件夹条目”能选中文件夹。之后合入 main 并清理临时分支。
