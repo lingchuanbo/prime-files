@@ -108,3 +108,45 @@ B1、B2 修好，S1–S4 一起处理，B3 写进文档；执行方贴出原始�
 | 4 | Launcher 中用 `@ps` 找到并启动；单独输入 `@` 列出全部 | ✅ |
 | 5 | `noh ql add` 添加的条目立即出现在窗口里 | ✅ |
 | 6 | 在设置页搜索“热键” | ⚠ 搜不到。**不是缺陷**：中文翻译统一用“快捷键”（这一行叫“全局快捷键”，翻译里没有“热键”这个词），是第 5 节第 6 项的写法有误，已更正为搜“快捷键”。BoBO 决定不为“热键”加搜索别名 |
+
+
+---
+
+# 复查（第 2 轮，2026-11-23 10:00）
+
+> 审查对象：`feature/quick-launch-m3` 在 E4 之后新增的 7 个提交（c0fe5b9 … c034b1a）。
+> 历史改写：执行方用 cherry-pick 重排了 C 之后的提交，C、D、E1–E4 的哈希都变了。我逐个文件比较了改写前的 E4（7462337）和改写后的 E4（5575eb2），**唯一的差别是 `crates/nohrs-cli/tests/quick_launch.rs`**（测试用二进制副本的目录命名方式，见执行方未决问题 3），可以接受。
+> 结论：**通过**，合入前只需改 1 处小问题（R1）。
+
+## A. 逐项确认
+
+| 项 | 结果 | 依据 |
+|---|---|---|
+| B1 | ✅ | `apply_loaded` 只在 `Some(Ok(parsed))` 时设置 `parsed_ok`，之后才调用 `prune_usage`；三个测试都在（`a_missing_file_…`、`a_broken_file_…`、`a_load_deletes_…`） |
+| B2 | ✅ | `retype_after_edit` 改为 `.log_err()`。逐包运行 `--no-deps` clippy，快速启动相关文件里查出 9 条从 M2 起就漏检的问题，已全部修复，本分支相比 main 没有新增。`nohrs` 的 build script 本身无法通过 clippy，`app.rs` 改用 `cargo build` 检查，没有警告 |
+| B3+S4 | ✅ | `docs/testing.md` §7 已补充 |
+| S1 | ✅ | `nohrs_core::shortcuts::gpui_keys_to_hotkey` 是唯一的实现，launcher 和 settings 中的副本都已删除。**顺带修掉了一个隐藏 bug**：settings 原来那份把 Win（`platform/cmd/super`）当成 Ctrl 处理，现在正确输出 `super`。备注：settings 副本的删除放在了 S3 提交里，不是 S1，不影响结果 |
+| S2 | ✅ | `nohrs_services::launch::ComApartment` 是 RAII 守卫，非 Windows 平台为空实现；CLI 不再依赖 `windows`，也没有 `unsafe` |
+| S3 | ✅ | 新增枚举 `HotkeyRefusal { LauncherConflict, Other }`，由 `app.rs` 构造；设置页改为按枚举判断 |
+
+## B. 合入前修改
+
+- **R1** `crates/nohrs-services/src/launch.rs` 第 24–25 行，`#[cfg(windows)]` 重复写了两次（S2 引入）。删掉一行即可。
+
+## C. 对未决问题的答复
+
+| # | 答复 |
+|---|---|
+| 1 `--no-deps` 卡在 build script | 接受逐包运行的做法。清理 `build.rs`、`nohrs-indexer`、`nohrs-core` 中已有的 clippy 问题，**另开一项**处理（这是让 clippy 能作为合入检查的前提） |
+| 2 既有问题记录、不修 | 接受 |
+| 3 测试用二进制副本的命名 | 接受（按大小 + 修改时间命名并复用，避开杀毒扫描） |
+| 4 COM 守卫有两份 | 接受，记入后续待办：`nohrs-pages` 的 worker 线程改用 services 的守卫 |
+| 5 `unregister` 仍返回 String | 接受 |
+| 6 launcher 保留一个调用 `parse` 的测试 | 接受，它测的就是 core 里那份共享函数 |
+| 7 B1 的代价 | 接受（陈旧记录会留到下一次成功读取时再清理，不会误删） |
+| 8 文档提交包含手测结果 | 接受 |
+| 9 9 条漏检问题已修 | 确认 |
+| 10 手测 | 已在第 7 节记录全部通过。本轮改动不影响手测项目，不需要重测 |
+
+## D. 合入条件
+修好 R1，fmt 和 `cargo build --release -p nohrs` 都通过，就可以合入 `main`。
