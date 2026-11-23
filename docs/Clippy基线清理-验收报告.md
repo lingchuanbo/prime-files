@@ -267,3 +267,21 @@ c910528 Add the clippy baseline spec
 - 在 Windows 上，`quick_launch.rs` 的测试和日志测试共用同一个副本目录，quick_launch 的子进程会把日志写进这个目录。cargo 默认按顺序一个个跑测试二进制，加上 `turn()` 会先清理，所以现在没有问题。但如果以后改用 nextest 这类并行执行器，就需要给两者分开目录。把这一点写进 `docs/testing.md` §7 第 5 条。
 
 **R1–R4 都改完后**：重跑 §2 的全部门槛命令；另外在 cli 测试里确认 4 个日志测试仍然通过，并且对 `log_command_leaves_the_log_alone.rs` 单独跑一次 `cargo clippy -p nohrs-cli --tests --no-deps`。
+
+
+---
+
+## 复查第 2 轮（复查方，2026-11-23，HEAD 44f5608）
+
+逐个提交看了 9a36c4c…44f5608 的 diff。
+
+| 项 | 结论 |
+|---|---|
+| R1 | ✅ 每个测试有自己的 state 临时目录，子进程始终设置 `XDG_STATE_HOME`；`log_dir()` 按平台区分；`Mutex` 和清理只在 Windows 上做。在非 Windows 平台上不会再碰到真实的日志目录 |
+| R2 | ✅ `copy_for_test()` 和两处 `allow(dead_code)` 已删除；`docs/testing.md` §7 第 4、5 条与代码一致，并补了并行执行器的提醒 |
+| R3 | ✅ 6 个多余的 allow 已删除；用 `expect` 又找出 1 个（`binary_under_test.rs`，只用了 `copy`/`rename`/`metadata`，都不在禁用列表里），也已删除。**留下一处小尾巴**：`everything.rs:2812` 删了 allow，却留下了 `// Tests build fixture files; there is no UI thread here.` 这行注释，现在它悬空在 `{` 代码块上面 → 合入前删掉 |
+| R4 | ✅ 注释已改正，已补登到规格 §7 和报告 §2 |
+
+**DeepSeek 报告的偶发失败**：`explorer::tags::tests::cards_keep_the_order_they_are_dragged_into`。复查方确认 `tags.rs:131` 的 `static TAGGED` 是整个进程共享的，并行执行的 gpui 测试会互相覆盖，所以 `main` 上同样会出现。这是本次之前就有的问题，与这次清理无关。**登记为后续事项**（修复方向：测试之间不共享这份全局数据，或者让用到它的测试按顺序执行），本次不改。
+
+**结论：删掉上面那行注释后即可合入 main。**
