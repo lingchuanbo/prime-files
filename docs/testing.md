@@ -207,10 +207,9 @@ cargo test --all-features --workspace
 cargo llvm-cov --all-features --html
 open target/llvm-cov/html/index.html
 
-# lint
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings \
-    -W clippy::unwrap_used -W clippy::expect_used
+# lint（合入门槛；Windows 开发机也走同一套命令，加 --release）
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --release -- -D warnings
 
 # 静的解析
 cargo deny check

@@ -99,7 +99,9 @@ cargo build --release -p nohrs -p nohrs-cli
 
 | 文件:行 | 调用 | 触发时机 | 预计影响 |
 |---|---|---|---|
-| （由 DeepSeek 在 E 步填写） | | | |
+| `crates/nohrs-core/src/config/paths.rs:94` | `std::fs::read_to_string` | 每次调用 `paths` 的辅助函数（`config_dir`、`data_dir`、`cache_dir`、`state_dir`、`log_dir`、`config_file` 等）时惰性执行；首次可能发生在渲染或按键处理里 | 读 `config.toml` 与 `userdata/config.toml` 两个小文件（各几十字节）来判定便携模式；高频路径上可缓存结果 |
+| `crates/nohrs-pages/src/explorer/batch_rename/window.rs:143` | `std::fs::read_to_string` | 点击“加载列表”按钮 | 读用户保存的列表文件（上限 4 MiB），一次点击一次 |
+| `crates/nohrs-pages/src/explorer/batch_rename/window.rs:163` | `std::fs::write` | 点击“保存列表”按钮 | 写同一个文件，一次点击一次 |
 
 ## 8. 不做的事
 - 不改函数签名（`too_many_arguments` 一律 allow）。
