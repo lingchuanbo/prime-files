@@ -226,7 +226,7 @@ mod tests {
     fn external_commands_parse_without_breaking_path_arguments() {
         let cli = Cli::parse_from(["nohrs", "open", r"C:\My Files"]);
         assert!(
-            matches!(cli.command, Some(Command::Open { path }) if path == std::path::PathBuf::from(r"C:\My Files"))
+            matches!(cli.command, Some(Command::Open { path }) if path == std::path::Path::new(r"C:\My Files"))
         );
         let cli = Cli::parse_from(["nohrs", "current-path"]);
         assert!(matches!(cli.command, Some(Command::CurrentPath)));

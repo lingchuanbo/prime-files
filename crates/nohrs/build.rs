@@ -8,7 +8,11 @@
 //!
 //! The `.rc` is written here, into `OUT_DIR`, rather than kept in the tree,
 //! so the version always comes from Cargo and the icon's path is absolute.
-
+//!
+//! A build script has no UI thread, and a failure to write the resource script
+//! must fail the build rather than be ignored (spec §4.2); `OUT_DIR` and the
+//! resource compiler are build invariants.
+#![allow(clippy::disallowed_methods, clippy::expect_used)]
 use std::path::Path;
 
 fn main() {
