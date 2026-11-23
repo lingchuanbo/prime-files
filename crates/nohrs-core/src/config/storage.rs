@@ -121,7 +121,8 @@ fn copy_missing_tree(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

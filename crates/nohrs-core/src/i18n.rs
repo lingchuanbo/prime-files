@@ -327,6 +327,8 @@ pub fn plural(count: usize, one: &'static str, many: &'static str) -> String {
 }
 
 #[cfg(test)]
+// The coverage tests read the crate's own sources; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use std::collections::{BTreeSet, HashSet};

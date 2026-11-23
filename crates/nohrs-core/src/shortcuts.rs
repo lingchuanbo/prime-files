@@ -641,10 +641,7 @@ impl Chord {
         };
         let mut rest = text.as_str();
         // `-` separates parts, but `ctrl--` is Ctrl and the minus key.
-        loop {
-            let Some((head, tail)) = rest.split_once('-') else {
-                break;
-            };
+        while let Some((head, tail)) = rest.split_once('-') {
             if tail.is_empty() {
                 break;
             }
