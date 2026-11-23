@@ -1397,9 +1397,7 @@ fn empty_cell(
             );
             // §17.2 R2: where the dialog can only pick one of the two, folders get
             // an entry of their own.
-            if !super::folder_entry_offered(cx.can_select_mixed_files_and_dirs()) {
-                menu
-            } else {
+            if super::folder_entry_offered(cx.can_select_mixed_files_and_dirs()) {
                 menu.item(
                     PopupMenuItem::new(nohrs_core::t!("Novo item de pasta"))
                         .disabled(!group_editable)
@@ -1417,6 +1415,8 @@ fn empty_cell(
                                 .log_err();
                         }),
                 )
+            } else {
+                menu
             }
         })
         .into_any_element()
