@@ -4,7 +4,7 @@
 //! mode ignores every XDG variable: without the copy the tests read and write the
 //! developer's own configuration.
 
-#![allow(clippy::expect_used, clippy::disallowed_methods)]
+#![allow(clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
 

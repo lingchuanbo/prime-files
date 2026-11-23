@@ -52,8 +52,6 @@ mod scan;
 mod workers;
 
 #[cfg(test)]
-// Tests build fixture files; there is no UI thread here.
-#[allow(clippy::disallowed_methods)]
 #[path = "everything/search_tests.rs"]
 mod search_tests;
 
@@ -1115,8 +1113,6 @@ impl Segment {
     }
 
     #[cfg(test)]
-    // Tests build fixture files; there is no UI thread here.
-    #[allow(clippy::disallowed_methods)]
     fn push(&mut self, parent: u32, name: &str, dir: bool) -> u32 {
         self.add(
             parent,
@@ -1768,8 +1764,6 @@ pub(crate) mod mft {
     }
 
     #[cfg(test)]
-    // Tests build fixture files; there is no UI thread here.
-    #[allow(clippy::disallowed_methods)]
     mod index_status_poll_tests {
         use super::{
             ERROR_PIPE_BUSY, IndexStatusPoll, ServiceIndexStatus, apply_index_status_poll,
@@ -2816,7 +2810,6 @@ pub(crate) mod remote {
                 // below the folder the app itself runs from.
                 #[cfg(test)]
                 // Tests build fixture files; there is no UI thread here.
-                #[allow(clippy::disallowed_methods)]
                 {
                     if let Some(above) = folder.parent() {
                         candidates.push(above.join("dll").join(name).into_os_string());

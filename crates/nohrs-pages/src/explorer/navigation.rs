@@ -72,8 +72,6 @@ pub(crate) const LISTING_WAIT: Duration = Duration::from_millis(30);
 // navigating, so they wait as long as it takes; `listing_wait` is set to zero
 // in the test that exercises the background path.
 #[cfg(test)]
-// Tests build fixture files; there is no UI thread here.
-#[allow(clippy::disallowed_methods)]
 pub(crate) const LISTING_WAIT: Duration = Duration::from_secs(10);
 
 /// How long the previous folder stays on screen while a slow one is read. The
@@ -682,8 +680,6 @@ impl ExplorerPane {
         // Tests record the request instead: launching the real program would
         // open windows on the machine running them.
         #[cfg(test)]
-        // Tests build fixture files; there is no UI thread here.
-        #[allow(clippy::disallowed_methods)]
         OPENED_WITH_DEFAULT_APP.with(|opened| opened.borrow_mut().push(path.to_owned()));
         // `explorer.exe <file>` hands the file to its associated program
         // without a shell in between to misread `&` or `^` in the name.
