@@ -237,7 +237,9 @@ impl Section {
         ];
         let running_options = [
             (
-                t!("Ativar"),
+                // R3: this is "go to the running window", not an on/off switch;
+                // `Ativar` belongs to the Everything toggle.
+                t!("Ir para ele"),
                 window.on_running == OnRunning::Activate,
                 Pick::QuickLaunch(Action::OnRunning(OnRunning::Activate)),
             ),
