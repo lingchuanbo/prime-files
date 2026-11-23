@@ -266,6 +266,11 @@ pub enum LaunchMode {
     Admin,
     /// Start a new instance whatever the configuration says.
     ForceNew,
+    /// Bring the main window of this process to the front, and start a new
+    /// instance when it has no window to bring. Only the pages layer asks for
+    /// it, after the user chose between the running program and a new one
+    /// (§17.2 F.1).
+    Activate(u32),
 }
 
 /// What a launch did.
@@ -275,6 +280,14 @@ pub enum LaunchOutcome {
     Started,
     /// An instance that was already running was brought to the front.
     Activated,
+    /// The target is already running and the configuration asks before
+    /// switching to it (§17.2 F.1). Nothing was activated and nothing was
+    /// started: the pages layer asks the user, then sends the request again
+    /// with [`LaunchMode::Activate`] or [`LaunchMode::ForceNew`].
+    AlreadyRunning {
+        /// The process the user may switch to.
+        process_id: u32,
+    },
     /// The user answered "no" to the UAC prompt. Not an error: nothing is
     /// reported for a decision (§8.2).
     Cancelled,

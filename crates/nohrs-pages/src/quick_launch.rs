@@ -1071,6 +1071,25 @@ pub(crate) struct GroupCommandConfirmation {
     pub(crate) script: String,
 }
 
+/// A program that turned out to be already running, waiting for the user to
+/// choose between switching to it and starting another instance (§17.2 F.2).
+struct PendingAlreadyRunning {
+    /// The group the item came from, recorded once a launch happens.
+    group: String,
+    /// The slot the item came from, recorded once a launch happens.
+    slot: u32,
+    /// The item itself: the chosen request uses this copy.
+    item: Item,
+    /// The running process the "switch to it" button asks for.
+    process_id: u32,
+}
+
+/// What the window's already-running dialog draws (§17.2 F.2).
+pub(crate) struct AlreadyRunningPrompt {
+    /// What the tile shows.
+    pub(crate) name: String,
+}
+
 /// The group launch in flight (§17.2 E.1): replies are counted until the whole
 /// batch has answered, and only then is the footer set, the usage recorded and
 /// the window hidden.
@@ -1137,6 +1156,9 @@ pub(crate) struct QuickLaunch {
     /// A group waiting for the user's confirmation of its untrusted commands
     /// (§17.2 E.1).
     pending_group: Option<PendingGroup>,
+    /// A program found running that the user has not answered about yet
+    /// (§17.2 F.2).
+    pending_already_running: Option<PendingAlreadyRunning>,
     /// A group launch whose replies are still being counted (§17.2 E.1).
     pending_batch: Option<PendingLaunchBatch>,
     /// A hide asked for while GPUI had the window out for an update. The 400 ms
@@ -1147,6 +1169,9 @@ pub(crate) struct QuickLaunch {
     revision: u64,
     /// The item a launch was asked for; counted only once it started (S7).
     pending_usage: Option<(String, u32)>,
+    /// The modes this session sent to the launcher, for the tests (§17.2 F.5).
+    #[cfg(test)]
+    sent_launches: Vec<LaunchMode>,
     /// What the user typed to filter the current group (§12.2, M2).
     filter: String,
     /// The health of each item, by group id and slot (§12.1, M2). Runtime state,
@@ -2421,10 +2446,13 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         message: None,
         pending_command: None,
         pending_group: None,
+        pending_already_running: None,
         pending_batch: None,
         pending_hide: false,
         revision: 0,
         pending_usage: None,
+        #[cfg(test)]
+        sent_launches: Vec::new(),
         filter: String::new(),
         health: HashMap::new(),
         health_started: false,
@@ -3333,8 +3361,14 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
                 return;
             }
             let close_after_launch = quick_launch.config.window.close_after_launch;
+            let visible = quick_launch.visible;
             let started = counts_as_usage(&outcome);
             let folder = match outcome {
+                Ok(LaunchOutcome::AlreadyRunning { process_id }) => {
+                    // §17.2 F.2: ask before switching; nothing is counted yet.
+                    ask_about_running_program(cx, process_id, visible);
+                    return;
+                }
                 Ok(LaunchOutcome::OpenFolder(path)) => Some(path),
                 Ok(LaunchOutcome::Started | LaunchOutcome::Activated) => None,
                 // Nothing is reported for a decision (§8.2).
@@ -3361,6 +3395,109 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
     }
 }
 
+/// §17.2 F.2: a program is already running and the configuration asks first.
+///
+/// The dialog belongs to the quick-launch window, so a launch from the
+/// Launcher's `@` shows the window before it appears. Nothing is recorded: the
+/// use counts only after the user chooses, and a cancel records nothing.
+fn ask_about_running_program(cx: &mut App, process_id: u32, visible: bool) {
+    let Some((group, slot)) = state(cx).and_then(|quick_launch| quick_launch.pending_usage.clone())
+    else {
+        tracing::debug!(
+            target: "quick_launch",
+            process = process_id,
+            "a running program answered without a pending item"
+        );
+        return;
+    };
+    let item = state(cx).and_then(|quick_launch| {
+        quick_launch
+            .config
+            .groups
+            .iter()
+            .find(|candidate| candidate.id == group)
+            .and_then(|candidate| candidate.items.iter().find(|item| item.slot == slot))
+            .cloned()
+    });
+    let Some(item) = item else {
+        tracing::debug!(
+            target: "quick_launch",
+            process = process_id,
+            "the item behind the running program is gone"
+        );
+        return;
+    };
+    if !visible && let Err(error) = show(cx) {
+        tracing::warn!(target: "quick_launch", "could not show the window: {error}");
+    }
+    if let Some(quick_launch) = state_mut(cx) {
+        quick_launch.message = None;
+        quick_launch.pending_already_running = Some(PendingAlreadyRunning {
+            group,
+            slot,
+            item,
+            process_id,
+        });
+        quick_launch.touch();
+    }
+    cx.refresh_windows();
+}
+
+/// "Switch to it": sends the launch again, naming the process to activate
+/// (§17.2 F.2).
+pub(crate) fn switch_to_running_program(cx: &mut App) {
+    let Some(pending) = take_pending_already_running(cx) else {
+        return;
+    };
+    send_launch(
+        cx,
+        pending.item,
+        pending.group,
+        pending.slot,
+        LaunchMode::Activate(pending.process_id),
+    );
+}
+
+/// "Start another": sends the launch again, forcing a new instance (§17.2 F.2).
+pub(crate) fn start_another_instance(cx: &mut App) {
+    let Some(pending) = take_pending_already_running(cx) else {
+        return;
+    };
+    send_launch(
+        cx,
+        pending.item,
+        pending.group,
+        pending.slot,
+        LaunchMode::ForceNew,
+    );
+}
+
+/// "Cancel": starts nothing and records no use (§17.2 F.2).
+pub(crate) fn cancel_already_running(cx: &mut App) {
+    if take_pending_already_running(cx).is_none() {
+        return;
+    }
+    if let Some(quick_launch) = state_mut(cx) {
+        // The launch never happened, so it must not be counted afterwards.
+        quick_launch.pending_usage = None;
+        quick_launch.touch();
+    }
+    cx.refresh_windows();
+}
+
+/// Takes the pending running-program dialog, if there is one, and tells the
+/// window it is gone.
+fn take_pending_already_running(cx: &mut App) -> Option<PendingAlreadyRunning> {
+    let pending = {
+        let quick_launch = state_mut(cx)?;
+        let pending = quick_launch.pending_already_running.take()?;
+        quick_launch.touch();
+        pending
+    };
+    cx.refresh_windows();
+    Some(pending)
+}
+
 /// Counts one group entry's answer, and finishes the batch when it was the last
 /// (§17.2 E.1).
 ///
@@ -3383,6 +3520,14 @@ fn apply_batch_reply(
     }
     match &outcome {
         Ok(LaunchOutcome::Cancelled) => {}
+        // D9: a group starts `ask` entries as `activate`, so a group entry has
+        // no dialog to open; nothing is counted for it.
+        Ok(LaunchOutcome::AlreadyRunning { .. }) => {
+            tracing::debug!(
+                target: "quick_launch",
+                "a group entry answered with a running process"
+            );
+        }
         Ok(LaunchOutcome::OpenFolder(path)) => {
             batch.used = true;
             batch.folders.push(path.clone());
@@ -3728,6 +3873,8 @@ fn send_launch(cx: &mut App, item: Item, group: String, slot: u32, mode: LaunchM
     let on_running = quick_launch.config.window.on_running;
     let generation = quick_launch.generation.wrapping_add(1);
     quick_launch.generation = generation;
+    #[cfg(test)]
+    quick_launch.sent_launches.push(mode);
     quick_launch.message = None;
     quick_launch.pending_usage = Some((group, slot));
     // A single launch replaces whatever group was in flight: its replies are
@@ -3746,10 +3893,12 @@ fn send_launch(cx: &mut App, item: Item, group: String, slot: u32, mode: LaunchM
 }
 
 /// Whether a command dialog is waiting for an answer (§17.2 D.3), or a group
-/// dialog is (§17.2 E.1).
+/// dialog is (§17.2 E.1), or the running-program dialog is (§17.2 F.2).
 pub(crate) fn command_waiting(cx: &App) -> bool {
     state(cx).is_some_and(|quick_launch| {
-        quick_launch.pending_command.is_some() || quick_launch.pending_group.is_some()
+        quick_launch.pending_command.is_some()
+            || quick_launch.pending_group.is_some()
+            || quick_launch.pending_already_running.is_some()
     })
 }
 
@@ -3764,6 +3913,15 @@ pub(crate) fn command_confirmation(cx: &App) -> Option<CommandConfirmation> {
         hidden: pending.spec.hidden,
         script: pending.spec.script.clone(),
         remembered: quick_launch.kv.is_some(),
+    })
+}
+
+/// What the window's running-program dialog shows, if one is waiting (§17.2 F.2).
+pub(crate) fn already_running_prompt(cx: &App) -> Option<AlreadyRunningPrompt> {
+    let quick_launch = state(cx)?;
+    let pending = quick_launch.pending_already_running.as_ref()?;
+    Some(AlreadyRunningPrompt {
+        name: pending.item.name.clone(),
     })
 }
 
@@ -3840,15 +3998,20 @@ pub(crate) fn confirm_pending_command(cx: &mut App) {
 
 /// "Cancel": forget the pending command, start nothing, report nothing
 /// (§17.2 D.3). A pending group is the same decision for its whole batch
-/// (§17.2 E.1).
+/// (§17.2 E.1), and so is the running-program dialog (§17.2 F.2).
 pub(crate) fn cancel_pending_command(cx: &mut App) {
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
     let cancelled = quick_launch.pending_command.take().is_some();
     let cancelled_group = quick_launch.pending_group.take().is_some();
-    if !cancelled && !cancelled_group {
+    let cancelled_running = quick_launch.pending_already_running.take().is_some();
+    if !cancelled && !cancelled_group && !cancelled_running {
         return;
+    }
+    if cancelled_running {
+        // A cancelled launch never happened, so it must not be counted.
+        quick_launch.pending_usage = None;
     }
     quick_launch.touch();
     cx.refresh_windows();
@@ -6791,6 +6954,152 @@ mod tests {
         });
     }
 
+    /// Installs an `app` item, sends its launch, and answers it with
+    /// `AlreadyRunning`, leaving the three-way dialog waiting (§17.2 F.2).
+    fn install_running_program(cx: &mut gpui::App, process_id: u32) {
+        let mut group = group_of(0);
+        group.items = vec![Item::new(0, "app", "Programa")];
+        install(cx, vec![group]);
+        if let Some(state) = state_mut(cx) {
+            state.visible = true;
+            state.config.window.on_running = OnRunning::Ask;
+        }
+        activate_with(cx, 0, ClickKind::Plain);
+        let generation = state(cx).map(|state| state.generation).unwrap_or(0);
+        apply_reply(
+            cx,
+            WorkerReply::Launched {
+                generation,
+                batch: None,
+                name: "Programa".to_string(),
+                outcome: Ok(LaunchOutcome::AlreadyRunning { process_id }),
+            },
+        );
+    }
+
+    /// §17.2 F.2: a running program that the configuration asks about opens the
+    /// dialog instead of counting a use.
+    #[gpui::test]
+    fn a_running_program_opens_the_three_way_dialog(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install_running_program(cx, 4242);
+            let installed = state(cx).expect("the state is installed");
+            let pending = installed
+                .pending_already_running
+                .as_ref()
+                .expect("the dialog is waiting");
+            assert_eq!(pending.process_id, 4242);
+            assert_eq!(
+                installed.pending_usage,
+                Some(("general".to_string(), 0)),
+                "nothing is counted before the user chooses"
+            );
+            assert_eq!(
+                installed.message, None,
+                "a running program is not a failure"
+            );
+            assert_eq!(
+                installed.sent_launches,
+                vec![LaunchMode::Normal],
+                "nothing was sent after the answer"
+            );
+            let prompt = already_running_prompt(cx).expect("the dialog has content");
+            assert_eq!(prompt.name, "Programa");
+        });
+    }
+
+    /// §17.2 F.2 and F.5: "switch to it" sends the launch again for that process,
+    /// and the use counts once the reply says it was activated.
+    #[gpui::test]
+    fn switching_to_the_running_program_asks_for_its_process(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install_running_program(cx, 4242);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            switch_to_running_program(cx);
+            let installed = state(cx).expect("the state is installed");
+            assert!(
+                installed.pending_already_running.is_none(),
+                "the dialog closes"
+            );
+            assert_eq!(
+                installed.sent_launches.last(),
+                Some(&LaunchMode::Activate(4242))
+            );
+            assert_eq!(
+                installed.pending_usage,
+                Some(("general".to_string(), 0)),
+                "the choice is counted when it starts"
+            );
+            let generation = installed.generation;
+            apply_reply(
+                cx,
+                WorkerReply::Launched {
+                    generation,
+                    batch: None,
+                    name: "Programa".to_string(),
+                    outcome: Ok(LaunchOutcome::Activated),
+                },
+            );
+            assert!(
+                state(cx).is_some_and(|state| state.pending_usage.is_none()),
+                "an answered launch is counted once"
+            );
+        });
+        cx.run_until_parked();
+        let key = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("a valid usage key");
+        assert!(
+            store.get(&key).expect("the test store").is_some(),
+            "the use is recorded after the choice"
+        );
+    }
+
+    /// §17.2 F.2 and F.5: "start another" sends a forced new instance.
+    #[gpui::test]
+    fn starting_another_instance_asks_for_a_new_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install_running_program(cx, 4242);
+            start_another_instance(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_already_running.is_none(), "the dialog closes");
+            assert_eq!(state.sent_launches.last(), Some(&LaunchMode::ForceNew));
+        });
+    }
+
+    /// §17.2 F.2 and F.5: cancelling starts nothing and records no use.
+    #[gpui::test]
+    fn cancelling_the_running_program_records_no_use(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install_running_program(cx, 4242);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            cancel_already_running(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_already_running.is_none(), "the dialog closes");
+            assert_eq!(
+                state.pending_usage, None,
+                "a cancelled launch must not be counted later"
+            );
+            assert_eq!(
+                state.sent_launches,
+                vec![LaunchMode::Normal],
+                "cancel sends no request"
+            );
+            assert_eq!(state.generation, 1, "and changes no generation");
+        });
+        cx.run_until_parked();
+        let key = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("a valid usage key");
+        assert_eq!(
+            store.get(&key).expect("the test store"),
+            None,
+            "cancel records no use"
+        );
+    }
+
     fn sample_state() -> QuickLaunch {
         QuickLaunch {
             config: QuickLaunchConfig {
@@ -6827,10 +7136,13 @@ mod tests {
             message: None,
             pending_command: None,
             pending_group: None,
+            pending_already_running: None,
             pending_batch: None,
             pending_hide: false,
             revision: 0,
             pending_usage: None,
+            #[cfg(test)]
+            sent_launches: Vec::new(),
             filter: String::new(),
             health: HashMap::new(),
             health_started: false,

@@ -420,7 +420,8 @@ impl<'a> Session<'a> {
         };
         let request = LaunchRequest {
             mode,
-            on_running: item.on_running,
+            // §17.2 F.4: a terminal has no dialog, so `ask` is `activate`.
+            on_running: terminal_on_running(item.on_running),
             expand: ExpandContext::current(),
         };
         let registry = LaunchRegistry::with_builtins();
@@ -439,6 +440,13 @@ impl<'a> Session<'a> {
                 Ok(0)
             }
             Ok(LaunchOutcome::Activated) => {
+                writeln!(self.output, "activated {:?}", item.item.name)?;
+                Ok(0)
+            }
+            // Unreachable while `ask` is turned into `activate` above (§17.2
+            // F.4); treated as an activation so the arm is honest if that ever
+            // changes.
+            Ok(LaunchOutcome::AlreadyRunning { .. }) => {
                 writeln!(self.output, "activated {:?}", item.item.name)?;
                 Ok(0)
             }
@@ -499,11 +507,8 @@ impl<'a> Session<'a> {
                 commands.join(", ")
             ));
         }
-        // §17.2 F.3: a terminal has no dialog, so `ask` is `activate`.
-        let on_running = match on_running {
-            model::OnRunning::Ask => model::OnRunning::Activate,
-            other => other,
-        };
+        // §17.2 F.4: a terminal has no dialog, so `ask` is `activate`.
+        let on_running = terminal_on_running(on_running);
         let _apartment = match nohrs_services::launch::ComApartment::enter() {
             Ok(apartment) => apartment,
             Err(error) => return self.fail(format_args!("could not initialize COM: {error}")),
@@ -529,6 +534,11 @@ impl<'a> Session<'a> {
                     writeln!(self.output, "started {:?}", entry.name)?;
                 }
                 Ok(LaunchOutcome::Activated) => {
+                    writeln!(self.output, "activated {:?}", entry.name)?;
+                }
+                // Unreachable while `ask` is turned into `activate` above
+                // (§17.2 F.4); treated as an activation to keep the arm honest.
+                Ok(LaunchOutcome::AlreadyRunning { .. }) => {
                     writeln!(self.output, "activated {:?}", entry.name)?;
                 }
                 // The user answered "no" to the UAC prompt: a decision, not a
@@ -769,6 +779,15 @@ impl<'a> Session<'a> {
     }
 }
 
+/// §17.2 F.4: a terminal has no dialog, so `ask` behaves as `activate`.
+#[cfg(windows)]
+fn terminal_on_running(on_running: model::OnRunning) -> model::OnRunning {
+    match on_running {
+        model::OnRunning::Ask => model::OnRunning::Activate,
+        other => other,
+    }
+}
+
 /// The item `run` resolved, with the window setting its launch needs.
 #[cfg(windows)]
 struct RunTarget {
@@ -950,5 +969,24 @@ mod tests {
     fn a_group_with_every_slot_taken_has_no_free_one() {
         let every_slot: Vec<u32> = (0..=MAX_SLOT).collect();
         assert_eq!(first_free_slot(&group(&every_slot)), None);
+    }
+
+    /// §17.2 F.4: the terminal has no dialog, so `ask` is `activate`; the other
+    /// choices are passed through.
+    #[cfg(windows)]
+    #[test]
+    fn asking_is_activating_in_a_terminal() {
+        assert_eq!(
+            terminal_on_running(model::OnRunning::Ask),
+            model::OnRunning::Activate
+        );
+        assert_eq!(
+            terminal_on_running(model::OnRunning::Activate),
+            model::OnRunning::Activate
+        );
+        assert_eq!(
+            terminal_on_running(model::OnRunning::New),
+            model::OnRunning::New
+        );
     }
 }

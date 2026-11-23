@@ -2670,4 +2670,11 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Could not save the group. Check the name and the items.",
         "No se pudo guardar el grupo. Revisa el nombre y los elementos.",
     ),
+    ("Perguntar sempre", "Always ask", "Preguntar siempre"),
+    (
+        "Este programa já está aberto.",
+        "This program is already open.",
+        "Este programa ya está abierto.",
+    ),
+    ("Ir para ele", "Switch to it", "Cambiar a él"),
 ];

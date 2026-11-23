@@ -233,6 +233,11 @@ impl Section {
                 window.on_running == OnRunning::New,
                 Pick::QuickLaunch(Action::OnRunning(OnRunning::New)),
             ),
+            (
+                t!("Perguntar sempre"),
+                window.on_running == OnRunning::Ask,
+                Pick::QuickLaunch(Action::OnRunning(OnRunning::Ask)),
+            ),
         ];
         let rows = vec![
             Row::hint(

@@ -873,6 +873,11 @@ impl Render for QuickLaunchView {
                 script_height.max(120.0),
             ));
         }
+        if let Some(prompt) = super::already_running_prompt(cx) {
+            // §17.2 F.2: the program is already open; the user picks what
+            // happens next.
+            root = root.child(already_running_overlay(&prompt));
+        }
         root
     }
 }
@@ -2034,6 +2039,70 @@ fn group_command_overlay(
                     }),
             ),
     );
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(0x00000080))
+        .child(card)
+        .into_any_element()
+}
+
+/// The running-program dialog (§17.2 F.2): switch to the instance that is
+/// already open, start another one, or cancel.
+fn already_running_overlay(prompt: &super::AlreadyRunningPrompt) -> AnyElement {
+    let card = div()
+        .w(px(440.0))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p(px(16.0))
+        .rounded(px(10.0))
+        .bg(rgb(theme::bg()))
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .child(
+            div()
+                .text_sm()
+                .child(nohrs_core::t!("Este programa já está aberto.")),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(prompt.name.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("quick-launch-running-cancel")
+                        .label(nohrs_core::t!("Cancelar"))
+                        .on_click(|_, _window, cx| {
+                            super::cancel_already_running(cx);
+                        }),
+                )
+                .child(
+                    Button::new("quick-launch-running-another")
+                        .label(nohrs_core::t!("Abrir outra vez"))
+                        .on_click(|_, _window, cx| {
+                            super::start_another_instance(cx);
+                        }),
+                )
+                .child(
+                    Button::new("quick-launch-running-switch")
+                        .label(nohrs_core::t!("Ir para ele"))
+                        .on_click(|_, _window, cx| {
+                            super::switch_to_running_program(cx);
+                        }),
+                ),
+        );
     div()
         .absolute()
         .top_0()

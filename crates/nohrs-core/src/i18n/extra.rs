@@ -8275,4 +8275,37 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "无法保存分组。请检查名称和项目。",
         ],
     ),
+    (
+        "Perguntar sempre",
+        [
+            "Toujours demander",
+            "Immer fragen",
+            "Chiedi sempre",
+            "Всегда спрашивать",
+            "毎回確認する",
+            "每次询问",
+        ],
+    ),
+    (
+        "Este programa já está aberto.",
+        [
+            "Ce programme est déjà ouvert.",
+            "Dieses Programm ist bereits geöffnet.",
+            "Questo programma è già aperto.",
+            "Эта программа уже открыта.",
+            "このプログラムは既に開いています。",
+            "这个程序已经打开。",
+        ],
+    ),
+    (
+        "Ir para ele",
+        [
+            "Basculer vers lui",
+            "Dorthin wechseln",
+            "Passa a esso",
+            "Переключиться на него",
+            "そちらに切り替える",
+            "切换到它",
+        ],
+    ),
 ];

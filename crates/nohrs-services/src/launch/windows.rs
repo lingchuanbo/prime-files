@@ -13,7 +13,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nohrs_core::config::quick_launch::{CommandSpec, Item, Shell, command_spec};
+use nohrs_core::config::quick_launch::{CommandSpec, Item, OnRunning, Shell, command_spec};
 use nohrs_core::telemetry::LogErr;
 use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HWND, LPARAM, MAX_PATH};
 use windows::Win32::Graphics::Gdi::{
@@ -337,44 +337,90 @@ impl LaunchAction for AppAction {
     }
 
     fn launch(&self, item: &Item, request: &LaunchRequest) -> Result<LaunchOutcome, LaunchError> {
-        let path = item_path(item, &request.expand)?;
-        if !path.is_file() {
-            return Err(LaunchError::NotFound(path));
-        }
-        let administrative = item.admin || request.mode == LaunchMode::Admin;
-        // A shortcut is handed to the Shell whole: its own target, arguments
-        // and "run as administrator" flag are the Shell's to read (§8.2).
-        let is_shortcut = path
-            .extension()
-            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("lnk"));
-        let wants_new_instance = request.mode == LaunchMode::ForceNew
-            || matches!(
-                request.on_running,
-                nohrs_core::config::quick_launch::OnRunning::New
-            );
-        // Activation is for the ordinary case only: an elevated start has to go
-        // through UAC, and a shortcut's target is not known without parsing it,
-        // which this milestone does not do (§8.3).
-        if !administrative
-            && !wants_new_instance
-            && !is_shortcut
-            && let Some(process) = process_id_for(&path)
-            && activate_main_window(process)
-        {
-            return Ok(LaunchOutcome::Activated);
-        }
-
-        let directory = match item.cwd.as_deref().map(str::trim) {
-            Some(raw) if !raw.is_empty() => Some(expand(raw, &request.expand)?),
-            _ => path.parent().map(Path::to_path_buf),
-        };
-        start(
-            &path.to_string_lossy(),
-            item.args.as_deref(),
-            directory.as_deref(),
-            administrative,
+        launch_application(
+            item,
+            request,
+            process_id_for,
+            activate_main_window,
+            start_new_instance,
         )
     }
+}
+
+/// One start of a new instance, passed in so a test never reaches the Shell.
+type InstanceStarter = fn(&Item, &LaunchRequest, &Path, bool) -> Result<LaunchOutcome, LaunchError>;
+
+/// Starts an application, with the process lookup, the window activation and
+/// the start of a new instance passed in so that a test depends on no real
+/// process and no real Shell call (§17.2 F.5).
+fn launch_application(
+    item: &Item,
+    request: &LaunchRequest,
+    find_process: fn(&Path) -> Option<u32>,
+    activate_window: fn(u32) -> bool,
+    start_new: InstanceStarter,
+) -> Result<LaunchOutcome, LaunchError> {
+    let path = item_path(item, &request.expand)?;
+    if !path.is_file() {
+        return Err(LaunchError::NotFound(path));
+    }
+    let administrative = item.admin || request.mode == LaunchMode::Admin;
+    // The pages layer already knows which process to bring forward; it only
+    // reaches here after the user chose "switch to it" (§17.2 F.1).
+    if let LaunchMode::Activate(process_id) = request.mode {
+        if activate_window(process_id) {
+            return Ok(LaunchOutcome::Activated);
+        }
+        // §17.2 F.1: with no main window to show, a new instance is started
+        // rather than leaving the click without an answer.
+        return start_new(item, request, &path, administrative);
+    }
+    // A shortcut is handed to the Shell whole: its own target, arguments
+    // and "run as administrator" flag are the Shell's to read (§8.2).
+    let is_shortcut = path
+        .extension()
+        .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("lnk"));
+    let wants_new_instance =
+        request.mode == LaunchMode::ForceNew || request.on_running == OnRunning::New;
+    // Activation is for the ordinary case only: an elevated start has to go
+    // through UAC, and a shortcut's target is not known without parsing it,
+    // which this milestone does not do (§8.3).
+    if !administrative
+        && !wants_new_instance
+        && !is_shortcut
+        && let Some(process) = find_process(&path)
+    {
+        // §17.2 F.1: with `ask` the window is not touched at all; the pages
+        // layer asks the user and sends the request again.
+        if request.on_running == OnRunning::Ask {
+            return Ok(LaunchOutcome::AlreadyRunning {
+                process_id: process,
+            });
+        }
+        if activate_window(process) {
+            return Ok(LaunchOutcome::Activated);
+        }
+    }
+    start_new(item, request, &path, administrative)
+}
+
+/// Starts a new instance of `item` through the Shell (§8.2).
+fn start_new_instance(
+    item: &Item,
+    request: &LaunchRequest,
+    path: &Path,
+    administrative: bool,
+) -> Result<LaunchOutcome, LaunchError> {
+    let directory = match item.cwd.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => Some(expand(raw, &request.expand)?),
+        _ => path.parent().map(Path::to_path_buf),
+    };
+    start(
+        &path.to_string_lossy(),
+        item.args.as_deref(),
+        directory.as_deref(),
+        administrative,
+    )
 }
 
 /// An application started by its AppUserModelID, through the activation
@@ -1142,6 +1188,115 @@ mod tests {
         );
         item.path = Some("https://example.com".to_string());
         assert_eq!(UrlAction.health(&item, &request.expand), Health::Ok);
+    }
+
+    /// An existing file for the launch path to hand around. These tests pass
+    /// their own start function, so the file never reaches the Shell and does
+    /// not have to be startable.
+    fn existing_program() -> (tempfile::NamedTempFile, Item) {
+        use std::io::Write as _;
+
+        let mut file = tempfile::NamedTempFile::new().expect("a temporary file");
+        file.write_all(b"not a program")
+            .expect("the file is written");
+        let mut item = Item::new(0, KIND_APP, "Programa");
+        item.path = Some(file.path().to_string_lossy().into_owned());
+        (file, item)
+    }
+
+    /// A start function that must not run: the case under test answers before
+    /// a new instance is needed.
+    fn unexpected_start(
+        _item: &Item,
+        _request: &LaunchRequest,
+        _path: &Path,
+        _administrative: bool,
+    ) -> Result<LaunchOutcome, LaunchError> {
+        panic!("no new instance should be started here");
+    }
+
+    /// A start function that records the fallback without reaching the Shell.
+    fn recorded_start(
+        _item: &Item,
+        _request: &LaunchRequest,
+        _path: &Path,
+        _administrative: bool,
+    ) -> Result<LaunchOutcome, LaunchError> {
+        Ok(LaunchOutcome::Started)
+    }
+
+    /// §17.2 F.1 and F.5: with `ask`, the process is looked up and reported, and
+    /// neither that process nor a new one is touched.
+    #[test]
+    fn asking_reports_the_running_process_without_starting_anything() {
+        let (_program, item) = existing_program();
+        let request = LaunchRequest {
+            mode: LaunchMode::Normal,
+            on_running: OnRunning::Ask,
+            expand: crate::launch::ExpandContext::current(),
+        };
+        let outcome = launch_application(
+            &item,
+            &request,
+            |_path: &Path| Some(4242),
+            |_process: u32| panic!("ask must not activate the window"),
+            unexpected_start,
+        )
+        .expect("ask answers with what it found");
+        assert_eq!(outcome, LaunchOutcome::AlreadyRunning { process_id: 4242 });
+    }
+
+    /// §17.2 F.1: `ask` without a running process goes on to start a new
+    /// instance instead of reporting one.
+    #[test]
+    fn asking_without_a_running_process_starts_a_new_instance() {
+        let (_program, item) = existing_program();
+        let request = LaunchRequest {
+            mode: LaunchMode::Normal,
+            on_running: OnRunning::Ask,
+            expand: crate::launch::ExpandContext::current(),
+        };
+        let outcome = launch_application(
+            &item,
+            &request,
+            |_path: &Path| None,
+            |_| false,
+            recorded_start,
+        )
+        .expect("nothing was running");
+        assert_eq!(outcome, LaunchOutcome::Started);
+    }
+
+    /// §17.2 F.1: `Activate` brings the given process forward, and starts a new
+    /// instance when it has no window to bring.
+    #[test]
+    fn activating_uses_the_given_process_and_falls_back_without_a_window() {
+        let (_program, item) = existing_program();
+        let request = LaunchRequest {
+            mode: LaunchMode::Activate(777),
+            on_running: OnRunning::Ask,
+            expand: crate::launch::ExpandContext::current(),
+        };
+        assert_eq!(
+            launch_application(
+                &item,
+                &request,
+                |_path: &Path| None,
+                |process| process == 777,
+                unexpected_start
+            )
+            .expect("the window is found"),
+            LaunchOutcome::Activated
+        );
+        let outcome = launch_application(
+            &item,
+            &request,
+            |_path: &Path| None,
+            |_process| false,
+            recorded_start,
+        )
+        .expect("no window means a new instance");
+        assert_eq!(outcome, LaunchOutcome::Started);
     }
 
     fn uwp_item(aumid: &str) -> Item {
