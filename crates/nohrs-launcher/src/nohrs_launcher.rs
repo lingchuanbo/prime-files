@@ -44,8 +44,7 @@ pub use crate::window::{
     open_keep_alive_window, open_launcher, toggle_launcher,
 };
 pub use hotkey::{
-    HotkeyId, describe_hotkey, gpui_keys_to_hotkey, is_registered, parse as parse_hotkey, register,
-    unregister,
+    HotkeyId, describe_hotkey, is_registered, parse as parse_hotkey, register, unregister,
 };
 
 /// What the launcher asks the quick launch for, injected by the binary (M3 D).

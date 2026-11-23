@@ -835,9 +835,178 @@ pub fn conflicts(
         .collect()
 }
 
+/// The `global-hotkey` name of a chord the settings page recorded (§17.1 B).
+///
+/// The page records GPUI's spelling (`ctrl-alt-space`) and the OS is asked for
+/// `ctrl+alt+Space`: same keys, different words. Modifiers always come out in one
+/// fixed order, so the same chord always names the same registration, and a chord
+/// without a modifier is refused — a bare key would take the keyboard from every
+/// other application.
+pub fn gpui_keys_to_hotkey(keys: &str) -> Option<String> {
+    let keys = keys.trim().to_ascii_lowercase();
+    if keys.is_empty() {
+        return None;
+    }
+    let mut control = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut command = false;
+    let mut rest = keys.as_str();
+    // The modifier list is every leading `-`-separated part that names one; the
+    // first part that does not is the key. `ctrl-alt--` leaves the key as the
+    // empty tail's `-`, which is the minus key itself.
+    while let Some((head, tail)) = rest.split_once('-') {
+        match head {
+            "ctrl" | "control" | "cmdorctrl" | "cmdorcontrol" => control = true,
+            "alt" | "option" => alt = true,
+            "shift" => shift = true,
+            "super" | "cmd" | "command" | "platform" | "win" => command = true,
+            _ => break,
+        }
+        rest = tail;
+    }
+    if !(control || alt || shift || command) {
+        return None;
+    }
+    let key = hotkey_key_name(rest)?;
+    let mut parts: Vec<String> = Vec::new();
+    if control {
+        parts.push("ctrl".to_string());
+    }
+    if alt {
+        parts.push("alt".to_string());
+    }
+    if shift {
+        parts.push("shift".to_string());
+    }
+    if command {
+        parts.push("super".to_string());
+    }
+    parts.push(key);
+    Some(parts.join("+"))
+}
+
+/// The `global-hotkey` name of one recorded key, lowercase in.
+fn hotkey_key_name(key: &str) -> Option<String> {
+    let named = match key {
+        "space" => "Space",
+        "up" => "ArrowUp",
+        "down" => "ArrowDown",
+        "left" => "ArrowLeft",
+        "right" => "ArrowRight",
+        "escape" | "esc" => "Escape",
+        "enter" | "return" => "Enter",
+        "tab" => "Tab",
+        "backspace" => "Backspace",
+        "delete" => "Delete",
+        "insert" => "Insert",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        "=" | "equal" => "Equal",
+        "-" | "minus" => "Minus",
+        "," | "comma" => "Comma",
+        "." | "period" => "Period",
+        "/" | "slash" => "Slash",
+        ";" | "semicolon" => "Semicolon",
+        "'" | "quote" => "Quote",
+        "`" | "backquote" => "Backquote",
+        "\\" | "backslash" => "Backslash",
+        "[" | "bracketleft" => "BracketLeft",
+        "]" | "bracketright" => "BracketRight",
+        _ => {
+            // A letter or a digit has a fixed name of its own, and `F1`..`F24`
+            // too; anything else is a key the registration cannot name.
+            let mut characters = key.chars();
+            let character = characters.next()?;
+            if characters.next().is_some() {
+                let number = key.strip_prefix('f')?.parse::<u8>().ok()?;
+                return (1..=24).contains(&number).then(|| format!("F{number}"));
+            }
+            if character.is_ascii_alphabetic() {
+                return Some(format!("Key{}", character.to_ascii_uppercase()));
+            }
+            if character.is_ascii_digit() {
+                return Some(format!("Digit{character}"));
+            }
+            return None;
+        }
+    };
+    Some(named.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// §17.1 B: the settings page records GPUI's spelling and registers
+    /// `global-hotkey`'s.
+    #[test]
+    fn a_gpui_chord_becomes_the_registration_spelling() {
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-alt-space").as_deref(),
+            Some("ctrl+alt+Space")
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey(" alt-ctrl-n ").as_deref(),
+            Some("ctrl+alt+KeyN"),
+            "the modifier order is fixed, whatever the order they were pressed in"
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("shift-ctrl-alt-super-5").as_deref(),
+            Some("ctrl+alt+shift+super+Digit5")
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-alt-f12").as_deref(),
+            Some("ctrl+alt+F12")
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-alt-f1").as_deref(),
+            Some("ctrl+alt+F1")
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-alt--").as_deref(),
+            Some("ctrl+alt+Minus"),
+            "the minus key is the empty tail after the last separator"
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-alt-up").as_deref(),
+            Some("ctrl+alt+ArrowUp")
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-alt-,").as_deref(),
+            Some("ctrl+alt+Comma")
+        );
+    }
+
+    /// §17.1 B: a chord with no modifier, or with no key, is refused.
+    #[test]
+    fn a_gpui_chord_without_a_modifier_or_a_key_is_refused() {
+        assert_eq!(gpui_keys_to_hotkey("n"), None);
+        assert_eq!(gpui_keys_to_hotkey("space"), None);
+        assert_eq!(gpui_keys_to_hotkey("f5"), None);
+        assert_eq!(gpui_keys_to_hotkey("ctrl"), None, "modifiers alone");
+        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-shift"), None);
+        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-"), None);
+        assert_eq!(gpui_keys_to_hotkey(""), None);
+        assert_eq!(gpui_keys_to_hotkey("  "), None);
+    }
+
+    /// §17.1 B: a key the registration cannot name is refused, and a letter with
+    /// a modifier is a normal chord whichever case it comes in.
+    #[test]
+    fn keys_the_registration_cannot_name_are_refused() {
+        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-maiusculo"), None);
+        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-f25"), None);
+        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-f0"), None);
+        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-numpad5"), None);
+        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-ç"), None);
+        assert_eq!(
+            gpui_keys_to_hotkey("Ctrl-Alt-Q").as_deref(),
+            Some("ctrl+alt+KeyQ")
+        );
+    }
 
     #[test]
     fn every_action_has_one_row_and_its_defaults_parse() {
