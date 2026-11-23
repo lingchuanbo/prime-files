@@ -7970,4 +7970,15 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "全局快捷键、外观和快速启动分组。",
         ],
     ),
+    (
+        "@ para a inicialização rápida",
+        [
+            "@ pour le démarrage rapide",
+            "@ für den Schnellstart",
+            "@ per l'avvio rapido",
+            "@ для быстрого запуска",
+            "@ でクイック起動",
+            "@ 快速启动",
+        ],
+    ),
 ];

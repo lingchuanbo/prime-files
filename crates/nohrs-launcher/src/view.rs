@@ -115,7 +115,13 @@ impl LauncherView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let query_input = cx.new(|cx| SearchField::new(PLACEHOLDER, field_style(cx), cx));
+        // D: the field says what `@` is for, without a second line of help.
+        let placeholder = format!(
+            "{}  ·  {}",
+            PLACEHOLDER,
+            nohrs_core::t!("@ para a inicialização rápida")
+        );
+        let query_input = cx.new(|cx| SearchField::new(placeholder, field_style(cx), cx));
 
         let subscription = cx.subscribe(&query_input, |this, _field, _event: &FieldChanged, cx| {
             this.on_query_changed(cx);
@@ -204,6 +210,30 @@ impl LauncherView {
             return;
         }
 
+        // D: a leading `@` searches the quick launch only. Anything else keeps the
+        // file search below untouched, ordering included.
+        if let Some(after) = query.trim().strip_prefix('@') {
+            let Some(hooks) = crate::quick_launch_hooks(cx) else {
+                self.set_items(Vec::new(), cx);
+                return;
+            };
+            // The snapshot is cloned from memory here, on the foreground; the
+            // matching itself runs on the background like every other search.
+            let entries = (hooks.snapshot)(cx);
+            let after = after.trim().to_string();
+            self.search_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(DEBOUNCE).await;
+                let items = cx
+                    .background_spawn(async move {
+                        ranking::rank_quick_launch(&entries, &after, MAX_RESULTS)
+                    })
+                    .await;
+                this.update(cx, |this, cx| this.set_items(items, cx))
+                    .log_err();
+            }));
+            return;
+        }
+
         let index = self.index.clone();
         let home = self.home.clone();
         self.search_task = Some(cx.spawn(async move |this, cx| {
@@ -277,10 +307,21 @@ impl LauncherView {
     }
 
     /// Opens the selected row with the system handler and closes the launcher.
+    ///
+    /// A quick-launch row is started by the pages layer instead (M3 D), because
+    /// its item may be a folder, an elevated program or a type the Shell cannot
+    /// take from a path.
     pub fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = self.items.get(self.selected) else {
             return;
         };
+        if let Some((group, slot)) = item.quick_launch.clone() {
+            if let Some(hooks) = crate::quick_launch_hooks(cx) {
+                (hooks.activate)(cx, &group, slot, false);
+            }
+            self.close(window, cx);
+            return;
+        }
         cx.open_with_system(&item.path);
         self.close(window, cx);
     }
@@ -290,6 +331,13 @@ impl LauncherView {
         let Some(item) = self.items.get(self.selected) else {
             return;
         };
+        if let Some((group, slot)) = item.quick_launch.clone() {
+            if let Some(hooks) = crate::quick_launch_hooks(cx) {
+                (hooks.activate)(cx, &group, slot, true);
+            }
+            self.close(window, cx);
+            return;
+        }
         cx.reveal_path(&item.path);
         self.close(window, cx);
     }

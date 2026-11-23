@@ -100,6 +100,9 @@ impl NohrsApp {
                     QUICK_LAUNCH_HOTKEY,
                     nohrs_pages::quick_launch::Mode::Standalone,
                 );
+                // M3 D: the `@` search works here too, and the resident process
+                // answers it from the same state.
+                nohrs_launcher::set_quick_launch_hooks(app, QUICK_LAUNCH_HOOKS);
                 if let Err(error) = nohrs_launcher::open_keep_alive_window(app) {
                     tracing::error!("failed to open the keep-alive window: {error}");
                 }
@@ -133,6 +136,8 @@ impl NohrsApp {
                 QUICK_LAUNCH_HOTKEY,
                 nohrs_pages::quick_launch::Mode::Main,
             );
+            // M3 D: what the launcher's `@` search reads and what Enter does.
+            nohrs_launcher::set_quick_launch_hooks(app, QUICK_LAUNCH_HOOKS);
 
             // The trash ledger, on the platforms whose OS trash records nothing
             // (macOS). Without it the explorer's Delete is a one-way door: the
@@ -232,6 +237,36 @@ fn install_in_app_launcher_key(launcher: LauncherIndex, app: &mut App) {
 
 /// Answers the `ToggleQuickLaunch` action, which is how the tray menu and (from
 /// M3) the settings page ask for the window.
+
+/// The launcher's view of the quick launch (M3 D).
+const QUICK_LAUNCH_HOOKS: nohrs_launcher::QuickLaunchHooks = nohrs_launcher::QuickLaunchHooks {
+    snapshot: quick_launch_snapshot,
+    activate: quick_launch_activate,
+};
+
+/// Every quick-launch entry, mapped into the launcher's own type (M3 D).
+///
+/// The two crates cannot see each other's types, so the binary is where the copy
+/// happens; it is a plain clone of data the pages layer already holds.
+fn quick_launch_snapshot(cx: &App) -> Vec<nohrs_launcher::QuickLaunchEntry> {
+    nohrs_pages::quick_launch::launcher_snapshot(cx)
+        .into_iter()
+        .map(|entry| nohrs_launcher::QuickLaunchEntry {
+            group: entry.group.into(),
+            slot: entry.slot,
+            name: entry.name.into(),
+            tags: entry.tags.into_iter().map(Into::into).collect(),
+            kind: entry.kind.into(),
+            path: entry.path.into(),
+        })
+        .collect()
+}
+
+/// Starts or reveals one entry of the quick launch (M3 D).
+fn quick_launch_activate(cx: &mut App, group: &str, slot: u32, reveal: bool) {
+    nohrs_pages::quick_launch::activate_by_id(cx, group, slot, reveal);
+}
+
 fn install_quick_launch_action(app: &mut App) {
     app.on_action(|_: &nohrs_pages::ToggleQuickLaunch, cx: &mut App| {
         nohrs_pages::quick_launch::toggle(cx);

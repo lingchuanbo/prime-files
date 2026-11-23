@@ -3038,6 +3038,79 @@ pub(crate) fn copy_text(cx: &App, slot: u32) -> Option<String> {
     )
 }
 
+/// One quick-launch entry as the launcher's `@` search needs it (M3 D).
+///
+/// A plain data copy: the launcher crate cannot name this module's types, so the
+/// binary maps these into its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LauncherEntry {
+    /// The group id activation needs.
+    pub group: String,
+    /// The item's slot in that group.
+    pub slot: u32,
+    /// What the row shows.
+    pub name: String,
+    /// Words the query also matches.
+    pub tags: Vec<String>,
+    /// The item's `type`.
+    pub kind: String,
+    /// The item's path as written.
+    pub path: String,
+}
+
+/// Every entry, cloned from memory for the launcher (M3 D).
+///
+/// Runs on the foreground and reads nothing but the state, which is what makes it
+/// safe from a keystroke handler: the matching itself happens on the background.
+pub fn launcher_snapshot(cx: &App) -> Vec<LauncherEntry> {
+    let Some(quick_launch) = state(cx) else {
+        return Vec::new();
+    };
+    quick_launch
+        .config
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group.items.iter().map(move |item| LauncherEntry {
+                group: group.id.clone(),
+                slot: item.slot,
+                name: item.name.clone(),
+                tags: item.tags.clone(),
+                kind: item.kind.clone(),
+                path: item.path.clone().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Starts the entry at `group`/`slot`, or shows its place when `reveal` (M3 D).
+///
+/// The launcher names an entry by its group id rather than its position, because
+/// the file may have been reordered since the rows were built; a group that is gone
+/// does nothing at all.
+pub fn activate_by_id(cx: &mut App, group: &str, slot: u32, reveal: bool) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let Some(index) = quick_launch
+        .config
+        .groups
+        .iter()
+        .position(|candidate| candidate.id == group)
+    else {
+        return;
+    };
+    quick_launch.group = index;
+    quick_launch.slot = Some(slot);
+    quick_launch.touch();
+    if reveal {
+        reveal_item(cx, slot);
+    } else {
+        activate_with(cx, slot, ClickKind::Plain);
+    }
+    cx.refresh_windows();
+}
+
 /// One item's path with the variables of §7 resolved, using the context built at init (S2).
 fn expanded_path(cx: &App, item: &Item) -> Option<PathBuf> {
     let state = state(cx)?;

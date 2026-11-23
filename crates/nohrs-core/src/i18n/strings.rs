@@ -2573,4 +2573,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Global shortcut, appearance and the quick-launch groups.",
         "Atajo global, apariencia y los grupos de la inicialización rápida.",
     ),
+    (
+        "@ para a inicialização rápida",
+        "@ for quick launch",
+        "@ para el inicio rápido",
+    ),
 ];
