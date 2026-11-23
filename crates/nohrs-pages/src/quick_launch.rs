@@ -513,9 +513,12 @@ impl Drop for ComApartment {
 }
 
 /// The disk cache path of one icon (§9).
-fn icon_cache_file(file: &Path, edge: u32) -> PathBuf {
+fn icon_cache_file(file: &Path, edge: u32, index: Option<u32>) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     file.to_string_lossy().to_lowercase().hash(&mut hasher);
+    // E1: the icon at an index is a different picture of the same file, so the
+    // index is part of the key.
+    index.hash(&mut hasher);
     if let Ok(metadata) = std::fs::metadata(file) {
         metadata.len().hash(&mut hasher);
         if let Ok(modified) = metadata.modified()
@@ -546,10 +549,21 @@ fn icon_image(context: &ExpandContext, raw: &str, edge: u32) -> Option<Arc<Rende
     // first icon, and the Shell's index-free extraction cannot express it (§9).
     if let Some((program, index)) = split_icon_index(raw)
         && let Ok(program) = nohrs_services::launch::expand(program, context)
-        && let Some((pixels, width, height)) =
-            nohrs_services::launch::indexed_icon(&program.to_string_lossy(), index, edge)
     {
-        return thumbnails::render_image(width, height, pixels).map(Arc::new);
+        let cache = icon_cache_file(&program, edge, Some(index));
+        if let Ok(bytes) = std::fs::read(&cache)
+            && let Some(image) = decode_cached_icon(&bytes)
+        {
+            return Some(Arc::new(image));
+        }
+        let (pixels, width, height) =
+            nohrs_services::launch::indexed_icon(&program.to_string_lossy(), index, edge)?;
+        let image = thumbnails::render_image(width, height, pixels)?;
+        let image = Arc::new(image);
+        if let Some(bytes) = encode_cached_icon(&image) {
+            write_icon_cache(&cache, &bytes);
+        }
+        return Some(image);
     }
     // A custom `.png` is the picture itself; anything else asks the Shell, which
     // knows `.ico`, programs and folders (§9).
@@ -559,7 +573,7 @@ fn icon_image(context: &ExpandContext, raw: &str, edge: u32) -> Option<Arc<Rende
     {
         return decode_png_icon(&file, edge).map(Arc::new);
     }
-    let cache = icon_cache_file(&file, edge);
+    let cache = icon_cache_file(&file, edge, None);
     if let Ok(bytes) = std::fs::read(&cache)
         && let Some(image) = decode_cached_icon(&bytes)
     {
@@ -3369,6 +3383,21 @@ mod tests {
         slots
     }
 
+    /// §9, E1: the same program at two icon indexes gets two cache files.
+    #[test]
+    fn an_indexed_icon_has_its_own_cache_file() {
+        let program = Path::new("C:/Windows/System32/shell32.dll");
+        let plain = icon_cache_file(program, 48, None);
+        let third = icon_cache_file(program, 48, Some(3));
+        let fourth = icon_cache_file(program, 48, Some(4));
+        assert_ne!(third, fourth, "each index is its own picture");
+        assert_ne!(plain, third, "no index is not the same as an index");
+        // The size still separates the files, and the same question answers the
+        // same file: the lookup has to be stable for the cache to work.
+        assert_eq!(third, icon_cache_file(program, 48, Some(3)));
+        assert_ne!(third, icon_cache_file(program, 32, Some(3)));
+    }
+
     /// §9: a custom icon may name an index inside a program.
     #[test]
     fn a_custom_icon_can_name_an_index_inside_a_program() {
@@ -4608,8 +4637,8 @@ mod tests {
         // directory gets refused by the on-access scanner on some machines.
         let file = directory.path().join("programa.txt");
         std::fs::write(&file, b"nao e um exe de verdade").unwrap();
-        let small = icon_cache_file(&file, 32);
-        let large = icon_cache_file(&file, 64);
+        let small = icon_cache_file(&file, 32, None);
+        let large = icon_cache_file(&file, 64, None);
         assert_ne!(small, large);
         assert_eq!(
             small.parent(),
