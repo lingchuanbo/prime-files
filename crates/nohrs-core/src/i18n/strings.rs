@@ -2578,4 +2578,12 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "@ for quick launch",
         "@ para el inicio rápido",
     ),
+    ("Aplicativo UWP", "UWP app", "Aplicación UWP"),
+    ("ID do aplicativo", "App ID", "ID de la aplicación"),
+    ("Escolher aplicativo…", "Choose app…", "Elegir aplicación…"),
+    (
+        "Não foi possível listar os aplicativos: {error}",
+        "Could not list the applications: {error}",
+        "No se pudieron listar las aplicaciones: {error}",
+    ),
 ];

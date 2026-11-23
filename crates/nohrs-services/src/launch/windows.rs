@@ -18,7 +18,11 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ, SelectObject,
 };
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    CoUninitialize,
+};
 use windows::Win32::System::Diagnostics::Debug::{
     FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
 };
@@ -32,7 +36,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MENU, keybd_event,
 };
 use windows::Win32::UI::Shell::{
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    AO_NONE, BHID_EnumItems, FOLDERID_AppsFolder, IApplicationActivationManager, IEnumShellItems,
+    IShellItem, IShellItem2, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS,
+    SHELLEXECUTEINFOW, SHGetKnownFolderItem, SIGDN_NORMALDISPLAY, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, DI_NORMAL, DestroyIcon, DrawIconEx, EnumWindows, GW_OWNER, GetIconInfo,
@@ -40,11 +46,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LR_DEFAULTCOLOR, PrivateExtractIconsW, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow,
     ShowWindow, SwitchToThisWindow,
 };
-use windows::core::{BOOL, Error as WindowsError, PCWSTR, PWSTR};
+use windows::core::{BOOL, Error as WindowsError, Interface, PCWSTR, PWSTR};
 
 use crate::launch::{
-    ExpandContext, Health, KIND_APP, KIND_FILE, KIND_URL, LaunchAction, LaunchError, LaunchMode,
-    LaunchOutcome, LaunchRequest, expand, item_path, validate_url,
+    ExpandContext, Health, InstalledApp, KIND_APP, KIND_FILE, KIND_URL, KIND_UWP, LaunchAction,
+    LaunchError, LaunchMode, LaunchOutcome, LaunchRequest, expand, item_path, validate_url,
 };
 
 /// A document (`file`): the Shell picks the program and the verb is left to it
@@ -364,6 +370,191 @@ impl LaunchAction for AppAction {
             directory.as_deref(),
             administrative,
         )
+    }
+}
+
+/// An application started by its AppUserModelID, through the activation
+/// manager (§17.2 B).
+///
+/// The item's path is an AppUserModelID, not a file; `cwd` and `admin` do not
+/// apply to it and are ignored whatever the file says.
+pub(crate) struct UwpAction;
+
+impl LaunchAction for UwpAction {
+    fn kind(&self) -> &str {
+        KIND_UWP
+    }
+
+    fn health(&self, item: &Item, _context: &ExpandContext) -> Health {
+        if aumid_of(item).is_some() {
+            Health::Ok
+        } else {
+            Health::Invalid("the app ID must name both sides of a ! and hold no spaces".to_string())
+        }
+    }
+
+    fn launch(&self, item: &Item, _request: &LaunchRequest) -> Result<LaunchOutcome, LaunchError> {
+        // The health check cannot query the system, so the format is checked
+        // here too: a malformed ID is refused before COM is asked (§17.2 B).
+        let aumid = aumid_of(item).ok_or_else(|| {
+            LaunchError::Blocked(format!(
+                "the uwp item {:?} has no well-formed app ID",
+                item.name
+            ))
+        })?;
+        activate_application(aumid, item.args.as_deref())
+    }
+}
+
+/// The item's path, when it is a well-formed AppUserModelID (§17.2 B).
+///
+/// The rules are the ones §17.2 B asks for: a `!` with something on both sides,
+/// no whitespace anywhere and at most 256 characters. Nothing here asks the
+/// system, so a health pass stays inside its 5 ms budget.
+fn aumid_of(item: &Item) -> Option<&str> {
+    let aumid = item.path.as_deref()?;
+    let (package, application) = aumid.split_once('!')?;
+    let well_formed = !package.is_empty()
+        && !application.is_empty()
+        && aumid.chars().count() <= 256
+        && !aumid.chars().any(char::is_whitespace);
+    well_formed.then_some(aumid)
+}
+
+/// Hands `aumid` to the activation manager with `arguments` (§17.2 B).
+///
+/// The manager is created on this thread, which already owns the `quick-launch`
+/// apartment (§8.4); both the manager and the strings it reads are released
+/// before this returns.
+#[allow(unsafe_code)]
+fn activate_application(
+    aumid: &str,
+    arguments: Option<&str>,
+) -> Result<LaunchOutcome, LaunchError> {
+    // SAFETY: `ApplicationActivationManager` is a constant class ID, the call
+    // returns an owned interface, and that interface is released by its own
+    // `Drop` when it goes out of scope.
+    let manager: IApplicationActivationManager = unsafe {
+        CoCreateInstance(
+            &windows::Win32::UI::Shell::ApplicationActivationManager,
+            None,
+            CLSCTX_ALL,
+        )
+    }
+    .map_err(|error| os_error(&error))?;
+    let aumid = wide(aumid);
+    let arguments = wide(
+        arguments
+            .map(str::trim)
+            .filter(|arguments| !arguments.is_empty())
+            .unwrap_or_default(),
+    );
+    // SAFETY: both buffers are NUL-terminated and outlive the call; the manager
+    // is live for the whole call. `AO_NONE` is the plain activation §17.2 B
+    // asks for, and there is no process handle to release.
+    unsafe {
+        manager.ActivateApplication(PCWSTR(aumid.as_ptr()), PCWSTR(arguments.as_ptr()), AO_NONE)
+    }
+    .map_err(|error| os_error(&error))?;
+    Ok(LaunchOutcome::Started)
+}
+
+/// The applications the Apps folder lists, with their display names (§17.2 B).
+///
+/// This is the slow call the settings page runs on a background task: it walks
+/// the shell's own enumeration and copies two properties out of every item. The
+/// caller must have entered a COM apartment on the calling thread.
+#[allow(unsafe_code)]
+pub fn installed_apps() -> Result<Vec<InstalledApp>, LaunchError> {
+    // SAFETY: `FOLDERID_AppsFolder` is a constant GUID and the call returns an
+    // owned shell item.
+    let folder: IShellItem =
+        unsafe { SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None) }
+            .map_err(|error| os_error(&error))?;
+    // SAFETY: the enumeration handler is requested with no bind context, and
+    // the enumerator is owned by this call.
+    let enumerator: IEnumShellItems =
+        unsafe { folder.BindToHandler(None, &BHID_EnumItems) }.map_err(|error| os_error(&error))?;
+    let mut apps = Vec::new();
+    loop {
+        let mut batch = [None];
+        let mut fetched = 0u32;
+        // SAFETY: the batch is writable for its whole length, which is the
+        // count the call is told, and the fetched count is its own out
+        // parameter.
+        unsafe { enumerator.Next(&mut batch, Some(&mut fetched)) }
+            .map_err(|error| os_error(&error))?;
+        if fetched == 0 {
+            break;
+        }
+        let Some(item) = batch[0].take() else {
+            break;
+        };
+        let Ok(item) = item.cast::<IShellItem2>() else {
+            tracing::debug!(target: "launch", "an app item is not an IShellItem2; skipped");
+            continue;
+        };
+        let Some(aumid) = shell_string(&item, &PKEY_AppUserModel_ID) else {
+            // A classic program without an AppUserModelID cannot be activated
+            // by ID, so it has nothing to offer the picker.
+            continue;
+        };
+        if aumid.is_empty() {
+            continue;
+        }
+        let name = display_name(&item).unwrap_or_else(|| aumid.clone());
+        apps.push(InstalledApp { name, aumid });
+    }
+    Ok(apps)
+}
+
+/// One property of a shell item, copied out of the shell's allocator.
+#[allow(unsafe_code)]
+fn shell_string(
+    item: &IShellItem2,
+    key: &windows::Win32::Foundation::PROPERTYKEY,
+) -> Option<String> {
+    // SAFETY: `key` is a valid property key and the call returns a string the
+    // shell allocated, which `taken_string` copies and releases exactly once.
+    let pointer = unsafe { item.GetString(key) }.log_err()?;
+    // SAFETY: the pointer came from the call above, so it is NUL-terminated and
+    // owned by this process.
+    unsafe { taken_string(pointer) }
+}
+
+/// The display name of a shell item, copied out of the shell's allocator.
+#[allow(unsafe_code)]
+fn display_name(item: &IShellItem2) -> Option<String> {
+    // SAFETY: the call returns a string the shell allocated; `taken_string`
+    // copies it and releases it exactly once.
+    let pointer = unsafe { item.GetDisplayName(SIGDN_NORMALDISPLAY) }.log_err()?;
+    // SAFETY: the pointer came from the call above, so it is NUL-terminated and
+    // owned by this process.
+    unsafe { taken_string(pointer) }
+}
+
+/// Copies a shell string and frees the shell's copy.
+#[allow(unsafe_code)]
+unsafe fn taken_string(pointer: PWSTR) -> Option<String> {
+    if pointer.is_null() {
+        return None;
+    }
+    // SAFETY: the caller passes a pointer the shell returned, which is
+    // NUL-terminated and may be read.
+    let text = unsafe { pointer.to_string() }.log_err();
+    // SAFETY: the same pointer was allocated by the shell for this process and
+    // is released exactly once, here.
+    unsafe { CoTaskMemFree(Some(pointer.0.cast())) };
+    text
+}
+
+/// Maps a Shell `HRESULT` failure to the error the window reports (§8.2,
+/// §17.2 B), reusing the conversion `start` uses.
+fn os_error(error: &WindowsError) -> LaunchError {
+    let code = win32_code(error);
+    LaunchError::Os {
+        code,
+        message: system_message(code),
     }
 }
 
@@ -770,5 +961,94 @@ mod tests {
         );
         item.path = Some("https://example.com".to_string());
         assert_eq!(UrlAction.health(&item, &request.expand), Health::Ok);
+    }
+
+    fn uwp_item(aumid: &str) -> Item {
+        let mut item = Item::new(0, KIND_UWP, "Calculadora");
+        item.path = Some(aumid.to_string());
+        item
+    }
+
+    /// §17.2 B.3: the format alone decides, and a real AppUserModelID passes.
+    #[test]
+    fn a_well_formed_app_id_is_healthy_without_asking_the_system() {
+        let context = crate::launch::ExpandContext::current();
+        for aumid in [
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            "Microsoft.Windows.Photos_8wekyb3d8bbwe!App",
+            "a!b",
+        ] {
+            assert_eq!(
+                UwpAction.health(&uwp_item(aumid), &context),
+                Health::Ok,
+                "{aumid} should be accepted"
+            );
+        }
+    }
+
+    /// §17.2 B.3 and B.7: each way an AppUserModelID can be malformed.
+    #[test]
+    fn a_malformed_app_id_is_invalid() {
+        let context = crate::launch::ExpandContext::current();
+        let longest_ok = format!("{}!{}", "a".repeat(128), "b".repeat(127));
+        assert_eq!(longest_ok.chars().count(), 256);
+        assert_eq!(
+            UwpAction.health(&uwp_item(&longest_ok), &context),
+            Health::Ok
+        );
+        let too_long = format!("{}!{}", "a".repeat(128), "b".repeat(128));
+        let rejected = [
+            "",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+            "!App",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!A pp",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!\tApp",
+            too_long.as_str(),
+        ];
+        for aumid in rejected {
+            assert!(
+                matches!(
+                    UwpAction.health(&uwp_item(aumid), &context),
+                    Health::Invalid(_)
+                ),
+                "{aumid:?} should be refused"
+            );
+        }
+        let mut without_path = Item::new(1, KIND_UWP, "Sem ID");
+        without_path.path = None;
+        assert!(matches!(
+            UwpAction.health(&without_path, &context),
+            Health::Invalid(_)
+        ));
+    }
+
+    /// §17.2 B.7: a malformed ID is refused before COM is asked to activate it.
+    #[test]
+    fn a_malformed_app_id_is_blocked_before_activation() {
+        let request = LaunchRequest {
+            mode: LaunchMode::Normal,
+            on_running: nohrs_core::config::quick_launch::OnRunning::Activate,
+            expand: crate::launch::ExpandContext::current(),
+        };
+        let error = UwpAction
+            .launch(&uwp_item("nao-tem-exclamacao"), &request)
+            .expect_err("nothing to activate");
+        assert!(matches!(error, LaunchError::Blocked(_)), "{error:?}");
+    }
+
+    /// §17.2 B.4 and B.7: the real Apps folder, on a real machine. Run by hand:
+    /// `cargo test --release -p nohrs-services -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "enumerates the real Apps folder; run by hand for the PR"]
+    fn the_apps_folder_has_at_least_one_application() {
+        let _apartment = ComApartment::enter().expect("the thread enters a COM apartment");
+        let apps = installed_apps().expect("the Apps folder is enumerated");
+        assert!(!apps.is_empty(), "the Apps folder should hold an app");
+        assert!(
+            apps.iter()
+                .any(|app| !app.name.is_empty() && !app.aumid.is_empty()),
+            "at least one app should have a display name and an AppUserModelID"
+        );
     }
 }

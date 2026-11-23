@@ -7981,4 +7981,48 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "@ 快速启动",
         ],
     ),
+    (
+        "Aplicativo UWP",
+        [
+            "Application UWP",
+            "UWP-App",
+            "App UWP",
+            "Приложение UWP",
+            "UWP アプリ",
+            "UWP 应用",
+        ],
+    ),
+    (
+        "ID do aplicativo",
+        [
+            "ID de l’application",
+            "App-ID",
+            "ID dell’app",
+            "Идентификатор приложения",
+            "アプリ ID",
+            "应用 ID",
+        ],
+    ),
+    (
+        "Escolher aplicativo…",
+        [
+            "Choisir une application…",
+            "App auswählen…",
+            "Scegli app…",
+            "Выбрать приложение…",
+            "アプリを選択…",
+            "选择应用…",
+        ],
+    ),
+    (
+        "Não foi possível listar os aplicativos: {error}",
+        [
+            "Impossible de lister les applications : {error}",
+            "Die Anwendungen konnten nicht aufgelistet werden: {error}",
+            "Impossibile elencare le applicazioni: {error}",
+            "Не удалось получить список приложений: {error}",
+            "アプリの一覧を取得できませんでした: {error}",
+            "无法列出应用：{error}",
+        ],
+    ),
 ];

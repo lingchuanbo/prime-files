@@ -23,7 +23,10 @@ use nohrs_core::config::quick_launch::{
 use nohrs_core::shortcuts::Chord;
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::{t, tf};
-use nohrs_services::launch::{ExpandContext, LaunchMode, LaunchRegistry, LaunchRequest};
+use nohrs_services::launch::{
+    ComApartment, ExpandContext, InstalledApp, KIND_UWP, LaunchMode, LaunchRegistry, LaunchRequest,
+    installed_apps,
+};
 use nohrs_ui::theme::theme;
 
 use super::{Pick, Row, SettingsPage};
@@ -109,6 +112,10 @@ pub(super) enum Action {
     SelectItem(u32),
     /// Change the kind of the item being edited.
     SetKind(&'static str),
+    /// Open the installed-app picker of an `uwp` item, or close it.
+    ChooseApp,
+    /// Fill the form with the installed app at this index.
+    PickApp(usize),
     /// Flip "run as administrator" of the item being edited.
     ToggleAdmin,
     /// Write the item form back.
@@ -137,6 +144,18 @@ pub(super) struct Section {
     confirm_delete: Option<String>,
     /// Waiting for the next key press to become the summon chord.
     recording: bool,
+    /// Whether the `uwp` app picker is open.
+    apps_picker: bool,
+    /// The installed apps, once the background enumeration has answered.
+    apps: Option<Vec<InstalledApp>>,
+    /// Why the enumeration failed, while there is still no list.
+    apps_error: Option<String>,
+    /// Whether the background enumeration is running.
+    apps_loading: bool,
+    /// The picker's search field, made on the first frame after it opens.
+    apps_query: Option<Entity<InputState>>,
+    /// The app a click chose, waiting for the next frame to fill the fields.
+    picked_app: Option<InstalledApp>,
 }
 
 impl Section {
@@ -688,8 +707,10 @@ impl Section {
         }))
     }
 
-    /// The rows of the item form (§17.1 B): kind, name, path with browsing,
-    /// arguments, working directory with browsing, elevation, icon and tags.
+    /// The rows of the item form (§17.1 B, §17.2 B): kind, name, path with
+    /// browsing, arguments, working directory with browsing, elevation, icon
+    /// and tags. An `uwp` item names an AppUserModelID instead of a path, picks
+    /// it from the Apps folder, and has no working directory or elevation.
     fn form_rows(
         &self,
         page: &SettingsPage,
@@ -697,7 +718,10 @@ impl Section {
         enabled: bool,
         cx: &mut Context<SettingsPage>,
     ) -> Vec<Row> {
-        let kind_control = if matches!(form.kind.as_str(), "app" | "folder" | "file" | "url") {
+        let kind_control = if matches!(
+            form.kind.as_str(),
+            "app" | "folder" | "file" | "url" | KIND_UWP
+        ) {
             let options = [
                 (
                     t!("Aplicativo"),
@@ -719,6 +743,11 @@ impl Section {
                     form.kind == "url",
                     Pick::QuickLaunch(Action::SetKind("url")),
                 ),
+                (
+                    t!("Aplicativo UWP"),
+                    form.kind == KIND_UWP,
+                    Pick::QuickLaunch(Action::SetKind(KIND_UWP)),
+                ),
             ];
             page.chips_when("quick-launch-item-kind", &options, false, enabled, cx)
         } else {
@@ -727,11 +756,18 @@ impl Section {
             // change what the entry means.
             status_line(form.kind.clone(), false)
         };
-        vec![
+        let uwp = form.kind == KIND_UWP;
+        let path_label = if uwp {
+            t!("ID do aplicativo")
+        } else {
+            t!("Caminho")
+        };
+        let cwd_enabled = enabled && !uwp;
+        let mut rows = vec![
             Row::new(t!("Tipo"), None, kind_control),
             Row::new(t!("Nome"), None, input_row(&form.name, enabled)).wide(),
             Row::new(
-                t!("Caminho"),
+                path_label,
                 None,
                 div()
                     .flex()
@@ -739,9 +775,26 @@ impl Section {
                     .gap_2()
                     .w_full()
                     .child(input_row(&form.path, enabled))
-                    .child(browse_button(Field::Path, enabled, cx)),
+                    .child(if uwp {
+                        action_button(
+                            "quick-launch-choose-app",
+                            t!("Escolher aplicativo…"),
+                            false,
+                            enabled,
+                            Action::ChooseApp,
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        browse_button(Field::Path, enabled, cx)
+                    }),
             )
             .wide(),
+        ];
+        if uwp && self.apps_picker {
+            rows.push(Row::new(t!("Aplicativo"), None, self.apps_picker_row(enabled, cx)).wide());
+        }
+        rows.extend([
             Row::new(t!("Argumentos"), None, input_row(&form.args, enabled)).wide(),
             Row::new(
                 t!("Pasta de trabalho"),
@@ -751,8 +804,8 @@ impl Section {
                     .items_center()
                     .gap_2()
                     .w_full()
-                    .child(input_row(&form.cwd, enabled))
-                    .child(browse_button(Field::Cwd, enabled, cx)),
+                    .child(input_row(&form.cwd, cwd_enabled))
+                    .child(browse_button(Field::Cwd, cwd_enabled, cx)),
             )
             .wide(),
             Row::new(
@@ -762,7 +815,7 @@ impl Section {
                     "quick-launch-item-admin",
                     form.admin,
                     Pick::QuickLaunch(Action::ToggleAdmin),
-                    enabled,
+                    enabled && !uwp,
                     cx,
                 ),
             ),
@@ -786,7 +839,80 @@ impl Section {
                 ),
             )
             .wide(),
-        ]
+        ]);
+        rows
+    }
+
+    /// The installed-app picker under the path row (§17.2 B.5): a search field
+    /// and the apps whose name matches it. The list is enumerated once per
+    /// session by a background task, never here.
+    fn apps_picker_row(&self, enabled: bool, cx: &mut Context<SettingsPage>) -> AnyElement {
+        let query = self
+            .apps_query
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let mut list = div()
+            .id("quick-launch-apps")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(240.0))
+            .min_h(px(0.0))
+            .overflow_y_scroll();
+        if let Some(input) = self.apps_query.as_ref() {
+            list = list.child(Input::new(input).small().w(px(360.0)));
+        }
+        if self.apps_loading {
+            list = list.child(status_line(t!("Carregando…"), false));
+        } else if let Some(error) = &self.apps_error {
+            list = list.child(status_line(
+                tf!(
+                    "Não foi possível listar os aplicativos: {error}",
+                    error = error
+                ),
+                true,
+            ));
+        } else if let Some(apps) = &self.apps {
+            let matching = matching_apps(apps, &query);
+            if matching.is_empty() {
+                list = list.child(status_line(t!("Nenhum"), false));
+            } else {
+                list = list.children(matching.into_iter().map(|(index, app)| {
+                    let pick = Pick::QuickLaunch(Action::PickApp(index));
+                    div()
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "quick-launch-app-{index}"
+                        ))))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .rounded(px(5.0))
+                        .text_sm()
+                        .text_color(rgb(theme::fg()))
+                        .when(enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(rgb(theme::bg_hover())))
+                                .on_click(cx.listener(move |page, _event, _window, cx| {
+                                    page.pick(pick.clone(), cx)
+                                }))
+                        })
+                        .when(!enabled, |this| this.opacity(0.45))
+                        .child(div().flex_1().child(app.name.clone()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(px(320.0))
+                                .text_xs()
+                                .text_color(rgb(theme::fg_secondary()))
+                                .child(app.aumid.clone()),
+                        )
+                }));
+            }
+        }
+        list.into_any_element()
     }
 
     /// The file card (§17.1 B): the path, the two buttons and the warning that
@@ -905,6 +1031,7 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
             };
             page.quick_launch.group = Some(group.id.clone());
             page.quick_launch.form = None;
+            close_apps_picker(&mut page.quick_launch);
             cx.notify();
         }
         Action::SelectItem(slot) => {
@@ -917,14 +1044,20 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
             };
             page.quick_launch.select = Some((group.id.clone(), slot));
             page.quick_launch.form = None;
+            close_apps_picker(&mut page.quick_launch);
             cx.notify();
         }
         Action::SetKind(kind) => {
             if let Some(form) = page.quick_launch.form.as_mut() {
                 form.kind = kind.to_string();
             }
+            if kind != KIND_UWP {
+                close_apps_picker(&mut page.quick_launch);
+            }
             cx.notify();
         }
+        Action::ChooseApp => choose_app(page, cx),
+        Action::PickApp(index) => pick_app(page, index, cx),
         Action::ToggleAdmin => {
             if let Some(form) = page.quick_launch.form.as_mut() {
                 form.admin = !form.admin;
@@ -966,6 +1099,84 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
         Action::OpenFile => open_file(cx),
         Action::RevealFile => reveal_file(cx),
     }
+}
+
+/// Closes the `uwp` picker and forgets what it held for the frame that was
+/// waiting to fill the fields.
+fn close_apps_picker(section: &mut Section) {
+    section.apps_picker = false;
+    section.apps_query = None;
+    section.picked_app = None;
+}
+
+/// Opens or closes the installed-app picker (§17.2 B.5).
+///
+/// The Apps folder is enumerated on a background task the first time the
+/// picker opens, and the answer is kept for the session: a foreground thread
+/// must not do this work (§18), and walking the folder again for every click
+/// would only add latency.
+fn choose_app(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
+    let section = &mut page.quick_launch;
+    if section.apps_picker {
+        close_apps_picker(section);
+        cx.notify();
+        return;
+    }
+    section.apps_picker = true;
+    if section.apps.is_some() || section.apps_loading {
+        cx.notify();
+        return;
+    }
+    section.apps_loading = true;
+    section.apps_error = None;
+    let enumeration = cx.background_spawn(async {
+        let _apartment = ComApartment::enter()?;
+        installed_apps()
+    });
+    cx.spawn(async move |this, cx| {
+        let outcome = enumeration.await;
+        this.update(cx, |page, cx| {
+            let section = &mut page.quick_launch;
+            section.apps_loading = false;
+            match outcome {
+                Ok(apps) => section.apps = Some(apps),
+                Err(error) => section.apps_error = Some(error.to_string()),
+            }
+            cx.notify();
+        })
+        .log_err();
+    })
+    .detach();
+    cx.notify();
+}
+
+/// Fills the form with the installed app at `index` (§17.2 B.5).
+///
+/// The click only stores the app: writing the input fields needs the window,
+/// which the next frame's [`ensure_inputs`] has.
+fn pick_app(page: &mut SettingsPage, index: usize, cx: &mut Context<SettingsPage>) {
+    let Some(app) = page
+        .quick_launch
+        .apps
+        .as_ref()
+        .and_then(|apps| apps.get(index))
+        .cloned()
+    else {
+        return;
+    };
+    page.quick_launch.picked_app = Some(app);
+    page.quick_launch.apps_picker = false;
+    cx.notify();
+}
+
+/// The installed apps whose name holds `query`, ignoring case and surrounding
+/// spaces, each with its index in `apps` so a click can name it again.
+fn matching_apps<'a>(apps: &'a [InstalledApp], query: &str) -> Vec<(usize, &'a InstalledApp)> {
+    let query = query.trim().to_lowercase();
+    apps.iter()
+        .enumerate()
+        .filter(|(_, app)| query.is_empty() || app.name.to_lowercase().contains(&query))
+        .collect()
 }
 
 /// A key pressed while the summon chord waits for one: Esc gives up, the
@@ -1046,6 +1257,27 @@ pub(super) fn ensure_inputs(
     });
     if stale {
         page.quick_launch.form = None;
+    }
+    if page.quick_launch.form.is_none() {
+        close_apps_picker(&mut page.quick_launch);
+    }
+    // A click on the app picker stores the app; the fields it fills are made
+    // with a window, so they are written here (§17.2 B.5).
+    if let Some(app) = page.quick_launch.picked_app.take() {
+        if let Some(form) = page.quick_launch.form.as_ref() {
+            form.path.update(cx, |state, cx| {
+                state.set_value(app.aumid.clone(), window, cx)
+            });
+            if form.name.read(cx).value().trim().is_empty() {
+                form.name.update(cx, |state, cx| {
+                    state.set_value(app.name.clone(), window, cx)
+                });
+            }
+        }
+        close_apps_picker(&mut page.quick_launch);
+    }
+    if page.quick_launch.apps_picker && page.quick_launch.apps_query.is_none() {
+        page.quick_launch.apps_query = Some(field(window, cx, t!("Filtrar"), ""));
     }
     match page.quick_launch.renaming.clone() {
         Some(id) => {
@@ -1499,5 +1731,32 @@ mod tests {
         for &(_, value) in &LIST_COLUMNS {
             assert!((1..=3).contains(&value));
         }
+    }
+
+    /// §17.2 B.5: the picker narrows the installed apps by the typed name,
+    /// without regard to case.
+    #[test]
+    fn the_app_picker_filters_by_name_without_regard_to_case() {
+        let apps = vec![
+            InstalledApp {
+                name: "Calculadora".to_string(),
+                aumid: "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".to_string(),
+            },
+            InstalledApp {
+                name: "Fotos".to_string(),
+                aumid: "Microsoft.Windows.Photos_8wekyb3d8bbwe!App".to_string(),
+            },
+        ];
+        let matching = matching_apps(&apps, "calc");
+        assert_eq!(matching.len(), 1, "only the calculator matches");
+        assert_eq!(matching[0].0, 0, "the index names the full list");
+        assert_eq!(matching[0].1.name, "Calculadora");
+        assert_eq!(matching_apps(&apps, "FOTOS")[0].0, 1);
+        assert_eq!(
+            matching_apps(&apps, "   ").len(),
+            2,
+            "an empty query shows all"
+        );
+        assert!(matching_apps(&apps, "nada").is_empty());
     }
 }

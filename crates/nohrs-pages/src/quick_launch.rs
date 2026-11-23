@@ -1411,10 +1411,14 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
         return false;
     };
-    // Only the four kinds the form offers may be introduced; every other kind
-    // (uwp, command, group, plugin:…) is kept as it is, since this milestone
-    // cannot build those and changing one would change what the entry means.
-    if !matches!(edit.kind.as_str(), "app" | "folder" | "file" | "url") && edit.kind != item.kind {
+    // Only the kinds the form offers may be introduced; every other kind
+    // (command, group, plugin:…) is kept as it is, since this milestone cannot
+    // build those and changing one would change what the entry means.
+    if !matches!(
+        edit.kind.as_str(),
+        "app" | "folder" | "file" | "url" | "uwp"
+    ) && edit.kind != item.kind
+    {
         return false;
     }
     let previous_kind = item.kind.clone();

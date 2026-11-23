@@ -333,6 +333,68 @@ fn check_passes_while_the_target_exists_and_fails_once_it_is_gone() {
     );
 }
 
+/// §17.2 B.6: `add --uwp` is the alternative to the positional path, and the
+/// AppUserModelID is what the item stores.
+#[test]
+fn an_item_added_by_app_id_stores_the_id_with_the_uwp_type() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let aumid = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+
+    let added = noh(
+        root,
+        &[
+            "ql",
+            "add",
+            "--uwp",
+            aumid,
+            "--name",
+            "Calculadora",
+            "--args",
+            "arg",
+        ],
+    );
+    assert_eq!(exit_code(&added), 0, "add failed: {}", stderr(&added));
+
+    let listed = noh(root, &["ql", "list"]);
+    assert_eq!(exit_code(&listed), 0, "list failed: {}", stderr(&listed));
+    assert!(
+        stdout(&listed).contains(&format!("0\tuwp\tCalculadora\t{aumid}")),
+        "{}",
+        stdout(&listed)
+    );
+
+    let written = std::fs::read_to_string(config_file(root)).unwrap();
+    assert!(written.contains("type = \"uwp\""), "{written}");
+    assert!(
+        written.contains(&format!("path = \"{aumid}\"")),
+        "{written}"
+    );
+    assert!(written.contains("args = \"arg\""), "{written}");
+}
+
+/// §17.2 B.6 and B.7: the structure of `apps --json` on a real machine.
+#[test]
+#[cfg(windows)]
+fn apps_json_describes_each_installed_app() {
+    let directory = tempfile::tempdir().unwrap();
+    let listed = noh(directory.path(), &["ql", "apps", "--json"]);
+    assert_eq!(
+        exit_code(&listed),
+        0,
+        "apps failed: {}{}",
+        stdout(&listed),
+        stderr(&listed)
+    );
+    let document: serde_json::Value = serde_json::from_str(&stdout(&listed)).unwrap();
+    let apps = document["apps"].as_array().expect("an apps array");
+    for app in apps {
+        assert!(app["name"].is_string(), "{app}");
+        let aumid = app["aumid"].as_str().expect("an aumid string");
+        assert!(!aumid.is_empty(), "{app}");
+    }
+}
+
 #[test]
 #[cfg(windows)]
 fn run_names_a_group_that_does_not_exist() {

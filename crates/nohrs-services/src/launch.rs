@@ -24,7 +24,7 @@ use nohrs_core::config::quick_launch::{Item, OnRunning};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::ComApartment;
+pub use windows::{ComApartment, installed_apps};
 
 /// `type` of an application item.
 pub const KIND_APP: &str = "app";
@@ -34,9 +34,31 @@ pub const KIND_FOLDER: &str = "folder";
 pub const KIND_FILE: &str = "file";
 /// `type` of a link item.
 pub const KIND_URL: &str = "url";
+/// `type` of an application started by its AppUserModelID (M4).
+pub const KIND_UWP: &str = "uwp";
 
 /// The kind names this milestone implements.
-pub const BUILTIN_KINDS: [&str; 4] = [KIND_APP, KIND_FOLDER, KIND_URL, KIND_FILE];
+pub const BUILTIN_KINDS: [&str; 5] = [KIND_APP, KIND_FOLDER, KIND_URL, KIND_FILE, KIND_UWP];
+
+/// One application the user's Apps folder lists, for the `uwp` picker
+/// (§17.2 B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledApp {
+    /// The display name the shell shows for the application.
+    pub name: String,
+    /// The AppUserModelID an `uwp` item stores as its path.
+    pub aumid: String,
+}
+
+/// The applications the user's Apps folder lists, packaged and classic alike
+/// (§17.2 B).
+///
+/// Only Windows has such a folder; elsewhere there is nothing to list and the
+/// caller is told so rather than shown an empty list.
+#[cfg(not(windows))]
+pub fn installed_apps() -> Result<Vec<InstalledApp>, LaunchError> {
+    Err(LaunchError::Unsupported(KIND_UWP.to_string()))
+}
 
 /// Why a stored path could not be turned into a real one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -325,6 +347,7 @@ impl LaunchRegistry {
             url_action(),
             app_action(),
             file_action(),
+            uwp_action(),
         ];
         for action in builtins {
             // The kinds are distinct constants; a duplicate would be a mistake
@@ -483,6 +506,16 @@ fn url_action() -> Box<dyn LaunchAction> {
 #[cfg(not(windows))]
 fn url_action() -> Box<dyn LaunchAction> {
     Box::new(UnsupportedAction { kind: KIND_URL })
+}
+
+#[cfg(windows)]
+fn uwp_action() -> Box<dyn LaunchAction> {
+    Box::new(windows::UwpAction)
+}
+
+#[cfg(not(windows))]
+fn uwp_action() -> Box<dyn LaunchAction> {
+    Box::new(UnsupportedAction { kind: KIND_UWP })
 }
 
 /// A kind this build cannot start on this platform.
@@ -681,11 +714,13 @@ mod tests {
         for kind in BUILTIN_KINDS {
             assert!(registry.get(kind).is_some(), "{kind} should be registered");
         }
-        assert!(registry.get("uwp").is_none());
-        assert_eq!(
-            registry.health(&item("uwp", "{config}"), &context()),
-            Health::Unknown
-        );
+        // `uwp` is known everywhere; only Windows can judge or start one, and
+        // an item whose path is not an AppUserModelID is invalid either way.
+        assert!(registry.get(KIND_UWP).is_some());
+        assert!(matches!(
+            registry.health(&item(KIND_UWP, "{config}"), &context()),
+            Health::Invalid(_)
+        ));
     }
 
     #[test]

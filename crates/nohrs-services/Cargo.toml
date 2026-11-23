@@ -57,6 +57,8 @@ rustix = { version = "1", features = ["fs"] }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # The Apps folder's items expose their AppUserModelID as a property (§17.2 B).
+    "Win32_Storage_EnhancedStorage",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Com",

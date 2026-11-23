@@ -48,7 +48,7 @@ const UNREADABLE_CONFIG: u8 = 2;
 pub enum Command {
     /// List the groups and items in `quicklaunch.toml`.
     List(ListArgs),
-    /// Add an existing file or folder to a group.
+    /// Add an existing file or folder, or an installed app, to a group.
     Add(AddArgs),
     /// Remove the item in a group's slot.
     Remove(RemoveArgs),
@@ -56,6 +56,8 @@ pub enum Command {
     Run(RunArgs),
     /// Check that every item points at something that exists.
     Check(CheckArgs),
+    /// List the installed apps whose AppUserModelID a `uwp` item can use.
+    Apps(AppsArgs),
 }
 
 /// Flags for `noh quick-launch list`.
@@ -70,14 +72,23 @@ pub struct ListArgs {
 #[derive(clap::Args, Debug, Default, Clone)]
 pub struct AddArgs {
     /// File or folder to add.
-    #[arg(value_name = "PATH")]
-    pub path: PathBuf,
+    #[arg(
+        value_name = "PATH",
+        required_unless_present = "uwp",
+        conflicts_with = "uwp"
+    )]
+    pub path: Option<PathBuf>,
+
+    /// AppUserModelID of an installed app to add instead of a path.
+    #[arg(long, value_name = "AUMID", required_unless_present = "path")]
+    pub uwp: Option<String>,
 
     /// Group id to add to (default: the first group).
     #[arg(long, value_name = "ID")]
     pub group: Option<String>,
 
-    /// Name shown on the tile (default: the file name without its extension).
+    /// Name shown on the tile (default: the file name without its extension,
+    /// or the AppUserModelID for `--uwp`).
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
@@ -131,6 +142,14 @@ pub struct CheckArgs {
     pub json: bool,
 }
 
+/// Flags for `noh quick-launch apps`.
+#[derive(clap::Args, Debug, Default, Clone)]
+pub struct AppsArgs {
+    /// Print one JSON object instead of one line per application.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// One `noh quick-launch` invocation: the file it works on and where its two
 /// output streams go.
 ///
@@ -162,6 +181,7 @@ impl<'a> Session<'a> {
             Command::Remove(args) => self.remove(args),
             Command::Run(args) => self.run_item(args),
             Command::Check(args) => self.check(args),
+            Command::Apps(args) => self.apps(args),
         }
     }
 
@@ -235,18 +255,36 @@ impl<'a> Session<'a> {
             None => QuickLaunchConfig::with_default_group(),
         };
 
-        // Stored absolute: when the item is launched, a relative path is
+        // A path is stored absolute: when the item is launched, a relative path is
         // resolved against the program folder (§7), which is not the folder the
-        // user typed the command in.
-        let path = match std::path::absolute(&args.path) {
-            Ok(path) => path,
-            Err(error) => {
-                return self.fail(format_args!("{}: {error}", args.path.display()));
+        // user typed the command in. An `uwp` item stores its AppUserModelID
+        // instead (§17.2 B).
+        let mut item = match (args.path.as_ref(), args.uwp.as_deref()) {
+            (Some(path), None) => {
+                let path = match std::path::absolute(path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return self.fail(format_args!("{}: {error}", path.display()));
+                    }
+                };
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => return self.fail(format_args!("{}: {error}", path.display())),
+                };
+                model::item_for_path(&path, 0, metadata.is_dir())
             }
-        };
-        let metadata = match std::fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) => return self.fail(format_args!("{}: {error}", path.display())),
+            (None, Some(aumid)) => {
+                let aumid = aumid.trim();
+                if aumid.is_empty() {
+                    return self.fail("the AppUserModelID is empty");
+                }
+                let mut item = model::Item::new(0, "uwp", aumid);
+                item.path = Some(aumid.to_string());
+                item
+            }
+            // clap refuses a command with neither or with both, so this is only
+            // the type-level fallback.
+            _ => return self.fail("pass either a path or --uwp"),
         };
 
         let group_index = match &args.group {
@@ -260,7 +298,6 @@ impl<'a> Session<'a> {
             None => 0,
         };
 
-        let mut item = model::item_for_path(&path, 0, metadata.is_dir());
         if let Some(name) = &args.name {
             item.name = name.clone();
         }
@@ -496,6 +533,41 @@ impl<'a> Session<'a> {
             writeln!(self.output, "{text}")?;
         }
         Ok(if healthy { 0 } else { FAILURE })
+    }
+
+    /// The installed apps an `uwp` item can name (§17.2 B.6).
+    ///
+    /// The Apps folder is a shell enumeration, so this console process enters a
+    /// COM apartment for it, exactly as `run` does (§8.4).
+    fn apps(&mut self, args: &AppsArgs) -> io::Result<u8> {
+        let _apartment = match nohrs_services::launch::ComApartment::enter() {
+            Ok(apartment) => apartment,
+            Err(error) => return self.fail(format_args!("could not initialize COM: {error}")),
+        };
+        let apps = match nohrs_services::launch::installed_apps() {
+            Ok(apps) => apps,
+            Err(error) => return self.fail(format_args!("{error}")),
+        };
+        if args.json {
+            let document = serde_json::json!({
+                "apps": apps
+                    .iter()
+                    .map(|app| {
+                        serde_json::json!({
+                            "name": app.name,
+                            "aumid": app.aumid,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            });
+            let text = serde_json::to_string(&document).map_err(io::Error::other)?;
+            writeln!(self.output, "{text}")?;
+            return Ok(0);
+        }
+        for app in apps {
+            writeln!(self.output, "{}\t{}", app.name, app.aumid)?;
+        }
+        Ok(0)
     }
 
     /// The item in `group`/`slot`, or the exit code to stop with. The reason is
