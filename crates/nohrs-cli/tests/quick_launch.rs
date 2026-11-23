@@ -30,10 +30,12 @@ fn binary_under_test() -> PathBuf {
 ///
 /// The directory is named after the source's size and modification time, so it is
 /// reused for as long as the build is the same: a per-process name made every run a
-/// brand-new executable for antivirus to scan, which took minutes. An existing copy
-/// is used as it is — it may even be the image of a child that has not exited, and
-/// overwriting that would fail with "access denied" — and a fresh one is written
-/// under a temporary name and renamed, so a half-written file is never run.
+/// brand-new executable for antivirus to scan, which took minutes. A copy that is
+/// already there is used as it is — it may even be the image of a child that has
+/// not exited, and overwriting that would fail with "access denied". A fresh copy
+/// is written under a name no other process uses, then renamed into place; when a
+/// scanner still holds the new file, another attempt is made, and a copy that only
+/// resisted the rename is run where it is.
 fn copy_binary_once() -> PathBuf {
     let source = PathBuf::from(env!("CARGO_BIN_EXE_noh"));
     let name = if cfg!(windows) {
@@ -57,19 +59,40 @@ fn copy_binary_once() -> PathBuf {
         return binary;
     }
     std::fs::create_dir_all(&directory).expect("a directory for the copied binary");
-    let partial = directory.join(format!("{name}.partial"));
-    std::fs::copy(&source, &partial).expect("copying the binary under test");
-    match std::fs::rename(&partial, &binary) {
-        Ok(()) => binary,
-        Err(error) => {
-            // Another test process may have placed the same build first.
-            if binary.exists() {
-                binary
-            } else {
-                panic!("placing the copied binary: {error}");
+    let mut placed = None;
+    for attempt in 0..10 {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        let partial = directory.join(format!(
+            "{name}.{}.{stamp}.{attempt}.partial",
+            std::process::id()
+        ));
+        if let Err(error) = std::fs::copy(&source, &partial) {
+            eprintln!("copying the binary (attempt {attempt}): {error}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        match std::fs::rename(&partial, &binary) {
+            Ok(()) => return binary,
+            Err(error) => {
+                if binary.exists() {
+                    return binary;
+                }
+                eprintln!("placing the copied binary (attempt {attempt}): {error}");
+                placed = Some(partial);
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
     }
+    // A complete copy that only resisted the rename can still be run.
+    if let Some(partial) = placed
+        && partial.exists()
+    {
+        return partial;
+    }
+    panic!("copying the binary under test");
 }
 
 fn noh(root: &Path, args: &[&str]) -> Output {
@@ -119,6 +142,70 @@ fn fixture_dir(root: &Path, name: &str) -> PathBuf {
     let directory = root.join(name);
     std::fs::create_dir(&directory).unwrap();
     directory
+}
+
+/// A file with one command item in the default group.
+fn command_file(root: &Path) -> PathBuf {
+    let file = config_file(root);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(
+        &file,
+        r#"
+schema_version = 1
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "command"
+name = "Echo"
+
+[group.item.extra]
+shell = "cmd"
+script = "exit 0"
+"#,
+    )
+    .unwrap();
+    file
+}
+
+/// D6: a single command is refused without `--yes`, before anything is started.
+#[test]
+fn running_a_single_command_needs_yes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    command_file(root);
+
+    let refused = noh(root, &["ql", "run", "general", "0"]);
+    assert_eq!(exit_code(&refused), 1, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("pass --yes to run a command"),
+        "the refusal should name the flag: {}",
+        stderr(&refused)
+    );
+}
+
+/// D6: with `--yes` the check passes and the command is started for real.
+///
+/// Ignored because it starts a process outside the test's control.
+#[test]
+#[ignore = "starts a real process"]
+fn a_single_command_runs_with_yes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    command_file(root);
+
+    let started = noh(root, &["ql", "run", "general", "0", "--yes"]);
+    assert_eq!(exit_code(&started), 0, "{}", stderr(&started));
+    assert!(
+        stdout(&started).contains("started"),
+        "the run should report the start: {}",
+        stdout(&started)
+    );
 }
 
 #[test]
@@ -333,6 +420,68 @@ fn check_passes_while_the_target_exists_and_fails_once_it_is_gone() {
     );
 }
 
+/// §17.2 B.6: `add --uwp` is the alternative to the positional path, and the
+/// AppUserModelID is what the item stores.
+#[test]
+fn an_item_added_by_app_id_stores_the_id_with_the_uwp_type() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let aumid = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+
+    let added = noh(
+        root,
+        &[
+            "ql",
+            "add",
+            "--uwp",
+            aumid,
+            "--name",
+            "Calculadora",
+            "--args",
+            "arg",
+        ],
+    );
+    assert_eq!(exit_code(&added), 0, "add failed: {}", stderr(&added));
+
+    let listed = noh(root, &["ql", "list"]);
+    assert_eq!(exit_code(&listed), 0, "list failed: {}", stderr(&listed));
+    assert!(
+        stdout(&listed).contains(&format!("0\tuwp\tCalculadora\t{aumid}")),
+        "{}",
+        stdout(&listed)
+    );
+
+    let written = std::fs::read_to_string(config_file(root)).unwrap();
+    assert!(written.contains("type = \"uwp\""), "{written}");
+    assert!(
+        written.contains(&format!("path = \"{aumid}\"")),
+        "{written}"
+    );
+    assert!(written.contains("args = \"arg\""), "{written}");
+}
+
+/// §17.2 B.6 and B.7: the structure of `apps --json` on a real machine.
+#[test]
+#[cfg(windows)]
+fn apps_json_describes_each_installed_app() {
+    let directory = tempfile::tempdir().unwrap();
+    let listed = noh(directory.path(), &["ql", "apps", "--json"]);
+    assert_eq!(
+        exit_code(&listed),
+        0,
+        "apps failed: {}{}",
+        stdout(&listed),
+        stderr(&listed)
+    );
+    let document: serde_json::Value = serde_json::from_str(&stdout(&listed)).unwrap();
+    let apps = document["apps"].as_array().expect("an apps array");
+    for app in apps {
+        assert!(app["name"].is_string(), "{app}");
+        let aumid = app["aumid"].as_str().expect("an aumid string");
+        assert!(!aumid.is_empty(), "{app}");
+    }
+}
+
 #[test]
 #[cfg(windows)]
 fn run_names_a_group_that_does_not_exist() {
@@ -350,5 +499,217 @@ fn run_names_a_group_that_does_not_exist() {
         stderr(&missing).contains("there is no group"),
         "{}",
         stderr(&missing)
+    );
+}
+
+/// A file with one group whose `bundle` item references `editor` and `script`
+/// (§17.2 E.5).
+#[cfg(windows)]
+fn write_group_file(root: &Path) {
+    let path = config_file(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"schema_version = 1
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "app"
+name = "Editor"
+id = "editor"
+path = "C:\\Windows\\notepad.exe"
+
+[[group.item]]
+slot = 1
+type = "command"
+name = "Script"
+id = "script"
+
+[group.item.extra]
+shell = "cmd"
+script = "echo ok"
+
+[[group.item]]
+slot = 2
+type = "group"
+name = "Pacote"
+id = "bundle"
+items = ["editor", "script"]
+"#,
+    )
+    .unwrap();
+}
+
+/// D6 (§17.2 E.5): a group with a command child is refused as a whole unless
+/// `--yes` confirms it, and nothing is started.
+#[test]
+#[cfg(windows)]
+fn run_refuses_a_group_with_a_command_without_yes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_group_file(root);
+
+    let refused = noh(root, &["ql", "run", "general", "2"]);
+    assert_eq!(exit_code(&refused), 1, "{}", stderr(&refused));
+    let errors = stderr(&refused);
+    assert!(errors.contains("contains commands"), "{errors}");
+    assert!(errors.contains("--yes"), "{errors}");
+    assert!(
+        stdout(&refused).is_empty(),
+        "the whole group is refused, so nothing is started: {}",
+        stdout(&refused)
+    );
+}
+
+/// §17.2 E.2: a group whose references do not lead anywhere cannot be run.
+#[test]
+#[cfg(windows)]
+fn run_refuses_a_group_with_no_valid_reference() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let path = config_file(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"schema_version = 1
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "group"
+name = "Vazio"
+id = "empty"
+items = ["ghost"]
+"#,
+    )
+    .unwrap();
+
+    let refused = noh(root, &["ql", "run", "general", "0"]);
+    assert_eq!(exit_code(&refused), 1, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("no item to start"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+/// A file with one ordinary group and the dynamic sources of §17.2 G.
+fn write_dynamic_file(root: &Path) {
+    let path = config_file(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"schema_version = 1
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "app"
+name = "Editor"
+path = "C:\\Windows\\notepad.exe"
+
+[[group]]
+id = "recent"
+name = "Recentes"
+source = "recent"
+
+[[group]]
+id = "tools"
+name = "Ferramentas"
+source = "folder:C:\\Windows"
+"#,
+    )
+    .unwrap();
+}
+
+/// §17.2 G.9: the listing marks a dynamic group with its source and shows no
+/// items for it, because the file has none.
+#[test]
+fn list_marks_a_dynamic_group_and_shows_no_items_for_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_dynamic_file(root);
+
+    let listed = noh(root, &["ql", "list"]);
+    assert_eq!(exit_code(&listed), 0, "list failed: {}", stderr(&listed));
+    let listing = stdout(&listed);
+    assert!(listing.contains("recent (dynamic: recent)"), "{listing}");
+    assert!(
+        listing.contains("tools (dynamic: folder:C:\\Windows)"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("0\tapp\tEditor"),
+        "the ordinary group keeps its entry: {listing}"
+    );
+    let lines: Vec<&str> = listing.lines().collect();
+    let dynamic = lines
+        .iter()
+        .position(|line| line.starts_with("recent (dynamic:"))
+        .expect("the recent group is listed");
+    assert!(
+        !lines
+            .get(dynamic + 1)
+            .is_some_and(|line| line.starts_with("  ")),
+        "a dynamic group lists no entries: {listing}"
+    );
+}
+
+/// §17.2 G.9: `add` and `remove` refuse a dynamic group with exit code 1 and
+/// leave the file alone.
+#[test]
+fn add_and_remove_refuse_a_dynamic_group() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_dynamic_file(root);
+    let before = std::fs::read(config_file(root)).unwrap();
+    let program = fixture_file(root, "Editor.txt");
+
+    let added = noh(
+        root,
+        &["ql", "add", program.to_str().unwrap(), "--group", "recent"],
+    );
+    assert_eq!(exit_code(&added), 1, "{}", stderr(&added));
+    assert!(stderr(&added).contains("dynamic"), "{}", stderr(&added));
+
+    let removed = noh(root, &["ql", "remove", "tools", "0"]);
+    assert_eq!(exit_code(&removed), 1, "{}", stderr(&removed));
+    assert!(stderr(&removed).contains("dynamic"), "{}", stderr(&removed));
+
+    assert_eq!(
+        std::fs::read(config_file(root)).unwrap(),
+        before,
+        "a refusal must not touch the file"
+    );
+}
+
+/// §17.2 G.9: `run` refuses a dynamic group and says the window is where it
+/// runs.
+#[test]
+#[cfg(windows)]
+fn run_refuses_a_dynamic_group_and_points_at_the_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_dynamic_file(root);
+
+    let refused = noh(root, &["ql", "run", "recent", "0"]);
+    assert_eq!(exit_code(&refused), 1, "{}", stderr(&refused));
+    let errors = stderr(&refused);
+    assert!(errors.contains("dynamic"), "{errors}");
+    assert!(errors.contains("window"), "{errors}");
+    assert!(
+        stdout(&refused).is_empty(),
+        "nothing is started: {}",
+        stdout(&refused)
     );
 }

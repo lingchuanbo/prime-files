@@ -19,9 +19,8 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, ImageSource, IntoElement,
-    KeyDownEvent, PathPromptOptions, Render, RenderImage, SharedString, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, WindowControlArea, div, img, px, rgb,
-    uniform_list,
+    KeyDownEvent, Render, RenderImage, SharedString, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window, WindowControlArea, div, img, px, rgb, uniform_list,
 };
 use gpui_component::{
     Icon, IconName, WindowExt as _,
@@ -78,6 +77,9 @@ struct Editor {
     args: Entity<InputState>,
     /// "Run as administrator", toggled by the checkbox and read on confirm.
     admin: Rc<Cell<bool>>,
+    /// A `group` item only offers its name here; everything else is edited in
+    /// the settings page (§17.2 E.4).
+    group_item: bool,
 }
 
 /// The in-place name editor of one group (§12.3).
@@ -193,6 +195,17 @@ impl QuickLaunchView {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.to_lowercase();
         let modifiers = event.keystroke.modifiers;
+        // A command waiting for its first-run confirmation owns the window: a
+        // key must not start what is behind the dialog, and Esc dismisses it
+        // rather than hiding the window (§17.2 D.3).
+        if super::command_waiting(cx) {
+            if key == "escape" {
+                super::cancel_pending_command(cx);
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
         let columns = super::state(cx)
             .map(|quick_launch| i64::from(quick_launch.config().window.columns))
             .unwrap_or(8);
@@ -308,6 +321,7 @@ impl QuickLaunchView {
         let name = input_with(window, cx, &item.name);
         let path = input_with(window, cx, item.path.as_deref().unwrap_or_default());
         let args = input_with(window, cx, item.args.as_deref().unwrap_or_default());
+        let group_item = item.action_kind() == ActionKind::Group;
         self.editor = Some(Editor {
             group,
             slot,
@@ -315,17 +329,27 @@ impl QuickLaunchView {
             path,
             args,
             admin: Rc::new(Cell::new(item.admin)),
+            group_item,
         });
         name.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
     /// Saves the four fields through the state layer (§12.3).
+    ///
+    /// A `group` item only writes its name: its path, arguments and working
+    /// directory are not part of it, and its entries are chosen in the settings
+    /// page (§17.2 E.4).
     fn confirm_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
         };
         let name = editor.name.read(cx).value().to_string();
+        if editor.group_item {
+            super::rename_item(cx, editor.group, editor.slot, &name);
+            cx.notify();
+            return;
+        }
         let path = editor.path.read(cx).value().to_string();
         let args = editor.args.read(cx).value().to_string();
         let admin = editor.admin.get();
@@ -335,24 +359,28 @@ impl QuickLaunchView {
 
     /// Adds what the file picker returned to the slot the menu was opened on
     /// (§12.3, §12.2): the first path fills that slot, the rest follow.
+    ///
+    /// `want` is what the dialog may pick: the menu offers files and folders
+    /// together where the platform allows it, and files alone (plus a folder-only
+    /// entry) where it does not (§17.2 R2).
     fn new_item_at(
         &mut self,
         group: usize,
         slot: u32,
+        want: super::PathWant,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !super::editable(cx) {
+        if !super::group_editable(cx, group) {
             return;
         }
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: true,
-            prompt: Some(SharedString::from(nohrs_core::t!(
-                "Escolher um arquivo ou uma pasta"
-            ))),
-        });
+        let prompt = match want {
+            super::PathWant::Folders => nohrs_core::t!("Escolher uma pasta"),
+            super::PathWant::Files | super::PathWant::Either => {
+                nohrs_core::t!("Escolher um arquivo ou uma pasta")
+            }
+        };
+        let receiver = cx.prompt_for_paths(super::path_prompt_for(cx, want, true, prompt));
         cx.spawn_in(window, async move |this, cx| {
             let picked = match receiver.await {
                 Ok(Ok(Some(paths))) => paths,
@@ -486,12 +514,28 @@ impl QuickLaunchView {
     /// The "浏览…" button of the editor: picks a path and puts it in the field
     /// (§12.3).
     fn browse_for_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: false,
-            prompt: Some(SharedString::from(nohrs_core::t!("Escolher um caminho"))),
-        });
+        // A `folder` item picks a folder; every other kind picks a file (§17.2 R2).
+        let folder = self
+            .editor
+            .as_ref()
+            .and_then(|editor| {
+                super::state(cx)
+                    .and_then(|state| state.config.groups.get(editor.group))
+                    .and_then(|group| group.items.iter().find(|item| item.slot == editor.slot))
+            })
+            .is_some_and(|item| item.kind == "folder");
+        let (want, prompt) = if folder {
+            (
+                super::PathWant::Folders,
+                nohrs_core::t!("Escolher uma pasta"),
+            )
+        } else {
+            (
+                super::PathWant::Files,
+                nohrs_core::t!("Escolher um caminho"),
+            )
+        };
+        let receiver = cx.prompt_for_paths(super::path_prompt_for(cx, want, false, prompt));
         cx.spawn_in(window, async move |this, cx| {
             let picked = match receiver.await {
                 Ok(Ok(Some(paths))) => paths,
@@ -549,7 +593,7 @@ impl QuickLaunchView {
         paths: &[std::path::PathBuf],
         cx: &mut Context<Self>,
     ) {
-        if !super::editable(cx) || paths.is_empty() {
+        if !super::group_editable(cx, group) || paths.is_empty() {
             return;
         }
         // S1: whether each path is a folder needs the disk, so it is asked on a
@@ -612,6 +656,10 @@ impl Render for QuickLaunchView {
         let read_only = super::read_only_reason(cx).map(str::to_string);
         let message = super::message(cx).map(str::to_string);
         let icon_edge = super::icon_edge(window, configured_icon_size);
+        // G.5: a dynamic group's entries are generated; nothing may add, move or
+        // edit them, while its tiles still launch and copy.
+        let group_editable = editable && super::group_editable(cx, group);
+        let notice = super::group_notice(cx, group);
 
         // A frame is rebuilt when the state says what it draws changed, or when
         // the window's scale asks for a different icon size (S6).
@@ -722,6 +770,9 @@ impl Render for QuickLaunchView {
 
         let content: AnyElement = if loading {
             centered_note(nohrs_core::t!("Carregando…"))
+        } else if let Some(notice) = notice {
+            // G.2, G.3: a dynamic group that has nothing to show says why.
+            centered_note(notice)
         } else if drawn.is_empty() {
             centered_note(nohrs_core::t!("Nenhum item neste grupo"))
         } else if view == View::List {
@@ -730,6 +781,7 @@ impl Render for QuickLaunchView {
                 selected,
                 group,
                 editable,
+                group_editable,
                 &missing,
                 list_columns,
                 icon_edge,
@@ -742,6 +794,7 @@ impl Render for QuickLaunchView {
                 selected,
                 group,
                 editable,
+                group_editable,
                 &missing,
                 columns,
                 cell_size,
@@ -810,7 +863,7 @@ impl Render for QuickLaunchView {
                         .child(content)
                         .on_drop(cx.listener(
                             move |view, paths: &gpui::ExternalPaths, _window, cx| {
-                                if editable {
+                                if group_editable {
                                     let target = super::next_free_slot(cx, group);
                                     let paths = paths.paths().to_vec();
                                     view.drop_paths(group, target, &paths, cx);
@@ -834,6 +887,24 @@ impl Render for QuickLaunchView {
             });
         if let Some(overlay) = editor_overlay(self.editor.as_ref(), &entity) {
             root = root.child(overlay);
+        }
+        if let Some(confirmation) = super::command_confirmation(cx) {
+            // §17.2 D.3: the script may not take more than 60% of the window.
+            let script_height = f32::from(window.bounds().size.height) * 0.6;
+            root = root.child(command_overlay(&confirmation, script_height.max(120.0)));
+        }
+        if let Some(confirmation) = super::group_confirmation(cx) {
+            // §17.2 E.1: the untrusted commands of the group share one dialog.
+            let script_height = f32::from(window.bounds().size.height) * 0.6;
+            root = root.child(group_command_overlay(
+                &confirmation,
+                script_height.max(120.0),
+            ));
+        }
+        if let Some(prompt) = super::already_running_prompt(cx) {
+            // §17.2 F.2: the program is already open; the user picks what
+            // happens next.
+            root = root.child(already_running_overlay(&prompt));
         }
         root
     }
@@ -1072,8 +1143,9 @@ fn render_group_bar(
                 }))
                 .on_drop(move |drag: &ItemDrag, _window, cx| {
                     // An item dropped on the bar joins that group: first free
-                    // slot, else appended (§12.2).
-                    if editable {
+                    // slot, else appended (§12.2). A dynamic group takes no
+                    // entries at all (§17.2 G.5).
+                    if editable && super::group_editable(cx, index) {
                         entity_drop
                             .update(cx, |view, cx| view.drop_item_on_group(drag, index, cx))
                             .log_err();
@@ -1141,6 +1213,7 @@ fn grid_view(
     selected: Option<u32>,
     group: usize,
     editable: bool,
+    group_editable: bool,
     missing: &HashMap<u32, bool>,
     columns: usize,
     cell_size: f32,
@@ -1188,8 +1261,16 @@ fn grid_view(
                                 .and_then(|image| image.clone());
                             let missing = missing.get(&item.slot).copied().unwrap_or(false);
                             line = line.child(tile(
-                                item, image, selected, missing, group, editable, cell_size,
-                                icon_edge, &entity,
+                                item,
+                                image,
+                                selected,
+                                missing,
+                                group,
+                                editable,
+                                group_editable,
+                                cell_size,
+                                icon_edge,
+                                &entity,
                             ));
                         }
                         None if packed => {
@@ -1205,8 +1286,13 @@ fn grid_view(
                         }
                         None => {
                             let slot = u32::try_from(index).unwrap_or(MAX_SLOT);
-                            line =
-                                line.child(empty_cell(slot, group, editable, cell_size, &entity));
+                            line = line.child(empty_cell(
+                                slot,
+                                group,
+                                group_editable,
+                                cell_size,
+                                &entity,
+                            ));
                         }
                     }
                 }
@@ -1227,6 +1313,7 @@ fn list_view(
     selected: Option<u32>,
     group: usize,
     editable: bool,
+    group_editable: bool,
     missing: &HashMap<u32, bool>,
     list_columns: usize,
     icon_edge: u32,
@@ -1252,7 +1339,14 @@ fn list_view(
                             let selected = selected == Some(entry.item.slot);
                             let missing = missing.get(&entry.item.slot).copied().unwrap_or(false);
                             line = line.child(div().flex_1().min_w(px(0.0)).child(row_of(
-                                entry, selected, missing, group, editable, icon_edge, &entity,
+                                entry,
+                                selected,
+                                missing,
+                                group,
+                                editable,
+                                group_editable,
+                                icon_edge,
+                                &entity,
                             )));
                         }
                         None => line = line.child(div().flex_1()),
@@ -1273,11 +1367,12 @@ fn list_view(
 fn empty_cell(
     slot: u32,
     group: usize,
-    editable: bool,
+    group_editable: bool,
     cell_size: f32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
+    let folder_handle = entity.clone();
     div()
         .id(("quick-launch-empty", slot))
         .w(px(cell_size))
@@ -1286,27 +1381,55 @@ fn empty_cell(
         .rounded(px(8.0))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .context_menu(move |menu, _window, _cx| {
+        .context_menu(move |menu, _window, cx| {
             let handle = handle.clone();
-            menu.item(
+            let folder_handle = folder_handle.clone();
+            let menu = menu.item(
                 PopupMenuItem::new(nohrs_core::t!("Novo item"))
-                    .disabled(!editable)
+                    .disabled(!group_editable)
                     .on_click(move |_, window, cx| {
                         handle
-                            .update(cx, |view, cx| view.new_item_at(group, slot, window, cx))
+                            .update(cx, |view, cx| {
+                                view.new_item_at(group, slot, super::PathWant::Either, window, cx)
+                            })
                             .log_err();
                     }),
-            )
+            );
+            // §17.2 R2: where the dialog can only pick one of the two, folders get
+            // an entry of their own.
+            if super::folder_entry_offered(cx.can_select_mixed_files_and_dirs()) {
+                menu.item(
+                    PopupMenuItem::new(nohrs_core::t!("Novo item de pasta"))
+                        .disabled(!group_editable)
+                        .on_click(move |_, window, cx| {
+                            folder_handle
+                                .update(cx, |view, cx| {
+                                    view.new_item_at(
+                                        group,
+                                        slot,
+                                        super::PathWant::Folders,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                                .log_err();
+                        }),
+                )
+            } else {
+                menu
+            }
         })
         .into_any_element()
 }
 
 /// The menu of one item (§12.2, M2 rows).
+#[allow(clippy::too_many_arguments)]
 fn item_menu(
     menu: PopupMenu,
     group: usize,
     slot: u32,
     editable: bool,
+    group_editable: bool,
     entity: &WeakEntity<QuickLaunchView>,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
@@ -1343,7 +1466,7 @@ fn item_menu(
         .separator()
         .item(
             PopupMenuItem::new(nohrs_core::t!("Editar"))
-                .disabled(!editable)
+                .disabled(!group_editable)
                 .on_click(move |_, window, cx| {
                     edit.update(cx, |view, cx| view.edit_item(group, slot, window, cx))
                         .log_err();
@@ -1362,7 +1485,7 @@ fn item_menu(
 
     // "Move to group ▸" lists every other group; with a single group there is
     // nowhere to move to and the entry is left out (§12.2).
-    let groups: Vec<(usize, String)> = super::state(cx)
+    let groups: Vec<(usize, String, bool)> = super::state(cx)
         .map(|state| {
             state
                 .config()
@@ -1370,7 +1493,15 @@ fn item_menu(
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| *index != group)
-                .map(|(index, group)| (index, group.name.clone()))
+                .map(|(index, group)| {
+                    // G.5: neither a copy nor a generated entry may be moved
+                    // into or out of a dynamic group.
+                    (
+                        index,
+                        group.name.clone(),
+                        group_editable && super::group_editable(cx, index),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -1380,15 +1511,19 @@ fn item_menu(
         let for_submenu = entity.clone();
         let submenu = PopupMenu::build(window, cx, move |submenu, _window, _cx| {
             let mut submenu = submenu;
-            for (index, name) in groups {
+            for (index, name, target_editable) in groups {
                 let handle = for_submenu.clone();
-                submenu = submenu.item(PopupMenuItem::new(name).on_click(move |_, _window, cx| {
-                    handle
-                        .update(cx, |view, cx| {
-                            view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
-                        })
-                        .log_err();
-                }));
+                submenu = submenu.item(
+                    PopupMenuItem::new(name)
+                        .disabled(!target_editable)
+                        .on_click(move |_, _window, cx| {
+                            handle
+                                .update(cx, |view, cx| {
+                                    view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
+                                })
+                                .log_err();
+                        }),
+                );
             }
             submenu
         });
@@ -1400,7 +1535,7 @@ fn item_menu(
 
     menu.separator().item(
         PopupMenuItem::new(nohrs_core::t!("Excluir"))
-            .disabled(!editable)
+            .disabled(!group_editable)
             .on_click(move |_, _window, cx| {
                 delete
                     .update(cx, |view, cx| view.delete_item(group, slot, cx))
@@ -1418,6 +1553,7 @@ fn tile(
     missing: bool,
     group: usize,
     editable: bool,
+    group_editable: bool,
     cell_size: f32,
     icon_edge: u32,
     entity: &WeakEntity<QuickLaunchView>,
@@ -1447,7 +1583,7 @@ fn tile(
                 .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
                 .log_err();
         })
-        .when(editable, |this| {
+        .when(group_editable, |this| {
             this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
                 cx.new(|_| ItemDragPreview {
                     name: drag_name.clone(),
@@ -1455,14 +1591,14 @@ fn tile(
             })
         })
         .on_drop(move |drag: &ItemDrag, _window, cx| {
-            if editable {
+            if group_editable {
                 drop_handle
                     .update(cx, |view, cx| view.drop_item(drag, group, slot, cx))
                     .log_err();
             }
         })
         .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
-            if editable {
+            if group_editable {
                 let paths = paths.paths().to_vec();
                 entity_drop
                     .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
@@ -1470,7 +1606,16 @@ fn tile(
             }
         })
         .context_menu(move |menu, window, cx| {
-            item_menu(menu, group, slot, editable, &menu_handle, window, cx)
+            item_menu(
+                menu,
+                group,
+                slot,
+                editable,
+                group_editable,
+                &menu_handle,
+                window,
+                cx,
+            )
         })
         .child(picture(item, image.as_ref(), icon_edge))
         .child(
@@ -1497,12 +1642,14 @@ fn tile(
 }
 
 /// One list row.
+#[allow(clippy::too_many_arguments)]
 fn row_of(
     drawn: &Drawn,
     selected: bool,
     missing: bool,
     group: usize,
     editable: bool,
+    group_editable: bool,
     icon_edge: u32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
@@ -1534,7 +1681,7 @@ fn row_of(
                 .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
                 .log_err();
         })
-        .when(editable, |this| {
+        .when(group_editable, |this| {
             this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
                 cx.new(|_| ItemDragPreview {
                     name: drag_name.clone(),
@@ -1542,14 +1689,14 @@ fn row_of(
             })
         })
         .on_drop(move |drag: &ItemDrag, _window, cx| {
-            if editable {
+            if group_editable {
                 drop_handle
                     .update(cx, |view, cx| view.drop_item(drag, group, slot, cx))
                     .log_err();
             }
         })
         .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
-            if editable {
+            if group_editable {
                 let paths = paths.paths().to_vec();
                 entity_drop
                     .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
@@ -1557,7 +1704,16 @@ fn row_of(
             }
         })
         .context_menu(move |menu, window, cx| {
-            item_menu(menu, group, slot, editable, &menu_handle, window, cx)
+            item_menu(
+                menu,
+                group,
+                slot,
+                editable,
+                group_editable,
+                &menu_handle,
+                window,
+                cx,
+            )
         })
         .child(picture(item, drawn.image.as_ref(), icon_edge))
         .child(
@@ -1636,6 +1792,62 @@ fn editor_overlay(
     let browse = entity.clone();
     let confirm = entity.clone();
     let cancel = entity.clone();
+    let fields = if editor.group_item {
+        // §17.2 E.4: only the name changes here; the rest belongs to the
+        // settings page, which is where the group's entries are chosen.
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(field(nohrs_core::t!("Nome"), &name))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme::muted()))
+                    .child(nohrs_core::t!(
+                        "Só o nome pode ser alterado aqui; edite os outros campos na página de configurações."
+                    )),
+            )
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(field(nohrs_core::t!("Nome"), &name))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(field(nohrs_core::t!("Caminho"), &path)),
+                    )
+                    .child(
+                        Button::new("quick-launch-browse")
+                            .label(nohrs_core::t!("Procurar…"))
+                            .on_click(move |_, window, cx| {
+                                browse
+                                    .update(cx, |view, cx| {
+                                        view.browse_for_path(window, cx);
+                                    })
+                                    .log_err();
+                            }),
+                    ),
+            )
+            .child(field(nohrs_core::t!("Argumentos"), &args))
+            .child(
+                Checkbox::new("quick-launch-admin")
+                    .label(nohrs_core::t!("Executar como administrador"))
+                    .checked(admin_value)
+                    .on_click(move |checked, _window, cx| {
+                        admin.set(*checked);
+                        cx.refresh_windows();
+                    }),
+            )
+    };
     Some(
         div()
             .absolute()
@@ -1658,40 +1870,7 @@ fn editor_overlay(
                     .border_1()
                     .border_color(rgb(theme::border()))
                     .child(div().text_sm().child(nohrs_core::t!("Editar item")))
-                    .child(field(nohrs_core::t!("Nome"), &name))
-                    .child(
-                        div()
-                            .flex()
-                            .items_end()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .child(field(nohrs_core::t!("Caminho"), &path)),
-                            )
-                            .child(
-                                Button::new("quick-launch-browse")
-                                    .label(nohrs_core::t!("Procurar…"))
-                                    .on_click(move |_, window, cx| {
-                                        browse
-                                            .update(cx, |view, cx| {
-                                                view.browse_for_path(window, cx);
-                                            })
-                                            .log_err();
-                                    }),
-                            ),
-                    )
-                    .child(field(nohrs_core::t!("Argumentos"), &args))
-                    .child(
-                        Checkbox::new("quick-launch-admin")
-                            .label(nohrs_core::t!("Executar como administrador"))
-                            .checked(admin_value)
-                            .on_click(move |checked, _window, cx| {
-                                admin.set(*checked);
-                                cx.refresh_windows();
-                            }),
-                    )
+                    .child(fields)
                     .child(
                         div()
                             .flex()
@@ -1724,6 +1903,330 @@ fn editor_overlay(
             )
             .into_any_element(),
     )
+}
+
+/// The first-run confirmation of a `command` (§17.2 D.3): what will run, as it
+/// was written, before anything starts.
+///
+/// `script_height` is the 60% of the window the script box may take (§17.2 D.3),
+/// computed by the caller from the window being drawn.
+fn command_overlay(confirmation: &super::CommandConfirmation, script_height: f32) -> AnyElement {
+    let cwd = confirmation.cwd.clone().unwrap_or_else(|| "—".to_string());
+    let mut card = div()
+        .w(px(560.0))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p(px(16.0))
+        .rounded(px(10.0))
+        .bg(rgb(theme::bg()))
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .child(div().text_sm().child(nohrs_core::t!("Executar este comando?")))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::muted()))
+                .child(nohrs_core::t!(
+                    "Este comando roda com as suas permissões. Confira o conteúdo antes de continuar."
+                )),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(confirmation.name.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_xs()
+                .text_color(rgb(theme::fg_secondary()))
+                .child(format!(
+                    "{}: {}",
+                    nohrs_core::t!("Shell"),
+                    confirmation.shell
+                ))
+                .child(format!(
+                    "{}: {cwd}",
+                    nohrs_core::t!("Pasta de trabalho")
+                )),
+        );
+    if confirmation.hidden {
+        card = card.child(
+            div()
+                .rounded(px(6.0))
+                .p(px(8.0))
+                .text_xs()
+                .bg(rgb(theme::accent_subtle()))
+                .text_color(rgb(theme::danger()))
+                .child(nohrs_core::t!(
+                    "Vai rodar em segundo plano, sem janela visível."
+                )),
+        );
+    }
+    card = card.child(
+        div()
+            .id("quick-launch-command-script")
+            .max_h(px(script_height))
+            .overflow_y_scroll()
+            .p(px(10.0))
+            .rounded(px(6.0))
+            .bg(rgb(theme::gray_100()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .font(crate::terminal::code_font())
+            .text_size(px(12.0))
+            .line_height(px(16.0))
+            .text_color(rgb(theme::fg()))
+            .child(confirmation.script.clone()),
+    );
+    if !confirmation.remembered {
+        card = card.child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::warning()))
+                .child(nohrs_core::t!(
+                    "Sem armazenamento: a confirmação vale até fechar o programa."
+                )),
+        );
+    }
+    card = card.child(
+        div()
+            .flex()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("quick-launch-command-cancel")
+                    .label(nohrs_core::t!("Cancelar"))
+                    .on_click(|_, _window, cx| {
+                        super::cancel_pending_command(cx);
+                    }),
+            )
+            .child(
+                Button::new("quick-launch-command-run")
+                    .label(nohrs_core::t!("Executar"))
+                    .on_click(|_, _window, cx| {
+                        super::confirm_pending_command(cx);
+                    }),
+            ),
+    );
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(0x00000080))
+        .child(card)
+        .into_any_element()
+}
+
+/// The first-run confirmation of a group (§17.2 E.1): every untrusted command
+/// the batch would run, listed together before anything starts.
+///
+/// `script_height` is the part of the window the list may take, as in the
+/// single-command dialog.
+fn group_command_overlay(
+    confirmation: &super::GroupConfirmation,
+    script_height: f32,
+) -> AnyElement {
+    let mut list = div()
+        .id("quick-launch-group-commands")
+        .max_h(px(script_height))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap_2();
+    for command in &confirmation.commands {
+        let cwd = command.cwd.clone().unwrap_or_else(|| "—".to_string());
+        let mut entry = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(command.name.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(rgb(theme::fg_secondary()))
+                    .child(format!("{}: {}", nohrs_core::t!("Shell"), command.shell))
+                    .child(format!("{}: {cwd}", nohrs_core::t!("Pasta de trabalho"))),
+            );
+        if command.hidden {
+            entry = entry.child(
+                div()
+                    .rounded(px(6.0))
+                    .p(px(8.0))
+                    .text_xs()
+                    .bg(rgb(theme::accent_subtle()))
+                    .text_color(rgb(theme::danger()))
+                    .child(nohrs_core::t!(
+                        "Vai rodar em segundo plano, sem janela visível."
+                    )),
+            );
+        }
+        entry = entry.child(
+            div()
+                .p(px(10.0))
+                .rounded(px(6.0))
+                .bg(rgb(theme::gray_100()))
+                .border_1()
+                .border_color(rgb(theme::border()))
+                .font(crate::terminal::code_font())
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .text_color(rgb(theme::fg()))
+                .child(command.script.clone()),
+        );
+        list = list.child(entry);
+    }
+    let mut card = div()
+        .w(px(560.0))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p(px(16.0))
+        .rounded(px(10.0))
+        .bg(rgb(theme::bg()))
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .child(
+            div()
+                .text_sm()
+                .child(nohrs_core::t!("Executar estes comandos?")),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::muted()))
+                .child(nohrs_core::t!(
+                    "Este comando roda com as suas permissões. Confira o conteúdo antes de continuar."
+                )),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(confirmation.name.clone()),
+        )
+        .child(list);
+    if !confirmation.remembered {
+        card = card.child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::warning()))
+                .child(nohrs_core::t!(
+                    "Sem armazenamento: a confirmação vale até fechar o programa."
+                )),
+        );
+    }
+    card = card.child(
+        div()
+            .flex()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("quick-launch-group-cancel")
+                    .label(nohrs_core::t!("Cancelar"))
+                    .on_click(|_, _window, cx| {
+                        super::cancel_pending_command(cx);
+                    }),
+            )
+            .child(
+                Button::new("quick-launch-group-run")
+                    .label(nohrs_core::t!("Executar"))
+                    .on_click(|_, _window, cx| {
+                        super::confirm_pending_group(cx);
+                    }),
+            ),
+    );
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(0x00000080))
+        .child(card)
+        .into_any_element()
+}
+
+/// The running-program dialog (§17.2 F.2): switch to the instance that is
+/// already open, start another one, or cancel.
+fn already_running_overlay(prompt: &super::AlreadyRunningPrompt) -> AnyElement {
+    let card = div()
+        .w(px(440.0))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p(px(16.0))
+        .rounded(px(10.0))
+        .bg(rgb(theme::bg()))
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .child(
+            div()
+                .text_sm()
+                .child(nohrs_core::t!("Este programa já está aberto.")),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(prompt.name.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("quick-launch-running-cancel")
+                        .label(nohrs_core::t!("Cancelar"))
+                        .on_click(|_, _window, cx| {
+                            super::cancel_already_running(cx);
+                        }),
+                )
+                .child(
+                    Button::new("quick-launch-running-another")
+                        .label(nohrs_core::t!("Abrir outra vez"))
+                        .on_click(|_, _window, cx| {
+                            super::start_another_instance(cx);
+                        }),
+                )
+                .child(
+                    Button::new("quick-launch-running-switch")
+                        .label(nohrs_core::t!("Ir para ele"))
+                        .on_click(|_, _window, cx| {
+                            super::switch_to_running_program(cx);
+                        }),
+                ),
+        );
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(0x00000080))
+        .child(card)
+        .into_any_element()
 }
 
 /// One input field with its opening text.

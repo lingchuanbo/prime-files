@@ -19,12 +19,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+use nohrs_core::config::quick_launch::command_spec;
 use nohrs_core::config::quick_launch::{Item, OnRunning};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::ComApartment;
+pub use windows::{ComApartment, installed_apps};
 
 /// `type` of an application item.
 pub const KIND_APP: &str = "app";
@@ -34,9 +36,36 @@ pub const KIND_FOLDER: &str = "folder";
 pub const KIND_FILE: &str = "file";
 /// `type` of a link item.
 pub const KIND_URL: &str = "url";
+/// `type` of an application started by its AppUserModelID (M4).
+pub const KIND_UWP: &str = "uwp";
+/// `type` of a shell script (M4).
+///
+/// Only Windows starts one (§17.2 C), so the kind is not part of
+/// [`BUILTIN_KINDS`]: elsewhere the registry leaves it unknown.
+pub const KIND_COMMAND: &str = "command";
 
-/// The kind names this milestone implements.
-pub const BUILTIN_KINDS: [&str; 4] = [KIND_APP, KIND_FOLDER, KIND_URL, KIND_FILE];
+/// The kind names every platform's registry knows.
+pub const BUILTIN_KINDS: [&str; 5] = [KIND_APP, KIND_FOLDER, KIND_URL, KIND_FILE, KIND_UWP];
+
+/// One application the user's Apps folder lists, for the `uwp` picker
+/// (§17.2 B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledApp {
+    /// The display name the shell shows for the application.
+    pub name: String,
+    /// The AppUserModelID an `uwp` item stores as its path.
+    pub aumid: String,
+}
+
+/// The applications the user's Apps folder lists, packaged and classic alike
+/// (§17.2 B).
+///
+/// Only Windows has such a folder; elsewhere there is nothing to list and the
+/// caller is told so rather than shown an empty list.
+#[cfg(not(windows))]
+pub fn installed_apps() -> Result<Vec<InstalledApp>, LaunchError> {
+    Err(LaunchError::Unsupported(KIND_UWP.to_string()))
+}
 
 /// Why a stored path could not be turned into a real one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -237,6 +266,11 @@ pub enum LaunchMode {
     Admin,
     /// Start a new instance whatever the configuration says.
     ForceNew,
+    /// Bring the main window of this process to the front, and start a new
+    /// instance when it has no window to bring. Only the pages layer asks for
+    /// it, after the user chose between the running program and a new one
+    /// (§17.2 F.1).
+    Activate(u32),
 }
 
 /// What a launch did.
@@ -246,6 +280,14 @@ pub enum LaunchOutcome {
     Started,
     /// An instance that was already running was brought to the front.
     Activated,
+    /// The target is already running and the configuration asks before
+    /// switching to it (§17.2 F.1). Nothing was activated and nothing was
+    /// started: the pages layer asks the user, then sends the request again
+    /// with [`LaunchMode::Activate`] or [`LaunchMode::ForceNew`].
+    AlreadyRunning {
+        /// The process the user may switch to.
+        process_id: u32,
+    },
     /// The user answered "no" to the UAC prompt. Not an error: nothing is
     /// reported for a decision (§8.2).
     Cancelled,
@@ -325,7 +367,11 @@ impl LaunchRegistry {
             url_action(),
             app_action(),
             file_action(),
-        ];
+            uwp_action(),
+        ]
+        .into_iter()
+        .chain(command_action())
+        .collect();
         for action in builtins {
             // The kinds are distinct constants; a duplicate would be a mistake
             // in this file, and is reported rather than silently replacing.
@@ -391,6 +437,33 @@ fn item_path(item: &Item, context: &ExpandContext) -> Result<PathBuf, LaunchErro
             "the {} item {:?} has no path",
             item.kind, item.name
         ))),
+    }
+}
+
+/// The health of a `command` item, without running anything (§17.2 C.4).
+///
+/// The shell and the script are checked first, then a `cwd` that is set has to
+/// exist. Whether the shell itself is installed is deliberately not checked:
+/// looking it up on `PATH` would spend the health check's 5 ms budget (§8.1).
+/// A command marked `admin` is invalid because this milestone cannot start one
+/// elevated (§17.2 C.2, D4).
+#[cfg(windows)]
+pub(crate) fn command_health(item: &Item, context: &ExpandContext) -> Health {
+    if item.admin {
+        return Health::Invalid(
+            nohrs_core::t!("Comandos não podem ser executados como administrador").to_string(),
+        );
+    }
+    if let Err(message) = command_spec(item) {
+        return Health::Invalid(message);
+    }
+    match item.cwd.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => match expand(raw, context) {
+            Ok(path) if path.is_dir() => Health::Ok,
+            Ok(_) => Health::Missing,
+            Err(error) => Health::Invalid(error.to_string()),
+        },
+        _ => Health::Ok,
     }
 }
 
@@ -483,6 +556,28 @@ fn url_action() -> Box<dyn LaunchAction> {
 #[cfg(not(windows))]
 fn url_action() -> Box<dyn LaunchAction> {
     Box::new(UnsupportedAction { kind: KIND_URL })
+}
+
+#[cfg(windows)]
+fn uwp_action() -> Box<dyn LaunchAction> {
+    Box::new(windows::UwpAction)
+}
+
+#[cfg(not(windows))]
+fn uwp_action() -> Box<dyn LaunchAction> {
+    Box::new(UnsupportedAction { kind: KIND_UWP })
+}
+
+#[cfg(windows)]
+fn command_action() -> Option<Box<dyn LaunchAction>> {
+    Some(Box::new(windows::CommandAction))
+}
+
+#[cfg(not(windows))]
+fn command_action() -> Option<Box<dyn LaunchAction>> {
+    // §17.2 C.1 registers the command action on Windows only, so an item of
+    // this type is unknown here rather than a kind that always fails.
+    None
 }
 
 /// A kind this build cannot start on this platform.
@@ -681,11 +776,19 @@ mod tests {
         for kind in BUILTIN_KINDS {
             assert!(registry.get(kind).is_some(), "{kind} should be registered");
         }
-        assert!(registry.get("uwp").is_none());
-        assert_eq!(
-            registry.health(&item("uwp", "{config}"), &context()),
-            Health::Unknown
-        );
+        // `uwp` is known everywhere; only Windows can judge or start one, and
+        // an item whose path is not an AppUserModelID is invalid either way.
+        assert!(registry.get(KIND_UWP).is_some());
+        assert!(matches!(
+            registry.health(&item(KIND_UWP, "{config}"), &context()),
+            Health::Invalid(_)
+        ));
+        // §17.2 C: `command` is registered on Windows only. Elsewhere the kind
+        // is unknown rather than a type that always fails.
+        #[cfg(windows)]
+        assert!(registry.get(KIND_COMMAND).is_some());
+        #[cfg(not(windows))]
+        assert!(registry.get(KIND_COMMAND).is_none());
     }
 
     #[test]

@@ -48,7 +48,7 @@ const UNREADABLE_CONFIG: u8 = 2;
 pub enum Command {
     /// List the groups and items in `quicklaunch.toml`.
     List(ListArgs),
-    /// Add an existing file or folder to a group.
+    /// Add an existing file or folder, or an installed app, to a group.
     Add(AddArgs),
     /// Remove the item in a group's slot.
     Remove(RemoveArgs),
@@ -56,6 +56,8 @@ pub enum Command {
     Run(RunArgs),
     /// Check that every item points at something that exists.
     Check(CheckArgs),
+    /// List the installed apps whose AppUserModelID a `uwp` item can use.
+    Apps(AppsArgs),
 }
 
 /// Flags for `noh quick-launch list`.
@@ -70,14 +72,23 @@ pub struct ListArgs {
 #[derive(clap::Args, Debug, Default, Clone)]
 pub struct AddArgs {
     /// File or folder to add.
-    #[arg(value_name = "PATH")]
-    pub path: PathBuf,
+    #[arg(
+        value_name = "PATH",
+        required_unless_present = "uwp",
+        conflicts_with = "uwp"
+    )]
+    pub path: Option<PathBuf>,
+
+    /// AppUserModelID of an installed app to add instead of a path.
+    #[arg(long, value_name = "AUMID", required_unless_present = "path")]
+    pub uwp: Option<String>,
 
     /// Group id to add to (default: the first group).
     #[arg(long, value_name = "ID")]
     pub group: Option<String>,
 
-    /// Name shown on the tile (default: the file name without its extension).
+    /// Name shown on the tile (default: the file name without its extension,
+    /// or the AppUserModelID for `--uwp`).
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
@@ -121,12 +132,27 @@ pub struct RunArgs {
     /// Start the item elevated, whatever the file says.
     #[arg(long)]
     pub admin: bool,
+
+    /// Run a group even though it contains commands (D6, §17.2 E.5).
+    ///
+    /// The window asks before the first run of a command; a terminal has no
+    /// dialog, so the flag is the confirmation.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Flags for `noh quick-launch check`.
 #[derive(clap::Args, Debug, Default, Clone)]
 pub struct CheckArgs {
     /// Print one JSON object describing every item instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Flags for `noh quick-launch apps`.
+#[derive(clap::Args, Debug, Default, Clone)]
+pub struct AppsArgs {
+    /// Print one JSON object instead of one line per application.
     #[arg(long)]
     pub json: bool,
 }
@@ -162,6 +188,7 @@ impl<'a> Session<'a> {
             Command::Remove(args) => self.remove(args),
             Command::Run(args) => self.run_item(args),
             Command::Check(args) => self.check(args),
+            Command::Apps(args) => self.apps(args),
         }
     }
 
@@ -182,6 +209,9 @@ impl<'a> Session<'a> {
                     .map(|group| {
                         serde_json::json!({
                             "id": group.id,
+                            "source": group.source,
+                            // G.9: a dynamic group has no items in the file, and
+                            // this command only shows what the file holds.
                             "items": group
                                 .items
                                 .iter()
@@ -207,6 +237,13 @@ impl<'a> Session<'a> {
         // anything it contains (§17.1 C).
         writeln!(self.output, "{}", self.path.display())?;
         for group in &config.groups {
+            // G.9: the file names the source and holds no items for it.
+            if let Some(source) = model::group_source(group)
+                && source.is_dynamic()
+            {
+                writeln!(self.output, "{} (dynamic: {})", group.id, source.as_str())?;
+                continue;
+            }
             writeln!(self.output, "{}", group.id)?;
             for item in &group.items {
                 writeln!(
@@ -235,18 +272,36 @@ impl<'a> Session<'a> {
             None => QuickLaunchConfig::with_default_group(),
         };
 
-        // Stored absolute: when the item is launched, a relative path is
+        // A path is stored absolute: when the item is launched, a relative path is
         // resolved against the program folder (§7), which is not the folder the
-        // user typed the command in.
-        let path = match std::path::absolute(&args.path) {
-            Ok(path) => path,
-            Err(error) => {
-                return self.fail(format_args!("{}: {error}", args.path.display()));
+        // user typed the command in. An `uwp` item stores its AppUserModelID
+        // instead (§17.2 B).
+        let mut item = match (args.path.as_ref(), args.uwp.as_deref()) {
+            (Some(path), None) => {
+                let path = match std::path::absolute(path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return self.fail(format_args!("{}: {error}", path.display()));
+                    }
+                };
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => return self.fail(format_args!("{}: {error}", path.display())),
+                };
+                model::item_for_path(&path, 0, metadata.is_dir())
             }
-        };
-        let metadata = match std::fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) => return self.fail(format_args!("{}: {error}", path.display())),
+            (None, Some(aumid)) => {
+                let aumid = aumid.trim();
+                if aumid.is_empty() {
+                    return self.fail("the AppUserModelID is empty");
+                }
+                let mut item = model::Item::new(0, "uwp", aumid);
+                item.path = Some(aumid.to_string());
+                item
+            }
+            // clap refuses a command with neither or with both, so this is only
+            // the type-level fallback.
+            _ => return self.fail("pass either a path or --uwp"),
         };
 
         let group_index = match &args.group {
@@ -260,7 +315,6 @@ impl<'a> Session<'a> {
             None => 0,
         };
 
-        let mut item = model::item_for_path(&path, 0, metadata.is_dir());
         if let Some(name) = &args.name {
             item.name = name.clone();
         }
@@ -281,6 +335,14 @@ impl<'a> Session<'a> {
         item.admin = args.admin;
 
         let group = &config.groups[group_index];
+        // G.9: a dynamic group's entries are generated in the window, so a
+        // terminal cannot add to it.
+        if model::group_source(group).is_some_and(|source| source.is_dynamic()) {
+            return self.fail(format_args!(
+                "group {:?} is dynamic; its items are generated in the window",
+                group.id
+            ));
+        }
         let slot = match args.slot {
             Some(slot) => {
                 if slot > MAX_SLOT {
@@ -337,6 +399,16 @@ impl<'a> Session<'a> {
         else {
             return self.fail(format_args!("there is no group {:?}", args.group));
         };
+        // G.9: a dynamic group has no entries in the file, and its copies are
+        // not the user's to delete.
+        if model::group_source(&config.groups[group_index])
+            .is_some_and(|source| source.is_dynamic())
+        {
+            return self.fail(format_args!(
+                "group {:?} is dynamic; its items are generated in the window",
+                args.group
+            ));
+        }
         let Some(item_index) = config.groups[group_index]
             .items
             .iter()
@@ -361,10 +433,22 @@ impl<'a> Session<'a> {
 
     #[cfg(windows)]
     fn run_item(&mut self, args: &RunArgs) -> io::Result<u8> {
-        let item = match self.item_for(&args.group, args.slot)? {
+        let target = match self.item_for(&args.group, args.slot)? {
             Ok(item) => item,
             Err(code) => return Ok(code),
         };
+        if target.item.action_kind() == model::ActionKind::Group {
+            return self.run_group(&target.group, &target.item, target.on_running, args);
+        }
+        // D6: a command runs from the terminal only when the caller says so; the
+        // group path above makes the same check for its children.
+        if target.item.action_kind() == model::ActionKind::Command && !args.yes {
+            return self.fail(format_args!(
+                "{:?} is a command: pass --yes to run a command",
+                target.item.name
+            ));
+        }
+        let item = target;
         let mode = if args.admin {
             LaunchMode::Admin
         } else {
@@ -372,7 +456,8 @@ impl<'a> Session<'a> {
         };
         let request = LaunchRequest {
             mode,
-            on_running: item.on_running,
+            // §17.2 F.4: a terminal has no dialog, so `ask` is `activate`.
+            on_running: terminal_on_running(item.on_running),
             expand: ExpandContext::current(),
         };
         let registry = LaunchRegistry::with_builtins();
@@ -394,6 +479,13 @@ impl<'a> Session<'a> {
                 writeln!(self.output, "activated {:?}", item.item.name)?;
                 Ok(0)
             }
+            // Unreachable while `ask` is turned into `activate` above (§17.2
+            // F.4); treated as an activation so the arm is honest if that ever
+            // changes.
+            Ok(LaunchOutcome::AlreadyRunning { .. }) => {
+                writeln!(self.output, "activated {:?}", item.item.name)?;
+                Ok(0)
+            }
             // The user answered "no" to the UAC prompt: a decision, not a
             // failure (§8.2).
             Ok(LaunchOutcome::Cancelled) => {
@@ -407,6 +499,115 @@ impl<'a> Session<'a> {
     #[cfg(not(windows))]
     fn run_item(&mut self, _args: &RunArgs) -> io::Result<u8> {
         writeln!(self.output, "quick-launch run is only supported on Windows")?;
+        Ok(FAILURE)
+    }
+
+    /// Runs a `group` item's entries in order (§17.2 E.5).
+    ///
+    /// The rules are the window's (§17.2 E.1): nested groups are flattened,
+    /// duplicates and cycles are skipped, at most [`model::MAX_GROUP_REFERENCES`]
+    /// entries start, `ask` behaves as `activate`, and every folder is opened in
+    /// LumaFiles afterwards. A group with a command requires `--yes` (D6): the
+    /// whole group is refused otherwise, before anything starts.
+    #[cfg(windows)]
+    fn run_group(
+        &mut self,
+        group: &model::Group,
+        item: &model::Item,
+        on_running: model::OnRunning,
+        args: &RunArgs,
+    ) -> io::Result<u8> {
+        let plan = expand_group(group, item);
+        if plan.excess > 0 {
+            writeln!(
+                self.errors,
+                "warning: {:?} has {} items beyond the limit of {}; they will not start",
+                item.name,
+                plan.excess,
+                model::MAX_GROUP_REFERENCES
+            )?;
+        }
+        if plan.items.is_empty() {
+            return self.fail(format_args!("{:?} has no item to start", item.name));
+        }
+        let commands: Vec<&str> = plan
+            .items
+            .iter()
+            .filter(|entry| entry.action_kind() == model::ActionKind::Command)
+            .map(|entry| entry.name.as_str())
+            .collect();
+        if !commands.is_empty() && !args.yes {
+            return self.fail(format_args!(
+                "{:?} contains commands ({}); pass --yes to run the group",
+                item.name,
+                commands.join(", ")
+            ));
+        }
+        // §17.2 F.4: a terminal has no dialog, so `ask` is `activate`.
+        let on_running = terminal_on_running(on_running);
+        let _apartment = match nohrs_services::launch::ComApartment::enter() {
+            Ok(apartment) => apartment,
+            Err(error) => return self.fail(format_args!("could not initialize COM: {error}")),
+        };
+        let registry = LaunchRegistry::with_builtins();
+        let expand = ExpandContext::current();
+        let total = plan.items.len();
+        let mut failed: Vec<String> = Vec::new();
+        let mut folders: Vec<(PathBuf, String)> = Vec::new();
+        for entry in plan.items {
+            let mode = if args.admin || entry.admin {
+                LaunchMode::Admin
+            } else {
+                LaunchMode::Normal
+            };
+            let request = LaunchRequest {
+                mode,
+                on_running,
+                expand: expand.clone(),
+            };
+            match registry.launch(&entry, &request) {
+                Ok(LaunchOutcome::Started) => {
+                    writeln!(self.output, "started {:?}", entry.name)?;
+                }
+                Ok(LaunchOutcome::Activated) => {
+                    writeln!(self.output, "activated {:?}", entry.name)?;
+                }
+                // Unreachable while `ask` is turned into `activate` above
+                // (§17.2 F.4); treated as an activation to keep the arm honest.
+                Ok(LaunchOutcome::AlreadyRunning { .. }) => {
+                    writeln!(self.output, "activated {:?}", entry.name)?;
+                }
+                // The user answered "no" to the UAC prompt: a decision, not a
+                // failure (§8.2).
+                Ok(LaunchOutcome::Cancelled) => {
+                    writeln!(
+                        self.output,
+                        "cancelled {:?}: the elevation prompt was declined",
+                        entry.name
+                    )?;
+                }
+                Ok(LaunchOutcome::OpenFolder(folder)) => folders.push((folder, entry.name)),
+                Err(error) => {
+                    writeln!(self.errors, "noh quick-launch: {:?}: {error}", entry.name)?;
+                    failed.push(entry.name);
+                }
+            }
+        }
+        for (folder, name) in folders {
+            if self.open_in_luma_files(&folder, &name)? != 0 {
+                failed.push(name);
+            }
+        }
+        if failed.is_empty() {
+            return Ok(0);
+        }
+        writeln!(
+            self.errors,
+            "noh quick-launch: {} of {} items did not start: {}",
+            failed.len(),
+            total,
+            failed.join(", ")
+        )?;
         Ok(FAILURE)
     }
 
@@ -498,6 +699,41 @@ impl<'a> Session<'a> {
         Ok(if healthy { 0 } else { FAILURE })
     }
 
+    /// The installed apps an `uwp` item can name (§17.2 B.6).
+    ///
+    /// The Apps folder is a shell enumeration, so this console process enters a
+    /// COM apartment for it, exactly as `run` does (§8.4).
+    fn apps(&mut self, args: &AppsArgs) -> io::Result<u8> {
+        let _apartment = match nohrs_services::launch::ComApartment::enter() {
+            Ok(apartment) => apartment,
+            Err(error) => return self.fail(format_args!("could not initialize COM: {error}")),
+        };
+        let apps = match nohrs_services::launch::installed_apps() {
+            Ok(apps) => apps,
+            Err(error) => return self.fail(format_args!("{error}")),
+        };
+        if args.json {
+            let document = serde_json::json!({
+                "apps": apps
+                    .iter()
+                    .map(|app| {
+                        serde_json::json!({
+                            "name": app.name,
+                            "aumid": app.aumid,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            });
+            let text = serde_json::to_string(&document).map_err(io::Error::other)?;
+            writeln!(self.output, "{text}")?;
+            return Ok(0);
+        }
+        for app in apps {
+            writeln!(self.output, "{}\t{}", app.name, app.aumid)?;
+        }
+        Ok(0)
+    }
+
     /// The item in `group`/`slot`, or the exit code to stop with. The reason is
     /// printed before the code is returned.
     #[cfg(windows)]
@@ -517,12 +753,20 @@ impl<'a> Session<'a> {
         let Some(found) = config.groups.iter().find(|candidate| candidate.id == group) else {
             return Ok(Err(self.fail(format_args!("there is no group {group:?}"))?));
         };
+        // G.9: what runs from a dynamic group is generated by the window; a
+        // terminal cannot name those entries and is told to use the window.
+        if model::group_source(found).is_some_and(|source| source.is_dynamic()) {
+            return Ok(Err(self.fail(format_args!(
+                "group {group:?} is dynamic; run its items from the window"
+            ))?));
+        }
         let Some(item) = found.items.iter().find(|item| item.slot == slot) else {
             return Ok(Err(self.fail(format_args!(
                 "group {group:?} has no item in slot {slot}"
             ))?));
         };
         Ok(Ok(RunTarget {
+            group: found.clone(),
             item: item.clone(),
             on_running: config.window.on_running,
         }))
@@ -578,9 +822,20 @@ impl<'a> Session<'a> {
     }
 }
 
+/// §17.2 F.4: a terminal has no dialog, so `ask` behaves as `activate`.
+#[cfg(windows)]
+fn terminal_on_running(on_running: model::OnRunning) -> model::OnRunning {
+    match on_running {
+        model::OnRunning::Ask => model::OnRunning::Activate,
+        other => other,
+    }
+}
+
 /// The item `run` resolved, with the window setting its launch needs.
 #[cfg(windows)]
 struct RunTarget {
+    /// The group the item belongs to: a `group` item expands inside it.
+    group: model::Group,
     item: model::Item,
     on_running: model::OnRunning,
 }
@@ -598,6 +853,65 @@ fn config_or_default(parsed: &Option<model::Parsed>) -> Cow<'_, QuickLaunchConfi
 /// The lowest slot no item of `group` occupies.
 fn first_free_slot(group: &model::Group) -> Option<u32> {
     (0..=MAX_SLOT).find(|slot| group.items.iter().all(|item| item.slot != *slot))
+}
+
+/// What `noh ql run` expands a `group` item into (§17.2 E.1).
+#[cfg(windows)]
+#[derive(Debug, Default, PartialEq)]
+struct GroupPlan {
+    /// The entries to start, in reference order, nested groups flattened.
+    items: Vec<model::Item>,
+    /// Entries left out because the plan was already full.
+    excess: usize,
+}
+
+/// Follows a `group` item's references inside its own group (§17.2 E.1).
+///
+/// The same rules the window applies: only ids of this group are found, an id
+/// that was already expanded is skipped (which breaks a cycle), nested groups
+/// are followed up to [`model::MAX_GROUP_NESTING`] levels, and the plan stops at
+/// [`model::MAX_GROUP_REFERENCES`] entries.
+#[cfg(windows)]
+fn expand_group(group: &model::Group, item: &model::Item) -> GroupPlan {
+    fn walk(
+        group: &model::Group,
+        references: &[String],
+        depth: usize,
+        visited: &mut std::collections::HashSet<String>,
+        plan: &mut GroupPlan,
+    ) {
+        for reference in references {
+            let Some(found) = group
+                .items
+                .iter()
+                .find(|candidate| candidate.id.as_deref() == Some(reference.as_str()))
+            else {
+                continue;
+            };
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            if found.action_kind() == model::ActionKind::Group {
+                if depth < model::MAX_GROUP_NESTING {
+                    walk(group, &found.items, depth + 1, visited, plan);
+                }
+                continue;
+            }
+            if plan.items.len() < model::MAX_GROUP_REFERENCES {
+                plan.items.push(found.clone());
+            } else {
+                plan.excess = plan.excess.saturating_add(1);
+            }
+        }
+    }
+
+    let mut plan = GroupPlan::default();
+    let mut visited = std::collections::HashSet::new();
+    if let Some(id) = &item.id {
+        visited.insert(id.clone());
+    }
+    walk(group, &item.items, 0, &mut visited, &mut plan);
+    plan
 }
 
 /// The one-word state [`Health`] reports, shared by the text and JSON output.
@@ -682,6 +996,7 @@ mod tests {
                 .iter()
                 .map(|slot| model::Item::new(*slot, "app", "Item"))
                 .collect(),
+            source: None,
         }
     }
 
@@ -697,5 +1012,24 @@ mod tests {
     fn a_group_with_every_slot_taken_has_no_free_one() {
         let every_slot: Vec<u32> = (0..=MAX_SLOT).collect();
         assert_eq!(first_free_slot(&group(&every_slot)), None);
+    }
+
+    /// §17.2 F.4: the terminal has no dialog, so `ask` is `activate`; the other
+    /// choices are passed through.
+    #[cfg(windows)]
+    #[test]
+    fn asking_is_activating_in_a_terminal() {
+        assert_eq!(
+            terminal_on_running(model::OnRunning::Ask),
+            model::OnRunning::Activate
+        );
+        assert_eq!(
+            terminal_on_running(model::OnRunning::Activate),
+            model::OnRunning::Activate
+        );
+        assert_eq!(
+            terminal_on_running(model::OnRunning::New),
+            model::OnRunning::New
+        );
     }
 }

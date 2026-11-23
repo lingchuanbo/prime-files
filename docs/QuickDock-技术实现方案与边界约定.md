@@ -1,4 +1,4 @@
-# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.7
+# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.8
 
 > v2.1（2026-11-22）：写入 Q1–Q5 的确认结果，新增 §15.0（主程序常驻）和 §15.1（常驻模式）。
 > v2.2（2026-11-22，M1 验收后）：§8.4 改为启动、图标两条线程。M1 的具体问题见 `docs/QuickLaunch-M1-验收报告.md`。
@@ -7,6 +7,7 @@
 > v2.5（2026-11-22）：新增 §11.1 锁定按钮。
 > v2.6（2026-11-23）：新增 §17.1，M3 实现细则。
 > v2.7（2026-11-23，M3 验收后）：更正 §17.1 B 中 `gpui_keys_to_hotkey` 的位置，改放到 `nohrs-core`。
+> v2.8（2026-11-23，M4 开工前）：新增 §17.2，M4 实现细则。
 
 > 这是一份**实现规格**，执行方（DeepSeek）按它写代码。写着“必须 / 禁止”的条款不能自行改动；没写到的情况按 §19 处理。
 > 需求见 `docs/LumaFiles-快速启动工具方案.md`。两份文档有冲突时，**以本文为准**。
@@ -557,7 +558,7 @@ BoBO 于 2026-11-22 确认 Q5：主窗口关闭后，即使托盘图标也关着
 | **M1** | §4 全部；§5；§6；§7；§8 中 `app`、`folder`、`url` 三种类型及 8.3、8.4、8.5；§9（不支持 exe,索引）；§10；§11；§12.2 标为 M1 的行；§14；托盘菜单项；**§15.0 主程序常驻，包括标题栏“⋯”菜单** | 拖放、右键菜单、过滤、设置页、CLI |
 | **M2** | §12.2 标为 M2 的行；`file` 类型；`exe,索引` 格式的图标；健康检查；使用次数统计；**§15.1 常驻模式支持** | 设置页 |
 | **M3** | §13 设置页；`noh quick-launch list/add/remove/run/check`；Launcher 数据源：`ranking::ItemKind` 新增 `QuickLaunch` 变体，输入 `@` 前缀时只搜快速启动条目，不改现有权重；`docs/config.md` 和 schema | 插件 |
-| **M4** | `uwp`；`group`；`command`（`extra.shell` 只能是 `cmd`、`pwsh`、`powershell`、`python`；`extra.script` 作为参数传入；`extra.hidden` 对应 `CREATE_NO_WINDOW`；**第一次运行必须弹窗确认**，确认记录用脚本内容的哈希存进 KV，脚本一改就重新确认）；`on_running = ask`；只读的动态分组（`source = "folder:…" / "recent" / "most_used"`） | 插件宿主、云同步、边缘停靠、从第三方导入（另行立项） |
+| **M4** | `uwp`；`group`；`command`（`extra.shell` 只能是 `cmd`、`pwsh`、`powershell`、`python`；`extra.script` 作为参数传入；`extra.hidden` 对应 `CREATE_NO_WINDOW`；**第一次运行必须弹窗确认**，确认记录用脚本内容的哈希存进 KV，脚本一改就重新确认）；`on_running = ask`；只读的动态分组（`source = "folder:…" / "recent" / "most_used"`） | 插件宿主、云同步、边缘停靠、从第三方导入（另行立项；细则见 §17.2） |
 
 每个里程碑结束时，在 `docs/launcher.md` 里补充或更新“Quick Launch”一节，记录实际实现和本文的差异。
 
@@ -662,6 +663,234 @@ pub fn set_quick_launch_hooks(cx: &mut App, hooks: QuickLaunchHooks);   // 存�
   4. 在 Launcher 里输入 `@ps` 能找到 Photoshop，回车启动；
   5. `noh ql add` 加一个条目，正在运行的快速启动窗口里立刻出现；
   6. 在设置页的搜索框里输入“热键”，能找到快速启动的热键这一行。
+
+## 17.2 M4 实现细则（v2.8，2026-11-23）
+
+> 本节把 §17 里 M4 的那一行拆成可以直接实现的规定，与 §17.1 同级。
+> 规格 §1（执行总则）、§3（依赖方向）、§8.4（线程、COM、unsafe）、§18（禁止事项）全部继续有效。
+> **M4 只做本节列出的内容。**
+
+### 1. 范围总览
+
+| 编号 | 内容 | 主要位置 |
+|---|---|---|
+| A | 配置模型：`on_running = "ask"`、分组 `source`、command 的 `extra` 校验、schema | `nohrs-core/src/config/quick_launch.rs` |
+| B | `uwp` 类型、已安装应用列表、设置页的应用选择器、`noh ql apps` | `nohrs-services/src/launch/windows.rs`、settings、CLI |
+| C | `command` 类型的启动 | `nohrs-services/src/launch/windows.rs` |
+| D | command 的首次运行确认与信任记录 | `nohrs-pages/src/quick_launch.rs`、`view.rs`、settings |
+| E | `group` 类型：一次启动多个条目 | `nohrs-pages`、settings、CLI |
+| F | `on_running = "ask"`：程序已在运行时询问 | services、pages、settings |
+| G | 动态分组：`folder:` / `recent` / `most_used`（只读） | `nohrs-pages`、settings、CLI、launcher 快照 |
+| H | 文档与翻译 | `docs/launcher.md`、`docs/config.md`、i18n |
+
+**不做**：插件宿主、云同步、贴边停靠、从第三方工具导入（与 §17 的 M4 行一致）。
+
+---
+
+### A. 配置模型（`nohrs-core`）
+
+1. **`OnRunning::Ask`**：新增变体，序列化为 `"ask"`。默认值仍是 `activate`。
+2. **分组来源**：`Group` 新增字段
+   ```rust
+   #[serde(default, skip_serializing_if = "Option::is_none")]
+   pub source: Option<String>,
+   ```
+   以及解析函数 `pub fn group_source(group: &Group) -> Option<GroupSource>`：
+   ```rust
+   pub enum GroupSource { Folder(String), Recent, MostUsed, Unknown(String) }
+   ```
+   规则：
+   - `folder:<路径>`：冒号后面的原样保留，路径变量在使用时再展开；
+   - `recent`、`most_used`；
+   - 其他写法记为 `Unknown`，并给出 warning；
+   - 设置了 `source` 的分组，如果文件里还写了 `[[group.item]]`，这些条目**丢弃**，并给出 warning `Warning::ItemsInDynamicGroup { group }`；
+   - `to_toml` 输出动态分组时**只写 `id`、`name`、`source`**，不写运行时生成的条目（由 G 节保证内存里有条目也不会写出去）。
+3. **command 的 `extra`**：新增 `pub struct CommandSpec { shell: Shell, script: String, hidden: bool, keep_open: bool }` 和 `enum Shell { Cmd, Pwsh, PowerShell, Python }`，以及 `pub fn command_spec(item: &Item) -> Result<CommandSpec, String>`：
+   - `shell` 必须是 `cmd` / `pwsh` / `powershell` / `python` 之一；
+   - `script` 必须是非空字符串；
+   - `hidden`、`keep_open` 可省略，默认 `false`，写了就必须是布尔值；
+   - 出现其他键时给出 warning `Warning::UnknownCommandKey`，条目保留。
+4. **schema**：重新生成 `docs/quicklaunch.schema.json`，一致性测试必须通过。
+5. **测试**：`ask` 往返序列化；三种 source 和 Unknown；动态分组的条目被丢弃并给出 warning；`to_toml` 不输出动态分组的条目；`command_spec` 的每条规则。
+
+---
+
+### B. `uwp` 类型
+
+1. **约定**：`path` 存 AppUserModelID（例如 `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`），`args` 作为启动参数，`cwd` 和 `admin` 不适用（设置了也忽略，设置页里置灰）。
+2. **启动**：在 `launch/windows.rs` 新增 `UwpAction`，用 `CoCreateInstance(ApplicationActivationManager)` 拿到 `IApplicationActivationManager`，调用 `ActivateApplication(aumid, args, AO_NONE)`。调用发生在 `quick-launch` 线程上，那里已经进入了 COM apartment。
+   - 成功返回 `Started`；
+   - 失败返回 `Os { code, message }`，并沿用 M1 的 HRESULT 换算。
+   - 需要追加的 `windows` feature 只能加到 `nohrs-services`，版本保持 0.61。
+   - `unsafe` 只能出现在这个文件里，每处都要写 `// SAFETY:`，句柄和接口使用 RAII 管理。
+3. **健康检查**：只做格式检查：`!` 前后都非空，不含空白字符，长度不超过 256，否则返回 `Invalid`。**不查询系统**，因为 §8.1 规定健康检查不能超过 5 ms。
+4. **已安装应用列表**：`pub fn installed_apps() -> Result<Vec<InstalledApp>, LaunchError>`，其中 `InstalledApp { name: String, aumid: String }`。
+   - 实现：`SHGetKnownFolderItem(FOLDERID_AppsFolder)`，再用 `BindToHandler(BHID_EnumItems)` 枚举，每一项读取显示名和 `PKEY_AppUserModel_ID`。
+   - 列表里也会包含经典桌面程序（它们同样有 AUMID），一并返回，`ActivateApplication` 对两者都适用。
+   - 只能在后台线程调用（耗时可能达到数百毫秒），调用方负责进入 COM。
+   - 非 Windows 平台返回 `Unsupported`。
+5. **设置页**：类型下拉框加入 `uwp`。选中 `uwp` 后，“路径”一行改名为 `t!("ID do aplicativo")`（中文：应用 ID），旁边的“浏览…”换成“选择应用…”：
+   - 点击后在后台调用 `installed_apps()`，弹出一个带搜索框的列表（按名称过滤）；
+   - 选中后填入 AUMID，名称为空时一并填入应用名；
+   - 列表结果在本次会话内缓存，避免重复枚举。
+6. **命令行**：新增 `noh ql apps [--json]`，输出名称和 AUMID。`noh ql add` 新增参数 `--uwp <AUMID>`，与 `<路径>` 二选一。
+7. **测试**：AUMID 格式检查（合法、缺 `!`、两侧为空、含空格、超长）；`installed_apps` 标记 `#[ignore]`，真机运行时至少返回一项；CLI 的 `apps --json` 输出结构测试（Windows 下运行）。
+
+---
+
+### C. `command` 类型的启动（`nohrs-services`）
+
+1. 新增 `CommandAction`，只在 Windows 上注册。用 `std::process::Command` 启动，**不写 unsafe**：
+
+| shell | 程序 | 参数 |
+|---|---|---|
+| `cmd` | `%ComSpec%`，没有就用 `cmd.exe` | `/d /s /c` 再加 `raw_arg("\"<script>\"")`；`keep_open` 时把 `/c` 换成 `/k` |
+| `pwsh` | `pwsh.exe` | `-NoLogo -NoProfile -EncodedCommand <base64(UTF-16LE(script))>`；`keep_open` 时在 `-EncodedCommand` 之前加 `-NoExit` |
+| `powershell` | `powershell.exe` | 同 pwsh |
+| `python` | `python.exe` | `keep_open` 时加 `-i`，然后加 `-c` 和 `.arg(script)` |
+
+   - PowerShell 用 `-EncodedCommand`，是为了**彻底避开命令行引号转义**；cmd 用 `/s /c "…"` 的标准写法；python 用 `.arg()`，转义交给 Rust。
+   - `hidden = true` 时设置 `CREATE_NO_WINDOW`；否则设置 `CREATE_NEW_CONSOLE`，让脚本有自己的控制台窗口。
+   - 工作目录：`cwd` 展开后的路径；没设置就用 `%USERPROFILE%`。
+   - 进程启动后**不等待**，返回 `Started`。启动失败（找不到程序等）返回 `NotFound` 或 `Os`。
+2. **`admin = true` 的 command 本期不支持**（D4）：健康检查返回 `Invalid(t!(…))`，启动返回 `Unsupported`，设置页在类型为 command 时把“以管理员运行”置灰。
+3. **services 层不负责确认**：确认在 pages 层（D 节）。services 只提供 `CommandAction`，调用方必须先完成确认。这一点要写在 `CommandAction` 的文档注释里。
+4. **健康检查**：`command_spec` 报错就返回 `Invalid`；设置了 `cwd` 但目录不存在就返回 `Missing`；不检查 shell 程序是否在 PATH 上（太慢）。
+5. **测试**：参数拼装写成纯函数 `command_line(spec) -> (program, Vec<Arg>)`，每种 shell、`keep_open`、`hidden` 的组合都要有测试；`-EncodedCommand` 的编码对含中文和引号的脚本往返一致；`#[ignore]` 的真机测试：cmd 脚本 `echo ok > %TEMP%\ql-test.txt` 能写出文件。
+
+---
+
+### D. 首次运行确认与信任记录（`nohrs-pages`）
+
+1. **信任键**：`trust_key(item, spec) = sha256(shell \0 script \0 cwd \0 hidden \0 keep_open)` 的前 32 位十六进制，KV 名为 `trusted_<32 位十六进制>`。用 pages 已有的 `sha2`（**不要**用 `DefaultHasher`：这里关系到安全，必须抗碰撞）。
+2. **何时需要确认**：要启动的 command 条目，在 KV 里查不到它的信任键时，就需要确认。M2 已经让 KV 的读取在前台走内存缓存；这里同样在 `restored` 里缓存所有 `trusted_*`，前台只查内存，**不读 redb**。
+3. **确认对话框**：沿用 M2 编辑器那种窗口内浮层的做法，内容包括：
+   - 条目名称、shell、工作目录；
+   - 是否隐藏窗口，如果是，用醒目的颜色提示“将在后台运行，看不到窗口”；
+   - **完整脚本**：等宽字体，可以滚动，最大高度为窗口的 60%；
+   - 按钮“运行”和“取消”。
+   - 文案：标题 `t!("Executar este comando?")`，说明 `t!("Este comando roda com as suas permissões. Confira o conteúdo antes de continuar.")`。
+
+   点击“运行”后写入信任键，然后启动；点击“取消”什么都不做，也不报错。
+4. **窗口隐藏时**（例如从 Launcher 的 `@` 启动）：先调用 `show()` 显示快速启动窗口，再弹出确认框。
+5. **常驻模式**（没有 KV）：信任只保存在内存里，进程退出就失效；对话框底部加一句 `t!("Sem armazenamento: a confirmação vale até fechar o programa.")`。
+6. **在设置页里保存的脚本自动信任**（D5）：通过设置页表单保存 command 条目时，把新的信任键写入 KV。手改文件、用命令行修改、热重载读进来的变化**都不会**自动信任。
+7. **撤销**：设置页的 command 表单显示“已信任 / 未信任”，并提供“撤销信任”按钮，删除对应的 KV 键。
+8. `prune_usage` 只清理 `usage_*`，**不能**碰 `trusted_*`。补一个测试保证这一点。
+9. **测试**：信任键的稳定性（同样输入得到同样的键，改一个字符就变）；未信任时不发送启动请求，而是打开确认；确认后写入 KV 并启动；改了脚本后需要重新确认；设置页保存后自动信任；撤销信任；常驻模式只在内存里信任；`prune_usage` 不删除 `trusted_*`。
+
+---
+
+### E. `group` 类型：一次启动多个条目
+
+1. **执行位置**：pages 层。`activate_with` 遇到 `group` 条目时，**不**发送给 registry，而是：
+   1. 按 `items` 里的 id，在**同一分组**中依次找到被引用的条目；遇到嵌套的 group 条目就递归展开，深度不超过 8，已经访问过的跳过；展开后最多 16 个条目，多出的不启动，并在底部提示中说明；
+   2. 收集其中所有**未信任**的 command 条目，如果有，弹出**一个**确认框，把它们一起列出来；取消就整组都不启动；
+   3. 按顺序给每个条目发送启动请求，共用一个“批次 id”。`on_running = ask` 在分组里一律按 `activate` 处理，不逐个询问（D9）；
+   4. 整批完成后：
+      - 有失败的，底部显示 `tf!("{failed} de {total} itens não iniciaram: {names}")`；
+      - 有 `OpenFolder` 的，逐个在资源管理器里打开；
+      - 使用次数**只记在 group 条目本身**，不记在各个子条目上；
+      - `close_after_launch` 在整批完成后才判断一次是否隐藏。
+2. **健康检查**：没有任何有效引用时返回 `Invalid`；否则返回 `Ok`。子条目各自的健康状态照常显示。
+3. **设置页**：类型下拉框加入 `group`。选中后，路径、参数、工作目录都隐藏，换成“包含的条目”多选列表（同一分组中除自己以外的条目，按槽位排序，显示勾选顺序）。保存时，**被选中但还没有 id 的条目自动分配 id**（`item_<槽位>`，冲突时追加 `_2`、`_3`……），整个修改作为一次保存写入。
+4. **快速启动窗口里的编辑浮层**：group 条目只能修改名称，其余字段提示“请在设置页中编辑”。
+5. **命令行**：`noh ql run` 能运行 group，按上面的规则依次启动；遇到 command 子条目时必须带 `--yes`，否则整组拒绝执行，退出码为 1（D6）。
+6. **测试**：引用解析（顺序、嵌套、环、超过 16 个、跨组引用被忽略）；未信任的子条目汇总到一个确认框；部分失败时的提示文本；使用次数只记在 group 上；设置页保存时自动分配 id 且不冲突。
+
+---
+
+### F. `on_running = "ask"`
+
+1. **services**：`LaunchOutcome` 新增 `AlreadyRunning { process_id: u32 }`。`AppAction` 在 `on_running == Ask` 并且找到正在运行的进程时返回它，**不激活、也不启动**。另外新增一个只供 pages 使用的入口：`LaunchMode::Activate(process_id)`，表示激活这个进程的主窗口；找不到窗口就退回到启动新实例。
+2. **pages**：收到 `AlreadyRunning` 后弹出窗口内浮层，提示 `t!("Este programa já está aberto.")`，按钮为：
+   - “切换到它”：用 `LaunchMode::Activate(pid)` 再发一次请求；
+   - “再开一个”：用 `LaunchMode::ForceNew` 再发一次请求；
+   - “取消”。
+
+   窗口隐藏时先显示窗口。使用次数在用户选择之后才记录；选“取消”不计数。
+3. **设置页**：“程序已在运行时”的选项增加“每次询问”。
+4. **命令行**：`ask` 按 `activate` 处理（命令行没有界面）。
+5. **测试**：services 中 ask 返回 AlreadyRunning（用注入的进程查找函数测试，不依赖真实进程）；pages 中三个按钮各自发出的请求；取消时不计数。
+
+---
+
+### G. 动态分组（只读）
+
+1. **运行时条目**：
+   - 动态分组的条目只存在于内存中的 `config.groups[i].items`，在每次 `apply_loaded` 之后以及刷新时重新生成。
+   - `save_now` / `save_in_background` 在 `to_toml` 之前，**先复制一份配置，并把动态分组的条目清空**（A.2 再兜一层底）。
+   - 状态中新增 `origins: HashMap<(String, u32), (String, u32)>`，记录 `(动态分组 id, 槽位)` 对应的 `(原分组 id, 原槽位)`，只有 `recent` 和 `most_used` 会用到。
+2. **`folder:<路径>`**：
+   - 在后台展开路径并读取目录，**不递归**；按名称排序（不区分大小写），每一项用 `item_for_path` 生成条目，槽位从 0 开始连续编号，最多 512 项，跳过隐藏文件和系统文件。
+   - 刷新时机：窗口每次显示时，以及切换到该分组时，距离上次刷新超过 30 秒才刷新。**不使用**文件监视。
+   - 目录不存在时，分组显示 `t!("Pasta não encontrada")`，没有条目。
+3. **`recent` / `most_used`**（只在主模式下有效，常驻模式下没有 KV，分组显示 `t!("Indisponível no modo residente")`）：
+   - 从内存中的使用记录（`restored`，必要时在后台读取 KV）里，按 `last` 从新到旧排序（recent），或按 `count` 从多到少排序，次数相同时按 `last` 排序（most_used）；
+   - 只保留在当前配置中**仍然存在**的原条目，排除动态分组自己；
+   - 最多 `columns × 2` 项，不超过 32 项（D7）；
+   - 复制原条目，槽位从 0 开始编号，并在 `origins` 中记录来源；
+   - 刷新时机：窗口每次显示时，以及每次启动成功后。
+4. **启动和记录**：在 `recent` / `most_used` 分组里启动条目时，使用次数和健康检查都按 `origins` 记到**原条目**上。
+5. **只读**：
+   - 新增 `group_editable(cx, index) = editable(cx) && source.is_none()`。`place_items`、`put_item`、`edit_item`、`update_item`、`swap_slots`、`delete_item` 都要检查它；`move_item_to_group` 的来源分组和目标分组只要有一个是动态分组就拒绝。
+   - 快速启动窗口中，动态分组的拖入、拖动、右键编辑都要置灰；“打开所在位置”和“复制路径”仍然可用。
+   - 动态分组本身可以**改名、删除、调整顺序**。
+6. **设置页**：
+   - 新建分组时可以选择“普通 / 文件夹 / 最近使用 / 最常使用”，选择文件夹时用 `prompt_for_paths` 选取目录；
+   - 分组列表里显示来源；
+   - 动态分组的条目列表只读，并显示 `t!("Itens gerados automaticamente; não podem ser editados.")`。
+7. **Launcher 快照**：`launcher_snapshot` 包含 `folder:` 分组的条目，**排除** `recent` / `most_used` 分组（它们的条目都是别处条目的副本，包含进来会重复）。
+8. **prune_usage**：计算“有效条目”时排除动态分组，避免把它们当成有效条目、从而留下不该留的使用记录。
+9. **命令行**：`list` 中动态分组标注 `(dynamic: <source>)`，只显示文件里写的内容（没有条目）；`add`、`remove` 遇到动态分组时拒绝，退出码为 1；`run` 遇到动态分组时报错，提示“请在界面中使用”。
+10. **测试**：`folder:` 生成条目的规则（排序、跳过隐藏文件、512 上限、目录不存在）；recent 和 most_used 的排序、上限、排除已删除的原条目；`origins` 让使用次数记到原条目上；保存时不写出动态分组的条目；所有编辑入口都拒绝修改动态分组；Launcher 快照的包含和排除规则；prune_usage 排除动态分组。
+
+---
+
+### H. 文档与翻译
+
+- `docs/launcher.md` §14：补充 uwp、command（确认和信任）、group、ask、动态分组，以及与规格的差异。
+- `docs/config.md`：补充 `source`、`extra`（command）、`ask` 的说明和示例。
+- 所有新增文案都用 `t!`，9 种语言补齐，`every_key_in_the_code_has_a_translation` 测试必须通过。
+
+---
+
+### M4 的决定（D4、D5、D7 已由 BoBO 于 2026-11-23 确认；D6、D8、D9 按默认执行）
+
+| # | 问题 | 做法 |
+|---|---|---|
+| D4 | command 以管理员身份运行 | ✅ **已确认**：本期不支持，设置页置灰 |
+| D5 | 在设置页保存的脚本是否自动信任 | ✅ **已确认**：是。只有设置页保存会自动信任，手改文件、命令行修改都不会 |
+| D6 | 命令行运行 command | 必须带 `--yes`，否则拒绝 |
+| D7 | 最近使用 / 最常使用分组的数量 | ✅ **已确认**：`columns × 2`，最多 32 项 |
+| D8 | command 的 `keep_open` 选项 | 提供，默认关闭 |
+| D9 | 分组启动时遇到 `ask` | 按 `activate` 处理，不逐个询问 |
+
+---
+
+### 提交顺序
+
+0 规格 v2.8 → A → B → C → D → E → F → G → H。每项一个提交；翻译可以随各自的项一起提交。
+
+### 验收
+
+- **原始输出**：
+  - `cargo fmt --all -- --check`
+  - **逐包** `--no-deps` clippy（`nohrs-core`、`nohrs-services`、`nohrs-launcher`、`nohrs-pages`、`nohrs-cli`），main 与本分支各跑一次，比较结果
+  - `cargo build --release -p nohrs`，检查有没有 rustc 警告
+  - 逐包测试，已知会失败的日志测试单独列出
+  - 每个提交的哈希和改动的文件
+  - 重新编译 `LumaFiles.exe` 和 `noh.exe` 的时间
+  - 未决问题
+- **BoBO 手测**：
+  1. 用设置页的“选择应用…”添加“计算器”（uwp），点击后能启动；
+  2. 新建一个 command：`cmd`，脚本 `echo hello & pause`。第一次点击弹出确认框，确认后弹出控制台；第二次点击直接运行；用记事本改 toml 里的脚本后，再次点击需要重新确认；
+  3. 设一个 `hidden = true` 的 command，确认框里有醒目的“后台运行”提示；
+  4. 新建一个 group，包含 3 个条目，点击后 3 个都启动，`close_after_launch` 只在最后隐藏一次窗口；
+  5. 把 `on_running` 设为“每次询问”，在程序已经打开的情况下点击它，三个按钮的行为都正确；
+  6. 新建一个“文件夹”分组，指向你常用的工具目录，里面的程序都显示出来，而且不能拖入、不能编辑；
+  7. “最近使用”分组按顺序显示刚刚启动过的条目，在这个分组里启动的次数记到原条目上；
+  8. 在 Launcher 里输入 `@`，列表中不会出现“最近使用”里的重复条目。
 
 ## 18. 禁止事项
 - 不实现插件宿主，只保留 `LaunchRegistry::register`。

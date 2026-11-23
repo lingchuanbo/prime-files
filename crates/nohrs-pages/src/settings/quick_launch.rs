@@ -23,7 +23,10 @@ use nohrs_core::config::quick_launch::{
 use nohrs_core::shortcuts::Chord;
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::{t, tf};
-use nohrs_services::launch::{ExpandContext, LaunchMode, LaunchRegistry, LaunchRequest};
+use nohrs_services::launch::{
+    ComApartment, ExpandContext, InstalledApp, KIND_COMMAND, KIND_UWP, LaunchMode, LaunchRegistry,
+    LaunchRequest, installed_apps,
+};
 use nohrs_ui::theme::theme;
 
 use super::{Pick, Row, SettingsPage};
@@ -64,6 +67,19 @@ const ICON_SIZES: [(&str, u16); 6] = [
 /// The list-view column counts offered, inside the `1..=3` of §4.
 const LIST_COLUMNS: [(&str, u8); 3] = [("1", 1), ("2", 2), ("3", 3)];
 
+/// The kinds of group the new-group chooser offers (§17.2 G.6).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NewGroupKind {
+    /// A group the user fills with entries.
+    Normal,
+    /// A group listing a folder's contents, read on the window's side.
+    Folder,
+    /// A group of the most recently launched entries.
+    Recent,
+    /// A group of the most used entries.
+    MostUsed,
+}
+
 /// What one click on the section does.
 #[derive(Clone, Copy)]
 pub(super) enum Action {
@@ -90,7 +106,7 @@ pub(super) enum Action {
     /// Wait for the next key press to become the summon chord.
     RecordHotkey,
     /// Add a group at the end and start its rename.
-    NewGroup,
+    NewGroup(NewGroupKind),
     /// Start renaming the group at this index.
     RenameGroup(usize),
     /// Write the renamed group back.
@@ -109,8 +125,22 @@ pub(super) enum Action {
     SelectItem(u32),
     /// Change the kind of the item being edited.
     SetKind(&'static str),
+    /// Include the item in `slot` in the group being edited, or leave it out.
+    ToggleGroupItem(u32),
+    /// Open the installed-app picker of an `uwp` item, or close it.
+    ChooseApp,
+    /// Fill the form with the installed app at this index.
+    PickApp(usize),
     /// Flip "run as administrator" of the item being edited.
     ToggleAdmin,
+    /// Change the shell of the command being edited.
+    SetShell(&'static str),
+    /// Flip "run without a window" of the command being edited.
+    ToggleHidden,
+    /// Flip "keep the console open" of the command being edited.
+    ToggleKeepOpen,
+    /// Remove the trust record of the command being edited.
+    RevokeTrust,
     /// Write the item form back.
     SaveItem,
     /// Open `quicklaunch.toml` in its own program.
@@ -137,6 +167,18 @@ pub(super) struct Section {
     confirm_delete: Option<String>,
     /// Waiting for the next key press to become the summon chord.
     recording: bool,
+    /// Whether the `uwp` app picker is open.
+    apps_picker: bool,
+    /// The installed apps, once the background enumeration has answered.
+    apps: Option<Vec<InstalledApp>>,
+    /// Why the enumeration failed, while there is still no list.
+    apps_error: Option<String>,
+    /// Whether the background enumeration is running.
+    apps_loading: bool,
+    /// The picker's search field, made on the first frame after it opens.
+    apps_query: Option<Entity<InputState>>,
+    /// The app a click chose, waiting for the next frame to fill the fields.
+    picked_app: Option<InstalledApp>,
 }
 
 impl Section {
@@ -158,7 +200,7 @@ impl Section {
         let read_only = quick_launch::read_only_reason(cx).map(str::to_string);
         vec![
             self.window_group(page, &window, enabled, cx),
-            self.groups_group(&groups, enabled, cx),
+            self.groups_group(page, &groups, enabled, cx),
             self.items_group(page, &groups, enabled, cx),
             self.file_group(&read_only, cx),
         ]
@@ -195,7 +237,9 @@ impl Section {
         ];
         let running_options = [
             (
-                t!("Ativar"),
+                // R3: this is "go to the running window", not an on/off switch;
+                // `Ativar` belongs to the Everything toggle.
+                t!("Ir para ele"),
                 window.on_running == OnRunning::Activate,
                 Pick::QuickLaunch(Action::OnRunning(OnRunning::Activate)),
             ),
@@ -203,6 +247,11 @@ impl Section {
                 t!("Abrir outra vez"),
                 window.on_running == OnRunning::New,
                 Pick::QuickLaunch(Action::OnRunning(OnRunning::New)),
+            ),
+            (
+                t!("Perguntar sempre"),
+                window.on_running == OnRunning::Ask,
+                Pick::QuickLaunch(Action::OnRunning(OnRunning::Ask)),
             ),
         ];
         let rows = vec![
@@ -394,10 +443,11 @@ impl Section {
         control.into_any_element()
     }
 
-    /// The groups card: one line per group with rename, delete and move, and
-    /// the button that adds another.
+    /// The groups card: one line per group with rename, delete and move, and the
+    /// chooser that adds another of a chosen kind (§17.2 G.6).
     fn groups_group(
         &self,
+        page: &SettingsPage,
         groups: &[LaunchGroup],
         enabled: bool,
         cx: &mut Context<SettingsPage>,
@@ -407,16 +457,50 @@ impl Section {
             .enumerate()
             .map(|(index, group)| self.group_entry(group, index, groups.len(), enabled, cx))
             .collect();
-        entries.push(
-            action_button(
-                "quick-launch-group-add",
-                t!("Novo grupo"),
+        // G.6: a group is either ordinary or generated from a source; a folder
+        // source is picked with the same dialog the item form browses with.
+        let new_group_options = [
+            (
+                t!("Normal"),
                 false,
-                enabled,
-                Action::NewGroup,
-                cx,
-            )
-            .into_any_element(),
+                Pick::QuickLaunch(Action::NewGroup(NewGroupKind::Normal)),
+            ),
+            (
+                t!("Pasta"),
+                false,
+                Pick::QuickLaunch(Action::NewGroup(NewGroupKind::Folder)),
+            ),
+            (
+                t!("Recentes"),
+                false,
+                Pick::QuickLaunch(Action::NewGroup(NewGroupKind::Recent)),
+            ),
+            (
+                t!("Mais usados"),
+                false,
+                Pick::QuickLaunch(Action::NewGroup(NewGroupKind::MostUsed)),
+            ),
+        ];
+        entries.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(theme::muted()))
+                        .child(t!("Novo grupo")),
+                )
+                .child(page.chips_when(
+                    "quick-launch-group-new",
+                    &new_group_options,
+                    false,
+                    enabled,
+                    cx,
+                ))
+                .into_any_element(),
         );
         let control = div().flex().flex_col().gap_1().w_full().children(entries);
         super::Group::new(vec![Row::new(t!("Grupos"), None, control).wide()])
@@ -480,6 +564,20 @@ impl Section {
                     .text_color(rgb(theme::fg()))
                     .child(group.name.clone()),
             )
+            // G.6: the group list says where a dynamic group's items come from.
+            .when_some(group.source.clone(), |this, source| {
+                this.child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(px(220.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(rgb(theme::muted()))
+                        .child(source),
+                )
+            })
             .child(action_button(
                 ElementId::Name(SharedString::from(format!(
                     "quick-launch-group-up-{}",
@@ -559,14 +657,26 @@ impl Section {
             )
             .wide(),
         ];
-        let mut list = self.item_list(group, enabled, cx);
-        if group.items.is_empty() {
+        // G.6: a dynamic group's items are generated by the window, so this page
+        // may show them but not edit them.
+        let group_enabled = enabled && group.source.is_none();
+        let mut list = self.item_list(group, group_enabled, cx);
+        if group.source.is_some() {
+            list = list.child(status_line(
+                t!("Itens gerados automaticamente; não podem ser editados."),
+                false,
+            ));
+        } else if group.items.is_empty() {
             list = list.child(status_line(t!("Nenhum item neste grupo."), false));
         } else if self.form.is_none() {
             list = list.child(status_line(t!("Selecione um item para editar."), false));
         }
         rows.push(Row::new(t!("Itens"), None, list).wide());
-        if let Some(form) = self.form.as_ref().filter(|form| form.group == group.id) {
+        if let Some(form) = self
+            .form
+            .as_ref()
+            .filter(|form| form.group == group.id && group.source.is_none())
+        {
             rows.extend(self.form_rows(page, form, enabled, cx));
         }
         super::Group::titled(t!("Itens"), rows)
@@ -688,8 +798,12 @@ impl Section {
         }))
     }
 
-    /// The rows of the item form (§17.1 B): kind, name, path with browsing,
-    /// arguments, working directory with browsing, elevation, icon and tags.
+    /// The rows of the item form (§17.1 B, §17.2 B, §17.2 D): kind, name, the
+    /// fields of the kind with browsing, elevation, icon and tags. An `uwp` item
+    /// names an AppUserModelID instead of a path, picks it from the Apps folder,
+    /// and has no working directory or elevation. A `command` item has no path
+    /// or arguments, shows its shell, script and two flags instead, and carries
+    /// its trust record (§17.2 D.6, D.7).
     fn form_rows(
         &self,
         page: &SettingsPage,
@@ -697,7 +811,10 @@ impl Section {
         enabled: bool,
         cx: &mut Context<SettingsPage>,
     ) -> Vec<Row> {
-        let kind_control = if matches!(form.kind.as_str(), "app" | "folder" | "file" | "url") {
+        let kind_control = if matches!(
+            form.kind.as_str(),
+            "app" | "folder" | "file" | "url" | KIND_UWP | KIND_COMMAND | quick_launch::KIND_GROUP
+        ) {
             let options = [
                 (
                     t!("Aplicativo"),
@@ -719,53 +836,209 @@ impl Section {
                     form.kind == "url",
                     Pick::QuickLaunch(Action::SetKind("url")),
                 ),
+                (
+                    t!("Aplicativo UWP"),
+                    form.kind == KIND_UWP,
+                    Pick::QuickLaunch(Action::SetKind(KIND_UWP)),
+                ),
+                (
+                    t!("Comando"),
+                    form.kind == KIND_COMMAND,
+                    Pick::QuickLaunch(Action::SetKind(KIND_COMMAND)),
+                ),
+                (
+                    t!("Grupo"),
+                    form.kind == quick_launch::KIND_GROUP,
+                    Pick::QuickLaunch(Action::SetKind(quick_launch::KIND_GROUP)),
+                ),
             ];
             page.chips_when("quick-launch-item-kind", &options, false, enabled, cx)
         } else {
-            // A kind this milestone cannot build (`command`, `group`, a plugin)
-            // is shown as it is: the form cannot offer it, and changing it would
-            // change what the entry means.
+            // A kind this milestone cannot build (a plugin) is shown as it is:
+            // the form cannot offer it, and changing it would change what the
+            // entry means.
             status_line(form.kind.clone(), false)
         };
-        vec![
+        let uwp = form.kind == KIND_UWP;
+        let command = form.kind == KIND_COMMAND;
+        let group = form.kind == quick_launch::KIND_GROUP;
+        let path_label = if uwp {
+            t!("ID do aplicativo")
+        } else {
+            t!("Caminho")
+        };
+        let cwd_enabled = enabled && !uwp;
+        let mut rows = vec![
             Row::new(t!("Tipo"), None, kind_control),
             Row::new(t!("Nome"), None, input_row(&form.name, enabled)).wide(),
-            Row::new(
-                t!("Caminho"),
+        ];
+        if !command && !group {
+            rows.push(
+                Row::new(
+                    path_label,
+                    None,
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .child(input_row(&form.path, enabled))
+                        .child(if uwp {
+                            action_button(
+                                "quick-launch-choose-app",
+                                t!("Escolher aplicativo…"),
+                                false,
+                                enabled,
+                                Action::ChooseApp,
+                                cx,
+                            )
+                            .into_any_element()
+                        } else {
+                            browse_button(Field::Path, enabled, cx)
+                        }),
+                )
+                .wide(),
+            );
+            if uwp && self.apps_picker {
+                rows.push(
+                    Row::new(t!("Aplicativo"), None, self.apps_picker_row(enabled, cx)).wide(),
+                );
+            }
+            rows.push(Row::new(t!("Argumentos"), None, input_row(&form.args, enabled)).wide());
+        }
+        if group {
+            rows.push(
+                Row::hint(
+                    t!("Incluir itens"),
+                    t!("A ordem dos cliques é a ordem de início."),
+                    self.group_picker(form, enabled, cx),
+                )
+                .wide(),
+            );
+        }
+        if command {
+            let shell_options = [
+                (
+                    "cmd",
+                    form.shell == "cmd",
+                    Pick::QuickLaunch(Action::SetShell("cmd")),
+                ),
+                (
+                    "pwsh",
+                    form.shell == "pwsh",
+                    Pick::QuickLaunch(Action::SetShell("pwsh")),
+                ),
+                (
+                    "powershell",
+                    form.shell == "powershell",
+                    Pick::QuickLaunch(Action::SetShell("powershell")),
+                ),
+                (
+                    "python",
+                    form.shell == "python",
+                    Pick::QuickLaunch(Action::SetShell("python")),
+                ),
+            ];
+            rows.push(Row::new(
+                t!("Shell"),
                 None,
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .w_full()
-                    .child(input_row(&form.path, enabled))
-                    .child(browse_button(Field::Path, enabled, cx)),
-            )
-            .wide(),
-            Row::new(t!("Argumentos"), None, input_row(&form.args, enabled)).wide(),
-            Row::new(
-                t!("Pasta de trabalho"),
+                page.chips_when(
+                    "quick-launch-command-shell",
+                    &shell_options,
+                    false,
+                    enabled,
+                    cx,
+                ),
+            ));
+            rows.push(Row::new(t!("Script"), None, input_row(&form.script, enabled)).wide());
+            rows.push(Row::new(
+                t!("Executar sem janela"),
                 None,
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .w_full()
-                    .child(input_row(&form.cwd, enabled))
-                    .child(browse_button(Field::Cwd, enabled, cx)),
-            )
-            .wide(),
-            Row::new(
+                page.switch_pick_when(
+                    "quick-launch-command-hidden",
+                    form.hidden,
+                    Pick::QuickLaunch(Action::ToggleHidden),
+                    enabled,
+                    cx,
+                ),
+            ));
+            rows.push(Row::new(
+                t!("Manter o console aberto"),
+                None,
+                page.switch_pick_when(
+                    "quick-launch-command-keep-open",
+                    form.keep_open,
+                    Pick::QuickLaunch(Action::ToggleKeepOpen),
+                    enabled,
+                    cx,
+                ),
+            ));
+        }
+        if !group {
+            rows.push(
+                Row::new(
+                    t!("Pasta de trabalho"),
+                    None,
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .child(input_row(&form.cwd, cwd_enabled))
+                        .child(browse_button(Field::Cwd, cwd_enabled, cx)),
+                )
+                .wide(),
+            );
+        }
+        if !group && command {
+            rows.push(
+                Row::hint(
+                    t!("Executar como administrador"),
+                    t!("Comandos não podem ser executados como administrador"),
+                    page.switch_pick_when(
+                        "quick-launch-item-admin",
+                        form.admin,
+                        Pick::QuickLaunch(Action::ToggleAdmin),
+                        false,
+                        cx,
+                    ),
+                )
+                .wide(),
+            );
+            let trust = quick_launch::command_trust(cx, &form.group, form.slot);
+            let mut control = div().flex().items_center().gap_2().child(status_line(
+                if trust == Some(true) {
+                    t!("Confiável")
+                } else {
+                    t!("Não confiável")
+                },
+                false,
+            ));
+            if trust == Some(true) {
+                control = control.child(action_button(
+                    "quick-launch-command-revoke-trust",
+                    t!("Revogar confiança"),
+                    true,
+                    enabled,
+                    Action::RevokeTrust,
+                    cx,
+                ));
+            }
+            rows.push(Row::new(t!("Confiança"), None, control).wide());
+        } else if !group {
+            rows.push(Row::new(
                 t!("Executar como administrador"),
                 None,
                 page.switch_pick_when(
                     "quick-launch-item-admin",
                     form.admin,
                     Pick::QuickLaunch(Action::ToggleAdmin),
-                    enabled,
+                    enabled && !uwp,
                     cx,
                 ),
-            ),
+            ));
+        }
+        rows.extend([
             Row::new(t!("Ícone"), None, input_row(&form.icon, enabled)).wide(),
             Row::new(
                 t!("Etiquetas (separadas por vírgula)"),
@@ -786,7 +1059,154 @@ impl Section {
                 ),
             )
             .wide(),
-        ]
+        ]);
+        rows
+    }
+
+    /// The installed-app picker under the path row (§17.2 B.5): a search field
+    /// and the apps whose name matches it. The list is enumerated once per
+    /// session by a background task, never here.
+    fn apps_picker_row(&self, enabled: bool, cx: &mut Context<SettingsPage>) -> AnyElement {
+        let query = self
+            .apps_query
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let mut list = div()
+            .id("quick-launch-apps")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(240.0))
+            .min_h(px(0.0))
+            .overflow_y_scroll();
+        if let Some(input) = self.apps_query.as_ref() {
+            list = list.child(Input::new(input).small().w(px(360.0)));
+        }
+        if self.apps_loading {
+            list = list.child(status_line(t!("Carregando…"), false));
+        } else if let Some(error) = &self.apps_error {
+            list = list.child(status_line(
+                tf!(
+                    "Não foi possível listar os aplicativos: {error}",
+                    error = error
+                ),
+                true,
+            ));
+        } else if let Some(apps) = &self.apps {
+            let matching = matching_apps(apps, &query);
+            if matching.is_empty() {
+                list = list.child(status_line(t!("Nenhum"), false));
+            } else {
+                list = list.children(matching.into_iter().map(|(index, app)| {
+                    let pick = Pick::QuickLaunch(Action::PickApp(index));
+                    div()
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "quick-launch-app-{index}"
+                        ))))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .rounded(px(5.0))
+                        .text_sm()
+                        .text_color(rgb(theme::fg()))
+                        .when(enabled, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(rgb(theme::bg_hover())))
+                                .on_click(cx.listener(move |page, _event, _window, cx| {
+                                    page.pick(pick.clone(), cx)
+                                }))
+                        })
+                        .when(!enabled, |this| this.opacity(0.45))
+                        .child(div().flex_1().child(app.name.clone()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(px(320.0))
+                                .text_xs()
+                                .text_color(rgb(theme::fg_secondary()))
+                                .child(app.aumid.clone()),
+                        )
+                }));
+            }
+        }
+        list.into_any_element()
+    }
+
+    /// The multi-select of a `group` item's entries (§17.2 E.3): the other items
+    /// of the same group, by slot, each showing the place it was picked in. The
+    /// pick order is the launch order.
+    fn group_picker(
+        &self,
+        form: &Form,
+        enabled: bool,
+        cx: &mut Context<SettingsPage>,
+    ) -> AnyElement {
+        let groups = quick_launch::groups(cx);
+        let Some(group) = groups.iter().find(|group| group.id == form.group) else {
+            return status_line(t!("Nenhum"), false).into_any_element();
+        };
+        let mut entries: Vec<&Item> = group
+            .items
+            .iter()
+            .filter(|item| item.slot != form.slot)
+            .collect();
+        entries.sort_by_key(|item| item.slot);
+        if entries.is_empty() {
+            return status_line(t!("Nenhum"), false).into_any_element();
+        }
+        let list = div().flex().flex_col().gap_1().w_full();
+        list.children(entries.into_iter().map(|item| {
+            let order = form.group_slots.iter().position(|slot| *slot == item.slot);
+            let pick = Pick::QuickLaunch(Action::ToggleGroupItem(item.slot));
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "quick-launch-group-item-{}",
+                    item.slot
+                ))))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(px(8.0))
+                .py(px(5.0))
+                .rounded(px(5.0))
+                .map(|this| {
+                    if order.is_some() {
+                        this.bg(rgb(theme::accent_subtle()))
+                            .text_color(rgb(theme::accent()))
+                    } else {
+                        this.text_color(rgb(theme::fg()))
+                            .hover(|style| style.bg(rgb(theme::bg_hover())))
+                    }
+                })
+                .when(enabled, |this| this.cursor_pointer())
+                .when(enabled, |this| {
+                    this.on_click(
+                        cx.listener(move |page, _event, _window, cx| page.pick(pick.clone(), cx)),
+                    )
+                })
+                .when(!enabled, |this| this.opacity(0.45))
+                .child(div().w(px(22.0)).flex_shrink_0().text_xs().child(
+                    order.map_or_else(|| "·".to_string(), |order| format!("{}.", order + 1)),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_sm()
+                        .child(item.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(theme::fg_secondary()))
+                        .child(item.kind.clone()),
+                )
+        }))
+        .into_any_element()
     }
 
     /// The file card (§17.1 B): the path, the two buttons and the warning that
@@ -858,8 +1278,11 @@ struct Form {
     group: String,
     /// The slot of the item in that group.
     slot: u32,
-    /// The kind shown by the chips; a kind outside the four stays as it was.
+    /// The kind shown by the chips; a kind outside the six stays as it was.
     kind: String,
+    /// The slots a `group` item starts, in the order they were picked
+    /// (§17.2 E.3). Empty for every other kind.
+    group_slots: Vec<u32>,
     /// Whether the item is started elevated.
     admin: bool,
     name: Entity<InputState>,
@@ -868,6 +1291,11 @@ struct Form {
     cwd: Entity<InputState>,
     icon: Entity<InputState>,
     tags: Entity<InputState>,
+    /// The `command` fields: the shell, the script and the two flags (§17.2 D).
+    shell: String,
+    script: Entity<InputState>,
+    hidden: bool,
+    keep_open: bool,
 }
 
 /// Which field the file picker under the form fills.
@@ -905,6 +1333,7 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
             };
             page.quick_launch.group = Some(group.id.clone());
             page.quick_launch.form = None;
+            close_apps_picker(&mut page.quick_launch);
             cx.notify();
         }
         Action::SelectItem(slot) => {
@@ -917,33 +1346,69 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
             };
             page.quick_launch.select = Some((group.id.clone(), slot));
             page.quick_launch.form = None;
+            close_apps_picker(&mut page.quick_launch);
             cx.notify();
         }
         Action::SetKind(kind) => {
             if let Some(form) = page.quick_launch.form.as_mut() {
                 form.kind = kind.to_string();
             }
+            if kind != KIND_UWP {
+                close_apps_picker(&mut page.quick_launch);
+            }
             cx.notify();
         }
+        Action::ToggleGroupItem(slot) => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                match form
+                    .group_slots
+                    .iter()
+                    .position(|selected| *selected == slot)
+                {
+                    Some(index) => {
+                        form.group_slots.remove(index);
+                    }
+                    None => form.group_slots.push(slot),
+                }
+            }
+            cx.notify();
+        }
+        Action::ChooseApp => choose_app(page, cx),
+        Action::PickApp(index) => pick_app(page, index, cx),
         Action::ToggleAdmin => {
             if let Some(form) = page.quick_launch.form.as_mut() {
                 form.admin = !form.admin;
             }
             cx.notify();
         }
-        Action::NewGroup => {
-            if !quick_launch::editable(cx) || quick_launch::add_group(cx).is_none() {
-                return;
+        Action::SetShell(shell) => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                form.shell = shell.to_string();
             }
-            let groups = quick_launch::groups(cx);
-            let Some(group) = groups.last() else {
-                return;
-            };
-            page.quick_launch.renaming = Some(group.id.clone());
-            page.quick_launch.rename_input = None;
-            cx.refresh_windows();
             cx.notify();
         }
+        Action::ToggleHidden => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                form.hidden = !form.hidden;
+            }
+            cx.notify();
+        }
+        Action::ToggleKeepOpen => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                form.keep_open = !form.keep_open;
+            }
+            cx.notify();
+        }
+        Action::RevokeTrust => {
+            if let Some(form) = page.quick_launch.form.as_ref() {
+                let (group, slot) = (form.group.clone(), form.slot);
+                if quick_launch::revoke_command_trust(cx, &group, slot) {
+                    page.status = None;
+                }
+            }
+            cx.notify();
+        }
+        Action::NewGroup(kind) => new_group(page, kind, cx),
         Action::RenameGroup(index) => {
             let groups = quick_launch::groups(cx);
             let Some(group) = groups.get(index) else {
@@ -966,6 +1431,108 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
         Action::OpenFile => open_file(cx),
         Action::RevealFile => reveal_file(cx),
     }
+}
+
+/// Closes the `uwp` picker and forgets what it held for the frame that was
+/// waiting to fill the fields.
+fn close_apps_picker(section: &mut Section) {
+    section.apps_picker = false;
+    section.apps_query = None;
+    section.picked_app = None;
+}
+
+/// Opens or closes the installed-app picker (§17.2 B.5).
+///
+/// The Apps folder is enumerated once, on a thread of its own, the first time the
+/// picker opens, and the answer is kept for the session: a foreground thread must
+/// not do this work (§18), and walking the folder again for every click would only
+/// add latency.
+///
+/// The thread is not a GPUI pool thread on purpose: a pool thread may have been
+/// COM-initialised earlier, and with another apartment model
+/// `CoInitializeEx` answers `RPC_E_CHANGED_MODE` (§8.4). A one-shot thread, named
+/// for its job, starts clean; it answers through a channel so the foreground never
+/// waits on it.
+fn choose_app(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
+    let section = &mut page.quick_launch;
+    if section.apps_picker {
+        close_apps_picker(section);
+        cx.notify();
+        return;
+    }
+    section.apps_picker = true;
+    if section.apps.is_some() || section.apps_loading {
+        cx.notify();
+        return;
+    }
+    section.apps_loading = true;
+    section.apps_error = None;
+    let (sender, receiver) = async_channel::bounded(1);
+    let spawned = std::thread::Builder::new()
+        .name("quick-launch-apps".to_string())
+        .spawn(move || {
+            let outcome = ComApartment::enter()
+                .and_then(|_apartment| installed_apps())
+                .map_err(|error| error.to_string());
+            if let Err(error) = sender.send_blocking(outcome) {
+                tracing::debug!(target: "quick_launch", "the app list was not wanted: {error}");
+            }
+        });
+    if let Err(error) = spawned {
+        section.apps_loading = false;
+        section.apps_error = Some(format!("could not start the app list thread: {error}"));
+        cx.notify();
+        return;
+    }
+    cx.spawn(async move |this, cx| {
+        // The channel is the hand-off: `recv` yields as soon as the thread answers,
+        // and the foreground task never blocks.
+        let outcome = match receiver.recv().await {
+            Ok(outcome) => outcome,
+            Err(error) => Err(format!("the app list thread stopped: {error}")),
+        };
+        this.update(cx, |page, cx| {
+            let section = &mut page.quick_launch;
+            section.apps_loading = false;
+            match outcome {
+                Ok(apps) => section.apps = Some(apps),
+                Err(error) => section.apps_error = Some(error),
+            }
+            cx.notify();
+        })
+        .log_err();
+    })
+    .detach();
+    cx.notify();
+}
+
+/// Fills the form with the installed app at `index` (§17.2 B.5).
+///
+/// The click only stores the app: writing the input fields needs the window,
+/// which the next frame's [`ensure_inputs`] has.
+fn pick_app(page: &mut SettingsPage, index: usize, cx: &mut Context<SettingsPage>) {
+    let Some(app) = page
+        .quick_launch
+        .apps
+        .as_ref()
+        .and_then(|apps| apps.get(index))
+        .cloned()
+    else {
+        return;
+    };
+    page.quick_launch.picked_app = Some(app);
+    page.quick_launch.apps_picker = false;
+    cx.notify();
+}
+
+/// The installed apps whose name holds `query`, ignoring case and surrounding
+/// spaces, each with its index in `apps` so a click can name it again.
+fn matching_apps<'a>(apps: &'a [InstalledApp], query: &str) -> Vec<(usize, &'a InstalledApp)> {
+    let query = query.trim().to_lowercase();
+    apps.iter()
+        .enumerate()
+        .filter(|(_, app)| query.is_empty() || app.name.to_lowercase().contains(&query))
+        .collect()
 }
 
 /// A key pressed while the summon chord waits for one: Esc gives up, the
@@ -1028,14 +1595,14 @@ pub(super) fn ensure_inputs(
 ) {
     let groups = quick_launch::groups(cx);
     if let Some((group_id, slot)) = page.quick_launch.select.take() {
-        let item = groups
-            .iter()
-            .find(|group| group.id == group_id)
+        let found = groups.iter().find(|group| group.id == group_id);
+        let item = found
             .and_then(|found| found.items.iter().find(|item| item.slot == slot))
             .cloned();
+        let group_items = found.map(|found| found.items.clone()).unwrap_or_default();
         page.quick_launch.form = item
             .as_ref()
-            .map(|item| form_of(&group_id, item, window, cx));
+            .map(|item| form_of(&group_id, item, &group_items, window, cx));
     }
     // A form whose item is gone (deleted, moved, or edited by hand in the file)
     // closes rather than editing whatever took its place.
@@ -1046,6 +1613,27 @@ pub(super) fn ensure_inputs(
     });
     if stale {
         page.quick_launch.form = None;
+    }
+    if page.quick_launch.form.is_none() {
+        close_apps_picker(&mut page.quick_launch);
+    }
+    // A click on the app picker stores the app; the fields it fills are made
+    // with a window, so they are written here (§17.2 B.5).
+    if let Some(app) = page.quick_launch.picked_app.take() {
+        if let Some(form) = page.quick_launch.form.as_ref() {
+            form.path.update(cx, |state, cx| {
+                state.set_value(app.aumid.clone(), window, cx)
+            });
+            if form.name.read(cx).value().trim().is_empty() {
+                form.name.update(cx, |state, cx| {
+                    state.set_value(app.name.clone(), window, cx)
+                });
+            }
+        }
+        close_apps_picker(&mut page.quick_launch);
+    }
+    if page.quick_launch.apps_picker && page.quick_launch.apps_query.is_none() {
+        page.quick_launch.apps_query = Some(field(window, cx, t!("Filtrar"), ""));
     }
     match page.quick_launch.renaming.clone() {
         Some(id) => {
@@ -1070,11 +1658,44 @@ pub(super) fn ensure_inputs(
 }
 
 /// The form of one item, filled from the item the file holds now.
-fn form_of(group: &str, item: &Item, window: &mut Window, cx: &mut Context<SettingsPage>) -> Form {
+fn form_of(
+    group: &str,
+    item: &Item,
+    group_items: &[Item],
+    window: &mut Window,
+    cx: &mut Context<SettingsPage>,
+) -> Form {
+    // A command's `extra` is read through the same parser the launcher uses, so
+    // a broken entry opens as `cmd` with an empty script and is refused on save.
+    let command = nohrs_core::config::quick_launch::command_spec(item).ok();
+    let script = item
+        .extra
+        .get("script")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let script_input = cx.new(|cx| InputState::new(window, cx).multi_line(true).rows(4));
+    script_input.update(cx, |state, cx| {
+        state.set_placeholder(t!("Script"), window, cx);
+        state.set_value(script, window, cx);
+    });
+    // A `group`'s stored references are ids; the form works with the slots of
+    // the items they name, which is what the picker shows (§17.2 E.3).
+    let group_slots: Vec<u32> = item
+        .items
+        .iter()
+        .filter_map(|id| {
+            group_items
+                .iter()
+                .find(|candidate| candidate.id.as_deref() == Some(id.as_str()))
+                .map(|candidate| candidate.slot)
+        })
+        .collect();
     Form {
         group: group.to_string(),
         slot: item.slot,
         kind: item.kind.clone(),
+        group_slots,
         admin: item.admin,
         name: field(window, cx, t!("Nome"), &item.name),
         path: field(
@@ -1102,6 +1723,13 @@ fn form_of(group: &str, item: &Item, window: &mut Window, cx: &mut Context<Setti
             item.icon.as_deref().unwrap_or_default(),
         ),
         tags: field(window, cx, t!("Etiquetas"), &item.tags.join(", ")),
+        shell: command
+            .as_ref()
+            .map_or("cmd", |spec| spec.shell.as_str())
+            .to_string(),
+        script: script_input,
+        hidden: command.as_ref().is_some_and(|spec| spec.hidden),
+        keep_open: command.as_ref().is_some_and(|spec| spec.keep_open),
     }
 }
 
@@ -1153,22 +1781,46 @@ fn browse_button(field: Field, enabled: bool, cx: &mut Context<SettingsPage>) ->
         .when(enabled, |this| {
             this.cursor_pointer()
                 .hover(|style| style.bg(rgb(theme::bg_hover())))
-                .on_click(cx.listener(move |_page, _event, window, cx| browse(field, window, cx)))
+                .on_click(
+                    cx.listener(move |page, _event, window, cx| browse(page, field, window, cx)),
+                )
         })
         .when(!enabled, |this| this.opacity(0.45))
         .child(t!("Procurar…"))
         .into_any_element()
 }
 
+/// What a "browse…" button may pick (§17.2 R2): the working directory is always a
+/// folder, a `folder` item picks a folder and every other kind picks a file.
+///
+/// `kind` is the form's type, `None` when there is no form yet.
+fn browse_want(field: Field, kind: Option<&str>) -> quick_launch::PathWant {
+    match field {
+        Field::Cwd => quick_launch::PathWant::Folders,
+        Field::Path if kind == Some("folder") => quick_launch::PathWant::Folders,
+        Field::Path => quick_launch::PathWant::Files,
+    }
+}
+
 /// Opens a file picker for one of the form's two path fields, on the window.
-fn browse(field: Field, window: &mut Window, cx: &mut Context<SettingsPage>) {
-    let cwd = matches!(field, Field::Cwd);
-    let receiver = cx.prompt_for_paths(PathPromptOptions {
-        files: !cwd,
-        directories: true,
-        multiple: false,
-        prompt: Some(SharedString::from(t!("Escolher um arquivo ou uma pasta"))),
-    });
+///
+/// The page is handed in by the listener: reading it back through the entity while
+/// the listener holds it leased is a `double_lease_panic` (M4 R4).
+fn browse(page: &SettingsPage, field: Field, window: &mut Window, cx: &mut Context<SettingsPage>) {
+    let kind = page
+        .quick_launch
+        .form
+        .as_ref()
+        .map(|form| form.kind.as_str());
+    let want = browse_want(field, kind);
+    let prompt = match want {
+        quick_launch::PathWant::Folders => t!("Escolher uma pasta"),
+        // S2: the dialog's confirm button reads better as "pick a path".
+        quick_launch::PathWant::Files | quick_launch::PathWant::Either => {
+            t!("Escolher um caminho")
+        }
+    };
+    let receiver = cx.prompt_for_paths(quick_launch::path_prompt_for(cx, want, false, prompt));
     cx.spawn_in(window, async move |this, cx| {
         let Ok(Ok(Some(paths))) = receiver.await else {
             return;
@@ -1256,6 +1908,62 @@ fn delete_group(page: &mut SettingsPage, index: usize, cx: &mut Context<Settings
     cx.notify();
 }
 
+/// Creates a group of the chosen kind (§17.2 G.6).
+///
+/// A folder group asks for its directory with the picker the item form already
+/// uses; the other kinds need nothing before the group exists. Every kind starts
+/// the inline rename, as the ordinary "new group" always did.
+fn new_group(page: &mut SettingsPage, kind: NewGroupKind, cx: &mut Context<SettingsPage>) {
+    if !quick_launch::editable(cx) {
+        return;
+    }
+    match kind {
+        NewGroupKind::Normal => add_new_group(page, None, cx),
+        NewGroupKind::Recent => add_new_group(page, Some("recent".to_string()), cx),
+        NewGroupKind::MostUsed => add_new_group(page, Some("most_used".to_string()), cx),
+        NewGroupKind::Folder => {
+            let receiver = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some(SharedString::from(t!("Escolher um arquivo ou uma pasta"))),
+            });
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(Some(paths))) = receiver.await else {
+                    return;
+                };
+                let Some(path) = paths.first() else {
+                    return;
+                };
+                let source = format!("folder:{}", path.to_string_lossy());
+                this.update(cx, |page, cx| add_new_group(page, Some(source), cx))
+                    .log_err();
+            })
+            .detach();
+        }
+    }
+}
+
+/// Adds one group, points the item card at it and starts its rename.
+fn add_new_group(page: &mut SettingsPage, source: Option<String>, cx: &mut Context<SettingsPage>) {
+    let Some(index) = quick_launch::add_group_with_source(cx, source) else {
+        return;
+    };
+    let groups = quick_launch::groups(cx);
+    let Some(group) = groups.get(index) else {
+        return;
+    };
+    page.quick_launch.group = Some(group.id.clone());
+    page.quick_launch.renaming = Some(group.id.clone());
+    page.quick_launch.rename_input = None;
+    page.quick_launch.form = None;
+    // A generated group has its items at once, or the note saying why it has
+    // none.
+    quick_launch::refresh_dynamic_groups(cx);
+    cx.refresh_windows();
+    cx.notify();
+}
+
 /// Moves one group to `to`, then tells both windows about the new order.
 fn move_group(cx: &mut Context<SettingsPage>, from: usize, to: Option<usize>) {
     if !quick_launch::editable(cx) {
@@ -1285,6 +1993,7 @@ fn save_item(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
         return;
     };
     let slot = form.slot;
+    let kind = form.kind.clone();
     let edit = quick_launch::ItemEdit {
         kind: form.kind.clone(),
         name: form.name.read(cx).value().to_string(),
@@ -1300,10 +2009,28 @@ fn save_item(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
             .split(',')
             .map(str::to_string)
             .collect(),
+        command: (kind == KIND_COMMAND).then(|| quick_launch::CommandEdit {
+            shell: form.shell.clone(),
+            script: form.script.read(cx).value().to_string(),
+            hidden: form.hidden,
+            keep_open: form.keep_open,
+        }),
+        // The picker's order is the order the group starts its entries in.
+        group_items: (kind == quick_launch::KIND_GROUP).then(|| form.group_slots.clone()),
     };
     if quick_launch::update_item(cx, index, slot, &edit) {
         page.status = None;
         cx.refresh_windows();
+    } else if kind == KIND_COMMAND {
+        page.status = Some((
+            t!("Não foi possível salvar o comando. Confira o shell e o script.").to_string(),
+            true,
+        ));
+    } else if kind == quick_launch::KIND_GROUP {
+        page.status = Some((
+            t!("Não foi possível salvar o grupo. Confira o nome e os itens.").to_string(),
+            true,
+        ));
     } else {
         page.status = Some((
             t!("Não foi possível salvar o item. Confira o nome e o caminho.").to_string(),
@@ -1468,11 +2195,13 @@ mod tests {
                 id: "first".to_string(),
                 name: "Primeiro".to_string(),
                 items: Vec::new(),
+                source: None,
             },
             LaunchGroup {
                 id: "second".to_string(),
                 name: "Segundo".to_string(),
                 items: Vec::new(),
+                source: None,
             },
         ];
         assert_eq!(section.chosen_group(&groups), Some(0));
@@ -1497,5 +2226,68 @@ mod tests {
         for &(_, value) in &LIST_COLUMNS {
             assert!((1..=3).contains(&value));
         }
+    }
+
+    /// §17.2 B.5: the picker narrows the installed apps by the typed name,
+    /// without regard to case.
+    #[test]
+    fn the_app_picker_filters_by_name_without_regard_to_case() {
+        let apps = vec![
+            InstalledApp {
+                name: "Calculadora".to_string(),
+                aumid: "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".to_string(),
+            },
+            InstalledApp {
+                name: "Fotos".to_string(),
+                aumid: "Microsoft.Windows.Photos_8wekyb3d8bbwe!App".to_string(),
+            },
+        ];
+        let matching = matching_apps(&apps, "calc");
+        assert_eq!(matching.len(), 1, "only the calculator matches");
+        assert_eq!(matching[0].0, 0, "the index names the full list");
+        assert_eq!(matching[0].1.name, "Calculadora");
+        assert_eq!(matching_apps(&apps, "FOTOS")[0].0, 1);
+        assert_eq!(
+            matching_apps(&apps, "   ").len(),
+            2,
+            "an empty query shows all"
+        );
+        assert!(matching_apps(&apps, "nada").is_empty());
+    }
+
+    /// §17.2 R2, M4 R4: the browse button's choice follows the field and the
+    /// form's type.
+    #[test]
+    fn browse_want_follows_the_field_and_the_item_kind() {
+        use quick_launch::PathWant;
+        assert_eq!(browse_want(Field::Cwd, Some("app")), PathWant::Folders);
+        assert_eq!(browse_want(Field::Cwd, None), PathWant::Folders);
+        assert_eq!(browse_want(Field::Path, Some("folder")), PathWant::Folders);
+        assert_eq!(browse_want(Field::Path, Some("app")), PathWant::Files);
+        assert_eq!(browse_want(Field::Path, Some("command")), PathWant::Files);
+        assert_eq!(browse_want(Field::Path, None), PathWant::Files);
+    }
+
+    /// M4 R4: the browse button reads the page it is handed, inside the update
+    /// that holds it — the shape that used to be a `double_lease_panic`.
+    #[gpui::test]
+    fn the_browse_button_reads_the_page_it_is_handed(cx: &mut gpui::TestAppContext) {
+        let page = cx.new(crate::settings::SettingsPage::new);
+        page.update(cx, |page, _cx| {
+            let kind = page
+                .quick_launch
+                .form
+                .as_ref()
+                .map(|form| form.kind.as_str());
+            assert_eq!(kind, None, "no form is open yet");
+            assert_eq!(
+                browse_want(Field::Path, kind),
+                quick_launch::PathWant::Files
+            );
+            assert_eq!(
+                browse_want(Field::Cwd, kind),
+                quick_launch::PathWant::Folders
+            );
+        });
     }
 }

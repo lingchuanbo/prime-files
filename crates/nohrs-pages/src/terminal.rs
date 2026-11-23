@@ -612,6 +612,15 @@ fn resolve(color: TermColor, colors: &Colors) -> Hsla {
     gpui::rgb((u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)).into()
 }
 
+/// The monospace face the preview terminal draws with.
+///
+/// The command confirmation and the other boxes that must line up character by
+/// character use the same family and fallback, so a script reads the same wherever
+/// it appears.
+pub(crate) fn code_font() -> Font {
+    terminal_font(false, false)
+}
+
 fn terminal_font(bold: bool, italic: bool) -> Font {
     Font {
         family: "Cascadia Mono".into(),

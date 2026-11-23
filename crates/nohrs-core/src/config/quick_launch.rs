@@ -67,6 +67,8 @@ pub enum OnRunning {
     Activate,
     /// Start a second instance.
     New,
+    /// Ask every time (§17.2 F).
+    Ask,
 }
 
 /// Window-level settings (`[window]` in the file).
@@ -133,6 +135,57 @@ pub struct Group {
     /// The group's items (`[[group.item]]`).
     #[serde(default, rename = "item", skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<Item>,
+    /// A dynamic group's source (`folder:<path>`, `recent`, `most_used`), §17.2 G.
+    ///
+    /// A group with one has no items of its own: its items are generated at
+    /// runtime and never written back, so a file that also lists items drops them
+    /// with a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// What a dynamic group's `source` asked for (§17.2 A.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupSource {
+    /// `folder:<path>`: the directory's entries, as written (variables expand
+    /// when it is read).
+    Folder(String),
+    /// `recent`: the entries launched most recently.
+    Recent,
+    /// `most_used`: the entries launched most often.
+    MostUsed,
+    /// Anything else; the group shows what the author wrote and stays static.
+    Unknown(String),
+}
+
+impl GroupSource {
+    /// Whether the group's items are generated at runtime.
+    pub fn is_dynamic(&self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+
+    /// The `source` text back, for display and for writing the file.
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Folder(path) => format!("folder:{path}"),
+            Self::Recent => "recent".to_string(),
+            Self::MostUsed => "most_used".to_string(),
+            Self::Unknown(other) => other.clone(),
+        }
+    }
+}
+
+/// What `group.source` asks for, or `None` when the group is static (§17.2 A.2).
+pub fn group_source(group: &Group) -> Option<GroupSource> {
+    let source = group.source.as_deref()?;
+    Some(match source {
+        "recent" => GroupSource::Recent,
+        "most_used" => GroupSource::MostUsed,
+        _ => match source.strip_prefix("folder:") {
+            Some(path) if !path.is_empty() => GroupSource::Folder(path.to_string()),
+            _ => GroupSource::Unknown(source.to_string()),
+        },
+    })
 }
 
 /// One launchable entry (`[[group.item]]`).
@@ -260,6 +313,85 @@ impl Item {
     }
 }
 
+/// The shell a `command` item runs through (§17.2 A.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    /// `cmd.exe`.
+    Cmd,
+    /// PowerShell 7 (`pwsh.exe`).
+    Pwsh,
+    /// Windows PowerShell (`powershell.exe`).
+    PowerShell,
+    /// `python.exe`.
+    Python,
+}
+
+impl Shell {
+    /// The `extra.shell` value this shell answers to.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cmd => "cmd",
+            Self::Pwsh => "pwsh",
+            Self::PowerShell => "powershell",
+            Self::Python => "python",
+        }
+    }
+}
+
+/// What a `command` item's `extra` says (§17.2 A.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSpec {
+    /// The shell that runs `script`.
+    pub shell: Shell,
+    /// The script itself, passed to the shell, never parsed here.
+    pub script: String,
+    /// Run without a console window (`CREATE_NO_WINDOW`).
+    pub hidden: bool,
+    /// Keep the console open when the script ends.
+    pub keep_open: bool,
+}
+
+/// Reads a `command` item's `extra`, or says what is wrong with it (§17.2 A.3).
+///
+/// The message is for the author (it is shown by the health check), so it names
+/// the field and what it expected.
+pub fn command_spec(item: &Item) -> Result<CommandSpec, String> {
+    let shell = match item.extra.get("shell").and_then(|value| value.as_str()) {
+        Some("cmd") => Shell::Cmd,
+        Some("pwsh") => Shell::Pwsh,
+        Some("powershell") => Shell::PowerShell,
+        Some("python") => Shell::Python,
+        Some(other) => {
+            return Err(format!(
+                "extra.shell {other:?} is not one of cmd, pwsh, powershell, python"
+            ));
+        }
+        None => return Err("extra.shell is missing".to_string()),
+    };
+    let script = match item.extra.get("script").and_then(|value| value.as_str()) {
+        Some(script) if !script.is_empty() => script.to_string(),
+        Some(_) => return Err("extra.script is empty".to_string()),
+        None => return Err("extra.script is missing".to_string()),
+    };
+    let flag = |name: &str| -> Result<bool, String> {
+        match item.extra.get(name) {
+            None => Ok(false),
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| format!("extra.{name} must be true or false")),
+        }
+    };
+    Ok(CommandSpec {
+        shell,
+        script,
+        hidden: flag("hidden")?,
+        keep_open: flag("keep_open")?,
+    })
+}
+
+/// The keys `extra` may carry for a `command` item (§17.2 A.3).
+const COMMAND_KEYS: [&str; 4] = ["shell", "script", "hidden", "keep_open"];
+
 /// The item a path becomes (§12.3): a folder is a `folder`, an executable or
 /// shortcut is an `app`, everything else a `file`.
 ///
@@ -323,6 +455,7 @@ impl QuickLaunchConfig {
                 id: DEFAULT_GROUP_ID.to_string(),
                 name: crate::t!("Geral").to_string(),
                 items: Vec::new(),
+                source: None,
             }],
             ..Self::default()
         }
@@ -425,6 +558,27 @@ pub enum Warning {
         /// The item's slot.
         slot: u32,
     },
+    /// A dynamic group's file also listed items; they were dropped (§17.2 A.2).
+    ItemsInDynamicGroup {
+        /// The group's id.
+        group: String,
+    },
+    /// A group's `source` is not one this build knows (§17.2 A.2).
+    UnknownGroupSource {
+        /// The group's id.
+        group: String,
+        /// The source as written.
+        source: String,
+    },
+    /// A `command` item's `extra` has a key the shell does not take (§17.2 A.3).
+    UnknownCommandKey {
+        /// The group's id.
+        group: String,
+        /// The item's slot.
+        slot: u32,
+        /// The key as written.
+        key: String,
+    },
     /// A `group` item referenced something it cannot.
     ReferenceDropped {
         /// The group's id.
@@ -509,6 +663,18 @@ impl std::fmt::Display for Warning {
             Warning::ExtraCleared { group, slot } => write!(
                 formatter,
                 "group {group:?}: item in slot {slot} has extra data its type does not take, cleared"
+            ),
+            Warning::ItemsInDynamicGroup { group } => write!(
+                formatter,
+                "group {group:?} has a source, so the items written for it are ignored"
+            ),
+            Warning::UnknownGroupSource { group, source } => write!(
+                formatter,
+                "group {group:?}: source {source:?} is not folder:<path>, recent or most_used"
+            ),
+            Warning::UnknownCommandKey { group, slot, key } => write!(
+                formatter,
+                "group {group:?}: item in slot {slot} has extra.{key}, which command does not take"
             ),
             Warning::ReferenceDropped {
                 group,
@@ -598,7 +764,15 @@ pub fn parse(text: &str) -> Result<Parsed, QuickLaunchError> {
 /// Comments the author wrote are not preserved; the settings page warns about
 /// that before offering to rewrite the file (§5.2).
 pub fn to_toml(config: &QuickLaunchConfig) -> Result<String, QuickLaunchError> {
-    toml::to_string(config).map_err(|error| QuickLaunchError::Serialize {
+    // §17.2 A.2 (and G): a dynamic group's items are generated at runtime and
+    // never written back, so the copy handed to the serializer has none.
+    let mut config = config.clone();
+    for group in &mut config.groups {
+        if group_source(group).is_some_and(|source| source.is_dynamic()) {
+            group.items.clear();
+        }
+    }
+    toml::to_string(&config).map_err(|error| QuickLaunchError::Serialize {
         message: error.to_string(),
     })
 }
@@ -654,6 +828,23 @@ fn validate(mut config: QuickLaunchConfig, warnings: &mut Vec<Warning>) -> Quick
         }
         truncate_name(&mut group.name, &format!("group {:?}", group.id), warnings);
         seen_groups.push(group.id.clone());
+        // §17.2 A.2: a group with a source has no items of its own. The file may
+        // still carry some (an older build wrote them, or a hand edit); drop them
+        // rather than run them.
+        if let Some(source) = group_source(&group) {
+            if source.is_dynamic() && !group.items.is_empty() {
+                warnings.push(Warning::ItemsInDynamicGroup {
+                    group: group.id.clone(),
+                });
+                group.items.clear();
+            }
+            if matches!(source, GroupSource::Unknown(_)) {
+                warnings.push(Warning::UnknownGroupSource {
+                    group: group.id.clone(),
+                    source: source.as_str(),
+                });
+            }
+        }
         validate_items(&mut group, warnings);
         groups.push(group);
     }
@@ -762,6 +953,17 @@ fn validate_items(group: &mut Group, warnings: &mut Vec<Warning>) {
             &format!("group {:?} slot {}", group.id, item.slot),
             warnings,
         );
+        if matches!(item.action_kind(), ActionKind::Command) {
+            for key in item.extra.keys() {
+                if !COMMAND_KEYS.contains(&key.as_str()) {
+                    warnings.push(Warning::UnknownCommandKey {
+                        group: group.id.clone(),
+                        slot: item.slot,
+                        key: key.clone(),
+                    });
+                }
+            }
+        }
         if !item.carries_extra() && !item.extra.is_empty() {
             warnings.push(Warning::ExtraCleared {
                 group: group.id.clone(),
@@ -968,6 +1170,198 @@ mod tests {
         );
     }
 
+    /// §17.2 A.1: `ask` is a third value of `on_running`, and the default stays
+    /// `activate`.
+    #[test]
+    fn ask_is_a_window_setting_that_round_trips() {
+        let text = "[window]\non_running = \"ask\"\n";
+        let parsed = parse_ok(text);
+        assert_eq!(parsed.config.window.on_running, OnRunning::Ask);
+        let written = to_toml(&parsed.config).expect("the model should write");
+        assert!(written.contains("on_running = \"ask\""), "{written}");
+        assert_eq!(
+            QuickLaunchConfig::default().window.on_running,
+            OnRunning::Activate
+        );
+    }
+
+    /// §17.2 A.2: the three sources, and anything else is `Unknown`.
+    #[test]
+    fn a_group_source_is_read_the_way_it_is_written() {
+        let folder = Group {
+            id: "tools".to_string(),
+            name: "Ferramentas".to_string(),
+            items: Vec::new(),
+            source: Some("folder:C:/Tools".to_string()),
+        };
+        assert_eq!(
+            group_source(&folder),
+            Some(GroupSource::Folder("C:/Tools".to_string()))
+        );
+        let recent = Group {
+            source: Some("recent".to_string()),
+            ..folder.clone()
+        };
+        assert_eq!(group_source(&recent), Some(GroupSource::Recent));
+        let most_used = Group {
+            source: Some("most_used".to_string()),
+            ..folder.clone()
+        };
+        assert_eq!(group_source(&most_used), Some(GroupSource::MostUsed));
+        let unknown = Group {
+            source: Some("favorites".to_string()),
+            ..folder.clone()
+        };
+        assert_eq!(
+            group_source(&unknown),
+            Some(GroupSource::Unknown("favorites".to_string()))
+        );
+        let static_group = Group {
+            source: None,
+            ..folder
+        };
+        assert_eq!(group_source(&static_group), None);
+        // A `folder:` with nothing after it is unknown, not an empty folder.
+        let empty = Group {
+            source: Some("folder:".to_string()),
+            ..static_group
+        };
+        assert_eq!(
+            group_source(&empty),
+            Some(GroupSource::Unknown("folder:".to_string()))
+        );
+    }
+
+    /// §17.2 A.2: a dynamic group's written items are dropped with a warning.
+    #[test]
+    fn a_dynamic_group_drops_the_items_the_file_also_wrote() {
+        let text = r#"
+[[group]]
+id = "recent"
+name = "Recentes"
+source = "recent"
+
+[[group.item]]
+slot = 0
+type = "app"
+name = "Calculadora"
+path = "C:/Windows/calc.exe"
+"#;
+        let parsed = parse_ok(text);
+        assert!(parsed.config.groups[0].items.is_empty());
+        assert!(parsed.warnings.contains(&Warning::ItemsInDynamicGroup {
+            group: "recent".to_string()
+        }));
+    }
+
+    /// §17.2 A.2: an unknown source is kept and reported.
+    #[test]
+    fn an_unknown_group_source_is_reported_and_kept() {
+        let text = "[[group]]\nid = \"x\"\nname = \"X\"\nsource = \"favorites\"\n";
+        let parsed = parse_ok(text);
+        assert_eq!(parsed.config.groups[0].source.as_deref(), Some("favorites"));
+        assert!(parsed.warnings.contains(&Warning::UnknownGroupSource {
+            group: "x".to_string(),
+            source: "favorites".to_string()
+        }));
+    }
+
+    /// §17.2 A.2: the writer never puts a dynamic group's items back.
+    #[test]
+    fn the_writer_leaves_a_dynamic_group_without_items() {
+        let mut group = Group {
+            id: "recent".to_string(),
+            name: "Recentes".to_string(),
+            items: vec![item(0, "app", "Calculadora")],
+            source: Some("recent".to_string()),
+        };
+        group.items[0].path = Some("C:/Windows/calc.exe".to_string());
+        let config = QuickLaunchConfig {
+            groups: vec![group],
+            ..QuickLaunchConfig::default()
+        };
+        let written = to_toml(&config).expect("the model should write");
+        assert!(!written.contains("[[group.item]]"), "{written}");
+        assert!(!written.contains("Calculadora"), "{written}");
+        assert!(written.contains("source = \"recent\""), "{written}");
+    }
+
+    /// §17.2 A.3: the four shells and the two flags.
+    #[test]
+    fn a_command_spec_reads_the_extra_table() {
+        let mut command = item(0, "command", "Echo");
+        command.extra = toml::Table::new();
+        assert_eq!(
+            command_spec(&command),
+            Err("extra.shell is missing".to_string())
+        );
+        for (text, shell) in [
+            ("cmd", Shell::Cmd),
+            ("pwsh", Shell::Pwsh),
+            ("powershell", Shell::PowerShell),
+            ("python", Shell::Python),
+        ] {
+            command.extra.insert("shell".to_string(), text.into());
+            command.extra.insert("script".to_string(), "echo ok".into());
+            let spec = command_spec(&command).expect("a valid spec");
+            assert_eq!(spec.shell, shell);
+            assert_eq!(spec.script, "echo ok");
+            assert!(!spec.hidden);
+            assert!(!spec.keep_open);
+        }
+        command.extra.insert("hidden".to_string(), true.into());
+        command.extra.insert("keep_open".to_string(), true.into());
+        let spec = command_spec(&command).expect("a valid spec");
+        assert!(spec.hidden);
+        assert!(spec.keep_open);
+    }
+
+    /// §17.2 A.3: every rejection names what it did not like.
+    #[test]
+    fn a_command_spec_refuses_what_the_shell_cannot_take() {
+        let mut command = item(0, "command", "Echo");
+        command.extra.insert("shell".to_string(), "bash".into());
+        command.extra.insert("script".to_string(), "echo ok".into());
+        assert!(command_spec(&command).is_err());
+        command.extra.insert("shell".to_string(), "cmd".into());
+        command.extra.insert("script".to_string(), "".into());
+        assert!(command_spec(&command).is_err());
+        command.extra.remove("script");
+        assert!(command_spec(&command).is_err());
+        command.extra.insert("script".to_string(), "echo ok".into());
+        command.extra.insert("hidden".to_string(), "yes".into());
+        assert!(command_spec(&command).is_err());
+        command.extra.insert("hidden".to_string(), true.into());
+        assert!(command_spec(&command).is_ok());
+    }
+
+    /// §17.2 A.3: a key the shell does not take is reported, and the item stays.
+    #[test]
+    fn an_unknown_command_key_is_reported_and_the_item_kept() {
+        let text = r#"
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "command"
+name = "Echo"
+
+[group.item.extra]
+shell = "cmd"
+script = "echo ok"
+colors = true
+"#;
+        let parsed = parse_ok(text);
+        assert_eq!(parsed.config.groups[0].items.len(), 1);
+        assert!(parsed.warnings.contains(&Warning::UnknownCommandKey {
+            group: "general".to_string(),
+            slot: 0,
+            key: "colors".to_string()
+        }));
+    }
+
     fn parse_ok(text: &str) -> Parsed {
         parse(text).expect("the document should parse")
     }
@@ -1107,6 +1501,7 @@ extra = { key = "value" }
             id: "general".to_string(),
             name: "Geral".to_string(),
             items: vec![item(0, "app", "A"), item(1, "app", "B")],
+            source: None,
         };
         group.items[0].id = Some("a".to_string());
         group.items[1].id = Some("b".to_string());
@@ -1716,11 +2111,13 @@ items = ["x"]
                     id: "a".to_string(),
                     name: "A".to_string(),
                     items: Vec::new(),
+                    source: None,
                 },
                 Group {
                     id: "b".to_string(),
                     name: "B".to_string(),
                     items: Vec::new(),
+                    source: None,
                 },
             ],
             ..QuickLaunchConfig::default()

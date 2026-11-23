@@ -137,7 +137,7 @@ list_columns = 2            # 1..=3
 auto_hide = true
 topmost = false
 close_after_launch = true
-on_running = "activate"     # "activate" | "new"
+on_running = "activate"     # "activate" | "new" | "ask"
 keep_running = true
 
 [[group]]
@@ -166,6 +166,71 @@ args = ""
 - 書き込みは 300 ms にまとめ、一時ファイル → `fsync` → `.bak` → rename の順で行う。
   書き直すため、手書きのコメントと整形は失われる。
 - 変更は監視されており、外部で編集された場合も内容のハッシュが変わった時点で読み直す。
+
+#### グループの `source` (動的分組)
+
+`[[group]]` の `source` は省略できる。書くとそのグループの項目はファイルではなく実行時に
+生成され、ファイルには項目を書かない (書いても破棄され、警告が出る)。
+
+```toml
+[[group]]
+id = "tools"
+name = "Ferramentas"
+source = "folder:%USERPROFILE%\\bin"   # folder:<パス> / "recent" / "most_used"
+```
+
+- `folder:<パス>` はそのディレクトリの直下だけ (再帰しない) を、名前の大文字小文字を無視して
+  並べる。隠しファイルとシステムファイルは除き、スロット 0 から最大 512 件。読み直しは
+  30 秒に 1 回までで、ファイル監視はしない。ディレクトリが無いときは項目が空になる。
+- `recent` は最終使用の新しい順、`most_used` は回数の多い順 (同数は最終使用順)。
+  現在も設定に残っている元項目だけを対象にし、最大 `columns × 2` (32 件まで)。
+- 常駐モード (`state.redb` を開かない) では `recent` / `most_used` は使えない。
+- 動的分組の項目は読み取り専用。`noh ql list` は `(dynamic: <source>)` とだけ表示し、
+  `noh ql add` / `remove` / `run` は拒否する。
+- それ以外の `source` は警告のうえ「不明」として扱い、書かれた項目を持つ普通のグループになる。
+- `source` を書いたグループは、保存時に `id` / `name` / `source` だけが書き戻される。
+
+#### `command` の `extra`
+
+`type = "command"` の項目は `path` の代わりに `extra` でシェルスクリプトを指定する。
+`path` と `args` は使わない。
+
+```toml
+[[group.item]]
+slot = 1
+type = "command"
+name = "Build"
+cwd = "%USERPROFILE%\\src"
+
+[group.item.extra]
+shell = "pwsh"             # 必須: "cmd" | "pwsh" | "powershell" | "python"
+script = "npm run build"   # 必須: 空でない文字列
+hidden = false             # 省略可: true で CREATE_NO_WINDOW (ウィンドウを出さない)
+keep_open = false          # 省略可: true で終了後もコンソールを開いたまま
+```
+
+| キー | 必須 | 既定 | 意味 |
+|---|---|---|---|
+| `shell` | はい | — | 実行するシェル。`cmd` / `pwsh` (PowerShell 7) / `powershell` (Windows PowerShell) / `python` のいずれか |
+| `script` | はい | — | シェルに渡すスクリプト。空文字は不可 |
+| `hidden` | いいえ | `false` | `true` なら `CREATE_NO_WINDOW` でウィンドウを出さない |
+| `keep_open` | いいえ | `false` | `true` なら終了後もコンソールを開いたままにする (`cmd` は `/k`、PowerShell は `-NoExit`、Python は `-i`) |
+
+- `shell` が上の 4 つ以外、`script` が空、`hidden` / `keep_open` が真偽値でないときは、
+  その項目は起動できない (健全性チェックが「無効」を返す)。`extra` の未知のキーは警告だけで、
+  項目は残る。
+- `admin = true` の `command` はこの期では未対応 (D4)。
+- 初回の起動時は確認の浮層が出る。信頼の記録は `shell` / `script` / 書かれた `cwd` /
+  `hidden` / `keep_open` のハッシュで、設定ページのフォームから保存したときだけ自動で信頼される。
+- `cwd` を省略すると `%USERPROFILE%`。存在しないディレクトリを指すと「無効」になる。
+
+#### `on_running` の `"ask"`
+
+`[window] on_running = "ask"` は、同じ exe が既に動いていてメインウィンドウを前に出せるときに、
+起動もアクティブ化もせず確認する。`"activate"` はそのまま前に出し、`"new"` は常に新しい
+インスタンスを起動する。確認では「Ir para ele」(実行中のプログラムへ切り替え)・
+「Abrir outra vez」(別インスタンスを起動)・「Cancelar」を選ぶ。使用回数は選んだ後だけ記録する。
+CLI (`noh ql run`) には画面が無いため、`"ask"` は `"activate"` として扱う。
 
 JSON Schema は [`quicklaunch.schema.json`](./quicklaunch.schema.json) にコミットしており、
 VS Code (Even Better TOML 拡張) などで補完と検証に使える。`config.toml` と同じく

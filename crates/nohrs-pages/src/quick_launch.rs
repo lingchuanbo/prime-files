@@ -32,25 +32,28 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gpui::{
-    App, AppContext as _, Bounds, Global, Pixels, PlatformDisplay, Point, RenderImage, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Global, PathPromptOptions, Pixels, PlatformDisplay, Point,
+    RenderImage, SharedString, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    point, px, size,
 };
 use gpui_component::Root;
 use nohrs_core::config::ConfigWatcher;
 use nohrs_core::config::paths;
 use nohrs_core::config::quick_launch::{
-    Group, Item, OnRunning, Parsed, QuickLaunchConfig, QuickLaunchError, View, Warning,
-    WindowSettings,
+    ActionKind, CommandSpec, Group, GroupSource, Item, MAX_GROUP_NESTING, MAX_GROUP_REFERENCES,
+    OnRunning, Parsed, QuickLaunchConfig, QuickLaunchError, View, Warning, WindowSettings,
+    command_spec, group_source, item_for_path,
 };
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::launch::LaunchRegistry;
 use nohrs_services::launch::{
-    ExpandContext, Health, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
+    ExpandContext, Health, KIND_COMMAND, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
 };
 use nohrs_store::{KvKey, KvOp, KvStore};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatchConfig, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::explorer::thumbnails;
 
@@ -72,6 +75,17 @@ const AUTO_HIDE_DELAY: Duration = Duration::from_millis(150);
 /// How long edits are merged before writing the file (§5.2).
 const SAVE_THROTTLE: Duration = Duration::from_millis(300);
 
+/// How long a `folder:` group's listing is reused before the directory is read
+/// again (§17.2 G.2).
+const FOLDER_REFRESH: Duration = Duration::from_secs(30);
+
+/// How many entries one `folder:` group may show (§17.2 G.2).
+const MAX_FOLDER_ITEMS: usize = 512;
+
+/// The most entries a `recent`/`most_used` group shows, whatever the columns
+/// (§17.2 G.3, D7).
+const MAX_USAGE_ITEMS: usize = 32;
+
 /// Window size when the view is a grid (logical pixels).
 const GRID_WINDOW_SIZE: (f32, f32) = (980.0, 875.0);
 
@@ -89,6 +103,15 @@ const KV_NAMESPACE: &str = "quick_launch";
 
 /// The key of the last group shown (§6).
 const LAST_GROUP_KEY: &str = "last_group";
+
+/// The name prefix of a command's trust record (§6, §17.2 D.1).
+const TRUSTED_PREFIX: &str = "trusted_";
+
+/// How many hex characters of the SHA-256 digest name a trust record (§17.2 D.1).
+const TRUST_KEY_HEX_LENGTH: usize = 32;
+
+/// The item `type` that bundles other items of its group (§17.2 E).
+pub(crate) const KIND_GROUP: &str = "group";
 
 /// How the state came to hold its configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +241,12 @@ struct StartRequest {
     on_running: OnRunning,
     /// Echoed back so a reply the window has moved on from is dropped (§8.4).
     generation: u64,
+    /// The group launch this request belongs to, when it is one (§17.2 E.1).
+    ///
+    /// A batch sends several requests that share one id, so their replies are
+    /// counted together instead of each one closing the window and counting a
+    /// use of its own.
+    batch: Option<u64>,
 }
 
 /// One health request for the `quick-launch-icons` thread.
@@ -241,6 +270,8 @@ struct IconRequest {
 enum WorkerReply {
     Launched {
         generation: u64,
+        /// The batch the request belonged to, echoed as it was sent (§17.2 E.1).
+        batch: Option<u64>,
         name: String,
         outcome: std::result::Result<LaunchOutcome, LaunchError>,
     },
@@ -387,6 +418,7 @@ fn run_launch_worker(
     let context = ExpandContext::current();
     while let Ok(request) = receiver.recv() {
         let generation = request.generation;
+        let batch = request.batch;
         let name = request.item.name.clone();
         let launch_request = LaunchRequest {
             mode: request.mode,
@@ -406,6 +438,7 @@ fn run_launch_worker(
         replies
             .try_send(WorkerReply::Launched {
                 generation,
+                batch,
                 name,
                 outcome,
             })
@@ -745,12 +778,29 @@ impl From<SavedBounds> for Bounds<Pixels> {
     }
 }
 
-/// What the store remembered: where the window was on each display, and which
-/// group was last shown (§6).
+/// One item's use count and last use, as `state.redb` keeps it (§6).
+///
+/// The state holds these in memory too: the `recent` and `most_used` groups are
+/// built from them without a store read (§17.2 G.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Usage {
+    count: u32,
+    last: u64,
+}
+
+/// What the store remembered: where the window was on each display, which
+/// group was last shown, which commands the user trusted (§6), and how often
+/// each item was used.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Restored {
     positions: HashMap<String, SavedBounds>,
     last_group: Option<String>,
+    /// The hex part of every `trusted_*` key the store held (§17.2 D.1). A
+    /// resident process adds the ones the user confirmed to this set without a
+    /// store, so they last until the process ends (§17.2 D.5).
+    trusted: HashSet<String>,
+    /// Every `usage_*` record, by group id and slot (§6, §17.2 G.3).
+    usage: HashMap<(String, u32), Usage>,
 }
 
 impl Restored {
@@ -768,6 +818,22 @@ impl Restored {
                 }
                 continue;
             }
+            if let Some(trusted) = name.strip_prefix(TRUSTED_PREFIX) {
+                // Only the values this program writes count: a stray key with
+                // another value is not a confirmation anyone made.
+                if bytes.as_slice() == b"true" && trusted.len() == TRUST_KEY_HEX_LENGTH {
+                    restored.trusted.insert(trusted.to_string());
+                }
+                continue;
+            }
+            if let Some(usage) = name.strip_prefix("usage_")
+                && let Some((group, slot)) = usage.rsplit_once('_')
+                && let Ok(slot) = slot.parse::<u32>()
+                && let Ok(record) = serde_json::from_slice::<Usage>(&bytes)
+            {
+                restored.usage.insert((group.to_string(), slot), record);
+                continue;
+            }
             if let Some(position) = name.strip_prefix("window_")
                 && let Ok(saved) = serde_json::from_slice::<SavedBounds>(&bytes)
             {
@@ -777,6 +843,124 @@ impl Restored {
             }
         }
         restored
+    }
+}
+
+/// The trust key of one command (§17.2 D.1): the first 32 hex characters of
+/// SHA-256 over its shell, script, working directory and two flags.
+///
+/// SHA-256 rather than `DefaultHasher`: a collision here would let one script
+/// inherit another one's trust. The working directory is hashed as written, not
+/// expanded, so the key follows the file's text and any edit asks again.
+fn command_trust_key(item: &Item, spec: &CommandSpec) -> String {
+    let mut hasher = Sha256::new();
+    let hidden = if spec.hidden { "1" } else { "0" };
+    let keep_open = if spec.keep_open { "1" } else { "0" };
+    for part in [
+        spec.shell.as_str(),
+        spec.script.as_str(),
+        item.cwd.as_deref().unwrap_or_default(),
+        hidden,
+        keep_open,
+    ] {
+        hasher.update(part.as_bytes());
+        // A NUL cannot occur in a TOML string, so it cannot join two fields
+        // into the same input as another combination.
+        hasher.update([0u8]);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex.truncate(TRUST_KEY_HEX_LENGTH);
+    hex
+}
+
+/// Whether a command still needs its first-run confirmation (§17.2 D.2).
+///
+/// Answers `None` for anything that is not a command with a valid spec: there
+/// is no trust key to compare, and the launch itself reports what is wrong.
+fn command_needs_confirmation(
+    quick_launch: &QuickLaunch,
+    item: &Item,
+) -> Option<(CommandSpec, String)> {
+    if item.action_kind() != ActionKind::Command {
+        return None;
+    }
+    let spec = command_spec(item).ok()?;
+    let trust_key = command_trust_key(item, &spec);
+    (!quick_launch.restored.trusted.contains(&trust_key)).then_some((spec, trust_key))
+}
+
+/// What launching one `group` item expands to (§17.2 E.1).
+#[derive(Debug, Default, PartialEq)]
+struct GroupPlan {
+    /// The entries to start, in the order the references name them, with nested
+    /// groups flattened into their own entries.
+    items: Vec<Item>,
+    /// How many entries were left out because the plan is already full.
+    excess: usize,
+}
+
+/// Follows one `group` item's references inside its own group (§17.2 E.1).
+///
+/// Only ids of the same group are found, so a reference to another group is
+/// ignored; an id that was already expanded is skipped, which is what breaks a
+/// cycle the parser may have repaired but a hand-built state can still hold.
+/// Nested groups are followed up to [`MAX_GROUP_NESTING`] levels, and the plan
+/// stops at [`MAX_GROUP_REFERENCES`] entries, reporting the rest as `excess`.
+fn expand_group(group_items: &[Item], group_item: &Item) -> GroupPlan {
+    fn walk(
+        group_items: &[Item],
+        references: &[String],
+        depth: usize,
+        visited: &mut HashSet<String>,
+        plan: &mut GroupPlan,
+    ) {
+        for reference in references {
+            let Some(item) = group_items
+                .iter()
+                .find(|candidate| candidate.id.as_deref() == Some(reference.as_str()))
+            else {
+                continue;
+            };
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            if item.action_kind() == ActionKind::Group {
+                if depth < MAX_GROUP_NESTING {
+                    walk(group_items, &item.items, depth + 1, visited, plan);
+                }
+                continue;
+            }
+            if plan.items.len() < MAX_GROUP_REFERENCES {
+                plan.items.push(item.clone());
+            } else {
+                plan.excess = plan.excess.saturating_add(1);
+            }
+        }
+    }
+
+    let mut plan = GroupPlan::default();
+    let mut visited: HashSet<String> = HashSet::new();
+    // The item that was clicked must not be expanded through one of its own
+    // references: the parser drops that reference, but the runtime rule has to
+    // hold for a state that was edited in memory too.
+    if let Some(id) = &group_item.id {
+        visited.insert(id.clone());
+    }
+    walk(group_items, &group_item.items, 0, &mut visited, &mut plan);
+    plan
+}
+
+/// The health of a `group` item (§17.2 E.2): `Invalid` when no reference leads
+/// to an entry, `Ok` otherwise. The entries keep their own health answers.
+fn group_health(group_items: &[Item], group_item: &Item) -> Health {
+    if expand_group(group_items, group_item).items.is_empty() {
+        Health::Invalid(nohrs_core::t!("Este grupo não tem itens válidos.").to_string())
+    } else {
+        Health::Ok
     }
 }
 
@@ -830,6 +1014,169 @@ pub struct HotkeyHooks {
     pub unregister: fn(&mut App, u64) -> std::result::Result<(), String>,
 }
 
+/// One `command` the user has asked to run but has not confirmed yet
+/// (§17.2 D.3). It keeps everything the eventual launch needs, so the item may
+/// change on disk while the dialog is open without changing what was shown.
+struct PendingCommand {
+    /// The group the item came from, recorded once it starts.
+    group: String,
+    /// The slot the item came from, recorded once it starts.
+    slot: u32,
+    /// The item itself: the launch uses this copy, not the one in the file.
+    item: Item,
+    /// What the dialog shows and what the trust key was built from.
+    spec: CommandSpec,
+    /// The key written when the user clicks "Run" (§17.2 D.1).
+    trust_key: String,
+    /// How the click asked for the launch, kept until the dialog answers.
+    mode: LaunchMode,
+}
+
+/// What the window's command dialog draws (§17.2 D.3): a copy of the pending
+/// command's fields, so the view does not hold the state borrow while it builds
+/// the overlay.
+pub(crate) struct CommandConfirmation {
+    /// What the tile shows.
+    pub(crate) name: String,
+    /// The shell the script runs through.
+    pub(crate) shell: &'static str,
+    /// The working directory as written, when one is set.
+    pub(crate) cwd: Option<String>,
+    /// Whether the script runs without a console window.
+    pub(crate) hidden: bool,
+    /// The whole script, shown as written.
+    pub(crate) script: String,
+    /// Whether this process has a store, so the confirmation survives a restart
+    /// (§17.2 D.5).
+    pub(crate) remembered: bool,
+}
+
+/// One untrusted `command` of a group, waiting for the group's single
+/// confirmation (§17.2 E.1).
+struct PendingGroupCommand {
+    /// The command itself: the launch uses this copy.
+    item: Item,
+    /// What the dialog shows and what the trust key was built from.
+    spec: CommandSpec,
+    /// The key written when the user clicks "Run" (§17.2 D.1).
+    trust_key: String,
+}
+
+/// A `group` item whose untrusted commands are waiting for one confirmation
+/// (§17.2 E.1). Cancelling it aborts the whole group.
+struct PendingGroup {
+    /// The group the item belongs to, by id: a renamed group keeps its usage.
+    group: String,
+    /// The slot of the group item, which is the only item usage is recorded on.
+    slot: u32,
+    /// What the group's tile shows, for the dialog's heading.
+    name: String,
+    /// The expanded entries, in launch order.
+    plan: GroupPlan,
+    /// Every command of the plan that is not trusted yet.
+    commands: Vec<PendingGroupCommand>,
+    /// How the click asked for the launch, kept until the dialog answers.
+    kind: ClickKind,
+}
+
+/// What the window's group dialog draws (§17.2 E.1): every untrusted command of
+/// the group, listed together.
+pub(crate) struct GroupConfirmation {
+    /// What the group's tile shows.
+    pub(crate) name: String,
+    /// The commands the "Run" button would trust and start.
+    pub(crate) commands: Vec<GroupCommandConfirmation>,
+    /// Whether this process has a store, so the confirmation survives a restart
+    /// (§17.2 D.5).
+    pub(crate) remembered: bool,
+}
+
+/// One command listed by the group dialog (§17.2 E.1).
+pub(crate) struct GroupCommandConfirmation {
+    /// What the command's tile shows.
+    pub(crate) name: String,
+    /// The shell the script runs through.
+    pub(crate) shell: &'static str,
+    /// The working directory as written, when one is set.
+    pub(crate) cwd: Option<String>,
+    /// Whether the script runs without a console window.
+    pub(crate) hidden: bool,
+    /// The whole script, shown as written.
+    pub(crate) script: String,
+}
+
+/// A program that turned out to be already running, waiting for the user to
+/// choose between switching to it and starting another instance (§17.2 F.2).
+struct PendingAlreadyRunning {
+    /// The group the item came from, recorded once a launch happens.
+    group: String,
+    /// The slot the item came from, recorded once a launch happens.
+    slot: u32,
+    /// The item itself: the chosen request uses this copy.
+    item: Item,
+    /// The running process the "switch to it" button asks for.
+    process_id: u32,
+}
+
+/// What the window's already-running dialog draws (§17.2 F.2).
+pub(crate) struct AlreadyRunningPrompt {
+    /// What the tile shows.
+    pub(crate) name: String,
+}
+
+/// The group launch in flight (§17.2 E.1): replies are counted until the whole
+/// batch has answered, and only then is the footer set, the usage recorded and
+/// the window hidden.
+struct PendingLaunchBatch {
+    /// The shared id the requests carried, and the generation they answer with.
+    generation: u64,
+    /// The group item usage is recorded on, once anything started.
+    usage: (String, u32),
+    /// How many requests were sent, for the partial-failure message.
+    total: usize,
+    /// How many answers are still to come.
+    remaining: usize,
+    /// The entries whose launch failed, by name, in reply order.
+    failed: Vec<String>,
+    /// The folders the entries asked to open, in reply order.
+    folders: Vec<PathBuf>,
+    /// Whether at least one entry started, activated or opened a folder.
+    used: bool,
+    /// Entries left out of the plan because it was already full.
+    excess: usize,
+}
+
+/// What the state remembers about one `folder:` group's listing (§17.2 G.2).
+#[derive(Debug, Default)]
+struct FolderRefresh {
+    /// When the directory was last asked for, if it ever was.
+    last: Option<Instant>,
+    /// Which read is the current one: a reply from an older one is dropped.
+    request: u64,
+}
+
+/// Why the dynamic groups are being regenerated (§17.2 G.1–G.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshReason {
+    /// The file was read: every dynamic group is built again.
+    Loaded,
+    /// The window is being shown: its folder listings may be read again.
+    Shown,
+    /// The window switched to this group index (§17.2 G.2).
+    GroupSwitch(usize),
+    /// An item was launched: the `recent`/`most_used` groups change (§17.2 G.3).
+    Launched,
+}
+
+/// What one read of a `folder:` group's directory found (§17.2 G.2).
+#[derive(Debug, Clone, PartialEq)]
+enum FolderListing {
+    /// The entries, in the order the group shows them.
+    Items(Vec<Item>),
+    /// There is no such directory.
+    Missing,
+}
+
 /// The in-memory state, read and written through the GPUI global (§13).
 pub(crate) struct QuickLaunch {
     config: QuickLaunchConfig,
@@ -869,6 +1216,16 @@ pub(crate) struct QuickLaunch {
     generation: u64,
     /// The most recent launch failure, shown in the window's footer (§8.5).
     message: Option<String>,
+    /// A command waiting for the user's first-run confirmation (§17.2 D.3).
+    pending_command: Option<PendingCommand>,
+    /// A group waiting for the user's confirmation of its untrusted commands
+    /// (§17.2 E.1).
+    pending_group: Option<PendingGroup>,
+    /// A program found running that the user has not answered about yet
+    /// (§17.2 F.2).
+    pending_already_running: Option<PendingAlreadyRunning>,
+    /// A group launch whose replies are still being counted (§17.2 E.1).
+    pending_batch: Option<PendingLaunchBatch>,
     /// A hide asked for while GPUI had the window out for an update. The 400 ms
     /// tick performs it, outside any update, rather than the request being lost.
     pending_hide: bool,
@@ -877,6 +1234,9 @@ pub(crate) struct QuickLaunch {
     revision: u64,
     /// The item a launch was asked for; counted only once it started (S7).
     pending_usage: Option<(String, u32)>,
+    /// The modes this session sent to the launcher, for the tests (§17.2 F.5).
+    #[cfg(test)]
+    sent_launches: Vec<LaunchMode>,
     /// What the user typed to filter the current group (§12.2, M2).
     filter: String,
     /// The health of each item, by group id and slot (§12.1, M2). Runtime state,
@@ -894,6 +1254,15 @@ pub(crate) struct QuickLaunch {
     expand: ExpandContext,
     /// The items still to check (§12.1).
     health_queue: VecDeque<(String, u32, Item)>,
+    /// `(dynamic group id, slot)` → the `(group id, slot)` a copy shown in a
+    /// `recent`/`most_used` group came from (§17.2 G.1).
+    origins: HashMap<(String, u32), (String, u32)>,
+    /// The `folder:` groups whose directory could not be read, by group id
+    /// (§17.2 G.2).
+    folder_missing: HashSet<String>,
+    /// When each `folder:` group was last expanded, and which read is current
+    /// (§17.2 G.2).
+    folder_refresh: HashMap<String, FolderRefresh>,
 }
 
 impl Global for QuickLaunch {}
@@ -969,6 +1338,13 @@ pub(crate) fn set_filter(cx: &mut App, text: String) {
 pub(crate) fn health_of(cx: &App, group: usize, slot: u32) -> Option<Health> {
     let state = state(cx)?;
     let id = state.config.groups.get(group)?.id.as_str();
+    // G.4: a copy shown in a `recent`/`most_used` group answers with the health
+    // of the entry it came from, where the check was recorded.
+    let (id, slot) = state
+        .origins
+        .get(&(id.to_string(), slot))
+        .map(|(origin_group, origin_slot)| (origin_group.as_str(), *origin_slot))
+        .unwrap_or((id, slot));
     state.health.get(&(id.to_string(), slot)).cloned()
 }
 
@@ -988,6 +1364,15 @@ fn start_health_check(cx: &mut App) {
         .config
         .groups
         .iter()
+        // The copies a `recent`/`most_used` group shows are checked through the
+        // entries they came from, which their own group already queues (§17.2
+        // G.4).
+        .filter(|group| {
+            !matches!(
+                group_source(group),
+                Some(GroupSource::Recent | GroupSource::MostUsed)
+            )
+        })
         .flat_map(|group| {
             group
                 .items
@@ -1010,6 +1395,23 @@ fn start_health_check(cx: &mut App) {
                     let Some((group, slot, item)) = quick_launch.health_queue.pop_front() else {
                         break;
                     };
+                    // A group's health is its references (§17.2 E.2), which is
+                    // string work on the state already in memory: no Shell call
+                    // is involved, so it can be answered here.
+                    if item.action_kind() == ActionKind::Group {
+                        let health = quick_launch
+                            .config
+                            .groups
+                            .iter()
+                            .find(|candidate| candidate.id == group)
+                            .map(|candidate| group_health(&candidate.items, &item));
+                        if let Some(health) = health {
+                            quick_launch.health.insert((group, slot), health);
+                            quick_launch.touch();
+                        }
+                        sent = sent.saturating_add(1);
+                        continue;
+                    }
                     let workers = quick_launch.workers.as_ref()?;
                     workers.send_health(HealthRequest {
                         group,
@@ -1021,7 +1423,10 @@ fn start_health_check(cx: &mut App) {
                 (sent > 0).then_some(sent)
             });
             match batch {
-                Ok(Some(_)) => continue,
+                Ok(Some(_)) => {
+                    cx.update(|cx| cx.refresh_windows()).log_err();
+                    continue;
+                }
                 _ => return,
             }
         }
@@ -1066,9 +1471,25 @@ fn recheck_health(cx: &mut App, group: usize, slot: u32) {
     state.health.remove(&(group_id.clone(), slot));
     #[cfg(test)]
     state.health_checks.push((group_id.clone(), slot));
-    if let Some(item) = item
-        && let Some(workers) = state.workers.as_ref()
-    {
+    let Some(item) = item else {
+        return;
+    };
+    // A group's references are checked against the state in memory (§17.2 E.2),
+    // not on the worker thread: nothing outside the process is involved.
+    if item.action_kind() == ActionKind::Group {
+        let health = state
+            .config
+            .groups
+            .iter()
+            .find(|candidate| candidate.id == group_id)
+            .map(|candidate| group_health(&candidate.items, &item));
+        if let Some(health) = health {
+            state.health.insert((group_id, slot), health);
+            state.touch();
+        }
+        return;
+    }
+    if let Some(workers) = state.workers.as_ref() {
         workers.send_health(HealthRequest {
             group: group_id,
             slot,
@@ -1217,6 +1638,9 @@ fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str)
 /// A `noh ql remove` or a hand edit leaves them behind, and the next item put in
 /// that slot would inherit the count. Only the main process has the store: the
 /// resident one runs without it.
+///
+/// Only `usage_*` keys are ever candidates (§17.2 D.8): a `trusted_*` record is
+/// about a script, not a slot, and must survive the item being moved or deleted.
 fn prune_usage(cx: &mut App) {
     let Some(quick_launch) = state(cx) else {
         return;
@@ -1231,6 +1655,10 @@ fn prune_usage(cx: &mut App) {
         .config
         .groups
         .iter()
+        // A dynamic group's entries are generated, so a record naming one is
+        // not about an entry the file has: keeping it would keep a use that
+        // belongs to nobody (§17.2 G.8).
+        .filter(|group| !group_source(group).is_some_and(|source| source.is_dynamic()))
         .flat_map(|group| {
             group
                 .items
@@ -1270,6 +1698,364 @@ fn prune_usage(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Whether the group at `index` may have its items edited (§17.2 G.5).
+///
+/// A dynamic group's entries are generated at runtime: they are not the user's
+/// to add, move or delete. The group itself may still be renamed, reordered and
+/// deleted.
+pub(crate) fn group_editable(cx: &App, index: usize) -> bool {
+    let Some(quick_launch) = state(cx) else {
+        return false;
+    };
+    if !quick_launch.status.can_save() {
+        return false;
+    }
+    quick_launch
+        .config
+        .groups
+        .get(index)
+        .is_some_and(|group| group.source.is_none())
+}
+
+/// What an empty dynamic group shows instead of "no items" (§17.2 G.2, G.3).
+pub(crate) fn group_notice(cx: &App, index: usize) -> Option<&'static str> {
+    let quick_launch = state(cx)?;
+    let group = quick_launch.config.groups.get(index)?;
+    match group_source(group)? {
+        GroupSource::Folder(_) => quick_launch
+            .folder_missing
+            .contains(&group.id)
+            .then(|| nohrs_core::t!("Pasta não encontrada")),
+        GroupSource::Recent | GroupSource::MostUsed => (quick_launch.mode == Mode::Standalone)
+            .then(|| nohrs_core::t!("Indisponível no modo residente")),
+        GroupSource::Unknown(_) => None,
+    }
+}
+
+/// Regenerates every dynamic group's items: what can be answered from memory
+/// now, and the folder listings that are due (§17.2 G.1).
+pub(crate) fn refresh_dynamic_groups(cx: &mut App) {
+    refresh_dynamic_groups_for(cx, RefreshReason::Shown);
+}
+
+/// Regenerates the dynamic groups for `reason` (§17.2 G.1–G.3).
+fn refresh_dynamic_groups_for(cx: &mut App, reason: RefreshReason) {
+    let mut requests: Vec<(String, String, PathBuf, u64)> = Vec::new();
+    {
+        let Some(quick_launch) = state_mut(cx) else {
+            return;
+        };
+        // The `recent`/`most_used` groups are copies of entries elsewhere, so
+        // they are rebuilt from the use records held in memory (§17.2 G.3).
+        if !matches!(reason, RefreshReason::GroupSwitch(_)) {
+            let mode = quick_launch.mode;
+            let usage_groups: Vec<(String, bool)> = quick_launch
+                .config
+                .groups
+                .iter()
+                .filter_map(|group| match group_source(group) {
+                    Some(GroupSource::Recent) => Some((group.id.clone(), false)),
+                    Some(GroupSource::MostUsed) => Some((group.id.clone(), true)),
+                    _ => None,
+                })
+                .collect();
+            for (group_id, most_used) in usage_groups {
+                // A resident process has no store, so it has no use records to
+                // show; the group says so instead (§17.2 G.3).
+                let generated = if mode == Mode::Standalone {
+                    Vec::new()
+                } else {
+                    usage_group_items(
+                        &quick_launch.config,
+                        &quick_launch.restored.usage,
+                        most_used,
+                    )
+                };
+                apply_usage_group(quick_launch, &group_id, generated);
+            }
+        }
+        let now = Instant::now();
+        for index in 0..quick_launch.config.groups.len() {
+            if let RefreshReason::GroupSwitch(switched) = reason
+                && switched != index
+            {
+                continue;
+            }
+            let (group_id, source, raw) = {
+                let Some(group) = quick_launch.config.groups.get(index) else {
+                    continue;
+                };
+                let Some(GroupSource::Folder(raw)) = group_source(group) else {
+                    continue;
+                };
+                (
+                    group.id.clone(),
+                    group.source.clone().unwrap_or_default(),
+                    raw,
+                )
+            };
+            let request = {
+                let refresh = quick_launch
+                    .folder_refresh
+                    .entry(group_id.clone())
+                    .or_default();
+                if refresh
+                    .last
+                    .is_some_and(|last| now.duration_since(last) < FOLDER_REFRESH)
+                {
+                    continue;
+                }
+                refresh.last = Some(now);
+                refresh.request = refresh.request.wrapping_add(1);
+                refresh.request
+            };
+            match nohrs_services::launch::expand(&raw, &quick_launch.expand) {
+                Ok(path) => requests.push((group_id, source, path, request)),
+                // A path whose variables cannot be resolved names no directory
+                // this process can read either (§17.2 G.2).
+                Err(error) => {
+                    tracing::debug!(
+                        target: "quick_launch",
+                        "could not resolve the folder of {group_id:?}: {error}"
+                    );
+                    quick_launch.config.groups[index].items.clear();
+                    quick_launch.folder_missing.insert(group_id);
+                    quick_launch.touch();
+                }
+            }
+        }
+    }
+    for (group_id, source, path, request) in requests {
+        cx.spawn(async move |cx| {
+            let listing = cx.background_spawn(async move { read_folder(&path) }).await;
+            cx.update(|cx| apply_folder_listing(cx, &group_id, &source, request, listing))
+                .ok();
+        })
+        .detach();
+    }
+    cx.refresh_windows();
+}
+
+/// The number of entries a `recent`/`most_used` group shows (§17.2 G.3, D7).
+fn usage_group_limit(columns: u8) -> usize {
+    usize::from(columns.max(1))
+        .saturating_mul(2)
+        .min(MAX_USAGE_ITEMS)
+}
+
+/// The copies a `recent`/`most_used` group shows, each with the entry it came
+/// from, in the order the group displays them (§17.2 G.3).
+///
+/// Only entries the configuration still has are candidates, and a dynamic
+/// group's own entries never are: they are copies of copies. `most_used` orders
+/// by count and then by the latest use; `recent` orders by the latest use.
+fn usage_group_items(
+    config: &QuickLaunchConfig,
+    usage: &HashMap<(String, u32), Usage>,
+    most_used: bool,
+) -> Vec<(Item, (String, u32))> {
+    let mut candidates: Vec<(Item, (String, u32), Usage)> = Vec::new();
+    for ((group_id, slot), record) in usage {
+        let Some(group) = config.groups.iter().find(|group| group.id == *group_id) else {
+            continue;
+        };
+        if group_source(group).is_some_and(|source| source.is_dynamic()) {
+            continue;
+        }
+        let Some(item) = group.items.iter().find(|item| item.slot == *slot) else {
+            continue;
+        };
+        candidates.push((item.clone(), (group.id.clone(), *slot), *record));
+    }
+    candidates.sort_by(
+        |(_, (left_group, left_slot), left), (_, (right_group, right_slot), right)| {
+            let order = if most_used {
+                right
+                    .count
+                    .cmp(&left.count)
+                    .then(right.last.cmp(&left.last))
+            } else {
+                right.last.cmp(&left.last)
+            };
+            // A stable order for records that tie, so the group does not reshuffle
+            // between two frames.
+            order
+                .then(left_group.cmp(right_group))
+                .then(left_slot.cmp(right_slot))
+        },
+    );
+    candidates.truncate(usage_group_limit(config.window.columns));
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, (mut item, origin, _))| {
+            item.slot = u32::try_from(index).unwrap_or_default();
+            (item, origin)
+        })
+        .collect()
+}
+
+/// Replaces one `recent`/`most_used` group's copies and records where each one
+/// came from (§17.2 G.1).
+fn apply_usage_group(
+    quick_launch: &mut QuickLaunch,
+    group_id: &str,
+    generated: Vec<(Item, (String, u32))>,
+) {
+    let Some(group) = quick_launch
+        .config
+        .groups
+        .iter_mut()
+        .find(|group| group.id == group_id)
+    else {
+        return;
+    };
+    group.items = generated.iter().map(|(item, _)| item.clone()).collect();
+    quick_launch.health.retain(|(id, _), _| id != group_id);
+    quick_launch.origins.retain(|(id, _), _| id != group_id);
+    for (item, origin) in generated {
+        quick_launch
+            .origins
+            .insert((group_id.to_string(), item.slot), origin);
+    }
+    quick_launch.touch();
+}
+
+/// Reads one directory for a `folder:` group (§17.2 G.2).
+///
+/// Off the foreground: a directory on a dead network path must not hold a frame
+/// (§8.4, §18). Only the entries directly in the directory are listed, sorted by
+/// name without regard to case, hidden and system entries left out, at most
+/// [`MAX_FOLDER_ITEMS`] of them, with slots from 0.
+fn read_folder(path: &Path) -> FolderListing {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return FolderListing::Missing;
+    };
+    let mut found: Vec<(String, PathBuf, bool)> = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(
+                    target: "quick_launch",
+                    "could not read an entry of {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let entry_path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::debug!(
+                    target: "quick_launch",
+                    "could not read {}: {error}",
+                    entry_path.display()
+                );
+                continue;
+            }
+        };
+        if is_hidden_or_system(&entry_path, &metadata) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        found.push((name, entry_path, metadata.is_dir()));
+    }
+    // The path breaks a tie between two names that only differ in case, so the
+    // same directory always produces the same order.
+    found.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    found.truncate(MAX_FOLDER_ITEMS);
+    FolderListing::Items(
+        found
+            .into_iter()
+            .enumerate()
+            .map(|(slot, (_, entry_path, is_dir))| {
+                item_for_path(&entry_path, u32::try_from(slot).unwrap_or_default(), is_dir)
+            })
+            .collect(),
+    )
+}
+
+/// Whether a directory entry is hidden or a system entry, which a `folder:`
+/// group leaves out (§17.2 G.2).
+#[cfg(windows)]
+fn is_hidden_or_system(_path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    metadata.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0
+}
+
+/// On this platform a hidden entry is one whose name starts with a dot.
+#[cfg(not(windows))]
+fn is_hidden_or_system(path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.'))
+}
+
+/// Puts one finished folder listing into the state (§17.2 G.2).
+fn apply_folder_listing(
+    cx: &mut App,
+    group_id: &str,
+    source: &str,
+    request: u64,
+    listing: FolderListing,
+) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let Some(index) = quick_launch
+        .config
+        .groups
+        .iter()
+        .position(|group| group.id == group_id)
+    else {
+        return;
+    };
+    // The group may have been renamed, deleted or pointed somewhere else while
+    // the directory was being read: only the read that is still current counts.
+    if quick_launch.config.groups[index].source.as_deref() != Some(source) {
+        return;
+    }
+    if quick_launch
+        .folder_refresh
+        .get(group_id)
+        .is_none_or(|refresh| refresh.request != request)
+    {
+        return;
+    }
+    match listing {
+        FolderListing::Items(items) => {
+            quick_launch.config.groups[index].items = items;
+            quick_launch.folder_missing.remove(group_id);
+        }
+        FolderListing::Missing => {
+            quick_launch.config.groups[index].items.clear();
+            quick_launch.folder_missing.insert(group_id.to_string());
+        }
+    }
+    quick_launch.health.retain(|(id, _), _| id != group_id);
+    quick_launch.origins.retain(|(id, _), _| id != group_id);
+    quick_launch.touch();
+    cx.refresh_windows();
+}
+
+/// The entry a use of `group`/`slot` is recorded on: the copy in a
+/// `recent`/`most_used` group belongs to the entry it was copied from
+/// (§17.2 G.4).
+fn usage_target(cx: &App, group: &str, slot: u32) -> (String, u32) {
+    state(cx)
+        .and_then(|quick_launch| {
+            quick_launch
+                .origins
+                .get(&(group.to_string(), slot))
+                .cloned()
+        })
+        .unwrap_or_else(|| (group.to_string(), slot))
 }
 
 /// Whether one item is known to be broken, so the view can grey it (§12.1).
@@ -1350,7 +2136,7 @@ pub(crate) fn item_at(cx: &App, group: usize, slot: u32) -> Option<Item> {
 /// holds one entry (§12.1).
 #[cfg_attr(not(test), allow(dead_code))] // M3's settings page replaces items too
 pub(crate) fn put_item(cx: &mut App, group: usize, slot: u32, mut item: Item) -> bool {
-    if !editable(cx) {
+    if !group_editable(cx, group) {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -1389,46 +2175,160 @@ pub(crate) struct ItemEdit {
     pub icon: String,
     /// Extra words the filter matches on.
     pub tags: Vec<String>,
+    /// The `command` fields the settings form offers (§17.2 A.3, D.6). `None`
+    /// keeps the item's `extra` as it is, which is what the window's edit dialog
+    /// and every other kind of item need.
+    pub command: Option<CommandEdit>,
+    /// The slots a `group` item launches, in start order (§17.2 E.3). `None`
+    /// leaves the item's references as they are, which is what every other kind
+    /// of item wants; the settings form fills it when the kind is `group`.
+    pub group_items: Option<Vec<u32>>,
+}
+
+/// What the settings page's form knows about a `command` item (§17.2 A.3).
+#[derive(Clone)]
+pub(crate) struct CommandEdit {
+    /// One of `cmd`, `pwsh`, `powershell`, `python`.
+    pub shell: String,
+    /// The script, passed to the shell as written.
+    pub script: String,
+    /// Run without a console window.
+    pub hidden: bool,
+    /// Keep the console open after the script ends.
+    pub keep_open: bool,
+}
+
+/// Writes the ids a saved `group` item refers to (§17.2 E.3), giving an id to
+/// every item that has none: the group item itself, then the selected entries in
+/// start order.
+///
+/// An id is `item_<slot>`; when another item of the group already holds that id,
+/// `_2`, `_3`… is appended until it is free. All of it happens in the caller's
+/// single write, so the references cannot be saved half-assigned.
+fn group_selection_ids(items: &mut [Item], own_slot: u32, selected: &[u32]) -> Vec<String> {
+    fn assign(items: &mut [Item], slot: u32) -> Option<String> {
+        let index = items.iter().position(|item| item.slot == slot)?;
+        if let Some(id) = items.get(index).and_then(|item| item.id.clone()) {
+            return Some(id);
+        }
+        let mut candidate = format!("item_{slot}");
+        let mut suffix = 1u32;
+        while items
+            .iter()
+            .any(|item| item.id.as_deref() == Some(candidate.as_str()))
+        {
+            suffix = suffix.saturating_add(1);
+            candidate = format!("item_{slot}_{suffix}");
+        }
+        items.get_mut(index)?.id = Some(candidate.clone());
+        Some(candidate)
+    }
+
+    assign(items, own_slot);
+    selected
+        .iter()
+        .filter_map(|slot| assign(items, *slot))
+        .collect()
 }
 
 /// Applies the item form of the settings page (§17.1 B), with the rules of the
 /// window's edit dialog: no empty name or path, no edits while the file is
 /// read-only, a fresh health check and a kind judged again from a new path.
+///
+/// A `command` saved through the form is trusted at once (D5, §17.2 D.6): the
+/// form is the one path where the user read and wrote the script themselves.
 pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit) -> bool {
     let name = edit.name.trim();
     let path = edit.path.trim();
+    // A `group` has no path and a `command` keeps its target in `extra`; the
+    // rest of the form still needs one.
+    let is_group = edit.kind == KIND_GROUP;
+    let command_extra = match (edit.kind.as_str(), edit.command.as_ref()) {
+        (KIND_COMMAND, Some(command)) => {
+            let mut probe = Item::new(0, KIND_COMMAND, "command");
+            probe
+                .extra
+                .insert("shell".to_string(), command.shell.clone().into());
+            probe
+                .extra
+                .insert("script".to_string(), command.script.clone().into());
+            if command.hidden {
+                probe.extra.insert("hidden".to_string(), true.into());
+            }
+            if command.keep_open {
+                probe.extra.insert("keep_open".to_string(), true.into());
+            }
+            if command_spec(&probe).is_err() {
+                return false;
+            }
+            Some(probe.extra)
+        }
+        _ => None,
+    };
+    let is_command = command_extra.is_some();
     // An item without a name would be an empty tile, and one without a path
     // could never start: the form treats both as "cancel".
-    if name.is_empty() || path.is_empty() || !editable(cx) {
+    if name.is_empty()
+        || (!is_command && !is_group && path.is_empty())
+        || !group_editable(cx, group)
+    {
         return false;
     }
+    let cwd = edit.cwd.trim();
+    // The key is built from what the form is saving, before the state borrow.
+    let trust_key = command_extra.as_ref().and_then(|extra| {
+        let mut probe = Item::new(slot, KIND_COMMAND, name);
+        probe.extra = extra.clone();
+        probe.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+        command_spec(&probe)
+            .ok()
+            .map(|spec| command_trust_key(&probe, &spec))
+    });
     let Some(state) = state_mut(cx) else {
         return false;
     };
     let Some(target) = state.config.groups.get_mut(group) else {
         return false;
     };
+    // A `group`'s references, and the ids they need, are settled before the
+    // item itself is borrowed: this is the one write that may touch several
+    // items of the group (§17.2 E.3).
+    let references = is_group.then(|| {
+        group_selection_ids(
+            &mut target.items,
+            slot,
+            edit.group_items.as_deref().unwrap_or_default(),
+        )
+    });
     let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
         return false;
     };
-    // Only the four kinds the form offers may be introduced; every other kind
-    // (uwp, command, group, plugin:…) is kept as it is, since this milestone
-    // cannot build those and changing one would change what the entry means.
-    if !matches!(edit.kind.as_str(), "app" | "folder" | "file" | "url") && edit.kind != item.kind {
+    // Only the kinds the form offers may be introduced; every other kind
+    // (group, plugin:…) is kept as it is, since this milestone cannot build
+    // those and changing one would change what the entry means.
+    if !matches!(
+        edit.kind.as_str(),
+        "app" | "folder" | "file" | "url" | "uwp" | KIND_COMMAND | KIND_GROUP
+    ) && edit.kind != item.kind
+    {
         return false;
     }
     let previous_kind = item.kind.clone();
     let previous_path = item.path.clone();
     item.kind = edit.kind.clone();
     item.name = name.to_string();
-    item.path = Some(path.to_string());
+    item.path = (!is_command && !is_group).then(|| path.to_string());
     let args = edit.args.trim();
-    item.args = (!args.is_empty()).then(|| args.to_string());
-    let cwd = edit.cwd.trim();
-    item.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+    item.args = (!is_group && !args.is_empty()).then(|| args.to_string());
+    item.cwd = (!is_group && !cwd.is_empty()).then(|| cwd.to_string());
     let icon = edit.icon.trim();
     item.icon = (!icon.is_empty()).then(|| icon.to_string());
-    item.admin = edit.admin;
+    item.admin = if is_command || is_group {
+        false
+    } else {
+        edit.admin
+    };
+    item.items = references.unwrap_or_default();
     item.tags = edit
         .tags
         .iter()
@@ -1436,6 +2336,13 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
         .filter(|tag| !tag.is_empty())
         .map(str::to_string)
         .collect();
+    match command_extra {
+        Some(extra) => item.extra = extra,
+        // A command changed into another kind has no use for its fields, and
+        // the file only keeps `extra` for `command` and `plugin:*` (§4.2).
+        None if previous_kind == KIND_COMMAND => item.extra.clear(),
+        None => {}
+    }
     let path_changed = item.path != previous_path;
     state.touch();
     mark_dirty(cx);
@@ -1443,8 +2350,11 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     // S4: a path that now points at a folder (or a program) changes the kind, so
     // the item keeps working after the edit. An unchanged path keeps the kind
     // the form chose.
-    if path_changed {
+    if path_changed && !is_command && !is_group {
         retype_after_edit(cx, group, slot, &previous_kind);
+    }
+    if let Some(trust_key) = trust_key {
+        remember_trust(cx, trust_key);
     }
     true
 }
@@ -1460,6 +2370,9 @@ pub(crate) fn edit_item(
     args: &str,
     admin: bool,
 ) -> bool {
+    if !group_editable(cx, group) {
+        return false;
+    }
     // The dialog does not offer the other fields, so they keep what the item
     // already has; a missing item is refused by `update_item` too.
     let Some(item) = item_at(cx, group, slot) else {
@@ -1480,6 +2393,8 @@ pub(crate) fn edit_item(
             admin,
             icon: item.icon.unwrap_or_default(),
             tags: item.tags,
+            command: None,
+            group_items: None,
         },
     );
     // The dialog judges the kind after every edit, as it did before the form
@@ -1491,9 +2406,45 @@ pub(crate) fn edit_item(
     edited
 }
 
+/// Renames one item without touching anything else (§17.2 E.4).
+///
+/// The window's edit dialog offers only the name for a `group` item: its path,
+/// arguments and working directory do not exist, and its contents are chosen in
+/// the settings page.
+pub(crate) fn rename_item(cx: &mut App, group: usize, slot: u32, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() || !editable(cx) {
+        return false;
+    }
+    let Some(state) = state_mut(cx) else {
+        return false;
+    };
+    let Some(item) = state
+        .config
+        .groups
+        .get_mut(group)
+        .and_then(|target| target.items.iter_mut().find(|item| item.slot == slot))
+    else {
+        return false;
+    };
+    if item.name == name {
+        return true;
+    }
+    item.name = name.to_string();
+    state.touch();
+    mark_dirty(cx);
+    true
+}
+
 /// Adds a group at the end and makes it the current one (§12.3). The caller
 /// starts the inline rename the specification asks for.
 pub(crate) fn add_group(cx: &mut App) -> Option<usize> {
+    add_group_with_source(cx, None)
+}
+
+/// Adds a group whose items are generated from `source` instead of edited
+/// (§17.2 G.6): `folder:<path>`, `recent` or `most_used`.
+pub(crate) fn add_group_with_source(cx: &mut App, source: Option<String>) -> Option<usize> {
     if !editable(cx) {
         return None;
     }
@@ -1504,6 +2455,7 @@ pub(crate) fn add_group(cx: &mut App) -> Option<usize> {
         id,
         name: nohrs_core::t!("Novo grupo").to_string(),
         items: Vec::new(),
+        source,
     });
     state.group = index;
     state.slot = None;
@@ -1597,7 +2549,7 @@ pub(crate) fn delete_group(cx: &mut App, index: usize, force: bool) -> bool {
 
 /// Removes one item and the usage record it left behind (§6, §12.3).
 pub(crate) fn delete_item(cx: &mut App, group: usize, slot: u32) -> bool {
-    if !editable(cx) {
+    if !group_editable(cx, group) {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -1632,7 +2584,7 @@ pub(crate) fn move_item_to_group(
     slot: u32,
     to_group: usize,
 ) -> bool {
-    if from_group == to_group || !editable(cx) {
+    if from_group == to_group || !group_editable(cx, from_group) || !group_editable(cx, to_group) {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -1684,7 +2636,7 @@ pub(crate) fn move_item_to_group(
 /// Moves an item to another slot of its own group; when the target is taken the
 /// two swap (§12.2).
 pub(crate) fn swap_slots(cx: &mut App, group: usize, from: u32, to: u32) -> bool {
-    if from == to || !editable(cx) {
+    if from == to || !group_editable(cx, group) {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -1741,7 +2693,7 @@ fn next_group_id(config: &QuickLaunchConfig) -> String {
 /// This is the only way a drop or a file picker adds entries; `put_item` is
 /// for edits, where replacing is what the user asked for.
 pub(crate) fn place_items(cx: &mut App, group: usize, start: u32, items: Vec<Item>) -> bool {
-    if !editable(cx) || items.is_empty() {
+    if !group_editable(cx, group) || items.is_empty() {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -1811,9 +2763,70 @@ pub(crate) fn path_is_directory(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// What a path prompt may pick (§17.2, M4 R2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathWant {
+    /// Files only.
+    Files,
+    /// Folders only.
+    Folders,
+    /// Both, where the platform allows it.
+    Either,
+}
+
+/// The options a path prompt gets, adjusted to what the platform can do (§17.2 R2).
+///
+/// gpui's Windows implementation adds `FOS_PICKFOLDERS` as soon as `directories`
+/// is set, and then the dialog can only pick folders; asking for both there would
+/// silently make a file picker useless. A platform without mixed selection falls
+/// back to files, the common case.
+pub(crate) fn path_prompt(
+    want: PathWant,
+    multiple: bool,
+    prompt: &str,
+    mixed_supported: bool,
+) -> PathPromptOptions {
+    let (files, directories) = match want {
+        PathWant::Files => (true, false),
+        PathWant::Folders => (false, true),
+        PathWant::Either => (true, mixed_supported),
+    };
+    PathPromptOptions {
+        files,
+        directories,
+        multiple,
+        prompt: Some(SharedString::from(prompt.to_string())),
+    }
+}
+
+/// [`path_prompt`] for the platform this process runs on.
+pub(crate) fn path_prompt_for(
+    cx: &App,
+    want: PathWant,
+    multiple: bool,
+    prompt: &str,
+) -> PathPromptOptions {
+    path_prompt(want, multiple, prompt, cx.can_select_mixed_files_and_dirs())
+}
+
+/// Whether the empty-cell menu offers the folder-only entry (§17.2 R2).
+///
+/// Where the platform can mix files and folders in one dialog there is nothing to
+/// split; where it cannot, "new item" picks files and folders get their own entry.
+pub(crate) fn folder_entry_offered(mixed_supported: bool) -> bool {
+    !mixed_supported
+}
+
 /// Moves one item's usage record to the place it went, in one transaction
 /// (S3): the old key is removed only when the new one is written.
 fn move_usage(cx: &mut App, from: (String, u32), to: (String, u32)) {
+    // The in-memory records the use groups are built from follow the item too
+    // (§17.2 G.3).
+    if let Some(quick_launch) = state_mut(cx)
+        && let Some(record) = quick_launch.restored.usage.remove(&from)
+    {
+        quick_launch.restored.usage.insert(to.clone(), record);
+    }
     let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
         return;
     };
@@ -1838,6 +2851,20 @@ fn move_usage(cx: &mut App, from: (String, u32), to: (String, u32)) {
 
 /// Swaps the usage records of two slots of one group, in one transaction (S3).
 fn swap_usage(cx: &mut App, group_id: String, first: u32, second: u32) {
+    // The in-memory records the use groups are built from swap as well
+    // (§17.2 G.3).
+    if let Some(quick_launch) = state_mut(cx) {
+        let first_key = (group_id.clone(), first);
+        let second_key = (group_id.clone(), second);
+        let first_record = quick_launch.restored.usage.remove(&first_key);
+        let second_record = quick_launch.restored.usage.remove(&second_key);
+        if let Some(record) = second_record {
+            quick_launch.restored.usage.insert(first_key, record);
+        }
+        if let Some(record) = first_record {
+            quick_launch.restored.usage.insert(second_key, record);
+        }
+    }
     let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
         return;
     };
@@ -1881,6 +2908,13 @@ fn usage_key_name(group: &str, slot: u32) -> String {
 fn delete_usage(cx: &mut App, entries: Vec<(String, u32)>) {
     if entries.is_empty() {
         return;
+    }
+    // The in-memory records the use groups are built from go with them
+    // (§17.2 G.3).
+    if let Some(quick_launch) = state_mut(cx) {
+        for (group, slot) in &entries {
+            quick_launch.restored.usage.remove(&(group.clone(), *slot));
+        }
     }
     let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
         return;
@@ -1956,13 +2990,22 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         signals: Some(receiver),
         generation: 0,
         message: None,
+        pending_command: None,
+        pending_group: None,
+        pending_already_running: None,
+        pending_batch: None,
         pending_hide: false,
         revision: 0,
         pending_usage: None,
+        #[cfg(test)]
+        sent_launches: Vec::new(),
         filter: String::new(),
         health: HashMap::new(),
         health_started: false,
         health_queue: VecDeque::new(),
+        origins: HashMap::new(),
+        folder_missing: HashSet::new(),
+        folder_refresh: HashMap::new(),
         mode,
         #[cfg(test)]
         health_checks: Vec::new(),
@@ -2005,6 +3048,9 @@ fn start_restore(cx: &mut App) {
                 quick_launch.restored = restored;
             }
             restore_last_group(cx);
+            // The use records the `recent`/`most_used` groups are made of were
+            // not in memory before this read (§17.2 G.3).
+            refresh_dynamic_groups_for(cx, RefreshReason::Loaded);
         })
         .ok();
     })
@@ -2121,12 +3167,19 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     let groups = quick_launch.config.groups.len();
     quick_launch.group = quick_launch.group.min(groups.saturating_sub(1));
     quick_launch.slot = None;
+    // The generated items of the configuration that was just replaced describe
+    // entries that may not be in the new one at all (§17.2 G.1).
+    quick_launch.origins.clear();
+    quick_launch.folder_missing.clear();
+    quick_launch.folder_refresh.clear();
     let topmost = quick_launch.config.window.topmost;
     quick_launch.touch();
     // §11.1: a `topmost` changed in the file reaches the window that is already
     // open; the pin button reads the same field.
     sync_topmost(cx, topmost);
     restore_last_group(cx);
+    // G.1: every dynamic group is generated again after a successful read.
+    refresh_dynamic_groups_for(cx, RefreshReason::Loaded);
     ensure_selection(cx);
     sync_hotkey(cx);
     cx.refresh_windows();
@@ -2356,6 +3409,21 @@ fn poll_save(cx: &mut App) {
     save_in_background(cx);
 }
 
+/// The configuration as the file holds it (§17.2 G.1): a dynamic group's items
+/// are generated at runtime, so the copy that is serialized has none of them.
+///
+/// `to_toml` clears them again (§17.2 A.2); the rule is applied here as well so
+/// that nothing this module serializes depends on that second line of defence.
+fn config_for_saving(quick_launch: &QuickLaunch) -> QuickLaunchConfig {
+    let mut config = quick_launch.config.clone();
+    for group in &mut config.groups {
+        if group_source(group).is_some_and(|source| source.is_dynamic()) {
+            group.items.clear();
+        }
+    }
+    config
+}
+
 /// Renders the model and writes it, on a background task (§5.2).
 ///
 /// The render happens here because the model belongs to the foreground; the file
@@ -2368,7 +3436,7 @@ fn save_in_background(cx: &mut App) {
     if !quick_launch.status.can_save() {
         return;
     }
-    let text = match nohrs_core::config::quick_launch::to_toml(&quick_launch.config) {
+    let text = match nohrs_core::config::quick_launch::to_toml(&config_for_saving(quick_launch)) {
         Ok(text) => text,
         Err(error) => {
             tracing::error!(target: "quick_launch", "could not write the configuration: {error}");
@@ -2411,7 +3479,7 @@ fn mark_dirty(cx: &mut App) {
 
 /// Renders the model and replaces the file, atomically (§5.2).
 fn save_now(quick_launch: &mut QuickLaunch) {
-    let text = match nohrs_core::config::quick_launch::to_toml(&quick_launch.config) {
+    let text = match nohrs_core::config::quick_launch::to_toml(&config_for_saving(quick_launch)) {
         Ok(text) => text,
         Err(error) => {
             tracing::error!(target: "quick_launch", "could not write the configuration: {error}");
@@ -2427,12 +3495,6 @@ fn save_now(quick_launch: &mut QuickLaunch) {
     }
 }
 
-/// Replaces `path` with `contents` through a temporary file and a backup.
-///
-/// A crash or a full disk in the middle leaves the original file alone: the
-/// temporary file is written and flushed first, and only then renamed over the
-/// target, which is atomic on both platforms LumaFiles runs on.
-#[allow(clippy::disallowed_methods)] // the exit path and the throttled save
 /// Writes one KV value in the background, logging rather than failing (§6).
 fn write_kv_name(cx: &mut App, name: String, bytes: Vec<u8>) {
     let Some(kv) = state(cx).and_then(|quick_launch| quick_launch.kv.clone()) else {
@@ -2547,34 +3609,33 @@ fn save_position(cx: &mut App, bounds: Bounds<Pixels>) {
 
 /// Counts one launch of the item in `slot` (§6).
 ///
-/// Nothing ranks by it in this milestone; the record is written so that the
-/// counts are already there when something does.
+/// The count is kept in memory as well as in the store: the `recent` and
+/// `most_used` groups are built from the copy in memory, including the use that
+/// just happened (§17.2 G.3).
 fn record_usage(cx: &mut App, group: &str, slot: u32) {
-    let name = format!("usage_{group}_{slot}");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
-    let Some(kv) = state(cx).and_then(|quick_launch| quick_launch.kv.clone()) else {
+    let Some(quick_launch) = state_mut(cx) else {
         return;
     };
+    let usage = quick_launch
+        .restored
+        .usage
+        .entry((group.to_string(), slot))
+        .or_default();
+    usage.count = usage.count.saturating_add(1);
+    usage.last = now;
+    let usage = *usage;
+    let Some(kv) = quick_launch.kv.clone() else {
+        return;
+    };
+    let name = usage_key_name(group, slot);
     cx.background_spawn(async move {
-        #[derive(Serialize, Deserialize, Default)]
-        struct Usage {
-            count: u32,
-            last: u64,
-        }
         let Ok(key) = KvKey::new(KV_NAMESPACE, &name) else {
             return;
         };
-        let mut usage: Usage = kv
-            .get(&key)
-            .ok()
-            .flatten()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        usage.count = usage.count.saturating_add(1);
-        usage.last = now;
         let Ok(bytes) = serde_json::to_vec(&usage) else {
             return;
         };
@@ -2598,6 +3659,9 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
             if let Some(quick_launch) = state_mut(cx) {
                 quick_launch.visible = true;
             }
+            // G.2, G.3: a folder group is read again at most every 30 s, and
+            // the `recent`/`most_used` groups follow the use records.
+            refresh_dynamic_groups_for(cx, RefreshReason::Shown);
             ensure_selection(cx);
             tracing::debug!(
                 target: "quick_launch",
@@ -2628,6 +3692,8 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
         quick_launch.window = Some(handle);
         quick_launch.visible = true;
     }
+    // G.2, G.3: the window opens on freshly generated dynamic groups.
+    refresh_dynamic_groups_for(cx, RefreshReason::Shown);
     ensure_selection(cx);
     // §12.1: the items are checked once the window has been shown, a batch at a
     // time, on the icon thread.
@@ -2852,6 +3918,7 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
         }
         WorkerReply::Launched {
             generation,
+            batch,
             name,
             outcome,
         } => {
@@ -2861,9 +3928,19 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
             if generation != quick_launch.generation {
                 return;
             }
+            if let Some(batch_id) = batch {
+                apply_batch_reply(cx, batch_id, &name, outcome);
+                return;
+            }
             let close_after_launch = quick_launch.config.window.close_after_launch;
+            let visible = quick_launch.visible;
             let started = counts_as_usage(&outcome);
             let folder = match outcome {
+                Ok(LaunchOutcome::AlreadyRunning { process_id }) => {
+                    // §17.2 F.2: ask before switching; nothing is counted yet.
+                    ask_about_running_program(cx, process_id, visible);
+                    return;
+                }
                 Ok(LaunchOutcome::OpenFolder(path)) => Some(path),
                 Ok(LaunchOutcome::Started | LaunchOutcome::Activated) => None,
                 // Nothing is reported for a decision (§8.2).
@@ -2879,6 +3956,9 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
             {
                 // Only a launch that happened is counted (S7).
                 record_usage(cx, &group, slot);
+                // G.3: the groups made of use records follow the launch that
+                // just happened.
+                refresh_dynamic_groups_for(cx, RefreshReason::Launched);
             }
             if let Some(path) = folder {
                 open_in_explorer(cx, path);
@@ -2888,6 +3968,205 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
             }
         }
     }
+}
+
+/// §17.2 F.2: a program is already running and the configuration asks first.
+///
+/// The dialog belongs to the quick-launch window, so a launch from the
+/// Launcher's `@` shows the window before it appears. Nothing is recorded: the
+/// use counts only after the user chooses, and a cancel records nothing.
+fn ask_about_running_program(cx: &mut App, process_id: u32, visible: bool) {
+    let Some((group, slot)) = state(cx).and_then(|quick_launch| quick_launch.pending_usage.clone())
+    else {
+        tracing::debug!(
+            target: "quick_launch",
+            process = process_id,
+            "a running program answered without a pending item"
+        );
+        return;
+    };
+    let item = state(cx).and_then(|quick_launch| {
+        quick_launch
+            .config
+            .groups
+            .iter()
+            .find(|candidate| candidate.id == group)
+            .and_then(|candidate| candidate.items.iter().find(|item| item.slot == slot))
+            .cloned()
+    });
+    let Some(item) = item else {
+        tracing::debug!(
+            target: "quick_launch",
+            process = process_id,
+            "the item behind the running program is gone"
+        );
+        return;
+    };
+    if !visible && let Err(error) = show(cx) {
+        tracing::warn!(target: "quick_launch", "could not show the window: {error}");
+    }
+    if let Some(quick_launch) = state_mut(cx) {
+        quick_launch.message = None;
+        quick_launch.pending_already_running = Some(PendingAlreadyRunning {
+            group,
+            slot,
+            item,
+            process_id,
+        });
+        quick_launch.touch();
+    }
+    cx.refresh_windows();
+}
+
+/// "Switch to it": sends the launch again, naming the process to activate
+/// (§17.2 F.2).
+pub(crate) fn switch_to_running_program(cx: &mut App) {
+    let Some(pending) = take_pending_already_running(cx) else {
+        return;
+    };
+    send_launch(
+        cx,
+        pending.item,
+        pending.group,
+        pending.slot,
+        LaunchMode::Activate(pending.process_id),
+    );
+}
+
+/// "Start another": sends the launch again, forcing a new instance (§17.2 F.2).
+pub(crate) fn start_another_instance(cx: &mut App) {
+    let Some(pending) = take_pending_already_running(cx) else {
+        return;
+    };
+    send_launch(
+        cx,
+        pending.item,
+        pending.group,
+        pending.slot,
+        LaunchMode::ForceNew,
+    );
+}
+
+/// "Cancel": starts nothing and records no use (§17.2 F.2).
+pub(crate) fn cancel_already_running(cx: &mut App) {
+    if take_pending_already_running(cx).is_none() {
+        return;
+    }
+    if let Some(quick_launch) = state_mut(cx) {
+        // The launch never happened, so it must not be counted afterwards.
+        quick_launch.pending_usage = None;
+        quick_launch.touch();
+    }
+    cx.refresh_windows();
+}
+
+/// Takes the pending running-program dialog, if there is one, and tells the
+/// window it is gone.
+fn take_pending_already_running(cx: &mut App) -> Option<PendingAlreadyRunning> {
+    let pending = {
+        let quick_launch = state_mut(cx)?;
+        let pending = quick_launch.pending_already_running.take()?;
+        quick_launch.touch();
+        pending
+    };
+    cx.refresh_windows();
+    Some(pending)
+}
+
+/// Counts one group entry's answer, and finishes the batch when it was the last
+/// (§17.2 E.1).
+///
+/// Nothing is recorded per entry: the group item is the one that was used, and
+/// the footer, the folders and the hide wait for the whole batch (§17.2 E.1).
+fn apply_batch_reply(
+    cx: &mut App,
+    batch_id: u64,
+    name: &str,
+    outcome: std::result::Result<LaunchOutcome, LaunchError>,
+) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let Some(batch) = quick_launch.pending_batch.as_mut() else {
+        return;
+    };
+    if batch.generation != batch_id {
+        return;
+    }
+    match &outcome {
+        Ok(LaunchOutcome::Cancelled) => {}
+        // D9: a group starts `ask` entries as `activate`, so a group entry has
+        // no dialog to open; nothing is counted for it.
+        Ok(LaunchOutcome::AlreadyRunning { .. }) => {
+            tracing::debug!(
+                target: "quick_launch",
+                "a group entry answered with a running process"
+            );
+        }
+        Ok(LaunchOutcome::OpenFolder(path)) => {
+            batch.used = true;
+            batch.folders.push(path.clone());
+        }
+        Ok(LaunchOutcome::Started | LaunchOutcome::Activated) => batch.used = true,
+        Err(error) => {
+            tracing::warn!(
+                target: "quick_launch",
+                "could not launch {name:?} from a group: {error}"
+            );
+            batch.failed.push(name.to_string());
+        }
+    }
+    batch.remaining = batch.remaining.saturating_sub(1);
+    if batch.remaining > 0 {
+        return;
+    }
+    let Some(batch) = state_mut(cx).and_then(|quick_launch| quick_launch.pending_batch.take())
+    else {
+        return;
+    };
+    finish_batch(cx, batch);
+}
+
+/// What happens once every entry of a group has answered (§17.2 E.1): one
+/// footer line when anything failed, the folders one by one, one usage record on
+/// the group item, and one decision about hiding the window.
+fn finish_batch(cx: &mut App, batch: PendingLaunchBatch) {
+    if batch.used {
+        record_usage(cx, &batch.usage.0, batch.usage.1);
+        // G.3: the groups made of use records follow the launch that just
+        // happened.
+        refresh_dynamic_groups_for(cx, RefreshReason::Launched);
+    }
+    for folder in batch.folders {
+        open_in_explorer(cx, folder);
+    }
+    let message = if !batch.failed.is_empty() {
+        Some(nohrs_core::tf!(
+            "{failed} de {total} itens não iniciaram: {names}",
+            failed = batch.failed.len(),
+            total = batch.total,
+            names = batch.failed.join(", ")
+        ))
+    } else if batch.excess > 0 {
+        Some(nohrs_core::tf!(
+            "{skipped} itens do grupo excedem o limite de {limit} e não serão iniciados.",
+            skipped = batch.excess,
+            limit = MAX_GROUP_REFERENCES
+        ))
+    } else {
+        None
+    };
+    let close_after_launch =
+        state(cx).is_some_and(|quick_launch| quick_launch.config.window.close_after_launch);
+    if let Some(quick_launch) = state_mut(cx) {
+        quick_launch.message = message;
+    }
+    // The window is hidden once, after the whole batch (§17.2 E.1), and only
+    // when something actually started — the same rule as one item (§8.5).
+    if batch.used && hides_after_action(close_after_launch, is_locked(cx)) {
+        hide(cx);
+    }
+    cx.refresh_windows();
 }
 
 /// Whether what just happened hides the window (§11.1): a pinned window stays
@@ -2980,7 +4259,13 @@ fn report_launch_failure(cx: &mut App, name: &str, error: &LaunchError) {
 }
 
 /// Starts the item in `slot` of the current group (§12.2).
-/// Starts the item in `slot` the way the click asked for (§12.2).
+///
+/// A `command` whose trust key is not in the restored set stops here: the window
+/// shows its confirmation dialog instead, and only that dialog's "Run" calls
+/// [`confirm_pending_command`] (§17.2 D.3).
+///
+/// A `group` is expanded and started here instead of being sent to the registry
+/// (§17.2 E.1).
 pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
     let Some(quick_launch) = state(cx) else {
         return;
@@ -2998,28 +4283,468 @@ pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
         "launching the selected item"
     );
     let (item, group_id) = (item.clone(), group.id.clone());
-    let mode = if kind == ClickKind::Admin || item.admin {
-        LaunchMode::Admin
-    } else {
-        LaunchMode::Normal
+    if item.action_kind() == ActionKind::Group {
+        let group_items = quick_launch
+            .config
+            .groups
+            .iter()
+            .find(|candidate| candidate.id == group_id)
+            .map(|candidate| candidate.items.clone())
+            .unwrap_or_default();
+        let visible = quick_launch.visible;
+        activate_group(cx, &group_id, &group_items, slot, &item, kind, visible);
+        return;
+    }
+    let mode = launch_mode(&item, kind);
+    let confirmation = command_needs_confirmation(quick_launch, &item);
+    let visible = quick_launch.visible;
+    if let Some((spec, trust_key)) = confirmation {
+        // The dialog lives in the quick-launch window, so a summon from the
+        // Launcher's `@` shows it first (§17.2 D.4).
+        if !visible && let Err(error) = show(cx) {
+            tracing::warn!(target: "quick_launch", "could not show the window: {error}");
+        }
+        if let Some(quick_launch) = state_mut(cx) {
+            quick_launch.message = None;
+            quick_launch.pending_command = Some(PendingCommand {
+                group: group_id,
+                slot,
+                item,
+                spec,
+                trust_key,
+                mode,
+            });
+            quick_launch.touch();
+        }
+        cx.refresh_windows();
+        return;
+    }
+    send_launch(cx, item, group_id, slot, mode);
+}
+
+/// Expands and starts one `group` item (§17.2 E.1).
+///
+/// The whole group is refused when one of its commands still needs its first-run
+/// confirmation and the user cancels: the commands are collected into one
+/// overlay rather than one per command, and nothing is sent before it answers.
+fn activate_group(
+    cx: &mut App,
+    group_id: &str,
+    group_items: &[Item],
+    slot: u32,
+    group_item: &Item,
+    kind: ClickKind,
+    visible: bool,
+) {
+    let plan = expand_group(group_items, group_item);
+    if plan.items.is_empty() {
+        if let Some(quick_launch) = state_mut(cx) {
+            quick_launch.message =
+                Some(nohrs_core::t!("Este grupo não tem itens válidos.").to_string());
+            quick_launch.touch();
+        }
+        cx.refresh_windows();
+        return;
+    }
+    let commands: Vec<PendingGroupCommand> = {
+        let Some(quick_launch) = state(cx) else {
+            return;
+        };
+        plan.items
+            .iter()
+            .filter_map(|child| {
+                command_needs_confirmation(quick_launch, child).map(|(spec, trust_key)| {
+                    PendingGroupCommand {
+                        item: child.clone(),
+                        spec,
+                        trust_key,
+                    }
+                })
+            })
+            .collect()
     };
-    let on_running = quick_launch.config.window.on_running;
-    let generation = quick_launch.generation.wrapping_add(1);
+    if commands.is_empty() {
+        send_group_launch(cx, group_id.to_string(), slot, plan, kind);
+        return;
+    }
+    // The dialog lives in the quick-launch window, so a summon from the
+    // Launcher's `@` shows it first (§17.2 D.4).
+    if !visible && let Err(error) = show(cx) {
+        tracing::warn!(target: "quick_launch", "could not show the window: {error}");
+    }
+    if let Some(quick_launch) = state_mut(cx) {
+        quick_launch.message = None;
+        quick_launch.pending_group = Some(PendingGroup {
+            group: group_id.to_string(),
+            slot,
+            name: group_item.name.clone(),
+            plan,
+            commands,
+            kind,
+        });
+        quick_launch.touch();
+    }
+    cx.refresh_windows();
+}
+
+/// Sends one start request per entry of a group, all under one generation and
+/// batch id (§17.2 E.1).
+fn send_group_launch(cx: &mut App, group: String, slot: u32, plan: GroupPlan, kind: ClickKind) {
+    // G.4: a use of a copy in a `recent`/`most_used` group belongs to the entry
+    // it was copied from.
+    let usage = usage_target(cx, &group, slot);
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
+    let generation = quick_launch.generation.wrapping_add(1);
     quick_launch.generation = generation;
+    // D9: `ask` is not asked per entry inside a group; it behaves as `activate`.
+    let on_running = group_on_running(quick_launch.config.window.on_running);
+    let total = plan.items.len();
     quick_launch.message = None;
-    quick_launch.pending_usage = Some((group_id, slot));
+    quick_launch.pending_usage = None;
+    quick_launch.pending_batch = Some(PendingLaunchBatch {
+        generation,
+        usage,
+        total,
+        remaining: total,
+        failed: Vec::new(),
+        folders: Vec::new(),
+        used: false,
+        excess: plan.excess,
+    });
+    if let Some(workers) = quick_launch.workers.as_ref() {
+        for item in plan.items {
+            let mode = launch_mode(&item, kind);
+            workers.send_launch(StartRequest {
+                item: Box::new(item),
+                mode,
+                on_running,
+                generation,
+                batch: Some(generation),
+            });
+        }
+    }
+    cx.refresh_windows();
+}
+
+/// The launch mode one click asks for (§8.1): `Ctrl` or an item marked `admin`.
+fn launch_mode(item: &Item, kind: ClickKind) -> LaunchMode {
+    if kind == ClickKind::Admin || item.admin {
+        LaunchMode::Admin
+    } else {
+        LaunchMode::Normal
+    }
+}
+
+/// D9 (§17.2 F.3): a group does not ask per entry, so `ask` behaves as
+/// `activate` inside one.
+fn group_on_running(on_running: OnRunning) -> OnRunning {
+    match on_running {
+        OnRunning::Ask => OnRunning::Activate,
+        other => other,
+    }
+}
+
+/// Hands one start request to the `quick-launch` thread (§8.1, §8.4).
+fn send_launch(cx: &mut App, item: Item, group: String, slot: u32, mode: LaunchMode) {
+    // G.4: a use of a copy in a `recent`/`most_used` group belongs to the entry
+    // it was copied from.
+    let usage = usage_target(cx, &group, slot);
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let on_running = quick_launch.config.window.on_running;
+    let generation = quick_launch.generation.wrapping_add(1);
+    quick_launch.generation = generation;
+    #[cfg(test)]
+    quick_launch.sent_launches.push(mode);
+    quick_launch.message = None;
+    quick_launch.pending_usage = Some(usage);
+    // A single launch replaces whatever group was in flight: its replies are
+    // already stale, because the generation moved on.
+    quick_launch.pending_batch = None;
     if let Some(workers) = quick_launch.workers.as_ref() {
         workers.send_launch(StartRequest {
             item: Box::new(item),
             mode,
             on_running,
             generation,
+            batch: None,
         });
     }
     cx.refresh_windows();
+}
+
+/// Whether a command dialog is waiting for an answer (§17.2 D.3), or a group
+/// dialog is (§17.2 E.1), or the running-program dialog is (§17.2 F.2).
+pub(crate) fn command_waiting(cx: &App) -> bool {
+    state(cx).is_some_and(|quick_launch| {
+        quick_launch.pending_command.is_some()
+            || quick_launch.pending_group.is_some()
+            || quick_launch.pending_already_running.is_some()
+    })
+}
+
+/// What the window's command dialog shows, if one is waiting (§17.2 D.3).
+pub(crate) fn command_confirmation(cx: &App) -> Option<CommandConfirmation> {
+    let quick_launch = state(cx)?;
+    let pending = quick_launch.pending_command.as_ref()?;
+    Some(CommandConfirmation {
+        name: pending.item.name.clone(),
+        shell: pending.spec.shell.as_str(),
+        cwd: pending.item.cwd.clone(),
+        hidden: pending.spec.hidden,
+        script: pending.spec.script.clone(),
+        remembered: quick_launch.kv.is_some(),
+    })
+}
+
+/// What the window's running-program dialog shows, if one is waiting (§17.2 F.2).
+pub(crate) fn already_running_prompt(cx: &App) -> Option<AlreadyRunningPrompt> {
+    let quick_launch = state(cx)?;
+    let pending = quick_launch.pending_already_running.as_ref()?;
+    Some(AlreadyRunningPrompt {
+        name: pending.item.name.clone(),
+    })
+}
+
+/// What the window's group dialog shows, if one is waiting (§17.2 E.1).
+pub(crate) fn group_confirmation(cx: &App) -> Option<GroupConfirmation> {
+    let quick_launch = state(cx)?;
+    let pending = quick_launch.pending_group.as_ref()?;
+    Some(GroupConfirmation {
+        name: pending.name.clone(),
+        commands: pending
+            .commands
+            .iter()
+            .map(|command| GroupCommandConfirmation {
+                name: command.item.name.clone(),
+                shell: command.spec.shell.as_str(),
+                cwd: command.item.cwd.clone(),
+                hidden: command.spec.hidden,
+                script: command.spec.script.clone(),
+            })
+            .collect(),
+        remembered: quick_launch.kv.is_some(),
+    })
+}
+
+/// "Run": writes the trust key, then starts the pending command (§17.2 D.3).
+///
+/// The key reaches the store before the start request, so a launch that works
+/// once does not ask again even if the process ends right after it.
+pub(crate) fn confirm_pending_command(cx: &mut App) {
+    let Some(pending) = state_mut(cx).and_then(|quick_launch| quick_launch.pending_command.take())
+    else {
+        return;
+    };
+    let kv = {
+        let Some(quick_launch) = state_mut(cx) else {
+            return;
+        };
+        remember_trust_in_memory(quick_launch, &pending.trust_key);
+        quick_launch.touch();
+        quick_launch.kv.clone()
+    };
+    cx.refresh_windows();
+    let PendingCommand {
+        group,
+        slot,
+        item,
+        trust_key,
+        mode,
+        ..
+    } = pending;
+    cx.spawn(async move |cx| {
+        if let Some(kv) = kv {
+            let key_name = format!("{TRUSTED_PREFIX}{trust_key}");
+            let written = cx
+                .background_spawn(async move {
+                    let Ok(key) = KvKey::new(KV_NAMESPACE, &key_name) else {
+                        return false;
+                    };
+                    kv.put(&key, b"true").is_ok()
+                })
+                .await;
+            if !written {
+                tracing::warn!(
+                    target: "quick_launch",
+                    "could not remember a command's trust in the store"
+                );
+            }
+        }
+        cx.update(|cx| send_launch(cx, item, group, slot, mode))
+            .ok();
+    })
+    .detach();
+}
+
+/// "Cancel": forget the pending command, start nothing, report nothing
+/// (§17.2 D.3). A pending group is the same decision for its whole batch
+/// (§17.2 E.1), and so is the running-program dialog (§17.2 F.2).
+pub(crate) fn cancel_pending_command(cx: &mut App) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let cancelled = quick_launch.pending_command.take().is_some();
+    let cancelled_group = quick_launch.pending_group.take().is_some();
+    let cancelled_running = quick_launch.pending_already_running.take().is_some();
+    if !cancelled && !cancelled_group && !cancelled_running {
+        return;
+    }
+    if cancelled_running {
+        // A cancelled launch never happened, so it must not be counted.
+        quick_launch.pending_usage = None;
+    }
+    quick_launch.touch();
+    cx.refresh_windows();
+}
+
+/// "Run" for a group (§17.2 E.1): writes every trust key, then sends the whole
+/// batch. Cancelling instead drops the pending group untouched, so the whole
+/// group is refused.
+pub(crate) fn confirm_pending_group(cx: &mut App) {
+    let Some(pending) = state_mut(cx).and_then(|quick_launch| quick_launch.pending_group.take())
+    else {
+        return;
+    };
+    let kv = {
+        let Some(quick_launch) = state_mut(cx) else {
+            return;
+        };
+        for command in &pending.commands {
+            remember_trust_in_memory(quick_launch, &command.trust_key);
+        }
+        quick_launch.touch();
+        quick_launch.kv.clone()
+    };
+    cx.refresh_windows();
+    let PendingGroup {
+        group,
+        slot,
+        plan,
+        commands,
+        kind,
+        ..
+    } = pending;
+    let key_names: Vec<String> = commands
+        .iter()
+        .map(|command| format!("{TRUSTED_PREFIX}{}", command.trust_key))
+        .collect();
+    cx.spawn(async move |cx| {
+        if let Some(kv) = kv {
+            let written = cx
+                .background_spawn(async move {
+                    let mut written = true;
+                    for key_name in key_names {
+                        let Ok(key) = KvKey::new(KV_NAMESPACE, &key_name) else {
+                            written = false;
+                            continue;
+                        };
+                        if kv.put(&key, b"true").is_err() {
+                            written = false;
+                        }
+                    }
+                    written
+                })
+                .await;
+            if !written {
+                tracing::warn!(
+                    target: "quick_launch",
+                    "could not remember the group's commands' trust in the store"
+                );
+            }
+        }
+        cx.update(|cx| send_group_launch(cx, group, slot, plan, kind))
+            .ok();
+    })
+    .detach();
+}
+
+/// Adds one trust key to the in-memory set and, when there is a store, writes it
+/// down (§17.2 D.1, D.5).
+fn remember_trust(cx: &mut App, trust_key: String) {
+    let Some(kv) = state_mut(cx).and_then(|quick_launch| {
+        remember_trust_in_memory(quick_launch, &trust_key);
+        quick_launch.kv.clone()
+    }) else {
+        // A resident process has no store: the set above is the whole record.
+        return;
+    };
+    let key_name = format!("{TRUSTED_PREFIX}{trust_key}");
+    cx.background_spawn(async move {
+        let Ok(key) = KvKey::new(KV_NAMESPACE, &key_name) else {
+            return;
+        };
+        kv.put(&key, b"true").log_err();
+    })
+    .detach();
+}
+
+/// Adds one trust key to the set the foreground consults, without touching the
+/// store: the caller decides whether the key is written.
+fn remember_trust_in_memory(quick_launch: &mut QuickLaunch, trust_key: &str) {
+    quick_launch.restored.trusted.insert(trust_key.to_string());
+}
+
+/// Whether the command at `group`/`slot` is trusted, as the settings form shows
+/// it (§17.2 D.7). `None` when the item is gone or its `extra` is invalid.
+pub(crate) fn command_trust(cx: &App, group: &str, slot: u32) -> Option<bool> {
+    let quick_launch = state(cx)?;
+    let item = quick_launch
+        .config
+        .groups
+        .iter()
+        .find(|candidate| candidate.id == group)?
+        .items
+        .iter()
+        .find(|item| item.slot == slot)?;
+    let spec = command_spec(item).ok()?;
+    let trust_key = command_trust_key(item, &spec);
+    Some(quick_launch.restored.trusted.contains(&trust_key))
+}
+
+/// Removes the trust record of the command at `group`/`slot` (§17.2 D.7).
+///
+/// The foreground set is updated at once; the store is written on a background
+/// task, like every other KV write of this module.
+pub(crate) fn revoke_command_trust(cx: &mut App, group: &str, slot: u32) -> bool {
+    let Some(item) = state(cx)
+        .and_then(|quick_launch| {
+            quick_launch
+                .config
+                .groups
+                .iter()
+                .find(|candidate| candidate.id == group)
+        })
+        .and_then(|candidate| candidate.items.iter().find(|item| item.slot == slot))
+        .cloned()
+    else {
+        return false;
+    };
+    let Ok(spec) = command_spec(&item) else {
+        return false;
+    };
+    let trust_key = command_trust_key(&item, &spec);
+    let kv = {
+        let Some(quick_launch) = state_mut(cx) else {
+            return false;
+        };
+        quick_launch.restored.trusted.remove(&trust_key);
+        quick_launch.kv.clone()
+    };
+    if let Some(kv) = kv {
+        let key_name = format!("{TRUSTED_PREFIX}{trust_key}");
+        cx.background_spawn(async move {
+            let Ok(key) = KvKey::new(KV_NAMESPACE, &key_name) else {
+                return;
+            };
+            kv.delete(&key).log_err();
+        })
+        .detach();
+    }
+    true
 }
 
 /// Switches the group bar to `index` (§12.2).
@@ -3040,6 +4765,9 @@ fn select_group(cx: &mut App, index: usize) {
     quick_launch.restored.last_group = Some(id.clone());
     let bytes = id.into_bytes();
     write_kv_name(cx, LAST_GROUP_KEY.to_string(), bytes);
+    // G.2: a `folder:` group reads its directory again when it is switched to,
+    // if the last read is older than 30 s.
+    refresh_dynamic_groups_for(cx, RefreshReason::GroupSwitch(index));
     ensure_selection(cx);
     cx.refresh_windows();
 }
@@ -3172,6 +4900,15 @@ pub fn launcher_snapshot(cx: &App) -> Vec<LauncherEntry> {
         .config
         .groups
         .iter()
+        // G.7: the copies a `recent`/`most_used` group shows are already in the
+        // snapshot through their own group; listing them again would duplicate
+        // every row.
+        .filter(|group| {
+            !matches!(
+                group_source(group),
+                Some(GroupSource::Recent | GroupSource::MostUsed)
+            )
+        })
         .flat_map(|group| {
             group.items.iter().map(move |item| LauncherEntry {
                 group: group.id.clone(),
@@ -3372,6 +5109,36 @@ mod platform {
 mod tests {
     use super::*;
 
+    /// §17.2 R2: the prompt asks for what the platform can actually pick.
+    #[test]
+    fn a_path_prompt_follows_what_the_platform_can_pick() {
+        let files = path_prompt(PathWant::Files, true, "p", true);
+        assert!(files.files);
+        assert!(!files.directories);
+        assert!(files.multiple);
+        let folders = path_prompt(PathWant::Folders, false, "p", true);
+        assert!(!folders.files);
+        assert!(folders.directories);
+        assert!(!folders.multiple);
+        // Where both may be picked, `Either` asks for both.
+        let either = path_prompt(PathWant::Either, true, "p", true);
+        assert!(either.files);
+        assert!(either.directories);
+        // Where they cannot be mixed, it falls back to files rather than to the
+        // folder-only dialog Windows would otherwise force (§17.2 R2).
+        let fallback = path_prompt(PathWant::Either, true, "p", false);
+        assert!(fallback.files);
+        assert!(!fallback.directories);
+    }
+
+    /// §17.2 R2: the folder-only menu entry exists only where the two cannot be
+    /// picked together.
+    #[test]
+    fn the_folder_entry_is_offered_only_without_mixed_selection() {
+        assert!(!folder_entry_offered(true));
+        assert!(folder_entry_offered(false));
+    }
+
     /// A group of `count` items, the size §16.2 measures a switch with.
     fn group_of(count: u32) -> Group {
         Group {
@@ -3380,6 +5147,7 @@ mod tests {
             items: (0..count)
                 .map(|slot| Item::new(slot, "app", format!("Item {slot}")))
                 .collect(),
+            source: None,
         }
     }
 
@@ -3513,11 +5281,13 @@ mod tests {
                     id: "group_1".to_string(),
                     name: "Um".to_string(),
                     items: Vec::new(),
+                    source: None,
                 },
                 Group {
                     id: "group_3".to_string(),
                     name: "Tres".to_string(),
                     items: Vec::new(),
+                    source: None,
                 },
             ],
             ..QuickLaunchConfig::default()
@@ -4243,6 +6013,8 @@ mod tests {
                     admin: false,
                     icon: String::new(),
                     tags: Vec::new(),
+                    command: None,
+                    group_items: None,
                 }
             ));
             assert!(!move_group(cx, 0, 1));
@@ -4314,7 +6086,7 @@ mod tests {
     }
 
     /// §17.1 B: the settings page's form changes the fields the window's dialog
-    /// does not offer, and only lets the four kinds of the form be introduced.
+    /// does not offer, and only lets the kinds of the form be introduced.
     #[gpui::test]
     fn a_settings_page_item_form_covers_the_other_fields(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -4329,6 +6101,8 @@ mod tests {
                 admin: true,
                 icon: "C:\\icone.png".to_string(),
                 tags: vec![" um ".to_string(), String::new(), "dois".to_string()],
+                command: None,
+                group_items: None,
             };
             assert!(update_item(cx, 0, 2, &edit));
             let item = item_at(cx, 0, 2).expect("the item is still there");
@@ -4349,26 +6123,75 @@ mod tests {
             empty.path = String::new();
             assert!(!update_item(cx, 0, 2, &empty));
 
-            // A kind outside the four is kept, never introduced.
-            let mut command = item_at(cx, 0, 2).expect("the item is still there");
-            command.kind = "command".to_string();
-            assert!(put_item(cx, 0, 2, command));
-            let kept = ItemEdit {
-                kind: "command".to_string(),
+            // A command comes with its own fields and no path, and its trust
+            // record is written as it is saved (D5, §17.2 D.6).
+            let command = ItemEdit {
+                kind: KIND_COMMAND.to_string(),
                 name: "Comando".to_string(),
-                path: "cmd.exe".to_string(),
+                path: String::new(),
+                args: String::new(),
+                admin: true,
+                command: Some(CommandEdit {
+                    shell: "cmd".to_string(),
+                    script: "echo ok".to_string(),
+                    hidden: true,
+                    keep_open: false,
+                }),
                 ..edit.clone()
             };
-            assert!(update_item(cx, 0, 2, &kept));
+            assert!(update_item(cx, 0, 2, &command));
+            let item = item_at(cx, 0, 2).expect("the item is still there");
+            assert_eq!(item.kind, KIND_COMMAND);
+            assert_eq!(item.path, None, "a command has no path");
             assert_eq!(
-                item_at(cx, 0, 2).map(|item| item.kind),
-                Some("command".to_string())
+                item.extra.get("shell").and_then(|value| value.as_str()),
+                Some("cmd")
             );
+            assert_eq!(
+                item.extra.get("script").and_then(|value| value.as_str()),
+                Some("echo ok")
+            );
+            assert_eq!(
+                item.extra.get("hidden").and_then(|value| value.as_bool()),
+                Some(true)
+            );
+            assert!(!item.admin, "a command cannot run elevated (D4)");
+            let spec = command_spec(&item).expect("a valid command");
+            let trust = command_trust_key(&item, &spec);
+            assert!(
+                state(cx).is_some_and(|state| state.restored.trusted.contains(&trust)),
+                "saving through the form trusts the new key"
+            );
+
+            let broken = ItemEdit {
+                command: Some(CommandEdit {
+                    shell: "bash".to_string(),
+                    script: String::new(),
+                    hidden: false,
+                    keep_open: false,
+                }),
+                ..command.clone()
+            };
+            assert!(!update_item(cx, 0, 2, &broken));
+
+            // A kind the form cannot build is kept, never introduced.
             let introduced = ItemEdit {
                 kind: "plugin:x".to_string(),
-                ..kept.clone()
+                ..command.clone()
             };
             assert!(!update_item(cx, 0, 2, &introduced));
+
+            // Going back to an ordinary kind drops the command's `extra`.
+            let back = ItemEdit {
+                kind: "app".to_string(),
+                path: "C:\\a.exe".to_string(),
+                command: None,
+                ..edit.clone()
+            };
+            assert!(update_item(cx, 0, 2, &back));
+            let item = item_at(cx, 0, 2).expect("the item is still there");
+            assert_eq!(item.kind, "app");
+            assert!(item.extra.is_empty(), "the command fields go with the kind");
         });
     }
 
@@ -4641,6 +6464,7 @@ mod tests {
             mode: LaunchMode::Normal,
             on_running: OnRunning::Activate,
             generation: 7,
+            batch: None,
         });
         let deadline = Instant::now() + Duration::from_millis(100);
         let mut answer = None;
@@ -4695,6 +6519,7 @@ mod tests {
             mode: LaunchMode::Normal,
             on_running: OnRunning::Activate,
             generation: 42,
+            batch: None,
         });
         match reply_receiver.recv_blocking() {
             Ok(WorkerReply::Launched {
@@ -4822,10 +6647,15 @@ mod tests {
                 KvKey::new(KV_NAMESPACE, LAST_GROUP_KEY).unwrap(),
                 b"desenvolvimento".to_vec(),
             ),
-            // A key of another milestone, or one that cannot be read: skipped,
+            // A key of another milestone, or one too short to be a trust key: skipped,
             // not an error.
             (
                 KvKey::new(KV_NAMESPACE, "trusted_00ff").unwrap(),
+                b"true".to_vec(),
+            ),
+            // A trust record this build wrote: the hex part is restored.
+            (
+                KvKey::new(KV_NAMESPACE, "trusted_0123456789abcdef0123456789abcdef").unwrap(),
                 b"true".to_vec(),
             ),
             (
@@ -4840,6 +6670,11 @@ mod tests {
             Some(saved)
         );
         assert_eq!(restored.last_group.as_deref(), Some("desenvolvimento"));
+        assert_eq!(
+            restored.trusted.iter().collect::<Vec<_>>(),
+            vec!["0123456789abcdef0123456789abcdef"],
+            "a key that is not 32 hex characters is not a trust record"
+        );
     }
 
     #[test]
@@ -4926,6 +6761,971 @@ mod tests {
         );
     }
 
+    /// A `command` item with a valid spec, for the confirmation tests (§17.2 D).
+    fn command_item(slot: u32, script: &str) -> Item {
+        let mut item = Item::new(slot, KIND_COMMAND, "Script");
+        item.extra.insert("shell".to_string(), "cmd".into());
+        item.extra.insert("script".to_string(), script.into());
+        item
+    }
+
+    /// §17.2 D.1: the same command always gets the same key, and any field that
+    /// changes what runs changes it too, so a changed script is confirmed again.
+    #[test]
+    fn a_command_trust_key_is_stable_and_follows_every_field() {
+        let item = command_item(0, "echo ok");
+        let spec = command_spec(&item).expect("a valid command");
+        let key = command_trust_key(&item, &spec);
+        assert_eq!(key.len(), TRUST_KEY_HEX_LENGTH);
+        assert!(
+            key.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "lowercase hex, as the KV name rules ask: {key}"
+        );
+        assert!(KvKey::new(KV_NAMESPACE, &format!("{TRUSTED_PREFIX}{key}")).is_ok());
+        assert_eq!(
+            command_trust_key(&item, &command_spec(&item).expect("a valid command")),
+            key,
+            "the same command answers the same key"
+        );
+        for field in [
+            {
+                let mut changed = item.clone();
+                changed
+                    .extra
+                    .insert("script".to_string(), "echo ok!".into());
+                changed
+            },
+            {
+                let mut changed = item.clone();
+                changed.extra.insert("shell".to_string(), "pwsh".into());
+                changed
+            },
+            {
+                let mut changed = item.clone();
+                changed.cwd = Some("C:\\Temp".to_string());
+                changed
+            },
+            {
+                let mut changed = item.clone();
+                changed.extra.insert("hidden".to_string(), true.into());
+                changed
+            },
+            {
+                let mut changed = item.clone();
+                changed.extra.insert("keep_open".to_string(), true.into());
+                changed
+            },
+        ] {
+            let spec = command_spec(&field).expect("a valid command");
+            assert_ne!(
+                command_trust_key(&field, &spec),
+                key,
+                "a changed {field:?} needs its own confirmation"
+            );
+        }
+    }
+
+    /// §17.2 D.2: an untrusted command opens the dialog instead of a start request.
+    ///
+    /// The dialog belongs to the window, so the hidden-window path of D.4 calls
+    /// `show`; a headless test window cannot be made visible, so the state is
+    /// marked visible here and the dialog itself is what the test checks.
+    #[gpui::test]
+    fn an_untrusted_command_opens_the_confirmation_instead_of_launching(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![command_item(0, "echo ok")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_command.is_some(), "the dialog is waiting");
+            assert_eq!(state.generation, 0, "nothing was sent to the launcher");
+            assert_eq!(state.pending_usage, None, "no launch was counted");
+            let confirmation = command_confirmation(cx).expect("the dialog has content");
+            assert_eq!(confirmation.name, "Script");
+            assert_eq!(confirmation.shell, "cmd");
+            assert_eq!(confirmation.script, "echo ok");
+            assert!(!confirmation.hidden);
+            assert!(
+                !confirmation.remembered,
+                "the sample has no store, so the note is shown"
+            );
+        });
+    }
+
+    /// §17.2 D.3: "Run" writes the key and only then asks the launcher to start
+    /// the command.
+    #[gpui::test]
+    fn confirming_a_command_writes_the_key_and_launches(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        let mut trust_key = String::new();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![command_item(0, "echo ok")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let item = item_at(cx, 0, 0).expect("the item is there");
+            trust_key = command_trust_key(&item, &command_spec(&item).expect("a valid command"));
+            confirm_pending_command(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(
+                state.pending_command.is_none(),
+                "the dialog closes when Run is clicked"
+            );
+            assert!(
+                state.restored.trusted.contains(&trust_key),
+                "the trust is in memory before the store answers"
+            );
+        });
+        cx.run_until_parked();
+        let key = KvKey::new(KV_NAMESPACE, &format!("{TRUSTED_PREFIX}{trust_key}"))
+            .expect("a valid trust key");
+        assert_eq!(
+            store.get(&key).expect("the test store"),
+            Some(b"true".to_vec()),
+            "the key reaches the store"
+        );
+        let sent =
+            cx.update(|cx| state(cx).map(|state| (state.generation, state.pending_usage.clone())));
+        assert_eq!(
+            sent,
+            Some((1, Some(("general".to_string(), 0)))),
+            "one launch request follows the write"
+        );
+    }
+
+    /// §17.2 D.9: a script edited after its first run is a different command and
+    /// must be confirmed again; the unchanged one runs without asking.
+    #[gpui::test]
+    fn a_changed_script_asks_for_confirmation_again(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![command_item(0, "echo ok")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            confirm_pending_command(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            // The same script is trusted now.
+            activate_with(cx, 0, ClickKind::Plain);
+            assert!(
+                state(cx).is_some_and(|state| state.pending_command.is_none()),
+                "the confirmed script runs without asking"
+            );
+            // A hand edit changes the script behind the state's back.
+            if let Some(state) = state_mut(cx) {
+                if let Some(item) = state.config.groups[0].items.first_mut() {
+                    item.extra.insert("script".to_string(), "echo outro".into());
+                }
+                state.touch();
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let state = state(cx).expect("the state is installed");
+            assert!(
+                state.pending_command.is_some(),
+                "the changed script asks for confirmation again"
+            );
+        });
+    }
+
+    /// §17.2 D.6 (D5): saving a command through the settings form trusts the key
+    /// it just wrote.
+    #[gpui::test]
+    fn saving_a_command_through_the_form_writes_its_trust_record(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install(cx, vec![group_of(0)]);
+            assert!(put_item(cx, 0, 1, Item::new(1, "app", "Antigo")));
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let edit = ItemEdit {
+                kind: KIND_COMMAND.to_string(),
+                name: "Comando".to_string(),
+                path: String::new(),
+                args: String::new(),
+                cwd: String::new(),
+                admin: false,
+                icon: String::new(),
+                tags: Vec::new(),
+                command: Some(CommandEdit {
+                    shell: "cmd".to_string(),
+                    script: "echo ok".to_string(),
+                    hidden: false,
+                    keep_open: false,
+                }),
+                group_items: None,
+            };
+            assert!(update_item(cx, 0, 1, &edit));
+        });
+        cx.run_until_parked();
+        let key_name = cx.update(|cx| {
+            let item = item_at(cx, 0, 1).expect("the item is there");
+            let spec = command_spec(&item).expect("a valid command");
+            format!("{TRUSTED_PREFIX}{}", command_trust_key(&item, &spec))
+        });
+        let key = KvKey::new(KV_NAMESPACE, &key_name).expect("a valid trust key");
+        assert_eq!(
+            store.get(&key).expect("the test store"),
+            Some(b"true".to_vec())
+        );
+        assert_eq!(cx.update(|cx| command_trust(cx, "general", 1)), Some(true));
+    }
+
+    /// §17.2 D.7: revoking removes the record from memory and from the store.
+    #[gpui::test]
+    fn revoking_a_trust_removes_the_record(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        let item = command_item(0, "echo ok");
+        let spec = command_spec(&item).expect("a valid command");
+        let trust_key = command_trust_key(&item, &spec);
+        let key = KvKey::new(KV_NAMESPACE, &format!("{TRUSTED_PREFIX}{trust_key}"))
+            .expect("a valid trust key");
+        store.put(&key, b"true").expect("the test store");
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![item];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+                state.restored.trusted.insert(trust_key.clone());
+            }
+            assert_eq!(command_trust(cx, "general", 0), Some(true));
+            assert!(revoke_command_trust(cx, "general", 0));
+            assert_eq!(command_trust(cx, "general", 0), Some(false));
+        });
+        cx.run_until_parked();
+        assert_eq!(store.get(&key).expect("the test store"), None);
+    }
+
+    /// §17.2 D.5: without a store the trust is kept in memory and forgotten when
+    /// the process ends.
+    #[gpui::test]
+    fn a_resident_process_keeps_its_trust_in_memory_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![command_item(0, "echo ok")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+                state.mode = Mode::Standalone;
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            assert!(
+                state(cx).is_some_and(|state| state.pending_command.is_some()),
+                "the first run still asks"
+            );
+            confirm_pending_command(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let installed = state(cx).expect("the state is installed");
+            assert_eq!(installed.mode, Mode::Standalone);
+            assert!(installed.kv.is_none(), "the resident process has no store");
+            assert_eq!(installed.generation, 1, "the command did start");
+            assert!(
+                !command_confirmation(cx).is_some_and(|confirmation| confirmation.remembered),
+                "the dialog would say the trust is not stored"
+            );
+            // Within this process the confirmation holds.
+            activate_with(cx, 0, ClickKind::Plain);
+            let installed = state(cx).expect("the state is installed");
+            assert!(
+                installed.pending_command.is_none(),
+                "the same process runs it without asking again"
+            );
+            assert_eq!(installed.generation, 2);
+        });
+    }
+
+    /// §17.2 D.8: pruning usage records must never delete a trust record.
+    #[gpui::test]
+    fn pruning_usage_leaves_the_trust_records_alone(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        let trusted_name = format!("{TRUSTED_PREFIX}0123456789abcdef0123456789abcdef");
+        let kept = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("a valid key");
+        let stale = KvKey::new(KV_NAMESPACE, "usage_general_9").expect("a valid key");
+        let trusted = KvKey::new(KV_NAMESPACE, &trusted_name).expect("a valid key");
+        store.put(&kept, b"a").expect("the test store");
+        store.put(&stale, b"b").expect("the test store");
+        store.put(&trusted, b"true").expect("the test store");
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            prune_usage(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            store.get(&kept).expect("the test store"),
+            Some(b"a".to_vec()),
+            "a live usage record stays"
+        );
+        assert_eq!(
+            store.get(&stale).expect("the test store"),
+            None,
+            "the stale usage record goes"
+        );
+        assert_eq!(
+            store.get(&trusted).expect("the test store"),
+            Some(b"true".to_vec()),
+            "a trust record is not a usage record and stays"
+        );
+    }
+
+    /// A leaf item that can be referenced by a `group` item (§17.2 E).
+    fn group_leaf(slot: u32, id: &str) -> Item {
+        let mut item = Item::new(slot, "app", id);
+        item.id = Some(id.to_string());
+        item
+    }
+
+    /// A `group` item with `references`, in start order.
+    fn group_bundle(slot: u32, id: &str, references: &[&str]) -> Item {
+        let mut item = Item::new(slot, KIND_GROUP, id);
+        item.id = Some(id.to_string());
+        item.items = references
+            .iter()
+            .map(|reference| reference.to_string())
+            .collect();
+        item
+    }
+
+    /// §17.2 E.1: references start in order, a nested group is flattened where it
+    /// appears, and an id that was already expanded is skipped.
+    #[test]
+    fn group_references_start_in_order_and_flatten_nesting() {
+        let items = vec![
+            group_leaf(0, "a"),
+            group_leaf(1, "b"),
+            group_leaf(2, "c"),
+            group_leaf(3, "d"),
+            group_bundle(4, "inner", &["c", "d"]),
+            group_bundle(5, "outer", &["b", "inner", "a", "a"]),
+        ];
+        let plan = expand_group(&items, &items[5]);
+        let names: Vec<&str> = plan.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["b", "c", "d", "a"]);
+        assert_eq!(plan.excess, 0, "nothing was left out");
+    }
+
+    /// §17.2 E.1: a cycle in memory is broken by the visited set instead of
+    /// recursing forever; the parse repairs one, but the runtime must not hang.
+    #[test]
+    fn group_references_break_a_cycle() {
+        let items = vec![
+            group_leaf(0, "x"),
+            group_bundle(1, "a", &["b"]),
+            group_bundle(2, "b", &["a", "x"]),
+        ];
+        let plan = expand_group(&items, &items[1]);
+        let names: Vec<&str> = plan.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["x"]);
+    }
+
+    /// §17.2 E.1: a plan stops at sixteen entries and reports the rest instead of
+    /// starting them.
+    #[test]
+    fn group_references_stop_at_the_entry_limit() {
+        let mut items: Vec<Item> = (0..20)
+            .map(|slot| Item {
+                slot,
+                ..group_leaf(slot, &format!("i{slot}"))
+            })
+            .collect();
+        let references: Vec<String> = items.iter().filter_map(|item| item.id.clone()).collect();
+        let reference_text: Vec<&str> = references.iter().map(String::as_str).collect();
+        items.push(group_bundle(20, "all", &reference_text));
+        let plan = expand_group(&items, &items[20]);
+        assert_eq!(plan.items.len(), MAX_GROUP_REFERENCES);
+        assert_eq!(plan.excess, 20 - MAX_GROUP_REFERENCES);
+        assert_eq!(
+            plan.items.first().map(|item| item.name.as_str()),
+            Some("i0"),
+            "the first references start"
+        );
+    }
+
+    /// §17.2 E.1: a reference that names another group's item is not found in
+    /// this group, so it is ignored.
+    #[test]
+    fn group_references_ignore_other_groups() {
+        let group = vec![group_leaf(0, "a")];
+        let mut bundle = group_bundle(1, "outer", &["a", "foreign"]);
+        bundle.id = Some("outer".to_string());
+        let plan = expand_group(&group, &bundle);
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(plan.excess, 0, "a missing reference is not an overflow");
+    }
+
+    /// §17.2 E.1: nesting is followed up to [`MAX_GROUP_NESTING`] levels.
+    #[test]
+    fn group_references_stop_at_the_nesting_limit() {
+        let build = |links: usize| {
+            let mut items = vec![group_leaf(0, "leaf")];
+            let mut references = vec!["leaf".to_string()];
+            for index in 0..links {
+                let id = format!("n{index}");
+                let reference_text: Vec<&str> = references.iter().map(String::as_str).collect();
+                items.push(group_bundle(
+                    u32::try_from(index + 1).unwrap_or(1),
+                    &id,
+                    &reference_text,
+                ));
+                references = vec![id];
+            }
+            let last = references.first().cloned().unwrap_or_default();
+            let outer_reference: Vec<&str> = vec![last.as_str()];
+            items.push(group_bundle(
+                u32::try_from(links + 1).unwrap_or(1),
+                "outer",
+                &outer_reference,
+            ));
+            items
+        };
+        let allowed = build(MAX_GROUP_NESTING);
+        let plan = expand_group(&allowed, allowed.last().expect("the outer bundle"));
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["leaf"],
+            "eight nested groups still reach the leaf"
+        );
+        let too_deep = build(MAX_GROUP_NESTING + 1);
+        let plan = expand_group(&too_deep, too_deep.last().expect("the outer bundle"));
+        assert!(plan.items.is_empty(), "the ninth level is not followed");
+    }
+
+    /// §17.2 E.2: a group with no valid reference is invalid; one with a
+    /// reference is ok, and its entries keep their own answers.
+    #[test]
+    fn a_group_is_invalid_only_without_a_valid_reference() {
+        let items = vec![group_leaf(0, "a")];
+        assert_eq!(
+            group_health(&items, &group_bundle(1, "empty", &[])),
+            Health::Invalid(nohrs_core::t!("Este grupo não tem itens válidos.").to_string())
+        );
+        assert_eq!(
+            group_health(&items, &group_bundle(2, "ghost", &["ghost"])),
+            Health::Invalid(nohrs_core::t!("Este grupo não tem itens válidos.").to_string())
+        );
+        assert_eq!(
+            group_health(&items, &group_bundle(3, "real", &["a"])),
+            Health::Ok
+        );
+    }
+
+    /// D9: inside a group `ask` behaves as `activate`.
+    #[test]
+    fn asking_inside_a_group_becomes_activating() {
+        assert_eq!(group_on_running(OnRunning::Ask), OnRunning::Activate);
+        assert_eq!(group_on_running(OnRunning::New), OnRunning::New);
+        assert_eq!(group_on_running(OnRunning::Activate), OnRunning::Activate);
+    }
+
+    /// §17.2 E.1: untrusted commands of the whole plan share one dialog, and
+    /// cancelling it starts nothing.
+    #[gpui::test]
+    fn untrusted_group_commands_share_one_confirmation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                group_leaf(1, "a"),
+                command_item(2, "echo um"),
+                command_item(3, "echo dois"),
+                group_bundle(4, "inner", &["c"]),
+                group_bundle(0, "bundle", &["a", "b", "inner"]),
+            ];
+            group.items[1].id = Some("b".to_string());
+            group.items[2].id = Some("c".to_string());
+            group.items[2].name = "Dois".to_string();
+            group.items[1].name = "Um".to_string();
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let installed = state(cx).expect("the state is installed");
+            assert!(
+                installed.pending_command.is_none(),
+                "a group does not use the single-command dialog"
+            );
+            let pending = installed
+                .pending_group
+                .as_ref()
+                .expect("the group dialog is waiting");
+            assert_eq!(pending.commands.len(), 2, "one entry per untrusted command");
+            assert_eq!(installed.generation, 0, "nothing was sent to the launcher");
+            let confirmation = group_confirmation(cx).expect("the dialog has content");
+            assert_eq!(confirmation.name, "bundle");
+            let names: Vec<&str> = confirmation
+                .commands
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["Um", "Dois"]);
+            assert_eq!(confirmation.commands[0].script, "echo um");
+            assert_eq!(confirmation.commands[1].script, "echo dois");
+            cancel_pending_command(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_group.is_none(), "cancel closes the dialog");
+            assert!(
+                state.pending_batch.is_none(),
+                "cancel refuses the whole group"
+            );
+            assert_eq!(state.generation, 0, "nothing started");
+        });
+        // "Run" trusts every command and only then sends the whole batch.
+        cx.update(|cx| {
+            activate_with(cx, 0, ClickKind::Plain);
+            confirm_pending_group(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_group.is_none(), "Run closes the dialog");
+            assert_eq!(state.restored.trusted.len(), 2, "both keys are remembered");
+            let batch = state
+                .pending_batch
+                .as_ref()
+                .expect("the whole group is in flight");
+            assert_eq!(batch.total, 3, "the non-command entry starts too");
+            assert_eq!(state.generation, 1, "one batch, one generation");
+        });
+    }
+
+    /// §17.2 E.1: once every entry has answered, one footer line names the ones
+    /// that did not start, and only then is the batch finished.
+    #[gpui::test]
+    fn a_group_reports_partial_failures_in_one_line(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                group_leaf(1, "a"),
+                group_leaf(2, "b"),
+                group_leaf(3, "c"),
+                group_bundle(0, "bundle", &["a", "b", "c"]),
+            ];
+            group.items[1].name = "A".to_string();
+            group.items[2].name = "B".to_string();
+            group.items[3].name = "C".to_string();
+            group.items[0].name = "Pacote".to_string();
+            install(cx, vec![group]);
+            activate_with(cx, 0, ClickKind::Plain);
+            let installed = state(cx).expect("the state is installed");
+            let batch = installed
+                .pending_batch
+                .as_ref()
+                .expect("the batch is in flight");
+            assert_eq!(batch.total, 3);
+            assert_eq!(
+                installed.message, None,
+                "nothing is reported before the end"
+            );
+            let generation = installed.generation;
+            apply_reply(
+                cx,
+                WorkerReply::Launched {
+                    generation,
+                    batch: Some(generation),
+                    name: "A".to_string(),
+                    outcome: Ok(LaunchOutcome::Started),
+                },
+            );
+            apply_reply(
+                cx,
+                WorkerReply::Launched {
+                    generation,
+                    batch: Some(generation),
+                    name: "B".to_string(),
+                    outcome: Err(LaunchError::NotFound(PathBuf::from("C:\\nao\\existe"))),
+                },
+            );
+            let after_one = state(cx).expect("the state is installed");
+            assert!(
+                after_one.pending_batch.is_some(),
+                "one answer is still missing"
+            );
+            assert_eq!(after_one.message, None, "no line before the batch ends");
+            apply_reply(
+                cx,
+                WorkerReply::Launched {
+                    generation,
+                    batch: Some(generation),
+                    name: "C".to_string(),
+                    outcome: Err(LaunchError::NotFound(PathBuf::from("C:\\nao\\existe"))),
+                },
+            );
+            let after_all = state(cx).expect("the state is installed");
+            assert!(after_all.pending_batch.is_none(), "the batch is finished");
+            assert_eq!(
+                after_all.message.as_deref(),
+                Some(
+                    nohrs_core::tf!(
+                        "{failed} de {total} itens não iniciaram: {names}",
+                        failed = 2,
+                        total = 3,
+                        names = "B, C"
+                    )
+                    .as_str()
+                )
+            );
+        });
+    }
+
+    /// §17.2 E.1: entries past the limit are not started, and the footer says how
+    /// many were left out.
+    #[gpui::test]
+    fn a_group_reports_entries_past_the_limit(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            for slot in 1..=18u32 {
+                let id = format!("i{slot}");
+                let mut item = group_leaf(slot, &id);
+                item.name = format!("Item {slot}");
+                group.items.push(item);
+            }
+            let references: Vec<String> = (1..=18u32).map(|slot| format!("i{slot}")).collect();
+            let reference_text: Vec<&str> = references.iter().map(String::as_str).collect();
+            group.items.push(group_bundle(0, "bundle", &reference_text));
+            install(cx, vec![group]);
+            activate_with(cx, 0, ClickKind::Plain);
+            let generation = state(cx).map(|state| state.generation).unwrap_or(0);
+            let total = state(cx)
+                .and_then(|state| state.pending_batch.as_ref().map(|batch| batch.total))
+                .unwrap_or(0);
+            assert_eq!(total, MAX_GROUP_REFERENCES);
+            for slot in 1..=u32::try_from(MAX_GROUP_REFERENCES).unwrap_or(16) {
+                apply_reply(
+                    cx,
+                    WorkerReply::Launched {
+                        generation,
+                        batch: Some(generation),
+                        name: format!("Item {slot}"),
+                        outcome: Ok(LaunchOutcome::Started),
+                    },
+                );
+            }
+            let state = state(cx).expect("the state is installed");
+            assert_eq!(
+                state.message.as_deref(),
+                Some(
+                    nohrs_core::tf!(
+                        "{skipped} itens do grupo excedem o limite de {limit} e não serão iniciados.",
+                        skipped = 2,
+                        limit = MAX_GROUP_REFERENCES
+                    )
+                    .as_str()
+                )
+            );
+        });
+    }
+
+    /// §17.2 E.1: the use is recorded on the group item only, never on the
+    /// entries it started.
+    #[gpui::test]
+    fn a_group_records_usage_only_on_itself(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                group_leaf(1, "a"),
+                group_leaf(2, "b"),
+                group_bundle(0, "bundle", &["a", "b"]),
+            ];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let generation = state(cx).map(|state| state.generation).unwrap_or(0);
+            for name in ["a", "b"] {
+                apply_reply(
+                    cx,
+                    WorkerReply::Launched {
+                        generation,
+                        batch: Some(generation),
+                        name: name.to_string(),
+                        outcome: Ok(LaunchOutcome::Started),
+                    },
+                );
+            }
+            assert!(
+                state(cx).is_some_and(|state| state.pending_usage.is_none()),
+                "a batch never uses the single item's pending record"
+            );
+        });
+        cx.run_until_parked();
+        let usage = |slot: u32| {
+            let key = KvKey::new(KV_NAMESPACE, &format!("usage_general_{slot}"))
+                .expect("a valid usage key");
+            store.get(&key).expect("the test store")
+        };
+        let group_usage = usage(0).expect("the group counted one use");
+        assert!(
+            String::from_utf8_lossy(&group_usage).contains("\"count\":1"),
+            "the record is a usage count: {group_usage:?}"
+        );
+        assert!(usage(1).is_none(), "the first entry is not counted");
+        assert!(usage(2).is_none(), "the second entry is not counted");
+    }
+
+    /// §17.2 E.3: saving a group gives ids to the items that had none, avoids a
+    /// collision by appending `_2`, and writes the references in pick order in
+    /// the same edit.
+    #[gpui::test]
+    fn saving_a_group_assigns_ids_without_collisions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![
+                {
+                    let mut item = Item::new(0, KIND_GROUP, "Pacote");
+                    item.items = vec!["item_1".to_string()];
+                    item
+                },
+                Item::new(1, "app", "Um"),
+                {
+                    let mut item = Item::new(2, "app", "Dois");
+                    item.id = Some("item_1".to_string());
+                    item
+                },
+                Item::new(3, "app", "Tres"),
+            ];
+            install(cx, vec![group]);
+            let edit = ItemEdit {
+                kind: KIND_GROUP.to_string(),
+                name: "Pacote".to_string(),
+                path: String::new(),
+                args: String::new(),
+                cwd: String::new(),
+                admin: false,
+                icon: String::new(),
+                tags: Vec::new(),
+                command: None,
+                group_items: Some(vec![2, 1, 3]),
+            };
+            let revision = state(cx).map(|state| state.revision).unwrap_or(0);
+            assert!(update_item(cx, 0, 0, &edit));
+            let item = item_at(cx, 0, 0).expect("the group is still there");
+            assert_eq!(
+                item.id.as_deref(),
+                Some("item_0"),
+                "the group gets an id too"
+            );
+            assert_eq!(
+                item.items,
+                vec![
+                    "item_1".to_string(),
+                    "item_1_2".to_string(),
+                    "item_3".to_string()
+                ],
+                "pick order, and the taken id gets a suffix"
+            );
+            assert_eq!(
+                item_at(cx, 0, 1).and_then(|item| item.id),
+                Some("item_1_2".to_string())
+            );
+            assert_eq!(
+                item_at(cx, 0, 2).and_then(|item| item.id),
+                Some("item_1".to_string()),
+                "an existing id is kept"
+            );
+            assert_eq!(
+                item_at(cx, 0, 3).and_then(|item| item.id),
+                Some("item_3".to_string())
+            );
+            assert!(
+                state(cx).is_some_and(|state| state.pending_save),
+                "the whole assignment is one throttled write"
+            );
+            assert!(
+                state(cx).map(|state| state.revision).unwrap_or(0) > revision,
+                "the window is told what changed"
+            );
+            // Saving the same selection again is stable: no new ids, no `_3`.
+            assert!(update_item(cx, 0, 0, &edit));
+            assert_eq!(
+                item_at(cx, 0, 0).map(|item| item.items),
+                Some(vec![
+                    "item_1".to_string(),
+                    "item_1_2".to_string(),
+                    "item_3".to_string()
+                ])
+            );
+        });
+    }
+
+    /// Installs an `app` item, sends its launch, and answers it with
+    /// `AlreadyRunning`, leaving the three-way dialog waiting (§17.2 F.2).
+    fn install_running_program(cx: &mut gpui::App, process_id: u32) {
+        let mut group = group_of(0);
+        group.items = vec![Item::new(0, "app", "Programa")];
+        install(cx, vec![group]);
+        if let Some(state) = state_mut(cx) {
+            state.visible = true;
+            state.config.window.on_running = OnRunning::Ask;
+        }
+        activate_with(cx, 0, ClickKind::Plain);
+        let generation = state(cx).map(|state| state.generation).unwrap_or(0);
+        apply_reply(
+            cx,
+            WorkerReply::Launched {
+                generation,
+                batch: None,
+                name: "Programa".to_string(),
+                outcome: Ok(LaunchOutcome::AlreadyRunning { process_id }),
+            },
+        );
+    }
+
+    /// §17.2 F.2: a running program that the configuration asks about opens the
+    /// dialog instead of counting a use.
+    #[gpui::test]
+    fn a_running_program_opens_the_three_way_dialog(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install_running_program(cx, 4242);
+            let installed = state(cx).expect("the state is installed");
+            let pending = installed
+                .pending_already_running
+                .as_ref()
+                .expect("the dialog is waiting");
+            assert_eq!(pending.process_id, 4242);
+            assert_eq!(
+                installed.pending_usage,
+                Some(("general".to_string(), 0)),
+                "nothing is counted before the user chooses"
+            );
+            assert_eq!(
+                installed.message, None,
+                "a running program is not a failure"
+            );
+            assert_eq!(
+                installed.sent_launches,
+                vec![LaunchMode::Normal],
+                "nothing was sent after the answer"
+            );
+            let prompt = already_running_prompt(cx).expect("the dialog has content");
+            assert_eq!(prompt.name, "Programa");
+        });
+    }
+
+    /// §17.2 F.2 and F.5: "switch to it" sends the launch again for that process,
+    /// and the use counts once the reply says it was activated.
+    #[gpui::test]
+    fn switching_to_the_running_program_asks_for_its_process(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install_running_program(cx, 4242);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            switch_to_running_program(cx);
+            let installed = state(cx).expect("the state is installed");
+            assert!(
+                installed.pending_already_running.is_none(),
+                "the dialog closes"
+            );
+            assert_eq!(
+                installed.sent_launches.last(),
+                Some(&LaunchMode::Activate(4242))
+            );
+            assert_eq!(
+                installed.pending_usage,
+                Some(("general".to_string(), 0)),
+                "the choice is counted when it starts"
+            );
+            let generation = installed.generation;
+            apply_reply(
+                cx,
+                WorkerReply::Launched {
+                    generation,
+                    batch: None,
+                    name: "Programa".to_string(),
+                    outcome: Ok(LaunchOutcome::Activated),
+                },
+            );
+            assert!(
+                state(cx).is_some_and(|state| state.pending_usage.is_none()),
+                "an answered launch is counted once"
+            );
+        });
+        cx.run_until_parked();
+        let key = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("a valid usage key");
+        assert!(
+            store.get(&key).expect("the test store").is_some(),
+            "the use is recorded after the choice"
+        );
+    }
+
+    /// §17.2 F.2 and F.5: "start another" sends a forced new instance.
+    #[gpui::test]
+    fn starting_another_instance_asks_for_a_new_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install_running_program(cx, 4242);
+            start_another_instance(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_already_running.is_none(), "the dialog closes");
+            assert_eq!(state.sent_launches.last(), Some(&LaunchMode::ForceNew));
+        });
+    }
+
+    /// §17.2 F.2 and F.5: cancelling starts nothing and records no use.
+    #[gpui::test]
+    fn cancelling_the_running_program_records_no_use(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install_running_program(cx, 4242);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            cancel_already_running(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_already_running.is_none(), "the dialog closes");
+            assert_eq!(
+                state.pending_usage, None,
+                "a cancelled launch must not be counted later"
+            );
+            assert_eq!(
+                state.sent_launches,
+                vec![LaunchMode::Normal],
+                "cancel sends no request"
+            );
+            assert_eq!(state.generation, 1, "and changes no generation");
+        });
+        cx.run_until_parked();
+        let key = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("a valid usage key");
+        assert_eq!(
+            store.get(&key).expect("the test store"),
+            None,
+            "cancel records no use"
+        );
+    }
+
     fn sample_state() -> QuickLaunch {
         QuickLaunch {
             config: QuickLaunchConfig {
@@ -4933,6 +7733,7 @@ mod tests {
                     id: "general".to_string(),
                     name: "Geral".to_string(),
                     items: Vec::new(),
+                    source: None,
                 }],
                 ..QuickLaunchConfig::default()
             },
@@ -4959,13 +7760,22 @@ mod tests {
             signals: None,
             generation: 0,
             message: None,
+            pending_command: None,
+            pending_group: None,
+            pending_already_running: None,
+            pending_batch: None,
             pending_hide: false,
             revision: 0,
             pending_usage: None,
+            #[cfg(test)]
+            sent_launches: Vec::new(),
             filter: String::new(),
             health: HashMap::new(),
             health_started: false,
             health_queue: VecDeque::new(),
+            origins: HashMap::new(),
+            folder_missing: HashSet::new(),
+            folder_refresh: HashMap::new(),
             mode: Mode::Main,
             #[cfg(test)]
             health_checks: Vec::new(),
@@ -4994,6 +7804,7 @@ mod tests {
             id: "dev".to_string(),
             name: "Dev".to_string(),
             items: Vec::new(),
+            source: None,
         });
         state.set_group(1);
         assert_eq!(state.group, 1);
@@ -5107,5 +7918,493 @@ mod tests {
             restored.positions.get("window_0000000000000001").copied(),
             Some(saved)
         );
+    }
+
+    /// One group whose items are generated from `source` (§17.2 G).
+    fn dynamic_group(id: &str, source: &str) -> Group {
+        Group {
+            id: id.to_string(),
+            name: id.to_string(),
+            items: Vec::new(),
+            source: Some(source.to_string()),
+        }
+    }
+
+    /// A state holding `groups` and the use records `(group, slot, count, last)`.
+    fn usage_state(groups: Vec<Group>, usage: Vec<((&str, u32), u32, u64)>) -> QuickLaunch {
+        let mut state = sample_state();
+        state.config.groups = groups;
+        for ((group, slot), count, last) in usage {
+            state
+                .restored
+                .usage
+                .insert((group.to_string(), slot), Usage { count, last });
+        }
+        state
+    }
+
+    /// The settings form's fields for one item, as a test edit.
+    fn item_edit(path: &str) -> ItemEdit {
+        ItemEdit {
+            kind: "app".to_string(),
+            name: "Outro".to_string(),
+            path: path.to_string(),
+            args: String::new(),
+            cwd: String::new(),
+            admin: false,
+            icon: String::new(),
+            tags: Vec::new(),
+            command: None,
+            group_items: None,
+        }
+    }
+
+    /// §17.2 G.2: a `folder:` group lists its directory, sorted by name without
+    /// regard to case, with hidden entries out and slots from 0.
+    #[test]
+    fn a_folder_group_lists_its_directory_in_order() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("banana.txt"), b"x").unwrap();
+        std::fs::write(directory.path().join("Apple.txt"), b"x").unwrap();
+        std::fs::write(directory.path().join("cherry.txt"), b"x").unwrap();
+        std::fs::create_dir(directory.path().join("Zulu")).unwrap();
+        // A hidden entry is the one the listing must leave out.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .attributes(FILE_ATTRIBUTE_HIDDEN)
+                .open(directory.path().join("hidden.txt"))
+                .unwrap();
+        }
+        #[cfg(not(windows))]
+        std::fs::write(directory.path().join(".hidden.txt"), b"x").unwrap();
+
+        let FolderListing::Items(items) = read_folder(directory.path()) else {
+            panic!("the directory exists");
+        };
+        let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Apple", "banana", "cherry", "Zulu"],
+            "the names are sorted without regard to case"
+        );
+        let slots: Vec<u32> = items.iter().map(|item| item.slot).collect();
+        assert_eq!(slots, vec![0, 1, 2, 3], "the slots run from 0");
+        let kinds: Vec<&str> = items.iter().map(|item| item.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["file", "file", "file", "folder"]);
+    }
+
+    /// §17.2 G.2: at most 512 entries are kept, after the sort.
+    #[test]
+    fn a_folder_group_stops_at_512_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..(MAX_FOLDER_ITEMS + 5) {
+            std::fs::write(directory.path().join(format!("item_{index:04}.txt")), b"x").unwrap();
+        }
+        let FolderListing::Items(items) = read_folder(directory.path()) else {
+            panic!("the directory exists");
+        };
+        assert_eq!(items.len(), MAX_FOLDER_ITEMS);
+        assert_eq!(items.first().map(|item| item.slot), Some(0));
+        assert_eq!(items.last().map(|item| item.slot), Some(511));
+        assert_eq!(
+            items.first().map(|item| item.name.as_str()),
+            Some("item_0000"),
+            "the first of the sorted names stay"
+        );
+    }
+
+    /// §17.2 G.2: a directory that is not there has no entries at all.
+    #[test]
+    fn a_folder_group_without_its_directory_has_no_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_folder(&directory.path().join("nao_existe")),
+            FolderListing::Missing
+        );
+    }
+
+    /// §17.2 G.3: `recent` orders by the latest use, `most_used` by the count
+    /// and then by the latest use; both copy the entry with slots from 0.
+    #[test]
+    fn the_use_groups_order_their_copies() {
+        let mut general = group_of(0);
+        general.items = vec![
+            Item::new(0, "app", "A"),
+            Item::new(1, "app", "B"),
+            Item::new(2, "app", "C"),
+        ];
+        let state = usage_state(
+            vec![
+                general,
+                dynamic_group("recent", "recent"),
+                dynamic_group("most", "most_used"),
+            ],
+            vec![
+                (("general", 0), 9, 5),
+                (("general", 1), 5, 30),
+                (("general", 2), 5, 20),
+            ],
+        );
+        let recent: Vec<(String, u32)> =
+            usage_group_items(&state.config, &state.restored.usage, false)
+                .into_iter()
+                .map(|(item, _)| (item.name, item.slot))
+                .collect();
+        assert_eq!(
+            recent,
+            vec![
+                ("B".to_string(), 0),
+                ("C".to_string(), 1),
+                ("A".to_string(), 2)
+            ],
+            "the latest use comes first"
+        );
+        let most: Vec<String> = usage_group_items(&state.config, &state.restored.usage, true)
+            .into_iter()
+            .map(|(item, _)| item.name)
+            .collect();
+        assert_eq!(
+            most,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            "the count first, then the latest use"
+        );
+        let origins: Vec<(String, u32)> =
+            usage_group_items(&state.config, &state.restored.usage, false)
+                .into_iter()
+                .map(|(_, origin)| origin)
+                .collect();
+        assert_eq!(
+            origins,
+            vec![
+                ("general".to_string(), 1),
+                ("general".to_string(), 2),
+                ("general".to_string(), 0)
+            ],
+            "each copy carries where it came from"
+        );
+    }
+
+    /// §17.2 G.3: at most `columns × 2` copies, never more than 32, and no copy
+    /// of an entry the configuration no longer has (or of a dynamic group).
+    #[test]
+    fn the_use_groups_stop_at_the_limit_and_skip_gone_entries() {
+        let mut general = group_of(0);
+        general.items = (0..20)
+            .map(|slot| Item::new(slot, "app", format!("Item {slot}")))
+            .collect();
+        let mut recent = dynamic_group("recent", "recent");
+        // The group's own generated entry is not a candidate: its record would
+        // name a copy, not an entry of the file.
+        recent.items = vec![Item::new(0, "app", "Copia")];
+        let mut usage = Vec::new();
+        for slot in 0..20 {
+            usage.push((("general", slot), 1, 100 + u64::from(slot)));
+        }
+        // An entry that is gone from the file, a group that is gone, and a
+        // dynamic group's own record.
+        usage.push((("general", 99), 50, 999));
+        usage.push((("ghost", 0), 50, 999));
+        usage.push((("recent", 0), 50, 999));
+        let mut state = usage_state(vec![general, recent], usage);
+
+        let items = usage_group_items(&state.config, &state.restored.usage, false);
+        assert_eq!(items.len(), 16, "8 columns allow 8 × 2 copies");
+        assert_eq!(items[0].0.name, "Item 19", "the newest entry comes first");
+        assert!(
+            items
+                .iter()
+                .all(|(_, origin)| origin.0 == "general" && origin.1 < 20),
+            "no copy of a gone entry or of the dynamic group itself"
+        );
+
+        state.config.window.columns = 16;
+        let items = usage_group_items(&state.config, &state.restored.usage, false);
+        assert_eq!(items.len(), 20, "a wide window takes every remaining entry");
+        let mut crowded = state;
+        crowded.config.groups[0].items = (0..40u32)
+            .map(|slot| Item::new(slot, "app", format!("Item {slot}")))
+            .collect();
+        crowded.restored.usage = (0..40u32)
+            .map(|slot| {
+                (
+                    ("general".to_string(), slot),
+                    Usage {
+                        count: 1,
+                        last: u64::from(slot),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            usage_group_items(&crowded.config, &crowded.restored.usage, false).len(),
+            MAX_USAGE_ITEMS,
+            "no group shows more than 32 copies"
+        );
+    }
+
+    /// §17.2 G.4: launching a copy records the use on the entry it came from.
+    #[gpui::test]
+    fn launching_a_copy_counts_the_original(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(5, "app", "A")];
+            let mut recent = dynamic_group("recent", "recent");
+            recent.items = vec![Item::new(0, "app", "A")];
+            install(cx, vec![general, recent]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+                state
+                    .origins
+                    .insert(("recent".to_string(), 0), ("general".to_string(), 5));
+            }
+            let item = item_at(cx, 1, 0).expect("the copy");
+            send_launch(cx, item, "recent".to_string(), 0, LaunchMode::Normal);
+            let pending = state(cx).and_then(|state| state.pending_usage.clone());
+            assert_eq!(
+                pending,
+                Some(("general".to_string(), 5)),
+                "the use belongs to the original entry"
+            );
+            if let Some(state) = state_mut(cx) {
+                state.pending_usage = None;
+            }
+            record_usage(cx, "general", 5);
+        });
+        cx.run_until_parked();
+        let key = KvKey::new(KV_NAMESPACE, "usage_general_5").expect("a valid usage key");
+        let written = store.get(&key).expect("the test store").expect("a record");
+        let usage: Usage = serde_json::from_slice(&written).expect("a usage record");
+        assert_eq!(usage.count, 1, "one use of the original");
+        assert!(usage.last > 0, "the use has a time");
+        let copy = KvKey::new(KV_NAMESPACE, "usage_recent_0").expect("a valid usage key");
+        assert_eq!(
+            store.get(&copy).expect("the test store"),
+            None,
+            "the copy gets no record of its own"
+        );
+    }
+
+    /// §17.2 G.1: the copy that is serialized leaves a dynamic group's generated
+    /// entries out while the state keeps them.
+    #[test]
+    fn saving_leaves_generated_items_out() {
+        let mut state = sample_state();
+        state.config.groups[0].items = vec![Item::new(0, "app", "Escrito")];
+        let mut folder = dynamic_group("tools", "folder:C:\\Tools");
+        folder.items = vec![Item::new(0, "app", "Gerado")];
+        state.config.groups.push(folder);
+
+        let copy = config_for_saving(&state);
+        let text = nohrs_core::config::quick_launch::to_toml(&copy).expect("the file renders");
+        assert!(text.contains("name = \"Escrito\""), "{text}");
+        assert!(!text.contains("Gerado"), "a generated entry is not written");
+        let written = nohrs_core::config::quick_launch::parse(&text).expect("the file parses back");
+        let folder = written
+            .config
+            .groups
+            .iter()
+            .find(|group| group.id == "tools")
+            .expect("the dynamic group is in the file");
+        assert_eq!(
+            folder.source.as_deref(),
+            Some("folder:C:\\Tools"),
+            "the group keeps its source"
+        );
+        assert!(folder.items.is_empty(), "and no generated entries");
+        assert_eq!(
+            state.config.groups[1].items.len(),
+            1,
+            "the state keeps the entries it generated"
+        );
+    }
+
+    /// §17.2 G.5: every edit entry refuses a dynamic group, while the group
+    /// itself can still be renamed, reordered and deleted.
+    #[gpui::test]
+    fn every_edit_entry_refuses_a_dynamic_group(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(0, "app", "A"), Item::new(1, "app", "B")];
+            let mut folder = dynamic_group("tools", "folder:C:\\Tools");
+            folder.items = vec![Item::new(0, "app", "Gerado")];
+            let mut recent = dynamic_group("recent", "recent");
+            recent.items = vec![Item::new(0, "app", "Copia")];
+            install(cx, vec![general, folder, recent]);
+
+            for index in [1, 2] {
+                assert!(!place_items(
+                    cx,
+                    index,
+                    0,
+                    vec![Item::new(0, "file", "Novo")]
+                ));
+                assert!(!put_item(cx, index, 0, Item::new(0, "file", "Novo")));
+                assert!(!edit_item(cx, index, 0, "Outro", "C:\\x.exe", "", false));
+                assert!(!update_item(cx, index, 0, &item_edit("C:\\x.exe")));
+                assert!(!swap_slots(cx, index, 0, 1));
+                assert!(!delete_item(cx, index, 0));
+                assert!(
+                    !move_item_to_group(cx, index, 0, 0),
+                    "out of a dynamic group"
+                );
+                assert!(!move_item_to_group(cx, 0, 0, index), "into a dynamic group");
+            }
+            // The ordinary group stays editable.
+            assert!(place_items(cx, 0, 2, vec![Item::new(0, "file", "Novo")]));
+
+            // The group itself is not one of its entries: it can be renamed,
+            // moved and deleted like any other.
+            assert!(rename_group(cx, 1, "Ferramentas 2"));
+            assert!(move_group(cx, 1, 2));
+            assert!(delete_group(cx, 2, true));
+        });
+    }
+
+    /// §17.2 G.7: the snapshot carries the folder group's generated entries and
+    /// leaves the copies of the use groups out.
+    #[gpui::test]
+    fn the_launcher_snapshot_keeps_folder_groups_and_drops_use_groups(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(0, "app", "Escrito")];
+            let mut folder = dynamic_group("tools", "folder:C:\\Tools");
+            folder.items = vec![Item::new(0, "app", "Gerado")];
+            let mut recent = dynamic_group("recent", "recent");
+            recent.items = vec![Item::new(0, "app", "Copia")];
+            let mut most = dynamic_group("most", "most_used");
+            most.items = vec![Item::new(0, "app", "Copia2")];
+            install(cx, vec![general, folder, recent, most]);
+
+            let snapshot = launcher_snapshot(cx);
+            let names: Vec<&str> = snapshot.iter().map(|entry| entry.name.as_str()).collect();
+            assert_eq!(names, vec!["Escrito", "Gerado"]);
+            assert_eq!(snapshot[1].group, "tools", "the folder group is in");
+        });
+    }
+
+    /// §17.2 G.8: a dynamic group's records name no entry of the file, so the
+    /// cleanup drops them and keeps the ordinary groups' records.
+    #[gpui::test]
+    fn pruning_usage_ignores_dynamic_groups(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(0, "app", "Escrito")];
+            let mut folder = dynamic_group("tools", "folder:C:\\Tools");
+            folder.items = vec![Item::new(0, "app", "Gerado")];
+            install(cx, vec![general, folder, dynamic_group("recent", "recent")]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            for name in ["usage_general_0", "usage_tools_0", "usage_recent_0"] {
+                let key = KvKey::new(KV_NAMESPACE, name).expect("a valid key");
+                store.put(&key, b"{}").expect("the test store");
+            }
+            prune_usage(cx);
+        });
+        cx.run_until_parked();
+        let general = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("a valid key");
+        assert!(
+            store.get(&general).expect("the test store").is_some(),
+            "an entry of the file keeps its record"
+        );
+        for name in ["usage_tools_0", "usage_recent_0"] {
+            let key = KvKey::new(KV_NAMESPACE, name).expect("a valid key");
+            assert_eq!(
+                store.get(&key).expect("the test store"),
+                None,
+                "a dynamic group's record goes"
+            );
+        }
+    }
+
+    /// §17.2 G.1, G.2: the refresh generates a folder group's entries in the
+    /// background, reuses them for 30 s, and says when the directory is gone.
+    #[gpui::test]
+    fn refreshing_generates_folder_groups(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("beta.txt"), b"x").unwrap();
+        std::fs::write(directory.path().join("Alfa.txt"), b"x").unwrap();
+        let existing = format!("folder:{}", directory.path().to_string_lossy());
+        let missing = format!(
+            "folder:{}",
+            directory.path().join("nao_existe").to_string_lossy()
+        );
+        cx.update(|cx| {
+            install(
+                cx,
+                vec![
+                    dynamic_group("tools", &existing),
+                    dynamic_group("gone", &missing),
+                ],
+            );
+            refresh_dynamic_groups(cx);
+            refresh_dynamic_groups(cx);
+        });
+        cx.run_until_parked();
+        let (names, slots, requests, notice) = cx.update(|cx| {
+            let state = state(cx).expect("the state is installed");
+            let items = state
+                .config
+                .groups
+                .first()
+                .map(|group| group.items.clone())
+                .unwrap_or_default();
+            (
+                items
+                    .iter()
+                    .map(|item| item.name.clone())
+                    .collect::<Vec<_>>(),
+                items.iter().map(|item| item.slot).collect::<Vec<_>>(),
+                state
+                    .folder_refresh
+                    .get("tools")
+                    .map(|refresh| refresh.request)
+                    .unwrap_or_default(),
+                group_notice(cx, 1).map(str::to_string),
+            )
+        });
+        assert_eq!(names, vec!["Alfa".to_string(), "beta".to_string()]);
+        assert_eq!(slots, vec![0, 1], "the slots run from 0");
+        assert_eq!(
+            requests, 1,
+            "the second refresh within 30 s reuses the listing"
+        );
+        assert_eq!(
+            notice,
+            Some(nohrs_core::t!("Pasta não encontrada").to_string())
+        );
+    }
+
+    /// §17.2 G.3: the resident process has no store, so its use groups have
+    /// nothing to show and say why.
+    #[gpui::test]
+    fn the_resident_process_has_no_use_groups(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut recent = dynamic_group("recent", "recent");
+            recent.items = vec![Item::new(0, "app", "Copia")];
+            install(cx, vec![recent]);
+            if let Some(state) = state_mut(cx) {
+                state.mode = Mode::Standalone;
+            }
+            refresh_dynamic_groups(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(
+                state.config.groups[0].items.is_empty(),
+                "a resident process has no use records to copy"
+            );
+            assert_eq!(
+                group_notice(cx, 0),
+                Some(nohrs_core::t!("Indisponível no modo residente"))
+            );
+        });
     }
 }
