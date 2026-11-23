@@ -8308,4 +8308,63 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "切换到它",
         ],
     ),
+    (
+        "Pasta não encontrada",
+        [
+            "Dossier introuvable",
+            "Ordner nicht gefunden",
+            "Cartella non trovata",
+            "Папка не найдена",
+            "フォルダーが見つかりません",
+            "找不到文件夹",
+        ],
+    ),
+    (
+        "Indisponível no modo residente",
+        [
+            "Indisponible en mode résident",
+            "Im Hintergrundmodus nicht verfügbar",
+            "Non disponibile in modalità residente",
+            "Недоступно в фоновом режиме",
+            "常駐モードでは使用できません",
+            "驻留模式下不可用",
+        ],
+    ),
+    (
+        "Itens gerados automaticamente; não podem ser editados.",
+        [
+            "Les éléments sont générés automatiquement ; ils ne peuvent pas être modifiés.",
+            "Die Einträge werden automatisch erzeugt; sie können nicht bearbeitet werden.",
+            "Gli elementi vengono generati automaticamente; non possono essere modificati.",
+            "Элементы создаются автоматически; их нельзя изменить.",
+            "項目は自動生成されるため編集できません。",
+            "项目为自动生成，无法编辑。",
+        ],
+    ),
+    (
+        "Normal",
+        ["Normal", "Normal", "Normale", "Обычная", "通常", "普通"],
+    ),
+    (
+        "Recentes",
+        [
+            "Récents",
+            "Zuletzt verwendet",
+            "Recenti",
+            "Недавние",
+            "最近使用",
+            "最近使用",
+        ],
+    ),
+    (
+        "Mais usados",
+        [
+            "Les plus utilisés",
+            "Am häufigsten",
+            "Più usati",
+            "Чаще всего",
+            "よく使う",
+            "最常使用",
+        ],
+    ),
 ];

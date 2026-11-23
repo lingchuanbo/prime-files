@@ -39,8 +39,9 @@ use gpui_component::Root;
 use nohrs_core::config::ConfigWatcher;
 use nohrs_core::config::paths;
 use nohrs_core::config::quick_launch::{
-    ActionKind, CommandSpec, Group, Item, MAX_GROUP_NESTING, MAX_GROUP_REFERENCES, OnRunning,
-    Parsed, QuickLaunchConfig, QuickLaunchError, View, Warning, WindowSettings, command_spec,
+    ActionKind, CommandSpec, Group, GroupSource, Item, MAX_GROUP_NESTING, MAX_GROUP_REFERENCES,
+    OnRunning, Parsed, QuickLaunchConfig, QuickLaunchError, View, Warning, WindowSettings,
+    command_spec, group_source, item_for_path,
 };
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::launch::LaunchRegistry;
@@ -72,6 +73,17 @@ const AUTO_HIDE_DELAY: Duration = Duration::from_millis(150);
 
 /// How long edits are merged before writing the file (§5.2).
 const SAVE_THROTTLE: Duration = Duration::from_millis(300);
+
+/// How long a `folder:` group's listing is reused before the directory is read
+/// again (§17.2 G.2).
+const FOLDER_REFRESH: Duration = Duration::from_secs(30);
+
+/// How many entries one `folder:` group may show (§17.2 G.2).
+const MAX_FOLDER_ITEMS: usize = 512;
+
+/// The most entries a `recent`/`most_used` group shows, whatever the columns
+/// (§17.2 G.3, D7).
+const MAX_USAGE_ITEMS: usize = 32;
 
 /// Window size when the view is a grid (logical pixels).
 const GRID_WINDOW_SIZE: (f32, f32) = (980.0, 875.0);
@@ -765,8 +777,19 @@ impl From<SavedBounds> for Bounds<Pixels> {
     }
 }
 
+/// One item's use count and last use, as `state.redb` keeps it (§6).
+///
+/// The state holds these in memory too: the `recent` and `most_used` groups are
+/// built from them without a store read (§17.2 G.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Usage {
+    count: u32,
+    last: u64,
+}
+
 /// What the store remembered: where the window was on each display, which
-/// group was last shown, and which commands the user trusted (§6).
+/// group was last shown, which commands the user trusted (§6), and how often
+/// each item was used.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Restored {
     positions: HashMap<String, SavedBounds>,
@@ -775,6 +798,8 @@ struct Restored {
     /// resident process adds the ones the user confirmed to this set without a
     /// store, so they last until the process ends (§17.2 D.5).
     trusted: HashSet<String>,
+    /// Every `usage_*` record, by group id and slot (§6, §17.2 G.3).
+    usage: HashMap<(String, u32), Usage>,
 }
 
 impl Restored {
@@ -798,6 +823,14 @@ impl Restored {
                 if bytes.as_slice() == b"true" && trusted.len() == TRUST_KEY_HEX_LENGTH {
                     restored.trusted.insert(trusted.to_string());
                 }
+                continue;
+            }
+            if let Some(usage) = name.strip_prefix("usage_")
+                && let Some((group, slot)) = usage.rsplit_once('_')
+                && let Ok(slot) = slot.parse::<u32>()
+                && let Ok(record) = serde_json::from_slice::<Usage>(&bytes)
+            {
+                restored.usage.insert((group.to_string(), slot), record);
                 continue;
             }
             if let Some(position) = name.strip_prefix("window_")
@@ -1112,6 +1145,37 @@ struct PendingLaunchBatch {
     excess: usize,
 }
 
+/// What the state remembers about one `folder:` group's listing (§17.2 G.2).
+#[derive(Debug, Default)]
+struct FolderRefresh {
+    /// When the directory was last asked for, if it ever was.
+    last: Option<Instant>,
+    /// Which read is the current one: a reply from an older one is dropped.
+    request: u64,
+}
+
+/// Why the dynamic groups are being regenerated (§17.2 G.1–G.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshReason {
+    /// The file was read: every dynamic group is built again.
+    Loaded,
+    /// The window is being shown: its folder listings may be read again.
+    Shown,
+    /// The window switched to this group index (§17.2 G.2).
+    GroupSwitch(usize),
+    /// An item was launched: the `recent`/`most_used` groups change (§17.2 G.3).
+    Launched,
+}
+
+/// What one read of a `folder:` group's directory found (§17.2 G.2).
+#[derive(Debug, Clone, PartialEq)]
+enum FolderListing {
+    /// The entries, in the order the group shows them.
+    Items(Vec<Item>),
+    /// There is no such directory.
+    Missing,
+}
+
 /// The in-memory state, read and written through the GPUI global (§13).
 pub(crate) struct QuickLaunch {
     config: QuickLaunchConfig,
@@ -1189,6 +1253,15 @@ pub(crate) struct QuickLaunch {
     expand: ExpandContext,
     /// The items still to check (§12.1).
     health_queue: VecDeque<(String, u32, Item)>,
+    /// `(dynamic group id, slot)` → the `(group id, slot)` a copy shown in a
+    /// `recent`/`most_used` group came from (§17.2 G.1).
+    origins: HashMap<(String, u32), (String, u32)>,
+    /// The `folder:` groups whose directory could not be read, by group id
+    /// (§17.2 G.2).
+    folder_missing: HashSet<String>,
+    /// When each `folder:` group was last expanded, and which read is current
+    /// (§17.2 G.2).
+    folder_refresh: HashMap<String, FolderRefresh>,
 }
 
 impl Global for QuickLaunch {}
@@ -1264,6 +1337,13 @@ pub(crate) fn set_filter(cx: &mut App, text: String) {
 pub(crate) fn health_of(cx: &App, group: usize, slot: u32) -> Option<Health> {
     let state = state(cx)?;
     let id = state.config.groups.get(group)?.id.as_str();
+    // G.4: a copy shown in a `recent`/`most_used` group answers with the health
+    // of the entry it came from, where the check was recorded.
+    let (id, slot) = state
+        .origins
+        .get(&(id.to_string(), slot))
+        .map(|(origin_group, origin_slot)| (origin_group.as_str(), *origin_slot))
+        .unwrap_or((id, slot));
     state.health.get(&(id.to_string(), slot)).cloned()
 }
 
@@ -1283,6 +1363,15 @@ fn start_health_check(cx: &mut App) {
         .config
         .groups
         .iter()
+        // The copies a `recent`/`most_used` group shows are checked through the
+        // entries they came from, which their own group already queues (§17.2
+        // G.4).
+        .filter(|group| {
+            !matches!(
+                group_source(group),
+                Some(GroupSource::Recent | GroupSource::MostUsed)
+            )
+        })
         .flat_map(|group| {
             group
                 .items
@@ -1565,6 +1654,10 @@ fn prune_usage(cx: &mut App) {
         .config
         .groups
         .iter()
+        // A dynamic group's entries are generated, so a record naming one is
+        // not about an entry the file has: keeping it would keep a use that
+        // belongs to nobody (§17.2 G.8).
+        .filter(|group| !group_source(group).is_some_and(|source| source.is_dynamic()))
         .flat_map(|group| {
             group
                 .items
@@ -1604,6 +1697,364 @@ fn prune_usage(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Whether the group at `index` may have its items edited (§17.2 G.5).
+///
+/// A dynamic group's entries are generated at runtime: they are not the user's
+/// to add, move or delete. The group itself may still be renamed, reordered and
+/// deleted.
+pub(crate) fn group_editable(cx: &App, index: usize) -> bool {
+    let Some(quick_launch) = state(cx) else {
+        return false;
+    };
+    if !quick_launch.status.can_save() {
+        return false;
+    }
+    quick_launch
+        .config
+        .groups
+        .get(index)
+        .is_some_and(|group| group.source.is_none())
+}
+
+/// What an empty dynamic group shows instead of "no items" (§17.2 G.2, G.3).
+pub(crate) fn group_notice(cx: &App, index: usize) -> Option<&'static str> {
+    let quick_launch = state(cx)?;
+    let group = quick_launch.config.groups.get(index)?;
+    match group_source(group)? {
+        GroupSource::Folder(_) => quick_launch
+            .folder_missing
+            .contains(&group.id)
+            .then(|| nohrs_core::t!("Pasta não encontrada")),
+        GroupSource::Recent | GroupSource::MostUsed => (quick_launch.mode == Mode::Standalone)
+            .then(|| nohrs_core::t!("Indisponível no modo residente")),
+        GroupSource::Unknown(_) => None,
+    }
+}
+
+/// Regenerates every dynamic group's items: what can be answered from memory
+/// now, and the folder listings that are due (§17.2 G.1).
+pub(crate) fn refresh_dynamic_groups(cx: &mut App) {
+    refresh_dynamic_groups_for(cx, RefreshReason::Shown);
+}
+
+/// Regenerates the dynamic groups for `reason` (§17.2 G.1–G.3).
+fn refresh_dynamic_groups_for(cx: &mut App, reason: RefreshReason) {
+    let mut requests: Vec<(String, String, PathBuf, u64)> = Vec::new();
+    {
+        let Some(quick_launch) = state_mut(cx) else {
+            return;
+        };
+        // The `recent`/`most_used` groups are copies of entries elsewhere, so
+        // they are rebuilt from the use records held in memory (§17.2 G.3).
+        if !matches!(reason, RefreshReason::GroupSwitch(_)) {
+            let mode = quick_launch.mode;
+            let usage_groups: Vec<(String, bool)> = quick_launch
+                .config
+                .groups
+                .iter()
+                .filter_map(|group| match group_source(group) {
+                    Some(GroupSource::Recent) => Some((group.id.clone(), false)),
+                    Some(GroupSource::MostUsed) => Some((group.id.clone(), true)),
+                    _ => None,
+                })
+                .collect();
+            for (group_id, most_used) in usage_groups {
+                // A resident process has no store, so it has no use records to
+                // show; the group says so instead (§17.2 G.3).
+                let generated = if mode == Mode::Standalone {
+                    Vec::new()
+                } else {
+                    usage_group_items(
+                        &quick_launch.config,
+                        &quick_launch.restored.usage,
+                        most_used,
+                    )
+                };
+                apply_usage_group(quick_launch, &group_id, generated);
+            }
+        }
+        let now = Instant::now();
+        for index in 0..quick_launch.config.groups.len() {
+            if let RefreshReason::GroupSwitch(switched) = reason
+                && switched != index
+            {
+                continue;
+            }
+            let (group_id, source, raw) = {
+                let Some(group) = quick_launch.config.groups.get(index) else {
+                    continue;
+                };
+                let Some(GroupSource::Folder(raw)) = group_source(group) else {
+                    continue;
+                };
+                (
+                    group.id.clone(),
+                    group.source.clone().unwrap_or_default(),
+                    raw,
+                )
+            };
+            let request = {
+                let refresh = quick_launch
+                    .folder_refresh
+                    .entry(group_id.clone())
+                    .or_default();
+                if refresh
+                    .last
+                    .is_some_and(|last| now.duration_since(last) < FOLDER_REFRESH)
+                {
+                    continue;
+                }
+                refresh.last = Some(now);
+                refresh.request = refresh.request.wrapping_add(1);
+                refresh.request
+            };
+            match nohrs_services::launch::expand(&raw, &quick_launch.expand) {
+                Ok(path) => requests.push((group_id, source, path, request)),
+                // A path whose variables cannot be resolved names no directory
+                // this process can read either (§17.2 G.2).
+                Err(error) => {
+                    tracing::debug!(
+                        target: "quick_launch",
+                        "could not resolve the folder of {group_id:?}: {error}"
+                    );
+                    quick_launch.config.groups[index].items.clear();
+                    quick_launch.folder_missing.insert(group_id);
+                    quick_launch.touch();
+                }
+            }
+        }
+    }
+    for (group_id, source, path, request) in requests {
+        cx.spawn(async move |cx| {
+            let listing = cx.background_spawn(async move { read_folder(&path) }).await;
+            cx.update(|cx| apply_folder_listing(cx, &group_id, &source, request, listing))
+                .ok();
+        })
+        .detach();
+    }
+    cx.refresh_windows();
+}
+
+/// The number of entries a `recent`/`most_used` group shows (§17.2 G.3, D7).
+fn usage_group_limit(columns: u8) -> usize {
+    usize::from(columns.max(1))
+        .saturating_mul(2)
+        .min(MAX_USAGE_ITEMS)
+}
+
+/// The copies a `recent`/`most_used` group shows, each with the entry it came
+/// from, in the order the group displays them (§17.2 G.3).
+///
+/// Only entries the configuration still has are candidates, and a dynamic
+/// group's own entries never are: they are copies of copies. `most_used` orders
+/// by count and then by the latest use; `recent` orders by the latest use.
+fn usage_group_items(
+    config: &QuickLaunchConfig,
+    usage: &HashMap<(String, u32), Usage>,
+    most_used: bool,
+) -> Vec<(Item, (String, u32))> {
+    let mut candidates: Vec<(Item, (String, u32), Usage)> = Vec::new();
+    for ((group_id, slot), record) in usage {
+        let Some(group) = config.groups.iter().find(|group| group.id == *group_id) else {
+            continue;
+        };
+        if group_source(group).is_some_and(|source| source.is_dynamic()) {
+            continue;
+        }
+        let Some(item) = group.items.iter().find(|item| item.slot == *slot) else {
+            continue;
+        };
+        candidates.push((item.clone(), (group.id.clone(), *slot), *record));
+    }
+    candidates.sort_by(
+        |(_, (left_group, left_slot), left), (_, (right_group, right_slot), right)| {
+            let order = if most_used {
+                right
+                    .count
+                    .cmp(&left.count)
+                    .then(right.last.cmp(&left.last))
+            } else {
+                right.last.cmp(&left.last)
+            };
+            // A stable order for records that tie, so the group does not reshuffle
+            // between two frames.
+            order
+                .then(left_group.cmp(right_group))
+                .then(left_slot.cmp(right_slot))
+        },
+    );
+    candidates.truncate(usage_group_limit(config.window.columns));
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, (mut item, origin, _))| {
+            item.slot = u32::try_from(index).unwrap_or_default();
+            (item, origin)
+        })
+        .collect()
+}
+
+/// Replaces one `recent`/`most_used` group's copies and records where each one
+/// came from (§17.2 G.1).
+fn apply_usage_group(
+    quick_launch: &mut QuickLaunch,
+    group_id: &str,
+    generated: Vec<(Item, (String, u32))>,
+) {
+    let Some(group) = quick_launch
+        .config
+        .groups
+        .iter_mut()
+        .find(|group| group.id == group_id)
+    else {
+        return;
+    };
+    group.items = generated.iter().map(|(item, _)| item.clone()).collect();
+    quick_launch.health.retain(|(id, _), _| id != group_id);
+    quick_launch.origins.retain(|(id, _), _| id != group_id);
+    for (item, origin) in generated {
+        quick_launch
+            .origins
+            .insert((group_id.to_string(), item.slot), origin);
+    }
+    quick_launch.touch();
+}
+
+/// Reads one directory for a `folder:` group (§17.2 G.2).
+///
+/// Off the foreground: a directory on a dead network path must not hold a frame
+/// (§8.4, §18). Only the entries directly in the directory are listed, sorted by
+/// name without regard to case, hidden and system entries left out, at most
+/// [`MAX_FOLDER_ITEMS`] of them, with slots from 0.
+fn read_folder(path: &Path) -> FolderListing {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return FolderListing::Missing;
+    };
+    let mut found: Vec<(String, PathBuf, bool)> = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(
+                    target: "quick_launch",
+                    "could not read an entry of {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let entry_path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::debug!(
+                    target: "quick_launch",
+                    "could not read {}: {error}",
+                    entry_path.display()
+                );
+                continue;
+            }
+        };
+        if is_hidden_or_system(&entry_path, &metadata) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        found.push((name, entry_path, metadata.is_dir()));
+    }
+    // The path breaks a tie between two names that only differ in case, so the
+    // same directory always produces the same order.
+    found.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    found.truncate(MAX_FOLDER_ITEMS);
+    FolderListing::Items(
+        found
+            .into_iter()
+            .enumerate()
+            .map(|(slot, (_, entry_path, is_dir))| {
+                item_for_path(&entry_path, u32::try_from(slot).unwrap_or_default(), is_dir)
+            })
+            .collect(),
+    )
+}
+
+/// Whether a directory entry is hidden or a system entry, which a `folder:`
+/// group leaves out (§17.2 G.2).
+#[cfg(windows)]
+fn is_hidden_or_system(_path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    metadata.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0
+}
+
+/// On this platform a hidden entry is one whose name starts with a dot.
+#[cfg(not(windows))]
+fn is_hidden_or_system(path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.'))
+}
+
+/// Puts one finished folder listing into the state (§17.2 G.2).
+fn apply_folder_listing(
+    cx: &mut App,
+    group_id: &str,
+    source: &str,
+    request: u64,
+    listing: FolderListing,
+) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let Some(index) = quick_launch
+        .config
+        .groups
+        .iter()
+        .position(|group| group.id == group_id)
+    else {
+        return;
+    };
+    // The group may have been renamed, deleted or pointed somewhere else while
+    // the directory was being read: only the read that is still current counts.
+    if quick_launch.config.groups[index].source.as_deref() != Some(source) {
+        return;
+    }
+    if quick_launch
+        .folder_refresh
+        .get(group_id)
+        .is_none_or(|refresh| refresh.request != request)
+    {
+        return;
+    }
+    match listing {
+        FolderListing::Items(items) => {
+            quick_launch.config.groups[index].items = items;
+            quick_launch.folder_missing.remove(group_id);
+        }
+        FolderListing::Missing => {
+            quick_launch.config.groups[index].items.clear();
+            quick_launch.folder_missing.insert(group_id.to_string());
+        }
+    }
+    quick_launch.health.retain(|(id, _), _| id != group_id);
+    quick_launch.origins.retain(|(id, _), _| id != group_id);
+    quick_launch.touch();
+    cx.refresh_windows();
+}
+
+/// The entry a use of `group`/`slot` is recorded on: the copy in a
+/// `recent`/`most_used` group belongs to the entry it was copied from
+/// (§17.2 G.4).
+fn usage_target(cx: &App, group: &str, slot: u32) -> (String, u32) {
+    state(cx)
+        .and_then(|quick_launch| {
+            quick_launch
+                .origins
+                .get(&(group.to_string(), slot))
+                .cloned()
+        })
+        .unwrap_or_else(|| (group.to_string(), slot))
 }
 
 /// Whether one item is known to be broken, so the view can grey it (§12.1).
@@ -1684,7 +2135,7 @@ pub(crate) fn item_at(cx: &App, group: usize, slot: u32) -> Option<Item> {
 /// holds one entry (§12.1).
 #[cfg_attr(not(test), allow(dead_code))] // M3's settings page replaces items too
 pub(crate) fn put_item(cx: &mut App, group: usize, slot: u32, mut item: Item) -> bool {
-    if !editable(cx) {
+    if !group_editable(cx, group) {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -1816,7 +2267,10 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     let is_command = command_extra.is_some();
     // An item without a name would be an empty tile, and one without a path
     // could never start: the form treats both as "cancel".
-    if name.is_empty() || (!is_command && !is_group && path.is_empty()) || !editable(cx) {
+    if name.is_empty()
+        || (!is_command && !is_group && path.is_empty())
+        || !group_editable(cx, group)
+    {
         return false;
     }
     let cwd = edit.cwd.trim();
@@ -1915,6 +2369,9 @@ pub(crate) fn edit_item(
     args: &str,
     admin: bool,
 ) -> bool {
+    if !group_editable(cx, group) {
+        return false;
+    }
     // The dialog does not offer the other fields, so they keep what the item
     // already has; a missing item is refused by `update_item` too.
     let Some(item) = item_at(cx, group, slot) else {
@@ -1981,6 +2438,12 @@ pub(crate) fn rename_item(cx: &mut App, group: usize, slot: u32, name: &str) -> 
 /// Adds a group at the end and makes it the current one (§12.3). The caller
 /// starts the inline rename the specification asks for.
 pub(crate) fn add_group(cx: &mut App) -> Option<usize> {
+    add_group_with_source(cx, None)
+}
+
+/// Adds a group whose items are generated from `source` instead of edited
+/// (§17.2 G.6): `folder:<path>`, `recent` or `most_used`.
+pub(crate) fn add_group_with_source(cx: &mut App, source: Option<String>) -> Option<usize> {
     if !editable(cx) {
         return None;
     }
@@ -1991,7 +2454,7 @@ pub(crate) fn add_group(cx: &mut App) -> Option<usize> {
         id,
         name: nohrs_core::t!("Novo grupo").to_string(),
         items: Vec::new(),
-        source: None,
+        source,
     });
     state.group = index;
     state.slot = None;
@@ -2085,7 +2548,7 @@ pub(crate) fn delete_group(cx: &mut App, index: usize, force: bool) -> bool {
 
 /// Removes one item and the usage record it left behind (§6, §12.3).
 pub(crate) fn delete_item(cx: &mut App, group: usize, slot: u32) -> bool {
-    if !editable(cx) {
+    if !group_editable(cx, group) {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -2120,7 +2583,7 @@ pub(crate) fn move_item_to_group(
     slot: u32,
     to_group: usize,
 ) -> bool {
-    if from_group == to_group || !editable(cx) {
+    if from_group == to_group || !group_editable(cx, from_group) || !group_editable(cx, to_group) {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -2172,7 +2635,7 @@ pub(crate) fn move_item_to_group(
 /// Moves an item to another slot of its own group; when the target is taken the
 /// two swap (§12.2).
 pub(crate) fn swap_slots(cx: &mut App, group: usize, from: u32, to: u32) -> bool {
-    if from == to || !editable(cx) {
+    if from == to || !group_editable(cx, group) {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -2229,7 +2692,7 @@ fn next_group_id(config: &QuickLaunchConfig) -> String {
 /// This is the only way a drop or a file picker adds entries; `put_item` is
 /// for edits, where replacing is what the user asked for.
 pub(crate) fn place_items(cx: &mut App, group: usize, start: u32, items: Vec<Item>) -> bool {
-    if !editable(cx) || items.is_empty() {
+    if !group_editable(cx, group) || items.is_empty() {
         return false;
     }
     let Some(state) = state_mut(cx) else {
@@ -2302,6 +2765,13 @@ pub(crate) fn path_is_directory(path: &Path) -> bool {
 /// Moves one item's usage record to the place it went, in one transaction
 /// (S3): the old key is removed only when the new one is written.
 fn move_usage(cx: &mut App, from: (String, u32), to: (String, u32)) {
+    // The in-memory records the use groups are built from follow the item too
+    // (§17.2 G.3).
+    if let Some(quick_launch) = state_mut(cx)
+        && let Some(record) = quick_launch.restored.usage.remove(&from)
+    {
+        quick_launch.restored.usage.insert(to.clone(), record);
+    }
     let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
         return;
     };
@@ -2326,6 +2796,20 @@ fn move_usage(cx: &mut App, from: (String, u32), to: (String, u32)) {
 
 /// Swaps the usage records of two slots of one group, in one transaction (S3).
 fn swap_usage(cx: &mut App, group_id: String, first: u32, second: u32) {
+    // The in-memory records the use groups are built from swap as well
+    // (§17.2 G.3).
+    if let Some(quick_launch) = state_mut(cx) {
+        let first_key = (group_id.clone(), first);
+        let second_key = (group_id.clone(), second);
+        let first_record = quick_launch.restored.usage.remove(&first_key);
+        let second_record = quick_launch.restored.usage.remove(&second_key);
+        if let Some(record) = second_record {
+            quick_launch.restored.usage.insert(first_key, record);
+        }
+        if let Some(record) = first_record {
+            quick_launch.restored.usage.insert(second_key, record);
+        }
+    }
     let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
         return;
     };
@@ -2369,6 +2853,13 @@ fn usage_key_name(group: &str, slot: u32) -> String {
 fn delete_usage(cx: &mut App, entries: Vec<(String, u32)>) {
     if entries.is_empty() {
         return;
+    }
+    // The in-memory records the use groups are built from go with them
+    // (§17.2 G.3).
+    if let Some(quick_launch) = state_mut(cx) {
+        for (group, slot) in &entries {
+            quick_launch.restored.usage.remove(&(group.clone(), *slot));
+        }
     }
     let Some(kv) = state(cx).and_then(|state| state.kv.clone()) else {
         return;
@@ -2457,6 +2948,9 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         health: HashMap::new(),
         health_started: false,
         health_queue: VecDeque::new(),
+        origins: HashMap::new(),
+        folder_missing: HashSet::new(),
+        folder_refresh: HashMap::new(),
         mode,
         #[cfg(test)]
         health_checks: Vec::new(),
@@ -2499,6 +2993,9 @@ fn start_restore(cx: &mut App) {
                 quick_launch.restored = restored;
             }
             restore_last_group(cx);
+            // The use records the `recent`/`most_used` groups are made of were
+            // not in memory before this read (§17.2 G.3).
+            refresh_dynamic_groups_for(cx, RefreshReason::Loaded);
         })
         .ok();
     })
@@ -2615,12 +3112,19 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     let groups = quick_launch.config.groups.len();
     quick_launch.group = quick_launch.group.min(groups.saturating_sub(1));
     quick_launch.slot = None;
+    // The generated items of the configuration that was just replaced describe
+    // entries that may not be in the new one at all (§17.2 G.1).
+    quick_launch.origins.clear();
+    quick_launch.folder_missing.clear();
+    quick_launch.folder_refresh.clear();
     let topmost = quick_launch.config.window.topmost;
     quick_launch.touch();
     // §11.1: a `topmost` changed in the file reaches the window that is already
     // open; the pin button reads the same field.
     sync_topmost(cx, topmost);
     restore_last_group(cx);
+    // G.1: every dynamic group is generated again after a successful read.
+    refresh_dynamic_groups_for(cx, RefreshReason::Loaded);
     ensure_selection(cx);
     sync_hotkey(cx);
     cx.refresh_windows();
@@ -2850,6 +3354,21 @@ fn poll_save(cx: &mut App) {
     save_in_background(cx);
 }
 
+/// The configuration as the file holds it (§17.2 G.1): a dynamic group's items
+/// are generated at runtime, so the copy that is serialized has none of them.
+///
+/// `to_toml` clears them again (§17.2 A.2); the rule is applied here as well so
+/// that nothing this module serializes depends on that second line of defence.
+fn config_for_saving(quick_launch: &QuickLaunch) -> QuickLaunchConfig {
+    let mut config = quick_launch.config.clone();
+    for group in &mut config.groups {
+        if group_source(group).is_some_and(|source| source.is_dynamic()) {
+            group.items.clear();
+        }
+    }
+    config
+}
+
 /// Renders the model and writes it, on a background task (§5.2).
 ///
 /// The render happens here because the model belongs to the foreground; the file
@@ -2862,7 +3381,7 @@ fn save_in_background(cx: &mut App) {
     if !quick_launch.status.can_save() {
         return;
     }
-    let text = match nohrs_core::config::quick_launch::to_toml(&quick_launch.config) {
+    let text = match nohrs_core::config::quick_launch::to_toml(&config_for_saving(quick_launch)) {
         Ok(text) => text,
         Err(error) => {
             tracing::error!(target: "quick_launch", "could not write the configuration: {error}");
@@ -2905,7 +3424,7 @@ fn mark_dirty(cx: &mut App) {
 
 /// Renders the model and replaces the file, atomically (§5.2).
 fn save_now(quick_launch: &mut QuickLaunch) {
-    let text = match nohrs_core::config::quick_launch::to_toml(&quick_launch.config) {
+    let text = match nohrs_core::config::quick_launch::to_toml(&config_for_saving(quick_launch)) {
         Ok(text) => text,
         Err(error) => {
             tracing::error!(target: "quick_launch", "could not write the configuration: {error}");
@@ -3041,34 +3560,33 @@ fn save_position(cx: &mut App, bounds: Bounds<Pixels>) {
 
 /// Counts one launch of the item in `slot` (§6).
 ///
-/// Nothing ranks by it in this milestone; the record is written so that the
-/// counts are already there when something does.
+/// The count is kept in memory as well as in the store: the `recent` and
+/// `most_used` groups are built from the copy in memory, including the use that
+/// just happened (§17.2 G.3).
 fn record_usage(cx: &mut App, group: &str, slot: u32) {
-    let name = format!("usage_{group}_{slot}");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
-    let Some(kv) = state(cx).and_then(|quick_launch| quick_launch.kv.clone()) else {
+    let Some(quick_launch) = state_mut(cx) else {
         return;
     };
+    let usage = quick_launch
+        .restored
+        .usage
+        .entry((group.to_string(), slot))
+        .or_default();
+    usage.count = usage.count.saturating_add(1);
+    usage.last = now;
+    let usage = *usage;
+    let Some(kv) = quick_launch.kv.clone() else {
+        return;
+    };
+    let name = usage_key_name(group, slot);
     cx.background_spawn(async move {
-        #[derive(Serialize, Deserialize, Default)]
-        struct Usage {
-            count: u32,
-            last: u64,
-        }
         let Ok(key) = KvKey::new(KV_NAMESPACE, &name) else {
             return;
         };
-        let mut usage: Usage = kv
-            .get(&key)
-            .ok()
-            .flatten()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        usage.count = usage.count.saturating_add(1);
-        usage.last = now;
         let Ok(bytes) = serde_json::to_vec(&usage) else {
             return;
         };
@@ -3092,6 +3610,9 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
             if let Some(quick_launch) = state_mut(cx) {
                 quick_launch.visible = true;
             }
+            // G.2, G.3: a folder group is read again at most every 30 s, and
+            // the `recent`/`most_used` groups follow the use records.
+            refresh_dynamic_groups_for(cx, RefreshReason::Shown);
             ensure_selection(cx);
             tracing::debug!(
                 target: "quick_launch",
@@ -3122,6 +3643,8 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
         quick_launch.window = Some(handle);
         quick_launch.visible = true;
     }
+    // G.2, G.3: the window opens on freshly generated dynamic groups.
+    refresh_dynamic_groups_for(cx, RefreshReason::Shown);
     ensure_selection(cx);
     // §12.1: the items are checked once the window has been shown, a batch at a
     // time, on the icon thread.
@@ -3384,6 +3907,9 @@ fn apply_reply(cx: &mut App, reply: WorkerReply) {
             {
                 // Only a launch that happened is counted (S7).
                 record_usage(cx, &group, slot);
+                // G.3: the groups made of use records follow the launch that
+                // just happened.
+                refresh_dynamic_groups_for(cx, RefreshReason::Launched);
             }
             if let Some(path) = folder {
                 open_in_explorer(cx, path);
@@ -3558,6 +4084,9 @@ fn apply_batch_reply(
 fn finish_batch(cx: &mut App, batch: PendingLaunchBatch) {
     if batch.used {
         record_usage(cx, &batch.usage.0, batch.usage.1);
+        // G.3: the groups made of use records follow the launch that just
+        // happened.
+        refresh_dynamic_groups_for(cx, RefreshReason::Launched);
     }
     for folder in batch.folders {
         open_in_explorer(cx, folder);
@@ -3812,6 +4341,9 @@ fn activate_group(
 /// Sends one start request per entry of a group, all under one generation and
 /// batch id (§17.2 E.1).
 fn send_group_launch(cx: &mut App, group: String, slot: u32, plan: GroupPlan, kind: ClickKind) {
+    // G.4: a use of a copy in a `recent`/`most_used` group belongs to the entry
+    // it was copied from.
+    let usage = usage_target(cx, &group, slot);
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
@@ -3824,7 +4356,7 @@ fn send_group_launch(cx: &mut App, group: String, slot: u32, plan: GroupPlan, ki
     quick_launch.pending_usage = None;
     quick_launch.pending_batch = Some(PendingLaunchBatch {
         generation,
-        usage: (group, slot),
+        usage,
         total,
         remaining: total,
         failed: Vec::new(),
@@ -3867,6 +4399,9 @@ fn group_on_running(on_running: OnRunning) -> OnRunning {
 
 /// Hands one start request to the `quick-launch` thread (§8.1, §8.4).
 fn send_launch(cx: &mut App, item: Item, group: String, slot: u32, mode: LaunchMode) {
+    // G.4: a use of a copy in a `recent`/`most_used` group belongs to the entry
+    // it was copied from.
+    let usage = usage_target(cx, &group, slot);
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
@@ -3876,7 +4411,7 @@ fn send_launch(cx: &mut App, item: Item, group: String, slot: u32, mode: LaunchM
     #[cfg(test)]
     quick_launch.sent_launches.push(mode);
     quick_launch.message = None;
-    quick_launch.pending_usage = Some((group, slot));
+    quick_launch.pending_usage = Some(usage);
     // A single launch replaces whatever group was in flight: its replies are
     // already stale, because the generation moved on.
     quick_launch.pending_batch = None;
@@ -4181,6 +4716,9 @@ fn select_group(cx: &mut App, index: usize) {
     quick_launch.restored.last_group = Some(id.clone());
     let bytes = id.into_bytes();
     write_kv_name(cx, LAST_GROUP_KEY.to_string(), bytes);
+    // G.2: a `folder:` group reads its directory again when it is switched to,
+    // if the last read is older than 30 s.
+    refresh_dynamic_groups_for(cx, RefreshReason::GroupSwitch(index));
     ensure_selection(cx);
     cx.refresh_windows();
 }
@@ -4313,6 +4851,15 @@ pub fn launcher_snapshot(cx: &App) -> Vec<LauncherEntry> {
         .config
         .groups
         .iter()
+        // G.7: the copies a `recent`/`most_used` group shows are already in the
+        // snapshot through their own group; listing them again would duplicate
+        // every row.
+        .filter(|group| {
+            !matches!(
+                group_source(group),
+                Some(GroupSource::Recent | GroupSource::MostUsed)
+            )
+        })
         .flat_map(|group| {
             group.items.iter().map(move |item| LauncherEntry {
                 group: group.id.clone(),
@@ -7147,6 +7694,9 @@ mod tests {
             health: HashMap::new(),
             health_started: false,
             health_queue: VecDeque::new(),
+            origins: HashMap::new(),
+            folder_missing: HashSet::new(),
+            folder_refresh: HashMap::new(),
             mode: Mode::Main,
             #[cfg(test)]
             health_checks: Vec::new(),
@@ -7289,5 +7839,493 @@ mod tests {
             restored.positions.get("window_0000000000000001").copied(),
             Some(saved)
         );
+    }
+
+    /// One group whose items are generated from `source` (§17.2 G).
+    fn dynamic_group(id: &str, source: &str) -> Group {
+        Group {
+            id: id.to_string(),
+            name: id.to_string(),
+            items: Vec::new(),
+            source: Some(source.to_string()),
+        }
+    }
+
+    /// A state holding `groups` and the use records `(group, slot, count, last)`.
+    fn usage_state(groups: Vec<Group>, usage: Vec<((&str, u32), u32, u64)>) -> QuickLaunch {
+        let mut state = sample_state();
+        state.config.groups = groups;
+        for ((group, slot), count, last) in usage {
+            state
+                .restored
+                .usage
+                .insert((group.to_string(), slot), Usage { count, last });
+        }
+        state
+    }
+
+    /// The settings form's fields for one item, as a test edit.
+    fn item_edit(path: &str) -> ItemEdit {
+        ItemEdit {
+            kind: "app".to_string(),
+            name: "Outro".to_string(),
+            path: path.to_string(),
+            args: String::new(),
+            cwd: String::new(),
+            admin: false,
+            icon: String::new(),
+            tags: Vec::new(),
+            command: None,
+            group_items: None,
+        }
+    }
+
+    /// §17.2 G.2: a `folder:` group lists its directory, sorted by name without
+    /// regard to case, with hidden entries out and slots from 0.
+    #[test]
+    fn a_folder_group_lists_its_directory_in_order() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("banana.txt"), b"x").unwrap();
+        std::fs::write(directory.path().join("Apple.txt"), b"x").unwrap();
+        std::fs::write(directory.path().join("cherry.txt"), b"x").unwrap();
+        std::fs::create_dir(directory.path().join("Zulu")).unwrap();
+        // A hidden entry is the one the listing must leave out.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .attributes(FILE_ATTRIBUTE_HIDDEN)
+                .open(directory.path().join("hidden.txt"))
+                .unwrap();
+        }
+        #[cfg(not(windows))]
+        std::fs::write(directory.path().join(".hidden.txt"), b"x").unwrap();
+
+        let FolderListing::Items(items) = read_folder(directory.path()) else {
+            panic!("the directory exists");
+        };
+        let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Apple", "banana", "cherry", "Zulu"],
+            "the names are sorted without regard to case"
+        );
+        let slots: Vec<u32> = items.iter().map(|item| item.slot).collect();
+        assert_eq!(slots, vec![0, 1, 2, 3], "the slots run from 0");
+        let kinds: Vec<&str> = items.iter().map(|item| item.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["file", "file", "file", "folder"]);
+    }
+
+    /// §17.2 G.2: at most 512 entries are kept, after the sort.
+    #[test]
+    fn a_folder_group_stops_at_512_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..(MAX_FOLDER_ITEMS + 5) {
+            std::fs::write(directory.path().join(format!("item_{index:04}.txt")), b"x").unwrap();
+        }
+        let FolderListing::Items(items) = read_folder(directory.path()) else {
+            panic!("the directory exists");
+        };
+        assert_eq!(items.len(), MAX_FOLDER_ITEMS);
+        assert_eq!(items.first().map(|item| item.slot), Some(0));
+        assert_eq!(items.last().map(|item| item.slot), Some(511));
+        assert_eq!(
+            items.first().map(|item| item.name.as_str()),
+            Some("item_0000"),
+            "the first of the sorted names stay"
+        );
+    }
+
+    /// §17.2 G.2: a directory that is not there has no entries at all.
+    #[test]
+    fn a_folder_group_without_its_directory_has_no_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_folder(&directory.path().join("nao_existe")),
+            FolderListing::Missing
+        );
+    }
+
+    /// §17.2 G.3: `recent` orders by the latest use, `most_used` by the count
+    /// and then by the latest use; both copy the entry with slots from 0.
+    #[test]
+    fn the_use_groups_order_their_copies() {
+        let mut general = group_of(0);
+        general.items = vec![
+            Item::new(0, "app", "A"),
+            Item::new(1, "app", "B"),
+            Item::new(2, "app", "C"),
+        ];
+        let state = usage_state(
+            vec![
+                general,
+                dynamic_group("recent", "recent"),
+                dynamic_group("most", "most_used"),
+            ],
+            vec![
+                (("general", 0), 9, 5),
+                (("general", 1), 5, 30),
+                (("general", 2), 5, 20),
+            ],
+        );
+        let recent: Vec<(String, u32)> =
+            usage_group_items(&state.config, &state.restored.usage, false)
+                .into_iter()
+                .map(|(item, _)| (item.name, item.slot))
+                .collect();
+        assert_eq!(
+            recent,
+            vec![
+                ("B".to_string(), 0),
+                ("C".to_string(), 1),
+                ("A".to_string(), 2)
+            ],
+            "the latest use comes first"
+        );
+        let most: Vec<String> = usage_group_items(&state.config, &state.restored.usage, true)
+            .into_iter()
+            .map(|(item, _)| item.name)
+            .collect();
+        assert_eq!(
+            most,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            "the count first, then the latest use"
+        );
+        let origins: Vec<(String, u32)> =
+            usage_group_items(&state.config, &state.restored.usage, false)
+                .into_iter()
+                .map(|(_, origin)| origin)
+                .collect();
+        assert_eq!(
+            origins,
+            vec![
+                ("general".to_string(), 1),
+                ("general".to_string(), 2),
+                ("general".to_string(), 0)
+            ],
+            "each copy carries where it came from"
+        );
+    }
+
+    /// §17.2 G.3: at most `columns × 2` copies, never more than 32, and no copy
+    /// of an entry the configuration no longer has (or of a dynamic group).
+    #[test]
+    fn the_use_groups_stop_at_the_limit_and_skip_gone_entries() {
+        let mut general = group_of(0);
+        general.items = (0..20)
+            .map(|slot| Item::new(slot, "app", format!("Item {slot}")))
+            .collect();
+        let mut recent = dynamic_group("recent", "recent");
+        // The group's own generated entry is not a candidate: its record would
+        // name a copy, not an entry of the file.
+        recent.items = vec![Item::new(0, "app", "Copia")];
+        let mut usage = Vec::new();
+        for slot in 0..20 {
+            usage.push((("general", slot), 1, 100 + u64::from(slot)));
+        }
+        // An entry that is gone from the file, a group that is gone, and a
+        // dynamic group's own record.
+        usage.push((("general", 99), 50, 999));
+        usage.push((("ghost", 0), 50, 999));
+        usage.push((("recent", 0), 50, 999));
+        let mut state = usage_state(vec![general, recent], usage);
+
+        let items = usage_group_items(&state.config, &state.restored.usage, false);
+        assert_eq!(items.len(), 16, "8 columns allow 8 × 2 copies");
+        assert_eq!(items[0].0.name, "Item 19", "the newest entry comes first");
+        assert!(
+            items
+                .iter()
+                .all(|(_, origin)| origin.0 == "general" && origin.1 < 20),
+            "no copy of a gone entry or of the dynamic group itself"
+        );
+
+        state.config.window.columns = 16;
+        let items = usage_group_items(&state.config, &state.restored.usage, false);
+        assert_eq!(items.len(), 20, "a wide window takes every remaining entry");
+        let mut crowded = state;
+        crowded.config.groups[0].items = (0..40u32)
+            .map(|slot| Item::new(slot, "app", format!("Item {slot}")))
+            .collect();
+        crowded.restored.usage = (0..40u32)
+            .map(|slot| {
+                (
+                    ("general".to_string(), slot),
+                    Usage {
+                        count: 1,
+                        last: u64::from(slot),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            usage_group_items(&crowded.config, &crowded.restored.usage, false).len(),
+            MAX_USAGE_ITEMS,
+            "no group shows more than 32 copies"
+        );
+    }
+
+    /// §17.2 G.4: launching a copy records the use on the entry it came from.
+    #[gpui::test]
+    fn launching_a_copy_counts_the_original(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(5, "app", "A")];
+            let mut recent = dynamic_group("recent", "recent");
+            recent.items = vec![Item::new(0, "app", "A")];
+            install(cx, vec![general, recent]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+                state
+                    .origins
+                    .insert(("recent".to_string(), 0), ("general".to_string(), 5));
+            }
+            let item = item_at(cx, 1, 0).expect("the copy");
+            send_launch(cx, item, "recent".to_string(), 0, LaunchMode::Normal);
+            let pending = state(cx).and_then(|state| state.pending_usage.clone());
+            assert_eq!(
+                pending,
+                Some(("general".to_string(), 5)),
+                "the use belongs to the original entry"
+            );
+            if let Some(state) = state_mut(cx) {
+                state.pending_usage = None;
+            }
+            record_usage(cx, "general", 5);
+        });
+        cx.run_until_parked();
+        let key = KvKey::new(KV_NAMESPACE, "usage_general_5").expect("a valid usage key");
+        let written = store.get(&key).expect("the test store").expect("a record");
+        let usage: Usage = serde_json::from_slice(&written).expect("a usage record");
+        assert_eq!(usage.count, 1, "one use of the original");
+        assert!(usage.last > 0, "the use has a time");
+        let copy = KvKey::new(KV_NAMESPACE, "usage_recent_0").expect("a valid usage key");
+        assert_eq!(
+            store.get(&copy).expect("the test store"),
+            None,
+            "the copy gets no record of its own"
+        );
+    }
+
+    /// §17.2 G.1: the copy that is serialized leaves a dynamic group's generated
+    /// entries out while the state keeps them.
+    #[test]
+    fn saving_leaves_generated_items_out() {
+        let mut state = sample_state();
+        state.config.groups[0].items = vec![Item::new(0, "app", "Escrito")];
+        let mut folder = dynamic_group("tools", "folder:C:\\Tools");
+        folder.items = vec![Item::new(0, "app", "Gerado")];
+        state.config.groups.push(folder);
+
+        let copy = config_for_saving(&state);
+        let text = nohrs_core::config::quick_launch::to_toml(&copy).expect("the file renders");
+        assert!(text.contains("name = \"Escrito\""), "{text}");
+        assert!(!text.contains("Gerado"), "a generated entry is not written");
+        let written = nohrs_core::config::quick_launch::parse(&text).expect("the file parses back");
+        let folder = written
+            .config
+            .groups
+            .iter()
+            .find(|group| group.id == "tools")
+            .expect("the dynamic group is in the file");
+        assert_eq!(
+            folder.source.as_deref(),
+            Some("folder:C:\\Tools"),
+            "the group keeps its source"
+        );
+        assert!(folder.items.is_empty(), "and no generated entries");
+        assert_eq!(
+            state.config.groups[1].items.len(),
+            1,
+            "the state keeps the entries it generated"
+        );
+    }
+
+    /// §17.2 G.5: every edit entry refuses a dynamic group, while the group
+    /// itself can still be renamed, reordered and deleted.
+    #[gpui::test]
+    fn every_edit_entry_refuses_a_dynamic_group(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(0, "app", "A"), Item::new(1, "app", "B")];
+            let mut folder = dynamic_group("tools", "folder:C:\\Tools");
+            folder.items = vec![Item::new(0, "app", "Gerado")];
+            let mut recent = dynamic_group("recent", "recent");
+            recent.items = vec![Item::new(0, "app", "Copia")];
+            install(cx, vec![general, folder, recent]);
+
+            for index in [1, 2] {
+                assert!(!place_items(
+                    cx,
+                    index,
+                    0,
+                    vec![Item::new(0, "file", "Novo")]
+                ));
+                assert!(!put_item(cx, index, 0, Item::new(0, "file", "Novo")));
+                assert!(!edit_item(cx, index, 0, "Outro", "C:\\x.exe", "", false));
+                assert!(!update_item(cx, index, 0, &item_edit("C:\\x.exe")));
+                assert!(!swap_slots(cx, index, 0, 1));
+                assert!(!delete_item(cx, index, 0));
+                assert!(
+                    !move_item_to_group(cx, index, 0, 0),
+                    "out of a dynamic group"
+                );
+                assert!(!move_item_to_group(cx, 0, 0, index), "into a dynamic group");
+            }
+            // The ordinary group stays editable.
+            assert!(place_items(cx, 0, 2, vec![Item::new(0, "file", "Novo")]));
+
+            // The group itself is not one of its entries: it can be renamed,
+            // moved and deleted like any other.
+            assert!(rename_group(cx, 1, "Ferramentas 2"));
+            assert!(move_group(cx, 1, 2));
+            assert!(delete_group(cx, 2, true));
+        });
+    }
+
+    /// §17.2 G.7: the snapshot carries the folder group's generated entries and
+    /// leaves the copies of the use groups out.
+    #[gpui::test]
+    fn the_launcher_snapshot_keeps_folder_groups_and_drops_use_groups(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(0, "app", "Escrito")];
+            let mut folder = dynamic_group("tools", "folder:C:\\Tools");
+            folder.items = vec![Item::new(0, "app", "Gerado")];
+            let mut recent = dynamic_group("recent", "recent");
+            recent.items = vec![Item::new(0, "app", "Copia")];
+            let mut most = dynamic_group("most", "most_used");
+            most.items = vec![Item::new(0, "app", "Copia2")];
+            install(cx, vec![general, folder, recent, most]);
+
+            let snapshot = launcher_snapshot(cx);
+            let names: Vec<&str> = snapshot.iter().map(|entry| entry.name.as_str()).collect();
+            assert_eq!(names, vec!["Escrito", "Gerado"]);
+            assert_eq!(snapshot[1].group, "tools", "the folder group is in");
+        });
+    }
+
+    /// §17.2 G.8: a dynamic group's records name no entry of the file, so the
+    /// cleanup drops them and keeps the ordinary groups' records.
+    #[gpui::test]
+    fn pruning_usage_ignores_dynamic_groups(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut general = group_of(0);
+            general.items = vec![Item::new(0, "app", "Escrito")];
+            let mut folder = dynamic_group("tools", "folder:C:\\Tools");
+            folder.items = vec![Item::new(0, "app", "Gerado")];
+            install(cx, vec![general, folder, dynamic_group("recent", "recent")]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            for name in ["usage_general_0", "usage_tools_0", "usage_recent_0"] {
+                let key = KvKey::new(KV_NAMESPACE, name).expect("a valid key");
+                store.put(&key, b"{}").expect("the test store");
+            }
+            prune_usage(cx);
+        });
+        cx.run_until_parked();
+        let general = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("a valid key");
+        assert!(
+            store.get(&general).expect("the test store").is_some(),
+            "an entry of the file keeps its record"
+        );
+        for name in ["usage_tools_0", "usage_recent_0"] {
+            let key = KvKey::new(KV_NAMESPACE, name).expect("a valid key");
+            assert_eq!(
+                store.get(&key).expect("the test store"),
+                None,
+                "a dynamic group's record goes"
+            );
+        }
+    }
+
+    /// §17.2 G.1, G.2: the refresh generates a folder group's entries in the
+    /// background, reuses them for 30 s, and says when the directory is gone.
+    #[gpui::test]
+    fn refreshing_generates_folder_groups(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("beta.txt"), b"x").unwrap();
+        std::fs::write(directory.path().join("Alfa.txt"), b"x").unwrap();
+        let existing = format!("folder:{}", directory.path().to_string_lossy());
+        let missing = format!(
+            "folder:{}",
+            directory.path().join("nao_existe").to_string_lossy()
+        );
+        cx.update(|cx| {
+            install(
+                cx,
+                vec![
+                    dynamic_group("tools", &existing),
+                    dynamic_group("gone", &missing),
+                ],
+            );
+            refresh_dynamic_groups(cx);
+            refresh_dynamic_groups(cx);
+        });
+        cx.run_until_parked();
+        let (names, slots, requests, notice) = cx.update(|cx| {
+            let state = state(cx).expect("the state is installed");
+            let items = state
+                .config
+                .groups
+                .first()
+                .map(|group| group.items.clone())
+                .unwrap_or_default();
+            (
+                items
+                    .iter()
+                    .map(|item| item.name.clone())
+                    .collect::<Vec<_>>(),
+                items.iter().map(|item| item.slot).collect::<Vec<_>>(),
+                state
+                    .folder_refresh
+                    .get("tools")
+                    .map(|refresh| refresh.request)
+                    .unwrap_or_default(),
+                group_notice(cx, 1).map(str::to_string),
+            )
+        });
+        assert_eq!(names, vec!["Alfa".to_string(), "beta".to_string()]);
+        assert_eq!(slots, vec![0, 1], "the slots run from 0");
+        assert_eq!(
+            requests, 1,
+            "the second refresh within 30 s reuses the listing"
+        );
+        assert_eq!(
+            notice,
+            Some(nohrs_core::t!("Pasta não encontrada").to_string())
+        );
+    }
+
+    /// §17.2 G.3: the resident process has no store, so its use groups have
+    /// nothing to show and say why.
+    #[gpui::test]
+    fn the_resident_process_has_no_use_groups(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut recent = dynamic_group("recent", "recent");
+            recent.items = vec![Item::new(0, "app", "Copia")];
+            install(cx, vec![recent]);
+            if let Some(state) = state_mut(cx) {
+                state.mode = Mode::Standalone;
+            }
+            refresh_dynamic_groups(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(
+                state.config.groups[0].items.is_empty(),
+                "a resident process has no use records to copy"
+            );
+            assert_eq!(
+                group_notice(cx, 0),
+                Some(nohrs_core::t!("Indisponível no modo residente"))
+            );
+        });
     }
 }

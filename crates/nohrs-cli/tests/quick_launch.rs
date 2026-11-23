@@ -535,3 +535,117 @@ items = ["ghost"]
         stderr(&refused)
     );
 }
+
+/// A file with one ordinary group and the dynamic sources of §17.2 G.
+fn write_dynamic_file(root: &Path) {
+    let path = config_file(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"schema_version = 1
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "app"
+name = "Editor"
+path = "C:\\Windows\\notepad.exe"
+
+[[group]]
+id = "recent"
+name = "Recentes"
+source = "recent"
+
+[[group]]
+id = "tools"
+name = "Ferramentas"
+source = "folder:C:\\Windows"
+"#,
+    )
+    .unwrap();
+}
+
+/// §17.2 G.9: the listing marks a dynamic group with its source and shows no
+/// items for it, because the file has none.
+#[test]
+fn list_marks_a_dynamic_group_and_shows_no_items_for_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_dynamic_file(root);
+
+    let listed = noh(root, &["ql", "list"]);
+    assert_eq!(exit_code(&listed), 0, "list failed: {}", stderr(&listed));
+    let listing = stdout(&listed);
+    assert!(listing.contains("recent (dynamic: recent)"), "{listing}");
+    assert!(
+        listing.contains("tools (dynamic: folder:C:\\Windows)"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("0\tapp\tEditor"),
+        "the ordinary group keeps its entry: {listing}"
+    );
+    let lines: Vec<&str> = listing.lines().collect();
+    let dynamic = lines
+        .iter()
+        .position(|line| line.starts_with("recent (dynamic:"))
+        .expect("the recent group is listed");
+    assert!(
+        !lines
+            .get(dynamic + 1)
+            .is_some_and(|line| line.starts_with("  ")),
+        "a dynamic group lists no entries: {listing}"
+    );
+}
+
+/// §17.2 G.9: `add` and `remove` refuse a dynamic group with exit code 1 and
+/// leave the file alone.
+#[test]
+fn add_and_remove_refuse_a_dynamic_group() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_dynamic_file(root);
+    let before = std::fs::read(config_file(root)).unwrap();
+    let program = fixture_file(root, "Editor.txt");
+
+    let added = noh(
+        root,
+        &["ql", "add", program.to_str().unwrap(), "--group", "recent"],
+    );
+    assert_eq!(exit_code(&added), 1, "{}", stderr(&added));
+    assert!(stderr(&added).contains("dynamic"), "{}", stderr(&added));
+
+    let removed = noh(root, &["ql", "remove", "tools", "0"]);
+    assert_eq!(exit_code(&removed), 1, "{}", stderr(&removed));
+    assert!(stderr(&removed).contains("dynamic"), "{}", stderr(&removed));
+
+    assert_eq!(
+        std::fs::read(config_file(root)).unwrap(),
+        before,
+        "a refusal must not touch the file"
+    );
+}
+
+/// §17.2 G.9: `run` refuses a dynamic group and says the window is where it
+/// runs.
+#[test]
+#[cfg(windows)]
+fn run_refuses_a_dynamic_group_and_points_at_the_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_dynamic_file(root);
+
+    let refused = noh(root, &["ql", "run", "recent", "0"]);
+    assert_eq!(exit_code(&refused), 1, "{}", stderr(&refused));
+    let errors = stderr(&refused);
+    assert!(errors.contains("dynamic"), "{errors}");
+    assert!(errors.contains("window"), "{errors}");
+    assert!(
+        stdout(&refused).is_empty(),
+        "nothing is started: {}",
+        stdout(&refused)
+    );
+}

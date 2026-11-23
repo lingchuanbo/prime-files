@@ -367,7 +367,7 @@ impl QuickLaunchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !super::editable(cx) {
+        if !super::group_editable(cx, group) {
             return;
         }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -574,7 +574,7 @@ impl QuickLaunchView {
         paths: &[std::path::PathBuf],
         cx: &mut Context<Self>,
     ) {
-        if !super::editable(cx) || paths.is_empty() {
+        if !super::group_editable(cx, group) || paths.is_empty() {
             return;
         }
         // S1: whether each path is a folder needs the disk, so it is asked on a
@@ -637,6 +637,10 @@ impl Render for QuickLaunchView {
         let read_only = super::read_only_reason(cx).map(str::to_string);
         let message = super::message(cx).map(str::to_string);
         let icon_edge = super::icon_edge(window, configured_icon_size);
+        // G.5: a dynamic group's entries are generated; nothing may add, move or
+        // edit them, while its tiles still launch and copy.
+        let group_editable = editable && super::group_editable(cx, group);
+        let notice = super::group_notice(cx, group);
 
         // A frame is rebuilt when the state says what it draws changed, or when
         // the window's scale asks for a different icon size (S6).
@@ -747,6 +751,9 @@ impl Render for QuickLaunchView {
 
         let content: AnyElement = if loading {
             centered_note(nohrs_core::t!("Carregando…"))
+        } else if let Some(notice) = notice {
+            // G.2, G.3: a dynamic group that has nothing to show says why.
+            centered_note(notice)
         } else if drawn.is_empty() {
             centered_note(nohrs_core::t!("Nenhum item neste grupo"))
         } else if view == View::List {
@@ -755,6 +762,7 @@ impl Render for QuickLaunchView {
                 selected,
                 group,
                 editable,
+                group_editable,
                 &missing,
                 list_columns,
                 icon_edge,
@@ -767,6 +775,7 @@ impl Render for QuickLaunchView {
                 selected,
                 group,
                 editable,
+                group_editable,
                 &missing,
                 columns,
                 cell_size,
@@ -835,7 +844,7 @@ impl Render for QuickLaunchView {
                         .child(content)
                         .on_drop(cx.listener(
                             move |view, paths: &gpui::ExternalPaths, _window, cx| {
-                                if editable {
+                                if group_editable {
                                     let target = super::next_free_slot(cx, group);
                                     let paths = paths.paths().to_vec();
                                     view.drop_paths(group, target, &paths, cx);
@@ -1115,8 +1124,9 @@ fn render_group_bar(
                 }))
                 .on_drop(move |drag: &ItemDrag, _window, cx| {
                     // An item dropped on the bar joins that group: first free
-                    // slot, else appended (§12.2).
-                    if editable {
+                    // slot, else appended (§12.2). A dynamic group takes no
+                    // entries at all (§17.2 G.5).
+                    if editable && super::group_editable(cx, index) {
                         entity_drop
                             .update(cx, |view, cx| view.drop_item_on_group(drag, index, cx))
                             .log_err();
@@ -1184,6 +1194,7 @@ fn grid_view(
     selected: Option<u32>,
     group: usize,
     editable: bool,
+    group_editable: bool,
     missing: &HashMap<u32, bool>,
     columns: usize,
     cell_size: f32,
@@ -1231,8 +1242,16 @@ fn grid_view(
                                 .and_then(|image| image.clone());
                             let missing = missing.get(&item.slot).copied().unwrap_or(false);
                             line = line.child(tile(
-                                item, image, selected, missing, group, editable, cell_size,
-                                icon_edge, &entity,
+                                item,
+                                image,
+                                selected,
+                                missing,
+                                group,
+                                editable,
+                                group_editable,
+                                cell_size,
+                                icon_edge,
+                                &entity,
                             ));
                         }
                         None if packed => {
@@ -1248,8 +1267,13 @@ fn grid_view(
                         }
                         None => {
                             let slot = u32::try_from(index).unwrap_or(MAX_SLOT);
-                            line =
-                                line.child(empty_cell(slot, group, editable, cell_size, &entity));
+                            line = line.child(empty_cell(
+                                slot,
+                                group,
+                                group_editable,
+                                cell_size,
+                                &entity,
+                            ));
                         }
                     }
                 }
@@ -1270,6 +1294,7 @@ fn list_view(
     selected: Option<u32>,
     group: usize,
     editable: bool,
+    group_editable: bool,
     missing: &HashMap<u32, bool>,
     list_columns: usize,
     icon_edge: u32,
@@ -1295,7 +1320,14 @@ fn list_view(
                             let selected = selected == Some(entry.item.slot);
                             let missing = missing.get(&entry.item.slot).copied().unwrap_or(false);
                             line = line.child(div().flex_1().min_w(px(0.0)).child(row_of(
-                                entry, selected, missing, group, editable, icon_edge, &entity,
+                                entry,
+                                selected,
+                                missing,
+                                group,
+                                editable,
+                                group_editable,
+                                icon_edge,
+                                &entity,
                             )));
                         }
                         None => line = line.child(div().flex_1()),
@@ -1316,7 +1348,7 @@ fn list_view(
 fn empty_cell(
     slot: u32,
     group: usize,
-    editable: bool,
+    group_editable: bool,
     cell_size: f32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
@@ -1333,7 +1365,7 @@ fn empty_cell(
             let handle = handle.clone();
             menu.item(
                 PopupMenuItem::new(nohrs_core::t!("Novo item"))
-                    .disabled(!editable)
+                    .disabled(!group_editable)
                     .on_click(move |_, window, cx| {
                         handle
                             .update(cx, |view, cx| view.new_item_at(group, slot, window, cx))
@@ -1345,11 +1377,13 @@ fn empty_cell(
 }
 
 /// The menu of one item (§12.2, M2 rows).
+#[allow(clippy::too_many_arguments)]
 fn item_menu(
     menu: PopupMenu,
     group: usize,
     slot: u32,
     editable: bool,
+    group_editable: bool,
     entity: &WeakEntity<QuickLaunchView>,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
@@ -1386,7 +1420,7 @@ fn item_menu(
         .separator()
         .item(
             PopupMenuItem::new(nohrs_core::t!("Editar"))
-                .disabled(!editable)
+                .disabled(!group_editable)
                 .on_click(move |_, window, cx| {
                     edit.update(cx, |view, cx| view.edit_item(group, slot, window, cx))
                         .log_err();
@@ -1405,7 +1439,7 @@ fn item_menu(
 
     // "Move to group ▸" lists every other group; with a single group there is
     // nowhere to move to and the entry is left out (§12.2).
-    let groups: Vec<(usize, String)> = super::state(cx)
+    let groups: Vec<(usize, String, bool)> = super::state(cx)
         .map(|state| {
             state
                 .config()
@@ -1413,7 +1447,15 @@ fn item_menu(
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| *index != group)
-                .map(|(index, group)| (index, group.name.clone()))
+                .map(|(index, group)| {
+                    // G.5: neither a copy nor a generated entry may be moved
+                    // into or out of a dynamic group.
+                    (
+                        index,
+                        group.name.clone(),
+                        group_editable && super::group_editable(cx, index),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -1423,15 +1465,19 @@ fn item_menu(
         let for_submenu = entity.clone();
         let submenu = PopupMenu::build(window, cx, move |submenu, _window, _cx| {
             let mut submenu = submenu;
-            for (index, name) in groups {
+            for (index, name, target_editable) in groups {
                 let handle = for_submenu.clone();
-                submenu = submenu.item(PopupMenuItem::new(name).on_click(move |_, _window, cx| {
-                    handle
-                        .update(cx, |view, cx| {
-                            view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
-                        })
-                        .log_err();
-                }));
+                submenu = submenu.item(
+                    PopupMenuItem::new(name)
+                        .disabled(!target_editable)
+                        .on_click(move |_, _window, cx| {
+                            handle
+                                .update(cx, |view, cx| {
+                                    view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
+                                })
+                                .log_err();
+                        }),
+                );
             }
             submenu
         });
@@ -1443,7 +1489,7 @@ fn item_menu(
 
     menu.separator().item(
         PopupMenuItem::new(nohrs_core::t!("Excluir"))
-            .disabled(!editable)
+            .disabled(!group_editable)
             .on_click(move |_, _window, cx| {
                 delete
                     .update(cx, |view, cx| view.delete_item(group, slot, cx))
@@ -1461,6 +1507,7 @@ fn tile(
     missing: bool,
     group: usize,
     editable: bool,
+    group_editable: bool,
     cell_size: f32,
     icon_edge: u32,
     entity: &WeakEntity<QuickLaunchView>,
@@ -1490,7 +1537,7 @@ fn tile(
                 .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
                 .log_err();
         })
-        .when(editable, |this| {
+        .when(group_editable, |this| {
             this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
                 cx.new(|_| ItemDragPreview {
                     name: drag_name.clone(),
@@ -1498,14 +1545,14 @@ fn tile(
             })
         })
         .on_drop(move |drag: &ItemDrag, _window, cx| {
-            if editable {
+            if group_editable {
                 drop_handle
                     .update(cx, |view, cx| view.drop_item(drag, group, slot, cx))
                     .log_err();
             }
         })
         .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
-            if editable {
+            if group_editable {
                 let paths = paths.paths().to_vec();
                 entity_drop
                     .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
@@ -1513,7 +1560,16 @@ fn tile(
             }
         })
         .context_menu(move |menu, window, cx| {
-            item_menu(menu, group, slot, editable, &menu_handle, window, cx)
+            item_menu(
+                menu,
+                group,
+                slot,
+                editable,
+                group_editable,
+                &menu_handle,
+                window,
+                cx,
+            )
         })
         .child(picture(item, image.as_ref(), icon_edge))
         .child(
@@ -1540,12 +1596,14 @@ fn tile(
 }
 
 /// One list row.
+#[allow(clippy::too_many_arguments)]
 fn row_of(
     drawn: &Drawn,
     selected: bool,
     missing: bool,
     group: usize,
     editable: bool,
+    group_editable: bool,
     icon_edge: u32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
@@ -1577,7 +1635,7 @@ fn row_of(
                 .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
                 .log_err();
         })
-        .when(editable, |this| {
+        .when(group_editable, |this| {
             this.on_drag(ItemDrag { group, slot }, move |_, _, _, cx| {
                 cx.new(|_| ItemDragPreview {
                     name: drag_name.clone(),
@@ -1585,14 +1643,14 @@ fn row_of(
             })
         })
         .on_drop(move |drag: &ItemDrag, _window, cx| {
-            if editable {
+            if group_editable {
                 drop_handle
                     .update(cx, |view, cx| view.drop_item(drag, group, slot, cx))
                     .log_err();
             }
         })
         .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
-            if editable {
+            if group_editable {
                 let paths = paths.paths().to_vec();
                 entity_drop
                     .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
@@ -1600,7 +1658,16 @@ fn row_of(
             }
         })
         .context_menu(move |menu, window, cx| {
-            item_menu(menu, group, slot, editable, &menu_handle, window, cx)
+            item_menu(
+                menu,
+                group,
+                slot,
+                editable,
+                group_editable,
+                &menu_handle,
+                window,
+                cx,
+            )
         })
         .child(picture(item, drawn.image.as_ref(), icon_edge))
         .child(

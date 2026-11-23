@@ -2677,4 +2677,22 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Este programa ya está abierto.",
     ),
     ("Ir para ele", "Switch to it", "Cambiar a él"),
+    (
+        "Pasta não encontrada",
+        "Folder not found",
+        "Carpeta no encontrada",
+    ),
+    (
+        "Indisponível no modo residente",
+        "Unavailable in resident mode",
+        "No disponible en modo residente",
+    ),
+    (
+        "Itens gerados automaticamente; não podem ser editados.",
+        "Items are generated automatically; they cannot be edited.",
+        "Los elementos se generan automáticamente; no se pueden editar.",
+    ),
+    ("Normal", "Normal", "Normal"),
+    ("Recentes", "Recent", "Recientes"),
+    ("Mais usados", "Most used", "Más usados"),
 ];

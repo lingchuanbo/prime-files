@@ -67,6 +67,19 @@ const ICON_SIZES: [(&str, u16); 6] = [
 /// The list-view column counts offered, inside the `1..=3` of §4.
 const LIST_COLUMNS: [(&str, u8); 3] = [("1", 1), ("2", 2), ("3", 3)];
 
+/// The kinds of group the new-group chooser offers (§17.2 G.6).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NewGroupKind {
+    /// A group the user fills with entries.
+    Normal,
+    /// A group listing a folder's contents, read on the window's side.
+    Folder,
+    /// A group of the most recently launched entries.
+    Recent,
+    /// A group of the most used entries.
+    MostUsed,
+}
+
 /// What one click on the section does.
 #[derive(Clone, Copy)]
 pub(super) enum Action {
@@ -93,7 +106,7 @@ pub(super) enum Action {
     /// Wait for the next key press to become the summon chord.
     RecordHotkey,
     /// Add a group at the end and start its rename.
-    NewGroup,
+    NewGroup(NewGroupKind),
     /// Start renaming the group at this index.
     RenameGroup(usize),
     /// Write the renamed group back.
@@ -187,7 +200,7 @@ impl Section {
         let read_only = quick_launch::read_only_reason(cx).map(str::to_string);
         vec![
             self.window_group(page, &window, enabled, cx),
-            self.groups_group(&groups, enabled, cx),
+            self.groups_group(page, &groups, enabled, cx),
             self.items_group(page, &groups, enabled, cx),
             self.file_group(&read_only, cx),
         ]
@@ -428,10 +441,11 @@ impl Section {
         control.into_any_element()
     }
 
-    /// The groups card: one line per group with rename, delete and move, and
-    /// the button that adds another.
+    /// The groups card: one line per group with rename, delete and move, and the
+    /// chooser that adds another of a chosen kind (§17.2 G.6).
     fn groups_group(
         &self,
+        page: &SettingsPage,
         groups: &[LaunchGroup],
         enabled: bool,
         cx: &mut Context<SettingsPage>,
@@ -441,16 +455,50 @@ impl Section {
             .enumerate()
             .map(|(index, group)| self.group_entry(group, index, groups.len(), enabled, cx))
             .collect();
-        entries.push(
-            action_button(
-                "quick-launch-group-add",
-                t!("Novo grupo"),
+        // G.6: a group is either ordinary or generated from a source; a folder
+        // source is picked with the same dialog the item form browses with.
+        let new_group_options = [
+            (
+                t!("Normal"),
                 false,
-                enabled,
-                Action::NewGroup,
-                cx,
-            )
-            .into_any_element(),
+                Pick::QuickLaunch(Action::NewGroup(NewGroupKind::Normal)),
+            ),
+            (
+                t!("Pasta"),
+                false,
+                Pick::QuickLaunch(Action::NewGroup(NewGroupKind::Folder)),
+            ),
+            (
+                t!("Recentes"),
+                false,
+                Pick::QuickLaunch(Action::NewGroup(NewGroupKind::Recent)),
+            ),
+            (
+                t!("Mais usados"),
+                false,
+                Pick::QuickLaunch(Action::NewGroup(NewGroupKind::MostUsed)),
+            ),
+        ];
+        entries.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(theme::muted()))
+                        .child(t!("Novo grupo")),
+                )
+                .child(page.chips_when(
+                    "quick-launch-group-new",
+                    &new_group_options,
+                    false,
+                    enabled,
+                    cx,
+                ))
+                .into_any_element(),
         );
         let control = div().flex().flex_col().gap_1().w_full().children(entries);
         super::Group::new(vec![Row::new(t!("Grupos"), None, control).wide()])
@@ -514,6 +562,20 @@ impl Section {
                     .text_color(rgb(theme::fg()))
                     .child(group.name.clone()),
             )
+            // G.6: the group list says where a dynamic group's items come from.
+            .when_some(group.source.clone(), |this, source| {
+                this.child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(px(220.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(rgb(theme::muted()))
+                        .child(source),
+                )
+            })
             .child(action_button(
                 ElementId::Name(SharedString::from(format!(
                     "quick-launch-group-up-{}",
@@ -593,14 +655,26 @@ impl Section {
             )
             .wide(),
         ];
-        let mut list = self.item_list(group, enabled, cx);
-        if group.items.is_empty() {
+        // G.6: a dynamic group's items are generated by the window, so this page
+        // may show them but not edit them.
+        let group_enabled = enabled && group.source.is_none();
+        let mut list = self.item_list(group, group_enabled, cx);
+        if group.source.is_some() {
+            list = list.child(status_line(
+                t!("Itens gerados automaticamente; não podem ser editados."),
+                false,
+            ));
+        } else if group.items.is_empty() {
             list = list.child(status_line(t!("Nenhum item neste grupo."), false));
         } else if self.form.is_none() {
             list = list.child(status_line(t!("Selecione um item para editar."), false));
         }
         rows.push(Row::new(t!("Itens"), None, list).wide());
-        if let Some(form) = self.form.as_ref().filter(|form| form.group == group.id) {
+        if let Some(form) = self
+            .form
+            .as_ref()
+            .filter(|form| form.group == group.id && group.source.is_none())
+        {
             rows.extend(self.form_rows(page, form, enabled, cx));
         }
         super::Group::titled(t!("Itens"), rows)
@@ -1332,19 +1406,7 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
             }
             cx.notify();
         }
-        Action::NewGroup => {
-            if !quick_launch::editable(cx) || quick_launch::add_group(cx).is_none() {
-                return;
-            }
-            let groups = quick_launch::groups(cx);
-            let Some(group) = groups.last() else {
-                return;
-            };
-            page.quick_launch.renaming = Some(group.id.clone());
-            page.quick_launch.rename_input = None;
-            cx.refresh_windows();
-            cx.notify();
-        }
+        Action::NewGroup(kind) => new_group(page, kind, cx),
         Action::RenameGroup(index) => {
             let groups = quick_launch::groups(cx);
             let Some(group) = groups.get(index) else {
@@ -1792,6 +1854,62 @@ fn delete_group(page: &mut SettingsPage, index: usize, cx: &mut Context<Settings
     {
         page.quick_launch.form = None;
     }
+    cx.refresh_windows();
+    cx.notify();
+}
+
+/// Creates a group of the chosen kind (§17.2 G.6).
+///
+/// A folder group asks for its directory with the picker the item form already
+/// uses; the other kinds need nothing before the group exists. Every kind starts
+/// the inline rename, as the ordinary "new group" always did.
+fn new_group(page: &mut SettingsPage, kind: NewGroupKind, cx: &mut Context<SettingsPage>) {
+    if !quick_launch::editable(cx) {
+        return;
+    }
+    match kind {
+        NewGroupKind::Normal => add_new_group(page, None, cx),
+        NewGroupKind::Recent => add_new_group(page, Some("recent".to_string()), cx),
+        NewGroupKind::MostUsed => add_new_group(page, Some("most_used".to_string()), cx),
+        NewGroupKind::Folder => {
+            let receiver = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some(SharedString::from(t!("Escolher um arquivo ou uma pasta"))),
+            });
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(Some(paths))) = receiver.await else {
+                    return;
+                };
+                let Some(path) = paths.first() else {
+                    return;
+                };
+                let source = format!("folder:{}", path.to_string_lossy());
+                this.update(cx, |page, cx| add_new_group(page, Some(source), cx))
+                    .log_err();
+            })
+            .detach();
+        }
+    }
+}
+
+/// Adds one group, points the item card at it and starts its rename.
+fn add_new_group(page: &mut SettingsPage, source: Option<String>, cx: &mut Context<SettingsPage>) {
+    let Some(index) = quick_launch::add_group_with_source(cx, source) else {
+        return;
+    };
+    let groups = quick_launch::groups(cx);
+    let Some(group) = groups.get(index) else {
+        return;
+    };
+    page.quick_launch.group = Some(group.id.clone());
+    page.quick_launch.renaming = Some(group.id.clone());
+    page.quick_launch.rename_input = None;
+    page.quick_launch.form = None;
+    // A generated group has its items at once, or the note saying why it has
+    // none.
+    quick_launch::refresh_dynamic_groups(cx);
     cx.refresh_windows();
     cx.notify();
 }
