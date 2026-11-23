@@ -1815,8 +1815,9 @@ fn browse(page: &SettingsPage, field: Field, window: &mut Window, cx: &mut Conte
     let want = browse_want(field, kind);
     let prompt = match want {
         quick_launch::PathWant::Folders => t!("Escolher uma pasta"),
+        // S2: the dialog's confirm button reads better as "pick a path".
         quick_launch::PathWant::Files | quick_launch::PathWant::Either => {
-            t!("Escolher um arquivo ou uma pasta")
+            t!("Escolher um caminho")
         }
     };
     let receiver = cx.prompt_for_paths(quick_launch::path_prompt_for(cx, want, false, prompt));
