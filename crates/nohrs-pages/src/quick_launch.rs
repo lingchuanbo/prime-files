@@ -2078,6 +2078,11 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
         // read: the content is what is already loaded.
         return;
     }
+    // Only a file that parsed describes the items the usage records belong to: a
+    // missing file loads a default configuration and a broken one keeps the old
+    // one, and pruning against either would delete counts that are still wanted
+    // (B1).
+    let mut parsed_ok = false;
     match read.parsed {
         None => {
             quick_launch.config = QuickLaunchConfig::with_default_group();
@@ -2086,6 +2091,7 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
             quick_launch.file_hash = read.hash;
         }
         Some(Ok(parsed)) => {
+            parsed_ok = true;
             for warning in &parsed.warnings {
                 tracing::warn!(target: "quick_launch", "{warning}");
             }
@@ -2113,8 +2119,10 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     sync_hotkey(cx);
     cx.refresh_windows();
     // E2: records of items the file no longer has go now, so the next occupant of
-    // a slot does not inherit them.
-    prune_usage(cx);
+    // a slot does not inherit them — but only when this read is the file (B1).
+    if parsed_ok {
+        prune_usage(cx);
+    }
 }
 
 /// Selects the group the last session was on, by id (§6).
@@ -3711,6 +3719,64 @@ mod tests {
         assert_eq!(
             store.get(&moved_usage).expect("the test store"),
             Some(b"y".to_vec())
+        );
+    }
+
+    /// §6, B1: a missing file must not delete any usage record.
+    #[gpui::test]
+    fn a_missing_file_keeps_the_usage_records(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install(cx, vec![group_of(2)]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let record = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            store.put(&record, b"a").expect("the test store");
+            apply_loaded(
+                cx,
+                FileRead {
+                    hash: 99,
+                    parsed: None,
+                },
+            );
+        });
+        cx.run_until_parked();
+        let record = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        assert_eq!(
+            store.get(&record).expect("the test store"),
+            Some(b"a".to_vec())
+        );
+    }
+
+    /// §6, B1: a file that does not parse must not delete any usage record either.
+    #[gpui::test]
+    fn a_broken_file_keeps_the_usage_records(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install(cx, vec![group_of(2)]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let record = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            store.put(&record, b"a").expect("the test store");
+            apply_loaded(
+                cx,
+                FileRead {
+                    hash: 77,
+                    parsed: Some(Err(QuickLaunchError::Parse {
+                        line: 1,
+                        column: 1,
+                        message: "quebrado".to_string(),
+                    })),
+                },
+            );
+        });
+        cx.run_until_parked();
+        let record = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        assert_eq!(
+            store.get(&record).expect("the test store"),
+            Some(b"a".to_vec())
         );
     }
 
