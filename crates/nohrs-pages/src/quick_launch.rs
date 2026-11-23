@@ -796,13 +796,36 @@ pub enum Mode {
 /// What the binary injects so the window can own a global chord without this
 /// crate depending on the launcher crate (§3.4, §10).
 ///
-/// The error is a `String` rather than `anyhow::Error` because the binary does
-/// not depend on `anyhow`, and this struct is built there.
+/// Why a chord was refused, as the binary knows it (§10, M3 S3).
+///
+/// The settings page has its own words for the launcher conflict, so it must be
+/// able to tell the kinds apart without reading the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotkeyRefusal {
+    /// The chord belongs to the search launcher, which was asked for it first.
+    LauncherConflict,
+    /// Anything else: the text does not parse, the OS refused it, and so on.
+    Other(String),
+}
+
+impl std::fmt::Display for HotkeyRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LauncherConflict => formatter.write_str("the Launcher's own shortcut"),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// A chord the binary registers, and how it is taken away again.
+///
+/// The error is not `anyhow::Error` because the binary does not depend on
+/// `anyhow`, and this struct is built there.
 #[derive(Clone, Copy)]
 pub struct HotkeyHooks {
     /// Parses and registers `text`, returning an opaque id for
     /// [`HotkeyHooks::unregister`].
-    pub register: fn(&mut App, &str) -> std::result::Result<u64, String>,
+    pub register: fn(&mut App, &str) -> std::result::Result<u64, HotkeyRefusal>,
     /// Removes a chord registered by [`HotkeyHooks::register`].
     pub unregister: fn(&mut App, u64) -> std::result::Result<(), String>,
 }
@@ -833,6 +856,8 @@ pub(crate) struct QuickLaunch {
     hotkey: Option<u64>,
     hotkey_text: Option<String>,
     hotkey_error: Option<String>,
+    /// Why the last registration failed, when it did (§10, M3 S3).
+    hotkey_refusal: Option<HotkeyRefusal>,
     /// A read is in flight; one at a time.
     loading: bool,
     /// An edit waiting for the throttle window, and when it ends (§5.2).
@@ -1923,6 +1948,7 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         hotkey: None,
         hotkey_text: None,
         hotkey_error: None,
+        hotkey_refusal: None,
         loading: false,
         pending_save: false,
         save_due: None,
@@ -2197,6 +2223,7 @@ fn sync_hotkey(cx: &mut App) {
             quick_launch.hotkey = None;
             quick_launch.hotkey_text = None;
             quick_launch.hotkey_error = None;
+            quick_launch.hotkey_refusal = None;
         }
         return;
     }
@@ -2219,10 +2246,12 @@ fn sync_hotkey(cx: &mut App) {
                 quick_launch.hotkey = Some(id);
                 quick_launch.hotkey_text = Some(wanted.clone());
                 quick_launch.hotkey_error = None;
+                quick_launch.hotkey_refusal = None;
             }
             tracing::info!(target: "quick_launch", "listening on {wanted}");
         }
-        Err(error) => {
+        Err(refusal) => {
+            let error = refusal.to_string();
             // §15.1: the same user may run the main program and the resident
             // one; the chord the first registered is the one that answers, and the
             // second says so at info level only.
@@ -2235,6 +2264,7 @@ fn sync_hotkey(cx: &mut App) {
                     quick_launch.hotkey = None;
                     quick_launch.hotkey_text = None;
                     quick_launch.hotkey_error = None;
+                    quick_launch.hotkey_refusal = None;
                 }
                 return;
             }
@@ -2248,6 +2278,7 @@ fn sync_hotkey(cx: &mut App) {
                 quick_launch.hotkey = restored;
                 quick_launch.hotkey_text = previous_text.filter(|_| restored.is_some());
                 quick_launch.hotkey_error = Some(error);
+                quick_launch.hotkey_refusal = Some(refusal);
             }
             if let Some(id) = restored {
                 tracing::warn!(
@@ -3230,13 +3261,15 @@ pub(crate) fn hotkey_error(cx: &App) -> Option<&str> {
 }
 
 /// Whether the last registration failed because the chord belongs to the
-/// Launcher.
+/// Launcher (§10, M3 S3).
 ///
-/// The binary refuses that chord before the OS is asked and says why in its own
-/// error text (§10); the settings page shows the user's own words for it, so the
-/// only thing to look for here is that refusal.
+/// The binary refuses that chord before the OS is asked and says so with the same
+/// enum; the settings page shows the user's own words for it, so it asks for the
+/// kind rather than reading the message.
 pub(crate) fn hotkey_conflicts_with_launcher(cx: &App) -> bool {
-    hotkey_error(cx).is_some_and(|error| error.contains("Launcher's own shortcut"))
+    state(cx).is_some_and(|quick_launch| {
+        quick_launch.hotkey_refusal == Some(HotkeyRefusal::LauncherConflict)
+    })
 }
 
 /// Whether the first read is still running.
@@ -4918,6 +4951,7 @@ mod tests {
             hotkey: None,
             hotkey_text: None,
             hotkey_error: None,
+            hotkey_refusal: None,
             loading: false,
             pending_save: false,
             save_due: None,

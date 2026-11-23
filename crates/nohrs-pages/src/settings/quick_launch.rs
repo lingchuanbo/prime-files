@@ -1001,11 +1001,10 @@ pub(super) fn record_key(
         cx.notify();
         return;
     }
-    // `nohrs-pages` cannot depend on `nohrs-launcher` (§3.4), so the spelling
-    // conversion the launcher crate exports for its own callers is repeated
-    // here: a recorded `ctrl-alt-space` becomes the registration's
-    // `ctrl+alt+Space`. A key the registration cannot name is refused.
-    let Some(text) = gpui_keys_to_hotkey(&chord.to_config()) else {
+    // The one conversion lives in `nohrs-core` (§17.1 B, v2.7): a recorded
+    // `ctrl-alt-space` becomes the registration's `ctrl+alt+Space`, and a key the
+    // registration cannot name is refused.
+    let Some(text) = nohrs_core::shortcuts::gpui_keys_to_hotkey(&chord.to_config()) else {
         page.status = Some((
             t!("Tecla não suportada como atalho global.").to_string(),
             true,
@@ -1018,89 +1017,6 @@ pub(super) fn record_key(
     quick_launch::set_window(cx, move |window| window.hotkey = text);
     cx.refresh_windows();
     cx.notify();
-}
-
-/// Converts a recorded GPUI chord into the syntax the OS registration takes
-/// (`ctrl+alt+Space`).
-///
-/// Kept in step with `nohrs_launcher::gpui_keys_to_hotkey`, which cannot be
-/// called from here: the dependency direction of §3.4 lets the launcher use the
-/// pages crate, not the other way round.
-fn gpui_keys_to_hotkey(keys: &str) -> Option<String> {
-    let keys = keys.trim().to_ascii_lowercase();
-    let mut control = false;
-    let mut alt = false;
-    let mut shift = false;
-    let mut rest = keys.as_str();
-    while let Some((head, tail)) = rest.split_once('-') {
-        match head {
-            "ctrl" | "control" | "platform" | "cmd" | "command" | "super" => control = true,
-            "alt" | "option" => alt = true,
-            "shift" => shift = true,
-            _ => break,
-        }
-        rest = tail;
-    }
-    if !(control || alt || shift) {
-        return None;
-    }
-    let key = match rest {
-        "space" => "Space".to_string(),
-        "up" => "ArrowUp".to_string(),
-        "down" => "ArrowDown".to_string(),
-        "left" => "ArrowLeft".to_string(),
-        "right" => "ArrowRight".to_string(),
-        "escape" | "esc" => "Escape".to_string(),
-        "enter" | "return" => "Enter".to_string(),
-        "tab" => "Tab".to_string(),
-        "backspace" => "Backspace".to_string(),
-        "delete" => "Delete".to_string(),
-        "insert" => "Insert".to_string(),
-        "home" => "Home".to_string(),
-        "end" => "End".to_string(),
-        "pageup" => "PageUp".to_string(),
-        "pagedown" => "PageDown".to_string(),
-        "=" | "equal" => "Equal".to_string(),
-        "-" | "minus" => "Minus".to_string(),
-        "," | "comma" => "Comma".to_string(),
-        "." | "period" => "Period".to_string(),
-        "/" | "slash" => "Slash".to_string(),
-        ";" | "semicolon" => "Semicolon".to_string(),
-        "'" | "quote" => "Quote".to_string(),
-        "`" | "backquote" => "Backquote".to_string(),
-        "\\" | "backslash" => "Backslash".to_string(),
-        "[" | "bracketleft" => "BracketLeft".to_string(),
-        "]" | "bracketright" => "BracketRight".to_string(),
-        other => {
-            let mut characters = other.chars();
-            let character = characters.next()?;
-            if characters.next().is_some() {
-                let number = other.strip_prefix('f')?.parse::<u8>().ok()?;
-                if !(1..=24).contains(&number) {
-                    return None;
-                }
-                format!("F{number}")
-            } else if character.is_ascii_alphabetic() {
-                format!("Key{}", character.to_ascii_uppercase())
-            } else if character.is_ascii_digit() {
-                format!("Digit{character}")
-            } else {
-                return None;
-            }
-        }
-    };
-    let mut parts: Vec<&str> = Vec::new();
-    if control {
-        parts.push("ctrl");
-    }
-    if alt {
-        parts.push("alt");
-    }
-    if shift {
-        parts.push("shift");
-    }
-    parts.push(&key);
-    Some(parts.join("+"))
 }
 
 /// Makes the fields the previous frame asked for: the form of a selected item
@@ -1514,30 +1430,6 @@ fn action_button(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    /// §17.1 B: the chord conversion keeps the fixed modifier order and names
-    /// keys the way the registration reads them.
-    #[test]
-    fn recorded_keys_become_the_registration_spelling() {
-        assert_eq!(
-            gpui_keys_to_hotkey("ctrl-alt-space").as_deref(),
-            Some("ctrl+alt+Space")
-        );
-        assert_eq!(
-            gpui_keys_to_hotkey("alt-shift-n").as_deref(),
-            Some("alt+shift+KeyN")
-        );
-        assert_eq!(
-            gpui_keys_to_hotkey("ctrl-5").as_deref(),
-            Some("ctrl+Digit5")
-        );
-        assert_eq!(
-            gpui_keys_to_hotkey("ctrl-alt-f5").as_deref(),
-            Some("ctrl+alt+F5")
-        );
-        assert_eq!(gpui_keys_to_hotkey("n"), None);
-        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-maiusculo"), None);
-    }
 
     /// §17.1 B: the section builds its four cards even before the quick launch has
     /// a state, and its labels are the searchable static ones the field looks at.

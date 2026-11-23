@@ -295,18 +295,21 @@ const QUICK_LAUNCH_HOTKEY: nohrs_pages::quick_launch::HotkeyHooks =
         unregister: unregister_quick_launch_hotkey,
     };
 
-fn register_quick_launch_hotkey(cx: &mut App, text: &str) -> Result<u64, String> {
-    let chord = nohrs_launcher::parse_hotkey(text).map_err(|error| error.to_string())?;
-    // The Launcher's own chord is refused with a reason instead of letting the
-    // OS report it as taken (§10).
+fn register_quick_launch_hotkey(
+    cx: &mut App,
+    text: &str,
+) -> Result<u64, nohrs_pages::quick_launch::HotkeyRefusal> {
+    use nohrs_pages::quick_launch::HotkeyRefusal;
+
+    let chord = nohrs_launcher::parse_hotkey(text)
+        .map_err(|error| HotkeyRefusal::Other(error.to_string()))?;
+    // The Launcher's own chord is refused with the reason the settings page
+    // recognizes, instead of letting the OS report it as taken (§10).
     if chord.id() == nohrs_launcher::hotkey::default_chord().hotkey.id() {
-        return Err(format!(
-            "{text} is the Launcher's own shortcut ({}), which it already owns",
-            nohrs_launcher::describe_hotkey(&chord)
-        ));
+        return Err(HotkeyRefusal::LauncherConflict);
     }
     let id = nohrs_launcher::register(cx, chord, |cx| nohrs_pages::quick_launch::toggle(cx))
-        .map_err(|error| format!("{error:#}"))?;
+        .map_err(|error| HotkeyRefusal::Other(format!("{error:#}")))?;
     Ok(u64::from(id.get()))
 }
 
