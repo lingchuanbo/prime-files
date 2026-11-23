@@ -2700,4 +2700,5 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "New folder item",
         "Nuevo elemento de carpeta",
     ),
+    ("Mostrar células", "Show cells", "Mostrar celdas"),
 ];

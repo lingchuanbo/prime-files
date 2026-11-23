@@ -32,22 +32,12 @@ use nohrs_ui::theme::theme;
 use super::{Pick, Row, SettingsPage};
 use crate::quick_launch;
 
-/// The grid column counts offered, inside the `2..=16` of §4.
-const COLUMNS: [(&str, u8); 7] = [
-    ("2", 2),
-    ("4", 4),
-    ("6", 6),
-    ("8", 8),
-    ("10", 10),
-    ("12", 12),
-    ("16", 16),
-];
-
 /// The cell sizes offered, inside the `64..=160` of §4.
-const CELL_SIZES: [(&str, u16); 7] = [
+const CELL_SIZES: [(&str, u16); 8] = [
     ("64", 64),
     ("80", 80),
     ("96", 96),
+    ("100", 100),
     ("112", 112),
     ("128", 128),
     ("144", 144),
@@ -55,17 +45,7 @@ const CELL_SIZES: [(&str, u16); 7] = [
 ];
 
 /// The icon sizes offered; the file accepts only these (§4).
-const ICON_SIZES: [(&str, u16); 6] = [
-    ("16", 16),
-    ("24", 24),
-    ("32", 32),
-    ("48", 48),
-    ("64", 64),
-    ("96", 96),
-];
-
-/// The list-view column counts offered, inside the `1..=3` of §4.
-const LIST_COLUMNS: [(&str, u8); 3] = [("1", 1), ("2", 2), ("3", 3)];
+const ICON_SIZES: [(&str, u16); 5] = [("16", 16), ("24", 24), ("32", 32), ("48", 48), ("64", 64)];
 
 /// The kinds of group the new-group chooser offers (§17.2 G.6).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -86,13 +66,13 @@ pub(super) enum Action {
     /// A new layout for the grid.
     View(View),
     /// A new grid column count.
-    Columns(u8),
+
     /// A new grid cell edge.
     CellSize(u16),
     /// A new icon edge.
     IconSize(u16),
     /// A new list column count.
-    ListColumns(u8),
+
     /// Hide the window when it loses focus, or stop hiding it.
     AutoHide(bool),
     /// Hide the window after a launch, or keep it.
@@ -103,6 +83,8 @@ pub(super) enum Action {
     OnRunning(OnRunning),
     /// Keep the process alive after the main window closes.
     KeepRunning(bool),
+    /// Draw the cells' blocks, the empty ones included.
+    ShowCells(bool),
     /// Wait for the next key press to become the summon chord.
     RecordHotkey,
     /// Add a group at the end and start its rename.
@@ -273,17 +255,6 @@ impl Section {
                 ),
             ),
             Row::new(
-                t!("Colunas"),
-                None,
-                page.chips_when(
-                    "quick-launch-columns",
-                    &numbered(&COLUMNS, window.columns, Action::Columns),
-                    false,
-                    enabled,
-                    cx,
-                ),
-            ),
-            Row::new(
                 t!("Tamanho da célula"),
                 None,
                 page.chips_when(
@@ -293,7 +264,8 @@ impl Section {
                     enabled,
                     cx,
                 ),
-            ),
+            )
+            .wide(),
             Row::new(
                 t!("Tamanho do ícone"),
                 None,
@@ -304,14 +276,15 @@ impl Section {
                     enabled,
                     cx,
                 ),
-            ),
+            )
+            .wide(),
             Row::new(
-                t!("Colunas da lista"),
+                t!("Mostrar células"),
                 None,
-                page.chips_when(
-                    "quick-launch-list-columns",
-                    &numbered(&LIST_COLUMNS, window.list_columns, Action::ListColumns),
-                    false,
+                page.switch_pick_when(
+                    "quick-launch-show-cells",
+                    window.show_cells,
+                    Pick::QuickLaunch(Action::ShowCells(!window.show_cells)),
                     enabled,
                     cx,
                 ),
@@ -783,6 +756,9 @@ impl Section {
                     div()
                         .flex_1()
                         .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
                         .text_sm()
                         .child(item.name.clone()),
                 )
@@ -790,6 +766,9 @@ impl Section {
                     div()
                         .flex_shrink_0()
                         .max_w(px(280.0))
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_xs()
                         .whitespace_nowrap()
                         .text_color(rgb(theme::fg_secondary()))
@@ -869,7 +848,7 @@ impl Section {
         };
         let cwd_enabled = enabled && !uwp;
         let mut rows = vec![
-            Row::new(t!("Tipo"), None, kind_control),
+            Row::new(t!("Tipo"), None, kind_control).wide(),
             Row::new(t!("Nome"), None, input_row(&form.name, enabled)).wide(),
         ];
         if !command && !group {
@@ -1309,15 +1288,14 @@ enum Field {
 pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<SettingsPage>) {
     match action {
         Action::View(view) => set_window(cx, move |window| window.view = view),
-        Action::Columns(columns) => set_window(cx, move |window| window.columns = columns),
         Action::CellSize(size) => set_window(cx, move |window| window.cell_size = size),
         Action::IconSize(size) => set_window(cx, move |window| window.icon_size = size),
-        Action::ListColumns(columns) => set_window(cx, move |window| window.list_columns = columns),
         Action::AutoHide(on) => set_window(cx, move |window| window.auto_hide = on),
         Action::CloseAfterLaunch(on) => {
             set_window(cx, move |window| window.close_after_launch = on)
         }
         Action::Topmost(on) => set_window(cx, move |window| window.topmost = on),
+        Action::ShowCells(on) => set_window(cx, move |window| window.show_cells = on),
         Action::OnRunning(on_running) => {
             set_window(cx, move |window| window.on_running = on_running)
         }
@@ -2214,17 +2192,11 @@ mod tests {
     /// The numeric controls only offer values inside the limits of §4.
     #[test]
     fn the_number_controls_stay_inside_the_limits_of_the_file() {
-        for &(_, value) in &COLUMNS {
-            assert!((2..=16).contains(&value));
-        }
         for &(_, value) in &CELL_SIZES {
             assert!((64..=160).contains(&value));
         }
         for &(_, value) in &ICON_SIZES {
-            assert!(matches!(value, 16 | 24 | 32 | 48 | 64 | 96));
-        }
-        for &(_, value) in &LIST_COLUMNS {
-            assert!((1..=3).contains(&value));
+            assert!(matches!(value, 16 | 24 | 32 | 48 | 64));
         }
     }
 

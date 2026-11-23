@@ -11,16 +11,18 @@
 //! second copy of the configuration (§13).
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, ImageSource, IntoElement,
-    KeyDownEvent, Render, RenderImage, SharedString, Subscription, Task, UniformListScrollHandle,
-    WeakEntity, Window, WindowControlArea, div, img, px, rgb, uniform_list,
+    Animation, AnimationExt as _, AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity,
+    FocusHandle, ImageSource, IntoElement, KeyDownEvent, Render, RenderImage, SharedString,
+    Subscription, Task, UniformListScrollHandle, WeakEntity, Window, WindowControlArea, div,
+    ease_out_quint, img, px, rgb, uniform_list,
 };
 use gpui_component::{
     Icon, IconName, WindowExt as _,
@@ -61,6 +63,13 @@ pub(crate) struct QuickLaunchView {
     /// changed (S6). Rebuilding it clones the group's items, so it is not done
     /// per frame.
     frame: Option<Frame>,
+    /// The item the pointer is over, if any: its tile is drawn a little bigger
+    /// (§12.1).
+    hovered: Option<u32>,
+    /// Every item a pointer has been over. A tile that is in here animates back
+    /// down when the pointer leaves it; one that is not is drawn at rest, so it
+    /// does not shrink into place when the window opens.
+    ever_hovered: HashSet<u32>,
     /// The item editor open over the window, if any (§12.3).
     editor: Option<Editor>,
     /// The group whose name is being edited in place, if any (§12.3).
@@ -122,9 +131,9 @@ struct Frame {
     groups: Rc<Vec<(String, bool)>>,
     drawn: Rc<Vec<Drawn>>,
     view: View,
-    columns: usize,
     cell_size: f32,
-    list_columns: usize,
+    /// Draw the cells' blocks, empty ones included.
+    show_cells: bool,
     /// True while a filter is typed: the grid packs the matches instead of
     /// leaving the holes their slots would leave (§12.2).
     packed: bool,
@@ -152,6 +161,8 @@ impl QuickLaunchView {
             hide_task: None,
             scroll_handle: UniformListScrollHandle::new(),
             frame: None,
+            hovered: None,
+            ever_hovered: HashSet::new(),
             editor: None,
             renaming: None,
             _activation: subscription,
@@ -206,9 +217,19 @@ impl QuickLaunchView {
             cx.stop_propagation();
             return;
         }
-        let columns = super::state(cx)
-            .map(|quick_launch| i64::from(quick_launch.config().window.columns))
-            .unwrap_or(8);
+        let (view, cell_size) = super::state(cx)
+            .map(|quick_launch| {
+                let window = &quick_launch.config().window;
+                (window.view, f32::from(window.cell_size))
+            })
+            .unwrap_or((View::Grid, 100.0));
+        let columns = if view == View::List {
+            fitted_list_columns(window)
+        } else {
+            let width = f32::from(window.viewport_size().width) - GROUP_BAR_WIDTH;
+            fit_count(width, cell_size)
+        };
+        let columns = i64::try_from(columns).unwrap_or(8);
         if modifiers.alt
             && !modifiers.control
             && !modifiers.platform
@@ -252,7 +273,7 @@ impl QuickLaunchView {
             "escape" => {
                 if !super::filter(cx).is_empty() {
                     super::set_filter(cx, String::new());
-                    super::ensure_selection(cx);
+                    super::drop_stale_selection(cx);
                     cx.notify();
                 } else {
                     super::hide_in(cx, window);
@@ -565,6 +586,20 @@ impl QuickLaunchView {
         cx.notify();
     }
 
+    /// Remembers the tile the pointer is over: that tile zooms and the one it
+    /// left shrinks back (§12.1).
+    fn set_hovered(&mut self, slot: u32, hovered: bool, cx: &mut Context<Self>) {
+        let next = hovered.then_some(slot);
+        if self.hovered == next {
+            return;
+        }
+        self.hovered = next;
+        if hovered {
+            self.ever_hovered.insert(slot);
+        }
+        cx.notify();
+    }
+
     /// A click selects the cell and does what its modifiers ask for (§12.2).
     fn clicked(&mut self, slot: u32, kind: super::ClickKind, cx: &mut Context<Self>) {
         if let Some(quick_launch) = super::state_mut(cx) {
@@ -700,13 +735,12 @@ impl Render for QuickLaunchView {
                     groups,
                     items,
                     config.window.view,
-                    usize::from(config.window.columns.max(1)),
                     f32::from(config.window.cell_size),
-                    usize::from(config.window.list_columns.max(1)),
+                    config.window.show_cells,
                     !state.filter.trim().is_empty(),
                 )
             };
-            let (groups, items, view, columns, cell_size, list_columns, packed) = planned;
+            let (groups, items, view, cell_size, show_cells, packed) = planned;
             // The icons are asked for here, once per rebuild, because
             // `super::icon` needs the mutable state.
             let drawn: Rc<Vec<Drawn>> = Rc::new(
@@ -733,9 +767,8 @@ impl Render for QuickLaunchView {
                 groups,
                 drawn,
                 view,
-                columns,
                 cell_size,
-                list_columns,
+                show_cells,
                 packed,
             });
         }
@@ -745,13 +778,33 @@ impl Render for QuickLaunchView {
         let groups = frame.groups.clone();
         let drawn = frame.drawn.clone();
         let view = frame.view;
-        let columns = frame.columns;
         let cell_size = frame.cell_size;
-        let list_columns = frame.list_columns;
+        let show_cells = frame.show_cells;
+        let list_columns = fitted_list_columns(window);
         let packed = frame.packed;
+        let list_icon = list_icon_size(configured_icon_size);
+        let hovered = self.hovered;
+        let ever_hovered = Rc::new(self.ever_hovered.clone());
 
         let filter_text = super::filter(cx).to_string();
         let filtered_count = drawn.len();
+        // The window's height less what the rows above and below the grid take;
+        // the grid is laid out over the rest.
+        let chrome = TITLE_BAR_HEIGHT
+            + if filter_text.is_empty() { 0.0 } else { 24.0 }
+            + if read_only.is_some() { 30.0 } else { 0.0 }
+            + if message.is_some() {
+                FOOTER_HEIGHT
+            } else {
+                0.0
+            };
+        let viewport = window.viewport_size();
+        let grid = grid_metrics(
+            f32::from(viewport.width) - GROUP_BAR_WIDTH,
+            f32::from(viewport.height) - chrome,
+            cell_size,
+        );
+        let grid_icon = grid_icon_size(configured_icon_size, grid.cell_height);
         let title_bar = self.render_title_bar(editable, cx);
         let group_bar = render_group_bar(&groups, self.renaming.as_ref(), editable, cx);
         let entity = cx.entity().downgrade();
@@ -779,12 +832,14 @@ impl Render for QuickLaunchView {
             list_view(
                 &drawn,
                 selected,
+                hovered,
+                &ever_hovered,
                 group,
                 editable,
                 group_editable,
                 &missing,
                 list_columns,
-                icon_edge,
+                list_icon,
                 &entity,
                 &self.scroll_handle,
             )
@@ -792,13 +847,15 @@ impl Render for QuickLaunchView {
             grid_view(
                 &drawn,
                 selected,
+                hovered,
+                &ever_hovered,
                 group,
                 editable,
                 group_editable,
                 &missing,
-                columns,
-                cell_size,
-                icon_edge,
+                grid,
+                grid_icon,
+                show_cells,
                 packed,
                 &entity,
                 &self.scroll_handle,
@@ -1016,13 +1073,18 @@ fn type_icon(item: &Item) -> Icon {
     }
 }
 
-/// The picture of one item: the extracted icon, or the type's icon.
-fn picture(item: &Item, image: Option<&Arc<RenderImage>>, edge: u32) -> AnyElement {
+/// The picture of one item: the extracted icon, or the type's icon, filling the
+/// box its tile sizes for it.
+///
+/// The box is sized in logical pixels: the image may have been extracted at a
+/// larger physical size for the display's scale, and filling its box keeps every
+/// icon the size the settings ask for.
+fn picture(item: &Item, image: Option<&Arc<RenderImage>>) -> AnyElement {
     match image {
         Some(image) => img(ImageSource::Render(image.clone()))
-            .size(px(edge as f32))
+            .size_full()
             .into_any_element(),
-        None => type_icon(item).size(px(edge as f32)).into_any_element(),
+        None => type_icon(item).size_full().into_any_element(),
     }
 }
 
@@ -1033,6 +1095,158 @@ fn group_shortcut(key: &str) -> Option<usize> {
     }
     let digit = key.chars().next()?.to_digit(10)?;
     usize::try_from(digit).ok()?.checked_sub(1)
+}
+
+/// The gap between two grid cells, in logical pixels.
+const CELL_GAP: f32 = 5.0;
+
+/// The narrowest a list column gets before another one is shown instead: its
+/// icon, name and path need that much to stay readable.
+const LIST_COLUMN_MIN_WIDTH: f32 = 260.0;
+
+/// The gap between two list columns, in logical pixels (the line's `gap_2`).
+const LIST_GAP: f32 = 8.0;
+
+/// The icon edge a cell gets: the configured size, kept small enough that the
+/// name's line still fits under it.
+fn grid_icon_size(configured: u16, cell_size: f32) -> f32 {
+    f32::from(configured).clamp(16.0, cell_size - NAME_LINE_HEIGHT - 12.0)
+}
+
+/// The icon edge a list row gets: a row is 44 tall, so the configured size is
+/// capped to leave room for its two lines of text.
+fn list_icon_size(configured: u16) -> f32 {
+    f32::from(configured).clamp(16.0, LIST_ROW_HEIGHT - 16.0)
+}
+
+/// How many cells of `cell_size` fit in `available` logical pixels.
+fn fit_count(available: f32, cell_size: f32) -> usize {
+    let cell = cell_size.max(1.0);
+    let fit = ((available + CELL_GAP) / (cell + CELL_GAP)).floor();
+    if fit.is_finite() && fit >= 1.0 {
+        usize::try_from(fit as u64).unwrap_or(1)
+    } else {
+        1
+    }
+}
+
+/// A grid that covers the window.
+///
+/// The cell size setting says how big a cell should be; the window's size says how
+/// many fit; the cells then stretch so the window is filled exactly. An item that
+/// does not fit adds rows below, which scroll.
+#[derive(Clone, Copy)]
+struct Grid {
+    columns: usize,
+    /// How many rows the window's height shows at once.
+    fill_rows: usize,
+    cell_width: f32,
+    cell_height: f32,
+}
+
+/// [`Grid`] for `width` by `height` of usable content area.
+fn grid_metrics(width: f32, height: f32, cell_size: f32) -> Grid {
+    let columns = fit_count(width, cell_size);
+    let fill_rows = fit_count(height, cell_size);
+    let cell_width = ((width - CELL_GAP * (columns - 1) as f32) / columns as f32).max(1.0);
+    // Every row carries the gap above it, the first one included, so the rows are
+    // as far apart as the columns and the grid still ends at the window's edge.
+    let cell_height = ((height - CELL_GAP * fill_rows as f32) / fill_rows as f32).max(1.0);
+    Grid {
+        columns,
+        fill_rows,
+        cell_width,
+        cell_height,
+    }
+}
+
+/// How many list columns `width` has room for: one more whenever another
+/// minimum-width column fits, so the list widens with the window instead of
+/// leaving the space empty.
+fn fit_list_columns(width: f32) -> usize {
+    let fit = ((width + LIST_GAP) / (LIST_COLUMN_MIN_WIDTH + LIST_GAP)).floor();
+    if fit.is_finite() && fit >= 1.0 {
+        // Cap only to keep a very wide window from making the rows unreadably
+        // thin; the columns still share the row's width.
+        usize::try_from(fit as u64).unwrap_or(1).min(8)
+    } else {
+        1
+    }
+}
+
+/// [`fit_list_columns`] for the window's width, once the group bar is taken out.
+fn fitted_list_columns(window: &Window) -> usize {
+    fit_list_columns(f32::from(window.viewport_size().width) - GROUP_BAR_WIDTH)
+}
+
+/// How long a tile takes to grow into the pointer and back (§12.1).
+const HOVER_MS: u64 = 120;
+
+/// The grid icon at rest and grown: a fifth bigger, as far as the cell's name
+/// line leaves room.
+fn hover_icon_edges(icon_size: f32, cell_size: f32) -> (f32, f32) {
+    let grown = (icon_size * 1.2)
+        .min(cell_size - NAME_LINE_HEIGHT - 6.0)
+        .max(icon_size);
+    (icon_size, grown)
+}
+
+/// The list row's icon at rest and grown.
+fn hover_list_icon_edges(icon_size: f32) -> (f32, f32) {
+    (
+        icon_size,
+        (icon_size * 1.2).min(LIST_ROW_HEIGHT - 10.0).max(icon_size),
+    )
+}
+
+/// One element's hover zoom: the size it has at rest and when the pointer is
+/// over it.
+#[derive(Clone, Copy)]
+struct Zoom {
+    slot: u32,
+    hovered: bool,
+    ever_hovered: bool,
+    rest: f32,
+    grown: f32,
+}
+
+/// Applies the hover zoom to `element`, growing it while the pointer is over the
+/// tile and shrinking it back after the pointer left.
+///
+/// `ever_hovered` is what keeps a tile that was never hovered at its resting
+/// size: it has nothing to shrink from. The element id carries which direction is
+/// running, so every change starts a fresh animation; once one finishes its state
+/// holds the final value and the frames stop.
+fn hover_zoom(
+    element: Div,
+    name: &'static str,
+    zoom: Zoom,
+    place: impl Fn(Div, f32) -> Div + Copy + 'static,
+) -> AnyElement {
+    let animation =
+        || Animation::new(Duration::from_millis(HOVER_MS)).with_easing(ease_out_quint());
+    let at = move |progress: f32| zoom.rest + (zoom.grown - zoom.rest) * progress;
+    let id = |zooming: bool| {
+        (
+            name,
+            usize::try_from(zoom.slot).unwrap_or(usize::MAX) * 2 + usize::from(zooming),
+        )
+    };
+    if zoom.hovered {
+        element
+            .with_animation(id(true), animation(), move |element, delta| {
+                place(element, at(delta))
+            })
+            .into_any_element()
+    } else if zoom.ever_hovered {
+        element
+            .with_animation(id(false), animation(), move |element, delta| {
+                place(element, at(1.0 - delta))
+            })
+            .into_any_element()
+    } else {
+        place(element, zoom.rest).into_any_element()
+    }
 }
 
 /// The grid's cells, in reading order, with the items placed by slot (§12.1).
@@ -1211,24 +1425,27 @@ fn packed_cells(items: &[Item], columns: usize) -> Vec<Option<Item>> {
 fn grid_view(
     drawn: &[Drawn],
     selected: Option<u32>,
+    hovered: Option<u32>,
+    ever_hovered: &HashSet<u32>,
     group: usize,
     editable: bool,
     group_editable: bool,
     missing: &HashMap<u32, bool>,
-    columns: usize,
-    cell_size: f32,
-    icon_edge: u32,
+    grid: Grid,
+    icon_size: f32,
+    show_cells: bool,
     packed: bool,
     entity: &WeakEntity<QuickLaunchView>,
     scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
+    let columns = grid.columns;
     let items: Vec<Item> = drawn.iter().map(|drawn| drawn.item.clone()).collect();
     let cells = if packed {
         packed_cells(&items, columns)
     } else {
         grid_cells(&items, columns)
     };
-    let rows = cells.len().div_ceil(columns.max(1));
+    let rows = cells.len().div_ceil(columns.max(1)).max(grid.fill_rows);
     let cells = Rc::new(cells);
     let drawn = Rc::new(drawn.to_vec());
     // The icon of a cell is the one the item got; the cell index is the slot.
@@ -1238,6 +1455,7 @@ fn grid_view(
         .collect();
     let pictures_by_slot = Rc::new(pictures_by_slot);
     let missing = Rc::new(missing.clone());
+    let ever_hovered = Rc::new(ever_hovered.clone());
     let entity = entity.clone();
     uniform_list(
         "quick-launch-grid",
@@ -1246,11 +1464,12 @@ fn grid_view(
             let mut lines = Vec::with_capacity(range.len());
             for row in range {
                 let mut line = div()
-                    .h(px(cell_size))
+                    .h(px(grid.cell_height + CELL_GAP))
+                    .pt(px(CELL_GAP))
                     .w_full()
                     .flex()
                     .items_center()
-                    .gap_1();
+                    .gap(px(CELL_GAP));
                 for column in 0..columns.max(1) {
                     let index = row.saturating_mul(columns.max(1)).saturating_add(column);
                     match cells.get(index).and_then(Option::as_ref) {
@@ -1264,12 +1483,16 @@ fn grid_view(
                                 item,
                                 image,
                                 selected,
+                                hovered == Some(item.slot),
+                                ever_hovered.contains(&item.slot),
                                 missing,
                                 group,
                                 editable,
                                 group_editable,
-                                cell_size,
-                                icon_edge,
+                                grid.cell_width,
+                                grid.cell_height,
+                                icon_size,
+                                show_cells,
                                 &entity,
                             ));
                         }
@@ -1278,8 +1501,8 @@ fn grid_view(
                             // padding of the last row: there is no slot to add to.
                             line = line.child(
                                 div()
-                                    .w(px(cell_size))
-                                    .h(px(cell_size))
+                                    .w(px(grid.cell_width))
+                                    .h(px(grid.cell_height))
                                     .flex_shrink_0()
                                     .rounded(px(8.0)),
                             );
@@ -1290,7 +1513,9 @@ fn grid_view(
                                 slot,
                                 group,
                                 group_editable,
-                                cell_size,
+                                grid.cell_width,
+                                grid.cell_height,
+                                show_cells,
                                 &entity,
                             ));
                         }
@@ -1311,12 +1536,14 @@ fn grid_view(
 fn list_view(
     drawn: &[Drawn],
     selected: Option<u32>,
+    hovered: Option<u32>,
+    ever_hovered: &HashSet<u32>,
     group: usize,
     editable: bool,
     group_editable: bool,
     missing: &HashMap<u32, bool>,
     list_columns: usize,
-    icon_edge: u32,
+    icon_size: f32,
     entity: &WeakEntity<QuickLaunchView>,
     scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
@@ -1324,6 +1551,7 @@ fn list_view(
     let rows = drawn.len().div_ceil(list_columns);
     let drawn = Rc::new(drawn.to_vec());
     let missing = Rc::new(missing.clone());
+    let ever_hovered = Rc::new(ever_hovered.clone());
     let entity = entity.clone();
     uniform_list(
         "quick-launch-list",
@@ -1341,11 +1569,13 @@ fn list_view(
                             line = line.child(div().flex_1().min_w(px(0.0)).child(row_of(
                                 entry,
                                 selected,
+                                hovered == Some(entry.item.slot),
+                                ever_hovered.contains(&entry.item.slot),
                                 missing,
                                 group,
                                 editable,
                                 group_editable,
-                                icon_edge,
+                                icon_size,
                                 &entity,
                             )));
                         }
@@ -1368,19 +1598,24 @@ fn empty_cell(
     slot: u32,
     group: usize,
     group_editable: bool,
-    cell_size: f32,
+    cell_width: f32,
+    cell_height: f32,
+    show_cells: bool,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
     let folder_handle = entity.clone();
     div()
         .id(("quick-launch-empty", slot))
-        .w(px(cell_size))
-        .h(px(cell_size))
+        .w(px(cell_width))
+        .h(px(cell_height))
         .flex_shrink_0()
         .rounded(px(8.0))
+        .when(show_cells, |this| this.bg(rgb(theme::bg_secondary())))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme::bg_hover())))
+        .when(show_cells, |this| {
+            this.hover(|style| style.bg(rgb(theme::bg_hover())))
+        })
         .context_menu(move |menu, _window, cx| {
             let handle = handle.clone();
             let folder_handle = folder_handle.clone();
@@ -1550,12 +1785,16 @@ fn tile(
     item: &Item,
     image: Option<Arc<RenderImage>>,
     selected: bool,
+    hovered: bool,
+    ever_hovered: bool,
     missing: bool,
     group: usize,
     editable: bool,
     group_editable: bool,
-    cell_size: f32,
-    icon_edge: u32,
+    cell_width: f32,
+    cell_height: f32,
+    icon_size: f32,
+    show_cells: bool,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
@@ -1564,10 +1803,28 @@ fn tile(
     let slot = item.slot;
     let drag_name = SharedString::from(item.name.clone());
     let drop_handle = entity.clone();
+    let hover_handle = entity.clone();
+    let (icon_rest, icon_grown) = hover_icon_edges(icon_size, cell_height);
+    let icon = div()
+        .flex_none()
+        .size(px(icon_rest))
+        .child(picture(item, image.as_ref()));
+    let icon = hover_zoom(
+        icon,
+        "quick-launch-icon",
+        Zoom {
+            slot,
+            hovered,
+            ever_hovered,
+            rest: icon_rest,
+            grown: icon_grown,
+        },
+        |icon, edge| icon.size(px(edge)),
+    );
     div()
         .id(("quick-launch-tile", slot))
-        .w(px(cell_size))
-        .h(px(cell_size))
+        .w(px(cell_width))
+        .h(px(cell_height))
         .flex_shrink_0()
         .flex()
         .flex_col()
@@ -1575,12 +1832,18 @@ fn tile(
         .justify_center()
         .gap_1()
         .rounded(px(8.0))
+        .when(show_cells, |this| this.bg(rgb(theme::bg_secondary())))
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
         .on_click(move |event, _window, cx| {
             handle
                 .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
+                .log_err();
+        })
+        .on_hover(move |over: &bool, _window, cx| {
+            hover_handle
+                .update(cx, |view, cx| view.set_hovered(slot, *over, cx))
                 .log_err();
         })
         .when(group_editable, |this| {
@@ -1617,10 +1880,10 @@ fn tile(
                 cx,
             )
         })
-        .child(picture(item, image.as_ref(), icon_edge))
+        .child(icon)
         .child(
             div()
-                .max_w(px(cell_size - 6.0))
+                .max_w(px(cell_width - 6.0))
                 .h(px(NAME_LINE_HEIGHT))
                 .overflow_hidden()
                 .text_ellipsis()
@@ -1646,11 +1909,13 @@ fn tile(
 fn row_of(
     drawn: &Drawn,
     selected: bool,
+    hovered: bool,
+    ever_hovered: bool,
     missing: bool,
     group: usize,
     editable: bool,
     group_editable: bool,
-    icon_edge: u32,
+    icon_size: f32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
@@ -1660,6 +1925,24 @@ fn row_of(
     let drag_name = SharedString::from(drawn.item.name.clone());
     let item = &drawn.item;
     let slot = item.slot;
+    let hover_handle = entity.clone();
+    let (icon_rest, icon_grown) = hover_list_icon_edges(icon_size);
+    let icon = div()
+        .flex_none()
+        .size(px(icon_rest))
+        .child(picture(item, drawn.image.as_ref()));
+    let icon = hover_zoom(
+        icon,
+        "quick-launch-row-icon",
+        Zoom {
+            slot,
+            hovered,
+            ever_hovered,
+            rest: icon_rest,
+            grown: icon_grown,
+        },
+        |icon, edge| icon.size(px(edge)),
+    );
     let subtitle = match item.action_kind() {
         ActionKind::Unknown(_) => nohrs_core::t!("Tipo não suportado").to_string(),
         _ => item.path.clone().unwrap_or_default(),
@@ -1679,6 +1962,11 @@ fn row_of(
         .on_click(move |event, _window, cx| {
             handle
                 .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
+                .log_err();
+        })
+        .on_hover(move |over: &bool, _window, cx| {
+            hover_handle
+                .update(cx, |view, cx| view.set_hovered(slot, *over, cx))
                 .log_err();
         })
         .when(group_editable, |this| {
@@ -1715,7 +2003,7 @@ fn row_of(
                 cx,
             )
         })
-        .child(picture(item, drawn.image.as_ref(), icon_edge))
+        .child(icon)
         .child(
             div()
                 .flex_1()
@@ -2242,6 +2530,56 @@ fn input_with(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The list shows one more column for every minimum-width column the window
+    /// has room for, and never more than its cap.
+    #[test]
+    fn the_list_shows_the_columns_that_fit_the_window() {
+        assert_eq!(fit_list_columns(540.0), 2, "the default list window");
+        assert_eq!(fit_list_columns(240.0), 1, "narrower than one column");
+        assert_eq!(fit_list_columns(1224.0), 4, "a wide grid-like window");
+        assert_eq!(fit_list_columns(10_000.0), 8, "the cap");
+        assert_eq!(fit_list_columns(0.0), 1);
+    }
+
+    /// The hover grows only the icon, and only as far as the cell's name line
+    /// leaves room; the cell itself stays the size it is.
+    #[test]
+    fn the_hover_zoom_stays_inside_the_cell() {
+        let (icon_rest, icon_grown) = hover_icon_edges(64.0, 100.0);
+        assert_eq!(icon_rest, 64.0);
+        assert!(icon_grown > icon_rest);
+        assert!(icon_grown + NAME_LINE_HEIGHT <= 100.0, "{icon_grown}");
+        let (row_rest, row_grown) = hover_list_icon_edges(28.0);
+        assert_eq!(row_rest, 28.0);
+        assert!(row_grown <= LIST_ROW_HEIGHT && row_grown > row_rest);
+    }
+
+    /// The grid covers the window: as many cells of the configured size as fit,
+    /// stretched so their rows and columns reach the edges, and no fewer than one.
+    #[test]
+    fn the_grid_fills_the_window() {
+        let grid = grid_metrics(860.0, 800.0, 100.0);
+        assert_eq!(grid.columns, 8);
+        assert_eq!(grid.fill_rows, 7);
+        let covered = grid.cell_width * 8.0 + CELL_GAP * 7.0;
+        assert!((covered - 860.0).abs() < 0.001, "the cells fill the width");
+        let covered = (grid.cell_height + CELL_GAP) * 7.0;
+        assert!((covered - 800.0).abs() < 0.001, "the rows fill the height");
+        assert!(grid.cell_width >= 100.0, "the cells stretch, not shrink");
+        let narrow = grid_metrics(240.0, 100.0, 100.0);
+        assert_eq!(narrow.columns, 2);
+        assert_eq!(narrow.fill_rows, 1);
+        assert_eq!(grid_metrics(10.0, 10.0, 100.0).columns, 1);
+    }
+
+    /// The icon is the configured size unless the cell is too small for it.
+    #[test]
+    fn the_icon_fits_the_cell_it_is_drawn_in() {
+        assert_eq!(grid_icon_size(64, 100.0), 64.0);
+        assert_eq!(grid_icon_size(64, 64.0), 34.0);
+        assert_eq!(list_icon_size(64), 28.0);
+    }
 
     fn item(slot: u32, name: &str) -> Item {
         Item::new(slot, "app", name)
