@@ -476,6 +476,8 @@ mod tests {
             }
         }
 
+        /// Only the Unix tests reverse the PATH to see which copy wins.
+        #[cfg(unix)]
         fn system_bin_first(&self) -> Context {
             let mut context = self.context.clone();
             context.path_entries.reverse();
@@ -499,6 +501,8 @@ mod tests {
 
     struct Run {
         summary: Summary,
+        /// Only the Unix tests read what `install` printed.
+        #[cfg(unix)]
         stdout: String,
         stderr: String,
     }
@@ -512,11 +516,14 @@ mod tests {
         let summary = command(&mut stdout, &mut stderr).unwrap();
         Run {
             summary,
+            #[cfg(unix)]
             stdout: String::from_utf8(stdout).unwrap(),
             stderr: String::from_utf8(stderr).unwrap(),
         }
     }
 
+    /// Only the Unix tests install the shims.
+    #[cfg(unix)]
     fn install_all(context: &Context, force: bool) -> Run {
         let args = InstallArgs {
             force,

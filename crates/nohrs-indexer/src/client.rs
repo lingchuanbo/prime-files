@@ -286,6 +286,9 @@ pub fn run_elevated(
             eprintln!("CloseHandle failed: {error}");
         }
     }
+    // Reads the elevated helper's report after it exited; the indexer crate has no
+    // UI thread.
+    #[allow(clippy::disallowed_methods)]
     let message = std::fs::read_to_string(report).unwrap_or_default();
     Ok(Some((code, message.trim().to_string())))
 }

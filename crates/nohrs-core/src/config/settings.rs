@@ -678,17 +678,13 @@ impl Default for Layout {
 /// Width policy used by the horizontal tab strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TabWidthMode {
     /// Let the strip distribute tabs within a comfortable min/max band.
+    #[default]
     Adaptive,
     /// Give every tab the configured [`Layout::tab_width`].
     Fixed,
-}
-
-impl Default for TabWidthMode {
-    fn default() -> Self {
-        Self::Adaptive
-    }
 }
 
 /// A side of the area a panel docks to.
@@ -1722,7 +1718,7 @@ fn read_theme(table: &toml::Table, theme: &mut Theme, diagnostics: &mut Vec<Diag
     if let Some(value) = table.get("background") {
         match value.as_str().map(str::trim) {
             // Empty is "no colour of my own": the palette's background.
-            Some(background) if background.is_empty() => theme.background.clear(),
+            Some("") => theme.background.clear(),
             Some(background) if is_hex_colour(background) => {
                 theme.background = background.to_string()
             }
@@ -2856,6 +2852,11 @@ pub fn load_from_files(main: &Path, appearance: &Path, search: &Path) -> (Config
     (config, diagnostics)
 }
 
+// Read once at startup, before the GPUI foreground loop runs (the same call path as
+// `load_from_path`), and again on the UI thread whenever the file changes: the hot
+// reload in `nohrs-pages/src/root.rs:672` calls `load_from_files` inside `update_in`.
+// Registered in docs/Clippy基线清理-规格.md §7.
+#[allow(clippy::disallowed_methods)]
 fn read_config_table(path: &Path, diagnostics: &mut Vec<Diagnostic>) -> toml::Table {
     match std::fs::read_to_string(path) {
         Ok(contents) => match contents.parse::<toml::Table>() {

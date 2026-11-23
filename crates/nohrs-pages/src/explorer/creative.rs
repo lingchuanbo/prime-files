@@ -191,7 +191,7 @@ fn psd(path: &str, edge: u32) -> Result<Creative, String> {
         };
         for y in 0..height as usize {
             let length = row_lengths[channel * height as usize + y];
-            let kept = plane.is_some() && y as u32 % step == 0;
+            let kept = plane.is_some() && (y as u32).is_multiple_of(step);
             if !kept {
                 skip(&mut file, length as u64)?;
                 continue;
@@ -363,7 +363,7 @@ fn picture(encoded: &[u8], edge: u32, caption: String) -> Result<Creative, Strin
     let rgba = decoded.into_rgba8();
     let (width, height) = rgba.dimensions();
     let mut bgra = rgba.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as u16;
         let premultiply = |channel: u8| ((channel as u16 * alpha + 127) / 255) as u8;
         let (red, green, blue) = (pixel[0], pixel[1], pixel[2]);
@@ -602,6 +602,8 @@ fn project_summary(
 }
 
 #[cfg(test)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

@@ -358,6 +358,8 @@ mod tests {
             Self { root, environment }
         }
 
+        /// Only the Unix tests build a shim: the others never look at it.
+        #[cfg(unix)]
         fn shim_dir(&self) -> PathBuf {
             match &self.environment.shim_dir {
                 Some(dir) => dir.clone(),
@@ -365,6 +367,7 @@ mod tests {
             }
         }
 
+        #[cfg(unix)]
         fn install_shim(&self) {
             let link = self.shim_dir().join("rm");
             #[cfg(unix)]

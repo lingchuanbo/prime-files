@@ -32,6 +32,9 @@ fn main() -> std::process::ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 service::log(&error.to_string());
+                // The elevated process has no UI and is about to exit; this is its
+                // last act, on the main thread of a process with no GPUI loop.
+                #[allow(clippy::disallowed_methods)]
                 if let Some(path) = value("--report")
                     && let Err(written) = std::fs::write(&path, error.to_string())
                 {

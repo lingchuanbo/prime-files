@@ -173,10 +173,11 @@ pub(crate) fn log_in_if_asked(path: &str) {
         return;
     };
     match std::fs::read_dir(path) {
-        Err(error) if error.raw_os_error().is_some_and(platform::wants_login) => {
-            if !platform::connect_interactive(&root) {
-                tracing::info!("no login given for {root}");
-            }
+        Err(error)
+            if error.raw_os_error().is_some_and(platform::wants_login)
+                && !platform::connect_interactive(&root) =>
+        {
+            tracing::info!("no login given for {root}");
         }
         _ => {}
     }
@@ -384,7 +385,7 @@ mod platform {
             ..Default::default()
         };
         let owner = super::OWNER.load(Ordering::Relaxed);
-        let owner = (owner != 0).then(|| HWND(owner as *mut core::ffi::c_void));
+        let owner = (owner != 0).then_some(HWND(owner as *mut core::ffi::c_void));
         let result = unsafe {
             WNetAddConnection3W(
                 owner,

@@ -243,10 +243,8 @@ fn add_name(table: &mut Table, record: u64, value: &[u8]) {
     let Some(units) = value.get(0x42..0x42 + length as usize * 2) else {
         return;
     };
-    let units: Vec<u16> = units
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect();
+    let (pairs, _) = units.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
     let name = String::from_utf16_lossy(&units);
     let start = table.text.len() as u32;
     table.text.push_str(&name);
@@ -294,9 +292,15 @@ pub fn data_runs(attribute: &[u8]) -> Option<Vec<(Option<u64>, u64)>> {
     }
 }
 
-/// The `$MFT`'s own extents, read from its record 0, and whether the record
-/// sends part of its attributes elsewhere (then the runs may be partial).
-pub fn mft_runs(record: &mut [u8]) -> Option<(Vec<(Option<u64>, u64)>, bool)> {
+/// One extent: its first cluster when it starts one, and how many clusters.
+type Extent = (Option<u64>, u64);
+
+/// The `$MFT`'s own extents and whether the record sends part of its attributes
+/// elsewhere (then the runs may be partial).
+type MftRuns = (Vec<Extent>, bool);
+
+/// The `$MFT`'s own extents, read from its record 0.
+pub fn mft_runs(record: &mut [u8]) -> Option<MftRuns> {
     if record.get(..4) != Some(b"FILE") || !apply_fixups(record) {
         return None;
     }
@@ -485,7 +489,7 @@ mod volume {
         let sector = (data.BytesPerSector as usize).max(512);
         let valid = u64::try_from(data.MftValidDataLength).unwrap_or(0);
         let start = u64::try_from(data.MftStartLcn).unwrap_or(0) * cluster;
-        if cluster == 0 || record_size < 256 || record_size > 65_536 || valid == 0 {
+        if cluster == 0 || !(256..=65_536).contains(&record_size) || valid == 0 {
             return Err(io::Error::other(format!(
                 "{root}: unexpected NTFS geometry"
             )));

@@ -207,10 +207,9 @@ cargo test --all-features --workspace
 cargo llvm-cov --all-features --html
 open target/llvm-cov/html/index.html
 
-# lint
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings \
-    -W clippy::unwrap_used -W clippy::expect_used
+# lint（合入门槛；Windows 开发机也走同一套命令，加 --release）
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --release -- -D warnings
 
 # 静的解析
 cargo deny check
@@ -255,19 +254,27 @@ cargo doc --no-deps --all-features --workspace
 
    同じ理由で、`powershell` (5.1) と `pwsh` (7+) を取り違えないこと。
 
-4. **`nohrs-cli` の 4 つのログテストは、開発機では portable モードのせいで失敗する。**
-   `crates/nohrs-cli/tests/log_command_leaves_the_log_alone.rs` はログが
-   `$XDG_STATE_HOME` の下に置かれることを前提にしているが、
-   `target\release\userdata\config.toml` に `portable_mode = true` があると
-   アプリは（テスト用の子プロセスも含めて）すべての `XDG_*` を無視し、
-   ログは実行ファイルの隣に書かれる。`main` でも同じく失敗する既知の問題で、
-   テストの不備ではなく環境の性質による。
-   実行するときは、先に `target\release\userdata` を一時的に別名へ退避するか、
-   CI のきれいな環境で走らせる。**この 4 件は「M3 で壊れた」ものではない。**
+4. **`nohrs-cli` の 4 つのログテストは修正済み。**（原因と修法は 5. と同じ）
+   以前は `target\release\userdata\config.toml` の `portable_mode = true` により
+   子プロセスも `XDG_*` を無視し、さらに Windows ではログが実行ファイルの隣に
+   書かれるため、`$XDG_STATE_HOME` を見るテストが失敗していた。
+   現在は各テストが自分の一時 state ディレクトリを子プロセスに渡し
+   （`XDG_STATE_HOME`）、ログの置き場所はプラットフォームで分ける:
+   Windows はコピーした実行ファイルのディレクトリ、それ以外は
+   `<state>/nohrs/logs`。Windows だけは 4 つのテストが同じディレクトリを
+   共有するので、`Mutex` で順番に実行し、各テストの冒頭で前回のログを消す。
+   実際のユーザーのログディレクトリには触れない。
 
 5. **`nohrs-cli` の統合テストは、バイナリを一時ディレクトリへコピーしてから実行する。**
    `CARGO_BIN_EXE_noh` は `target\release\noh.exe` を指し、その隣の `userdata` が
    portable モードを有効にしてしまう（3. と同じ罠）。コピー先には `userdata` が無いので、
    `XDG_CONFIG_HOME` などの隔離がそのまま効く。
-   `crates/nohrs-cli/tests/quick_launch.rs` の `binary_under_test()` がその実装で、
-   プロセスごとに一度だけコピーする。
+   その実装は `crates/nohrs-cli/tests/support/binary_under_test.rs` の
+   `binary_under_test()` で、各テストファイルが
+   `#[path = "support/binary_under_test.rs"] mod binary_under_test;` で読み込む。
+   プロセスごとに一度だけコピーし、`quick_launch.rs` と
+   `log_command_leaves_the_log_alone.rs` が共用する。
+   Windows では両者が同じコピー先ディレクトリを使うため、ログテストの子プロセスが
+   書くログもそのディレクトリに入る。cargo はテストバイナリを順番に実行し、
+   ログテストは冒頭で消すので問題ないが、**nextest のような並列実行器に変えるときは
+   両者でコピー先を分けること**。

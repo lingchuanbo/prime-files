@@ -1490,8 +1490,10 @@ async fn a_window_opens_with_the_preview_it_was_left_with(cx: &mut TestAppContex
             );
             // What the last run wrote into `[layout]` when the preview was
             // closed before the window was.
-            let mut layout = config::Layout::default();
-            layout.preview_visible = false;
+            let layout = config::Layout {
+                preview_visible: false,
+                ..config::Layout::default()
+            };
             page.apply_config_layout(&layout, cx);
             assert!(
                 !page.pane(0).read(cx).preview_visible,
@@ -1576,8 +1578,10 @@ async fn a_sidebar_toggle_in_a_split_stays_in_that_pane(cx: &mut TestAppContext)
             // Ctrl+B in pane 0 hides its sidebar; the toggle is written to
             // `[layout]` and the watcher applies that file back.
             page.pane(0).update(cx, |pane, cx| pane.toggle_sidebar(cx));
-            let mut hidden = config::Layout::default();
-            hidden.sidebar_visible = false;
+            let hidden = config::Layout {
+                sidebar_visible: false,
+                ..config::Layout::default()
+            };
             page.apply_config_layout(&hidden, cx);
             assert!(!page.pane(0).read(cx).sidebar_visible);
             assert!(!page.pane(1).read(cx).sidebar_visible);
@@ -3410,7 +3414,12 @@ async fn a_folder_dropped_into_itself_is_refused(cx: &mut TestAppContext) {
     let window = open_pane_at(cx, root);
     window
         .update(cx, |pane, window, cx| {
-            pane.drop_paths(&[folder.clone()], folder.join("inner"), window, cx);
+            pane.drop_paths(
+                std::slice::from_ref(&folder),
+                folder.join("inner"),
+                window,
+                cx,
+            );
             assert!(pane.paste_plan.is_none(), "nothing is planned");
         })
         .unwrap();
@@ -3823,15 +3832,16 @@ async fn the_space_map_takes_its_colours_from_the_config(cx: &mut TestAppContext
                 nohrs_core::config::SpaceMapColor::Size,
                 "the heat map by size is the default"
             );
-            let mut style = nohrs_core::config::SpaceMap::default();
-            style.color = nohrs_core::config::SpaceMapColor::Kind;
-            style.bands_gb = [20, 8, 2];
-            style.colors = [
-                "#111111".into(),
-                "#222222".into(),
-                "#333333".into(),
-                "#444444".into(),
-            ];
+            let style = nohrs_core::config::SpaceMap {
+                color: nohrs_core::config::SpaceMapColor::Kind,
+                bands_gb: [20, 8, 2],
+                colors: [
+                    "#111111".into(),
+                    "#222222".into(),
+                    "#333333".into(),
+                    "#444444".into(),
+                ],
+            };
             pane.apply_config_space_map(&style, cx);
             assert_eq!(pane.space_map_style, style, "the palette reaches the pane");
         })

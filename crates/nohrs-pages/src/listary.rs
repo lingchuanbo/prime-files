@@ -105,6 +105,9 @@ fn change(edit: impl Fn(&mut Value) -> io::Result<bool>) -> io::Result<()> {
     written
 }
 
+// Both of these run inside `cx.background_spawn` (the settings page and the
+// welcome page read the file that way, and changing it spawns the work too).
+#[allow(clippy::disallowed_methods)]
 fn read(file: &Path) -> io::Result<Value> {
     let text = std::fs::read_to_string(file)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -119,6 +122,7 @@ fn read(file: &Path) -> io::Result<Value> {
 
 // Through a temporary file and a rename, so a failure halfway never leaves
 // Listary with a truncated file (it would start over with defaults).
+#[allow(clippy::disallowed_methods)]
 fn write(file: &Path, preferences: &Value) -> io::Result<()> {
     let text = serde_json::to_string_pretty(preferences).map_err(io::Error::other)?;
     let temporary = file.with_extension("json.prime-files");

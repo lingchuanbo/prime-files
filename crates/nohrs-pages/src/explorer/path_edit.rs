@@ -75,10 +75,9 @@ impl ExplorerPane {
         // A network address is gone to without asking the disk here: a
         // server that does not answer would freeze the window for as long,
         // and the listing reads it on a thread of its own (asking for a
-        // login if the share wants one).
-        let target = if super::network::is_unc(&typed) {
-            Some(typed.clone())
-        } else if path.is_dir() {
+        // login if the share wants one). `is_unc` must stay first in the
+        // short-circuit below, so a network address never reaches `is_dir`.
+        let target = if super::network::is_unc(&typed) || path.is_dir() {
             Some(typed.clone())
         } else if path.is_file() {
             path.parent()

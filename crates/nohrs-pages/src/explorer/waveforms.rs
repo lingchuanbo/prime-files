@@ -254,11 +254,14 @@ struct Service {
     written: Condvar,
 }
 
+/// A worker thread's name and the method it runs.
+type Worker = (String, fn(&Service));
+
 fn service() -> &'static Arc<Service> {
     static SERVICE: OnceLock<Arc<Service>> = OnceLock::new();
     SERVICE.get_or_init(|| {
         let service = Arc::new(Service::default());
-        let mut threads: Vec<(String, fn(&Service))> = vec![
+        let mut threads: Vec<Worker> = vec![
             ("nohrs-waveforms-stored".to_string(), Service::answer_stored),
             ("nohrs-waveforms-writer".to_string(), Service::write_batches),
         ];

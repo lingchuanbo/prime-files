@@ -258,6 +258,8 @@ impl WelcomePage {
     }
 
     // A switch of `config.toml`: flips `[section] key` from `on`.
+    // One argument per column of the card; a struct would only rename the list.
+    #[allow(clippy::too_many_arguments)]
     fn config_card(
         &self,
         id: &'static str,

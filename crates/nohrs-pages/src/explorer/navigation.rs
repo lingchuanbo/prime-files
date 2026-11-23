@@ -14,6 +14,8 @@ use super::ExplorerPane;
 use super::types::{PaneEvent, StatusLevel};
 
 #[cfg(test)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 mod directory_expand_tests {
     use super::flatten_directory_files;
     use nohrs_services::fs::listing::{ListParams, list_dir_sync};

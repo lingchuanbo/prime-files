@@ -234,6 +234,9 @@ impl IndexManager {
         Ok(())
     }
 
+    // One `Field` per indexed field, and they differ only in what they name; a
+    // struct would just rename the list.
+    #[allow(clippy::too_many_arguments)]
     fn index_single_directory(
         &self,
         path: &Path,
@@ -263,6 +266,9 @@ impl IndexManager {
         Ok(())
     }
 
+    // One `Field` per indexed field, and they differ only in what they name; a
+    // struct would just rename the list.
+    #[allow(clippy::too_many_arguments)]
     fn index_single_file(
         &self,
         path: &Path,
@@ -540,7 +546,8 @@ fn find_all_match_lines(path: &Path, query: &str) -> Vec<(usize, String)> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

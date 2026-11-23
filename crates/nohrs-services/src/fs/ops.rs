@@ -1474,10 +1474,10 @@ pub fn trash_paths_reported(
         if transfer::check(progress).is_err() {
             break;
         }
-        if let Some(progress) = progress {
-            if let Some(first) = chunk.first().and_then(|path| path.file_name()) {
-                progress.set_detail(first.to_string_lossy().into_owned());
-            }
+        if let Some(progress) = progress
+            && let Some(first) = chunk.first().and_then(|path| path.file_name())
+        {
+            progress.set_detail(first.to_string_lossy().into_owned());
         }
         match ledger {
             Some(ledger) => {
@@ -1767,7 +1767,7 @@ mod tests {
         fs::write(src.join("sub").join("b.txt"), "1234567890").unwrap();
         let dst = dir.path().join("copia");
         let progress = TransferProgress::new(1);
-        let total = bytes_to_copy(&[src.clone()], Some(&progress)).unwrap();
+        let total = bytes_to_copy(std::slice::from_ref(&src), Some(&progress)).unwrap();
         assert_eq!(total, 15);
         progress.set_total(total);
         copy_path_reported(&src, &dst, &progress).unwrap();
@@ -1789,7 +1789,7 @@ mod tests {
         let progress = TransferProgress::new(1);
         progress.cancel();
         assert!(matches!(
-            bytes_to_copy(&[src.clone()], Some(&progress)),
+            bytes_to_copy(std::slice::from_ref(&src), Some(&progress)),
             Err(Error::Cancelled)
         ));
         assert!(matches!(

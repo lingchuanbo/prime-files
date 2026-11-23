@@ -44,6 +44,9 @@ impl RenameWindow {
                 if list_mode {
                     Ok(plan::preview_list(&entries, &list_lines, list_apply, &excluded))
                 } else {
+                    // Rule mode always carries its rules: the other branch is the
+                    // list mode, which has none (this runs on a background thread).
+                    #[allow(clippy::expect_used)]
                     rules.expect("rule mode has rules").map(|rules| plan::preview_selected(&entries, &rules, &excluded, restart))
                 }
             }).await;

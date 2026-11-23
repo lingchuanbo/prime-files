@@ -14,89 +14,13 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "support/binary_under_test.rs"]
+mod binary_under_test;
+
 /// Run `noh` with every XDG directory pointed into `root`, so nothing is read
 /// from or written to the real user configuration.
-/// The binary under test, copied out of `target/` once per test process.
-///
-/// A `userdata` folder beside the real build turns on portable mode, and portable
-/// mode ignores every XDG variable: without the copy these tests read and write the
-/// developer's own quicklaunch.toml.
-fn binary_under_test() -> PathBuf {
-    static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BINARY.get_or_init(copy_binary_once).clone()
-}
-
-/// Copies the binary somewhere it can run without the portable profile.
-///
-/// The directory is named after the source's size and modification time, so it is
-/// reused for as long as the build is the same: a per-process name made every run a
-/// brand-new executable for antivirus to scan, which took minutes. A copy that is
-/// already there is used as it is — it may even be the image of a child that has
-/// not exited, and overwriting that would fail with "access denied". A fresh copy
-/// is written under a name no other process uses, then renamed into place; when a
-/// scanner still holds the new file, another attempt is made, and a copy that only
-/// resisted the rename is run where it is.
-fn copy_binary_once() -> PathBuf {
-    let source = PathBuf::from(env!("CARGO_BIN_EXE_noh"));
-    let name = if cfg!(windows) {
-        "noh-under-test.exe"
-    } else {
-        "noh-under-test"
-    };
-    let metadata = std::fs::metadata(&source).expect("the binary cargo just built");
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
-    let directory = std::env::temp_dir().join(format!(
-        "noh-quick-launch-test-{:016x}-{modified:016x}",
-        metadata.len()
-    ));
-    let binary = directory.join(name);
-    if binary.exists() {
-        return binary;
-    }
-    std::fs::create_dir_all(&directory).expect("a directory for the copied binary");
-    let mut placed = None;
-    for attempt in 0..10 {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or(0);
-        let partial = directory.join(format!(
-            "{name}.{}.{stamp}.{attempt}.partial",
-            std::process::id()
-        ));
-        if let Err(error) = std::fs::copy(&source, &partial) {
-            eprintln!("copying the binary (attempt {attempt}): {error}");
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            continue;
-        }
-        match std::fs::rename(&partial, &binary) {
-            Ok(()) => return binary,
-            Err(error) => {
-                if binary.exists() {
-                    return binary;
-                }
-                eprintln!("placing the copied binary (attempt {attempt}): {error}");
-                placed = Some(partial);
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-    }
-    // A complete copy that only resisted the rename can still be run.
-    if let Some(partial) = placed
-        && partial.exists()
-    {
-        return partial;
-    }
-    panic!("copying the binary under test");
-}
-
 fn noh(root: &Path, args: &[&str]) -> Output {
-    Command::new(binary_under_test())
+    Command::new(binary_under_test::binary_under_test())
         .args(args)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))

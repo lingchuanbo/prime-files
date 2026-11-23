@@ -1,3 +1,6 @@
+// Tests build fixture files; there is no UI thread here.
+#![allow(clippy::disallowed_methods)]
+
 use super::{
     plan,
     rules::{CaseMode, Rules},

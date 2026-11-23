@@ -561,6 +561,8 @@ impl Tags {
 }
 
 #[cfg(test)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -693,7 +695,7 @@ mod tests {
             // Ticked on both, the tick takes it off both.
             Tags::toggle(&[one.clone(), two.clone()], id, cx);
             assert!(read_items(id).is_empty());
-            Tags::toggle(&[one.clone()], id, cx);
+            Tags::toggle(std::slice::from_ref(&one), id, cx);
             let renamed = folder
                 .path()
                 .join("renamed.txt")

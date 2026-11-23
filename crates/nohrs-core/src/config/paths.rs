@@ -90,6 +90,10 @@ fn portable_mode_from_configs(default: &std::path::Path, portable: &std::path::P
         .unwrap_or(false)
 }
 
+// Runs on the thread that asks a path question: `portable_mode_enabled` is
+// consulted lazily by every helper in this module, including from the UI thread;
+// registered in docs/Clippy基线清理-规格.md §7.
+#[allow(clippy::disallowed_methods)]
 fn read_portable_mode(path: &std::path::Path) -> Option<bool> {
     let contents = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&contents).ok()?;
@@ -209,7 +213,8 @@ pub fn config_file_for(section: &str, key: &str) -> PathBuf {
 #[cfg(test)]
 // Rust 2024 made `std::env::{set_var, remove_var}` unsafe; these tests must
 // mutate the process environment to exercise XDG path resolution.
-#[allow(clippy::unwrap_used, unsafe_code)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::unwrap_used, clippy::disallowed_methods, unsafe_code)]
 mod tests {
     use super::*;
     use crate::config::test_env::env_lock;

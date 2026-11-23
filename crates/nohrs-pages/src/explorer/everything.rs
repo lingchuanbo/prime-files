@@ -991,9 +991,7 @@ impl Query {
                     || initials
                         .as_deref()
                         .is_some_and(|initials| initials.contains(part.as_str()))
-                    || full_pinyin
-                        .as_deref()
-                        .is_some_and(|full| full.contains(part.as_str()))
+                    || full_pinyin.is_some_and(|full| full.contains(part.as_str()))
             }
             Term::Pattern(pattern) => wildcard(pattern, name),
             Term::Path(_) => true,
@@ -1462,7 +1460,7 @@ pub(crate) mod mft {
                 );
             }
             self.count += 1;
-            if self.count % 4096 == 0 {
+            if self.count.is_multiple_of(4096) {
                 self.progress.fetch_add(4096, Ordering::Relaxed);
             }
         }
@@ -2601,7 +2599,9 @@ pub(crate) mod remote {
             let end = start.checked_add(count.checked_add(1)?.checked_mul(2)?)?;
             let data = buffer.get(start..end)?;
             let units: Vec<u16> = data
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .take(count)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
@@ -3154,10 +3154,7 @@ pub(crate) mod remote {
                 None,
             )
             .unwrap_or_default();
-            let Some(hit) = han
-                .into_iter()
-                .find(|hit| hit.path.chars().any(|ch| !ch.is_ascii()))
-            else {
+            let Some(hit) = han.into_iter().find(|hit| !hit.path.is_ascii()) else {
                 eprintln!("no Han-named name in this index; nothing to check");
                 return;
             };
@@ -3171,7 +3168,7 @@ pub(crate) mod remote {
                 return;
             };
             let by_initials = search(
-                &[initials.clone()],
+                std::slice::from_ref(&initials),
                 200,
                 &Arc::new(AtomicBool::new(false)),
                 Some(modifier),
@@ -3463,6 +3460,8 @@ fn number(bytes: &[u8], at: usize) -> Option<u64> {
     ))
 }
 
+// The snapshot is loaded from a background task (see `ensure`, which spawns it).
+#[allow(clippy::disallowed_methods)]
 fn load(path: &Path) -> Option<Index> {
     let bytes = std::fs::read(path).ok()?;
     let entry_bytes = match bytes.get(..8)? {
@@ -4316,7 +4315,7 @@ pub(crate) fn ensure(cx: &mut App) {
         cx.update(|cx| {
             let state = cx.default_global::<Everything>();
             state.loading = false;
-            let stale = loaded.as_ref().map_or(true, Index::stale);
+            let stale = loaded.as_ref().is_none_or(Index::stale);
             if let Some(index) = loaded {
                 state.index = Some(Arc::new(index));
                 state.generation += 1;
@@ -4530,7 +4529,7 @@ pub(crate) fn rebuild(cx: &mut App) {
                 Err(async_channel::TryRecvError::Empty) => {
                     let touched = cx.update(|cx| {
                         let state = cx.global_mut::<Everything>();
-                        if ticks % 12 == 0 && state.walking_is_new() {
+                        if ticks.is_multiple_of(12) && state.walking_is_new() {
                             state.generation += 1;
                         }
                     });
@@ -5058,6 +5057,8 @@ mod platform {
 }
 
 #[cfg(test)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
@@ -5179,7 +5180,7 @@ mod tests {
 
     #[test]
     fn the_root_walks_users_first_and_windows_last() {
-        let mut children = vec![
+        let mut children = [
             (PathBuf::from("C:\\Users"), 1),
             (PathBuf::from("C:\\Windows"), 2),
             (PathBuf::from("C:\\Program Files"), 3),
@@ -5264,7 +5265,7 @@ mod tests {
         let drive = table.add(NO_PARENT, "C:", found(true, 0, 400));
         table.add(drive, "文件夹", found(true, 0, 400));
         table.add(drive, "工作报告.docx", found(false, 2 * KB, 9));
-        table.add(drive, "notes.txt", found(false, 1 * KB, 9));
+        table.add(drive, "notes.txt", found(false, KB, 9));
         let folder = table.add(drive, "项目A", found(true, 0, 400));
         table.add(folder, "照片.png", found(false, 4 * KB, 9));
         table.complete = true;
@@ -5541,7 +5542,9 @@ mod tests {
     #[ignore]
     fn walk_speed() {
         let root = std::env::var("NOHRS_WALK_ROOT").unwrap_or_else(|_| "C:\\Users".into());
-        let runs: [(&str, fn(&Path, &mut Vec<Listed>), usize); 5] = [
+        // A label, the listing function to time, and how many workers to use.
+        type Run = (&'static str, fn(&Path, &mut Vec<Listed>), usize);
+        let runs: [Run; 5] = [
             ("warm-up", platform::list, 32),
             ("std, 12", list_std, 12),
             ("large fetch, 12", platform::list, 12),

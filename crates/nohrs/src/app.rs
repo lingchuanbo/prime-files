@@ -235,9 +235,6 @@ fn install_in_app_launcher_key(launcher: LauncherIndex, app: &mut App) {
     });
 }
 
-/// Answers the `ToggleQuickLaunch` action, which is how the tray menu and (from
-/// M3) the settings page ask for the window.
-
 /// The launcher's view of the quick launch (M3 D).
 const QUICK_LAUNCH_HOOKS: nohrs_launcher::QuickLaunchHooks = nohrs_launcher::QuickLaunchHooks {
     snapshot: quick_launch_snapshot,
@@ -267,6 +264,8 @@ fn quick_launch_activate(cx: &mut App, group: &str, slot: u32, reveal: bool) {
     nohrs_pages::quick_launch::activate_by_id(cx, group, slot, reveal);
 }
 
+/// Answers the `ToggleQuickLaunch` action, which is how the tray menu and (from
+/// M3) the settings page ask for the window.
 fn install_quick_launch_action(app: &mut App) {
     app.on_action(|_: &nohrs_pages::ToggleQuickLaunch, cx: &mut App| {
         nohrs_pages::quick_launch::toggle(cx);
@@ -308,7 +307,7 @@ fn register_quick_launch_hotkey(
     if chord.id() == nohrs_launcher::hotkey::default_chord().hotkey.id() {
         return Err(HotkeyRefusal::LauncherConflict);
     }
-    let id = nohrs_launcher::register(cx, chord, |cx| nohrs_pages::quick_launch::toggle(cx))
+    let id = nohrs_launcher::register(cx, chord, nohrs_pages::quick_launch::toggle)
         .map_err(|error| HotkeyRefusal::Other(format!("{error:#}")))?;
     Ok(u64::from(id.get()))
 }

@@ -1067,10 +1067,7 @@ impl SettingsPage {
         if let Some(input) = &self.app_name {
             return input.clone();
         }
-        let input = cx.new(|cx| {
-            let state = InputState::new(window, cx);
-            state
-        });
+        let input = cx.new(|cx| InputState::new(window, cx));
         input.update(cx, |state, cx| {
             state.set_placeholder(t!("Nome do aplicativo"), window, cx);
             state.set_value(self.config.ui.app_name.clone(), window, cx);
@@ -1588,7 +1585,7 @@ impl SettingsPage {
             .into_iter()
             .map(SharedString::from)
             .collect();
-        fonts.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
+        fonts.sort_by_key(|left| left.to_lowercase());
         fonts.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
         let state = cx.new(|cx| SelectState::new(SearchableVec::new(fonts), None, window, cx));
         cx.subscribe_in(
@@ -2712,12 +2709,11 @@ impl SettingsPage {
         } else if status.service {
             match status.service_index_status.as_ref() {
                 Some(Ok(index)) if index.ready => {
-                    let message = if index.refreshing {
+                    if index.refreshing {
                         tf!("{n} 个索引条目，正在重建", n = index.entries)
                     } else {
                         tf!("{n} 个索引条目，已就绪", n = index.entries)
-                    };
-                    message
+                    }
                 }
                 Some(Ok(_)) | None => t!("索引服务正在建立索引…").to_string(),
                 Some(Err(error)) => format!("{} {error}", t!("无法读取索引服务状态：")),
@@ -3030,10 +3026,9 @@ impl SettingsPage {
             if current
                 .as_ref()
                 .is_some_and(|(group, _)| *group != info.group)
+                && let Some((group, rows)) = current.take()
             {
-                if let Some((group, rows)) = current.take() {
-                    groups.push(Group::titled(tr(group), rows));
-                }
+                groups.push(Group::titled(tr(group), rows));
             }
             let row = self.shortcut_row(info, bindings.contains_key(info.id), cx);
             current
