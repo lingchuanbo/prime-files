@@ -645,7 +645,8 @@ testado em FAT32/exFAT nem no Google Drive (`I:`).
 **Sintoma.** Nenhum relatado; passada pedida pela revisão
 `docs/prime-files-优化方案.md` §2, que manda caçar 	hread::sleep rodando na
 thread da interface. Dos 30 sleep do código de produção, quase todos estão em
-thread própria e dormir ali é legítimo: a vigia do eveal e da barra do
+thread própria e dormir ali é legítimo: a vigia do 
+eveal e da barra do
 `dialog_jump`, a caixa de diálogo de arquivo (thread `nohrs-file-dialogs`), o
 `foreground` (thread criada só para isso), o processo de arquivamento, o
 `media` e o laço de mensagens da `shell_windows`. Dois não estavam:
@@ -694,3 +695,107 @@ build `release` do dia a dia não mudou. Medições em `docs/size.md`.
 **Cobertura.** 431 testes de `nohrs-pages` (`--test-threads=1`) e 95 de
 `nohrs-core` verdes depois das mudanças; `cargo build --workspace` sem
 aviso novo.
+
+---
+
+### 10. Memória (24/11/2026)
+
+**Sintoma.** Nenhum relatado: esta é a medida de partida do item O0 de
+[`LumaFiles-内存与缩略图优化方案.md`](./LumaFiles-内存与缩略图优化方案.md) (v1.1).
+Antes de mexer no consumo — índice de nomes, miniaturas, listas — o número de
+partida, medido com o mesmo instrumento que cada item seguinte vai usar.
+
+**Método.** `scripts/measure-memory.ps1` sobe `LumaFiles.exe` (release,
+hard link do build) com um perfil portátil próprio: `userdata` ao lado do
+executável e `[storage] portable_mode = true`, então nada do perfil real
+(configuração, estado, histórico, logs) é lido nem escrito. O script amostra a
+cada segundo `PrivateMemorySize64`, `WorkingSet64`, handles e objetos GDI/USER,
+roda cada cenário três vezes e a tabela traz a mediana das três. Os CSV de cada
+rodada ficam em `target\tmp\perf\runs`, fora do repositório. As pastas de teste
+são geradas pelo mesmo script em `target\tmp\perf\data`: 100.000 arquivos de
+256 B, 10.000 fotos de 800x600 e 100.000 subpastas.
+
+No cenário 2 o instantâneo real do índice (261 MB, dois segmentos, ~3,7 milhões
+de nomes) foi copiado para o perfil, com apenas o carimbo `built` (bytes 8..16)
+atualizado para agora: o instantâneo da máquina tinha dois dias e o app o refaz
+depois de seis horas, e o que o item O1 muda é o caminho de *carga*. Com o
+carimbo antigo a mesma rodada mede carga **e** reconstrução: pico de 1.174 MB e
+estável de 744 MB, registrado aqui para não ser confundido com o número de cima.
+
+| Cenário | Pico privado | Estável privado | Pico working set | Handles | GDI | USER |
+|---|---:|---:|---:|---:|---:|---:|
+| 1. Início a frio, 30 s parado | 175.9 MB | 134.9 MB | 115.9 MB | 1158 | 55 | 50 |
+| 2. Índice próprio: carga do instantâneo de 261 MB | 588.8 MB | 505.9 MB | 542.9 MB | 1217 | 55 | 52 |
+| 3. Pasta de 100.000 arquivos + 5 letras no filtro | 269.0 MB | 242.2 MB | 211.6 MB | 1227 | 55 | 58 |
+| 4. 10.000 fotos, grade a 256 px, rolagem até o fim | 499.7 MB | 454.0 MB | 316.0 MB | 1167 | 55 | 51 |
+| 5. Duas abas com a mesma pasta de fotos, rolagem nas duas | 881.9 MB | 826.6 MB | 376.0 MB | 1245 | 55 | 53 |
+| 6. 100.000 subpastas na lista, rolagem contínua | 275.0 MB | 273.2 MB | 231.0 MB | 1097 | 55 | 51 |
+| 7. Janela fechada, processo residente, 10 min | 221.9 MB | 148.4 MB | 115.5 MB | 1160 | 55 | 51 |
+| 8. Abrir e fechar a pasta grande 10 vezes | 327.6 MB | 173.0 MB | 213.5 MB | 1168 | 55 | 50 |
+
+**O que os números dizem.** A base ociosa é 134.9 MB (cenário 1, estável).
+O índice próprio soma 371.0 MB ao estável e 453.9 MB ao pico (cenário 2: 505.9 MB
+estável) — a tabela e as strings que o plano estimou em ~350 MB, medidas.
+
+A pasta de 100.000 arquivos com filtro (cenário 3) chega a 269.0 MB de pico; a de
+100.000 subpastas na lista (cenário 6) fica em ~275 MB com ~8.600 subpastas roladas
+em 90 s — é o ícone por caminho que O4 passa a contar no orçamento.
+
+As fotos a 256 px (cenário 4) são o maior consumidor isolado: 499.7 MB de pico e
+454.0 MB estável, ~320 MB acima da base — mais do que os 192 MB que o teto por
+painel conta, porque ele conta só as miniaturas `Ready` e não o que a GPU, o cache
+do Shell e as decodificações em voo seguram enquanto a rolagem corre. As duas abas do cenário 5 mantêm dois caches assim ao mesmo tempo
+(881.9 MB de pico), que é exatamente o que o orçamento global de O3 tem de limitar.
+
+O cenário 7 (10 min de janela fechada, processo residente) fecha em 148.4 MB
+estável, e o 8 (dez idas e voltas numa pasta grande) em 173.0 MB: comparados com
+a base ociosa, os dois mostram se fica memória para trás.
+
+#### Notas de método (o que não é o app)
+
+O cenário 5 foi executado com **duas abas** e não com dois painéis: os atalhos de
+painel (`Ctrl+\`, `Ctrl+Shift+→`, `Ctrl+→`) não disparam a partir de teclado
+sintético — só `Ctrl+T`, `Ctrl+W`, `Ctrl+=` e `Ctrl+-` disparam —, mas cada aba
+tem o próprio cache de miniaturas, que é o que o orçamento global de O3 cobre.
+O cenário 6 rolou ~8.600 das 100.000 subpastas em 90 s (a captura final mostra
+`folder_008600`); rolar as 100.000 levaria ~17 min, então as comparações usam o
+mesmo tempo de rolagem, não a pasta inteira.
+
+Um perfil portátil novo também recebe, na primeira execução, uma cópia do índice
+de nomes do perfil anterior (258 MB em `cache\everything.idx`); ela acontece em
+todas as rodadas por igual e não aparece na memória privada, só no disco. O
+cenário 2 substitui esse arquivo pelo instantâneo do teste antes de medir.
+
+O perfil real guardava 752 MB de logs em `~\.local\state\nohrs\logs`; o app
+copia o perfil anterior para um perfil portátil novo na primeira execução, e
+essa cópia acontecia dentro da janela de amostragem de cada rodada. Para o
+baseline ser do app e não da cópia, os logs foram movidos para
+`~\.local\state\nohrs-logs.baseline-off` durante as medições e devolvidos
+depois.
+
+#### O5: por que 549 MB de log num dia
+
+`nohrs.log.2026-11-15` tem 2.532.006 linhas, e **2.531.269** delas são a mesma
+mensagem:
+
+```
+{"level":"ERROR","message":"could not find asset at path \"icons/menu.svg\"",
+ "log.file":"third_party\\gpui\\src\\elements\\svg.rs","log.line":121,"target":""}
+```
+
+É um ícone de menu pedido a cada quadro: o elemento SVG registra um ERROR por
+desenho porque `icons/menu.svg` não existe nos assets. O mesmo vale para 14/11
+(579.744 de 581.085 linhas) e, em menor escala, para 13/11 e 16/11. O log cresce
+com o tempo em que a janela fica aberta, não com o uso. O item O5 tem duas
+partes: pôr o asset que falta (ou parar de desenhá-lo) e limitar o arquivo; a
+primeira é a que apaga o loop.
+
+| Dia | Tamanho | Linhas ERROR |
+|---|---:|---:|
+| 2026-11-13 | 48,3 MB | não medido |
+| 2026-11-14 | 126,3 MB | 579.884 |
+| 2026-11-15 | 549,5 MB | 2.531.388 |
+| 2026-11-16 | 64,4 MB | não medido |
+| 2026-11-17 | 48 KB | — |
+
+No total, `~/.local/state/nohrs/logs` guardava 752 MB em sete arquivos.
