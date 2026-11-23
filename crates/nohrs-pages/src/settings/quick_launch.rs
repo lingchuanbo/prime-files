@@ -1781,35 +1781,43 @@ fn browse_button(field: Field, enabled: bool, cx: &mut Context<SettingsPage>) ->
         .when(enabled, |this| {
             this.cursor_pointer()
                 .hover(|style| style.bg(rgb(theme::bg_hover())))
-                .on_click(cx.listener(move |_page, _event, window, cx| browse(field, window, cx)))
+                .on_click(
+                    cx.listener(move |page, _event, window, cx| browse(page, field, window, cx)),
+                )
         })
         .when(!enabled, |this| this.opacity(0.45))
         .child(t!("Procurar…"))
         .into_any_element()
 }
 
+/// What a "browse…" button may pick (§17.2 R2): the working directory is always a
+/// folder, a `folder` item picks a folder and every other kind picks a file.
+///
+/// `kind` is the form's type, `None` when there is no form yet.
+fn browse_want(field: Field, kind: Option<&str>) -> quick_launch::PathWant {
+    match field {
+        Field::Cwd => quick_launch::PathWant::Folders,
+        Field::Path if kind == Some("folder") => quick_launch::PathWant::Folders,
+        Field::Path => quick_launch::PathWant::Files,
+    }
+}
+
 /// Opens a file picker for one of the form's two path fields, on the window.
 ///
-/// A `folder` item picks a folder, every other kind picks a file, and the working
-/// directory is always a folder (§17.2 R2: the Windows dialog can only do one).
-fn browse(field: Field, window: &mut Window, cx: &mut Context<SettingsPage>) {
-    let folder = match field {
-        Field::Cwd => true,
-        Field::Path => cx
-            .entity()
-            .read(cx)
-            .quick_launch
-            .form
-            .as_ref()
-            .is_some_and(|form| form.kind == "folder"),
-    };
-    let (want, prompt) = if folder {
-        (quick_launch::PathWant::Folders, t!("Escolher uma pasta"))
-    } else {
-        (
-            quick_launch::PathWant::Files,
-            t!("Escolher um arquivo ou uma pasta"),
-        )
+/// The page is handed in by the listener: reading it back through the entity while
+/// the listener holds it leased is a `double_lease_panic` (M4 R4).
+fn browse(page: &SettingsPage, field: Field, window: &mut Window, cx: &mut Context<SettingsPage>) {
+    let kind = page
+        .quick_launch
+        .form
+        .as_ref()
+        .map(|form| form.kind.as_str());
+    let want = browse_want(field, kind);
+    let prompt = match want {
+        quick_launch::PathWant::Folders => t!("Escolher uma pasta"),
+        quick_launch::PathWant::Files | quick_launch::PathWant::Either => {
+            t!("Escolher um arquivo ou uma pasta")
+        }
     };
     let receiver = cx.prompt_for_paths(quick_launch::path_prompt_for(cx, want, false, prompt));
     cx.spawn_in(window, async move |this, cx| {
@@ -2244,5 +2252,41 @@ mod tests {
             "an empty query shows all"
         );
         assert!(matching_apps(&apps, "nada").is_empty());
+    }
+
+    /// §17.2 R2, M4 R4: the browse button's choice follows the field and the
+    /// form's type.
+    #[test]
+    fn browse_want_follows_the_field_and_the_item_kind() {
+        use quick_launch::PathWant;
+        assert_eq!(browse_want(Field::Cwd, Some("app")), PathWant::Folders);
+        assert_eq!(browse_want(Field::Cwd, None), PathWant::Folders);
+        assert_eq!(browse_want(Field::Path, Some("folder")), PathWant::Folders);
+        assert_eq!(browse_want(Field::Path, Some("app")), PathWant::Files);
+        assert_eq!(browse_want(Field::Path, Some("command")), PathWant::Files);
+        assert_eq!(browse_want(Field::Path, None), PathWant::Files);
+    }
+
+    /// M4 R4: the browse button reads the page it is handed, inside the update
+    /// that holds it — the shape that used to be a `double_lease_panic`.
+    #[gpui::test]
+    fn the_browse_button_reads_the_page_it_is_handed(cx: &mut gpui::TestAppContext) {
+        let page = cx.new(crate::settings::SettingsPage::new);
+        page.update(cx, |page, _cx| {
+            let kind = page
+                .quick_launch
+                .form
+                .as_ref()
+                .map(|form| form.kind.as_str());
+            assert_eq!(kind, None, "no form is open yet");
+            assert_eq!(
+                browse_want(Field::Path, kind),
+                quick_launch::PathWant::Files
+            );
+            assert_eq!(
+                browse_want(Field::Cwd, kind),
+                quick_launch::PathWant::Folders
+            );
+        });
     }
 }
