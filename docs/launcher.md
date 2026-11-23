@@ -304,9 +304,11 @@ portal 側は Wayland コンポジタ無しでは実機確認できないため�
 
 ## 14. クイック起動 (Quick Launch)
 
-> 仕様: [`QuickDock-技术实现方案与边界约定.md`](./QuickDock-技术实现方案与边界约定.md) §17.1 E。
+> 仕様: [`QuickDock-技术实现方案与边界约定.md`](./QuickDock-技术实现方案与边界约定.md) §17.1 E。M4 は同 §17.2。
 > M1–M2 実装済み。M3 の設定ページ・CLI はそれぞれ `settings/quick_launch.rs`・
 > `nohrs-cli/src/quick_launch.rs` に追加され、`@` 検索は §14.5 の設計で実装される。
+> M4 の `uwp` / `command` / `group` / `on_running = "ask"` / 動的分組は §14.6–§14.10、
+> 仕様との差異は §14.11 にまとめる。
 
 Launcher とは別の、登録したショートカットを格子または一覧で並べる独立ウィンドウ。
 グローバルホットキーで呼び出し、常駐して何度でも開閉する。設定は `config.toml` ではなく
@@ -319,14 +321,14 @@ Launcher とは別の、登録したショートカットを格子または一�
 | `crates/nohrs-core/src/config/quick_launch.rs` | データモデル (`QuickLaunchConfig` / `WindowSettings` / `Group` / `Item`)、パース、検証、マイグレーション、`to_toml`。ファイル I/O はしない |
 | `crates/nohrs-core/src/config/paths.rs` | `quick_launch_file()` と `quick_launch_icon_dir()` |
 | `crates/nohrs-services/src/launch.rs` | `LaunchAction` trait、`LaunchRegistry`、パス変数展開、URL 検証、エラー型。非 Windows はすべて `Unsupported` |
-| `crates/nohrs-services/src/launch/windows.rs` | 組み込み種別の `ShellExecuteExW` 実装と、`on_running = activate` のウィンドウ活性化 |
-| `crates/nohrs-pages/src/quick_launch.rs` | `QuickLaunch` グローバル状態 (唯一の状態源)、ファイルの読み書きと監視、ウィンドウの生成・表示・非表示、アイコンのキャッシュ、起動用スレッド、常駐の判定 |
-| `crates/nohrs-pages/src/quick_launch/view.rs` | タイトルバー、グループバー、グリッド / リスト、キーボードとマウス、右クリックメニュー、ドラッグ & ドロップ、編集カード (§14.6) |
+| `crates/nohrs-services/src/launch/windows.rs` | 組み込み種別の `ShellExecuteExW` 実装、`IApplicationActivationManager` による `uwp`、`std::process::Command` による `command`、`on_running` のウィンドウ活性化 |
+| `crates/nohrs-pages/src/quick_launch.rs` | `QuickLaunch` グローバル状態 (唯一の状態源)、ファイルの読み書きと監視、ウィンドウの生成・表示・非表示、アイコンのキャッシュ、起動用スレッド、常駐の判定、`command` の初回確認と信頼記録、`group` の展開と一括起動、動的分組の生成 |
+| `crates/nohrs-pages/src/quick_launch/view.rs` | タイトルバー、グループバー、グリッド / リスト、キーボードとマウス、右クリックメニュー、ドラッグ & ドロップ、編集カード (§14.11)、`command` / `group` / 実行中プログラムの確認浮層 (§14.7–§14.9) |
 | `crates/nohrs-launcher/src/hotkey.rs` | 複数ホットキーの登録・解除・パース (§10) |
 | `crates/nohrs/src/app.rs` | 主モードと常駐モードでの初期化、`ToggleQuickLaunch` のハンドラ、ホットキーのフック |
 | `crates/nohrs-pages/src/tray.rs`、`root.rs` | トレイメニューの項目と、常駐時のウィンドウを閉じる振り分け (§14.4) |
-| `crates/nohrs-pages/src/settings/quick_launch.rs` (M3) | 設定ページ |
-| `crates/nohrs-cli/src/quick_launch.rs` (M3) | `noh quick-launch` (別名 `noh ql`) |
+| `crates/nohrs-pages/src/settings/quick_launch.rs` (M3) | 設定ページ。M4 で種別 `uwp` / `command` / `group`、動的分組の作成、信頼の表示と取り消しを追加 |
+| `crates/nohrs-cli/src/quick_launch.rs` (M3) | `noh quick-launch` (別名 `noh ql`)。M4 で `apps`、`--uwp`、`--yes` と動的分組の扱いを追加 |
 
 フォルダー (`folder`) の起動は services が自分で開かず `OpenFolder(path)` を返し、
 pages 層が LumaFiles の新しいタブとして開く。`services` が UI に依存しないための分担。
@@ -351,7 +353,7 @@ list_columns = 2            # 1..=3
 auto_hide = true
 topmost = false
 close_after_launch = true
-on_running = "activate"     # "activate" | "new"
+on_running = "activate"     # "activate" | "new" | "ask" (§14.9)
 keep_running = true         # メインウィンドウを閉じてもプロセスを残す (§14.4)
 
 [[group]]
@@ -375,7 +377,10 @@ path = "%ProgramFiles%\\Notepad++\\notepad++.exe"
   保存は 300 ms にまとめてから、一時ファイル → `fsync` → `.bak` → rename の順で行う。
 - `notify` で監視し、内容のハッシュが変わったときだけ読み直す。UI 自身の保存による通知は
   ハッシュ比較で無視する。外部で編集した場合も、次にウィンドウを開いた時点のファイルが正しい。
-- 使い回す設定値の詳細は [`config.md`](./config.md) の「クイック起動」節を参照。
+- `[[group]]` に `source` を書くと、そのグループの項目はファイルではなく実行時に生成される
+  動的分組になる (`folder:` / `recent` / `most_used`、§14.10)。`command` の `extra`、
+  `on_running = "ask"` を含む各フィールドの意味は [`config.md`](./config.md) の
+  「クイック起動」節にまとめてある。
 
 ### 14.3 呼び出し
 
@@ -466,7 +471,175 @@ pub fn set_quick_launch_hooks(cx: &mut App, hooks: QuickLaunchHooks);
   グループ id が存在しない場合は何もしない。
 - placeholder の既存ヒントの後ろに `t!("@ para a inicialização rápida")` を足す。
 
-### 14.6 仕様との差異
+### 14.6 `uwp` (UWP アプリ、M4)
+
+`uwp` は Microsoft Store 形式のパッケージアプリを AppUserModelID (AUMID) で起動する種別。
+`path` に `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App` のような AUMID を書き、`args` を
+起動引数として渡す。`cwd` と `admin` は意味を持たず、ファイルに書かれていても無視する。
+
+- 起動は `IApplicationActivationManager::ActivateApplication`。COM は起動スレッド
+  (`quick-launch`) が既に持っている apartment を使う (§8.4)。
+- 健全性チェックは書式だけを見る: `!` の両側が非空、空白文字を含まない、256 文字以内。
+  インストール済みかどうかは問い合わせない (§8.1 の 5 ms 予算)。書式が不正な項目は
+  タイルがグレーになり、起動もしない。
+- 設定ページの種別に「Aplicativo UWP」が増える。`uwp` を選ぶと「Caminho」行が
+  「ID do aplicativo」(アプリ ID) に変わり、「Procurar…」が「Escolher aplicativo…」になる。
+  押すと Apps フォルダーを**バックグラウンドで 1 回だけ**列挙した一覧が開き、名前で絞り込める。
+  選ぶと AUMID を、名前が空ならアプリ名も入力欄に入れる。AUMID を持つクラシックな
+  デスクトップアプリも一覧に出る (どちらも `ActivateApplication` で起動できる)。
+- コマンドラインでは `noh ql apps [--json]` が名前と AUMID を一覧し、
+  `noh ql add --uwp <AUMID>` が `<パス>` の代わりに `uwp` 項目を追加する (`--name` を
+  省略すると名前は AUMID になる)。
+
+### 14.7 `command` (シェルコマンド、M4)
+
+`command` は `extra` の `shell` と `script` でシェルスクリプトを起動する。`path` と `args` は
+持たない (`args` は無視される)。
+
+```toml
+[[group.item]]
+slot = 1
+type = "command"
+name = "Build"
+cwd = "%USERPROFILE%\\src"
+
+[group.item.extra]
+shell = "pwsh"      # "cmd" | "pwsh" | "powershell" | "python"
+script = "npm run build"
+hidden = false      # true: ウィンドウを出さない (CREATE_NO_WINDOW)
+keep_open = false   # true: 終了後もコンソールを開いたままにする
+```
+
+- 起動は `std::process::Command`。`cmd` は `%ComSpec%` (無ければ `cmd.exe`) に
+  `/d /s /c`、`pwsh` / `powershell` は `-NoLogo -NoProfile -EncodedCommand`
+  (UTF-16LE の base64)、`python` は `.arg(script)`。`hidden` は `CREATE_NO_WINDOW`、
+  指定が無ければ `CREATE_NEW_CONSOLE` で自分のコンソールを持つ。`keep_open` は `cmd` の
+  `/k`、PowerShell の `-NoExit`、Python の `-i` になる。
+- 作業ディレクトリは `cwd` を展開したもの。未設定なら `%USERPROFILE%`。
+  起動したプロセスは待たず、すぐ `Started` を返す。
+- `admin = true` のコマンドはこの期では未対応 (D4)。健全性チェックは「無効」、
+  起動は「未対応」を返し、設定ページは「Executar como administrador」をヒント付きで
+  無効表示にする。
+- 健全性チェックは `extra` の内容と、設定された `cwd` が存在するか。
+  シェルが `PATH` にあるかは見ない (遅いため)。
+
+#### 初回確認と信頼
+
+- まだ信頼していない `command` を起動しようとすると、ウィンドウ内の浮層で確認する。
+  内容は項目名・シェル・作業ディレクトリ・スクリプト全文 (等幅、スクロール可、
+  高さはウィンドウの 60% まで)・「Executar」/「Cancelar」。`hidden` のときは
+  「バックグラウンドで実行され、ウィンドウが見えない」旨を警告色で出す。
+- 「Executar」で信頼を記録してから起動する。「Cancelar」は何も起動せず、エラーも出さない。
+- 信頼の記録は `shell` / `script` / ファイルに書かれた `cwd` / `hidden` / `keep_open` の
+   SHA-256 の先頭 32 hex を KV の `trusted_<32hex>` に置く。スクリプトやフラグを 1 文字でも
+  変えると再確認になる。記録は項目を移動・削除しても残り、`prune_usage` は `usage_*` だけを
+  掃除する。
+- ウィンドウが隠れているとき (Launcher の `@` から起動した場合など) は、確認の前に
+  ウィンドウを表示する。
+- 常駐モードで `state.redb` を開けない場合は信頼をメモリ内にだけ持ち、プロセス終了で失効する。
+  その場合ダイアログの下に「Sem armazenamento: a confirmação vale até fechar o programa.」を出す。
+- 設定ページのフォームから保存した `command` だけは、その保存で自動的に信頼される (D5)。
+  ファイルの手編集・CLI・ホットリロードで入った変更は自動では信頼されない。
+- 設定ページは「Confiável」/「Não confiável」と「Revogar confiança」(信頼を取り消す) を出す。
+- グループの中の未信頼の `command` は 1 つの確認にまとめる (§14.8)。
+
+### 14.8 `group` (複数項目のまとめ起動、M4)
+
+`group` は同じグループ内の項目を `id` で参照し、順に起動する種別。`path` / `args` /
+`cwd` / `admin` は持たない。
+
+```toml
+[[group.item]]
+slot = 2
+type = "group"
+name = "Work"
+items = ["editor", "script"]
+
+[[group.item]]
+slot = 3
+type = "app"
+name = "Editor"
+id = "editor"
+path = "%ProgramFiles%\\Notepad++\\notepad++.exe"
+```
+
+- 参照される項目には `id` が要る。設定ページでグループを保存すると、選んだ項目に
+  `item_<スロット>` が自動で割り当てられる (衝突時は `_2`、`_3`…)。手書きの `id` は
+  `^[a-z0-9_]{1,32}$`。
+- 展開規則: ネストした `group` は深さ 8 まで再帰的に展開し、訪問済みはスキップ、
+  起動するのは最大 16 項目。超過分は起動せず、下部に
+  「{skipped} itens do grupo excedem o limite de {limit}…」を出す。別グループの `id` は
+  無視する。有効な参照が 1 つも無いときは「Este grupo não tem itens válidos.」。
+- 未信頼の `command` が含まれるときは、その全部を 1 つの浮層にまとめて確認する。
+  キャンセルするとグループ全体を起動しない。
+- 各項目は 1 つのバッチ id で順に起動する。全応答が揃ってから、失敗があれば
+  「{failed} de {total} itens não iniciaram: {names}」を 1 行だけ出し、`OpenFolder` は
+  LumaFiles で順に開き、使用回数は `group` 項目にだけ 1 回記録し、`close_after_launch` は
+  そのときに 1 回だけ判断する。
+- グループの中では `on_running = "ask"` は `activate` として扱う (D9)。項目ごとには聞かない。
+- 健全性チェックは「有効な参照が 1 つも無いとき」だけ無効。子項目の状態はそれぞれ表示する。
+- 設定ページの種別に「Grupo」が増え、パス・引数・作業ディレクトリの代わりに
+  「Incluir itens」(同じグループの他の項目をスロット順に並べ、クリックした順が起動順) を出す。
+  クイック起動ウィンドウの編集カードでは名前だけを変更でき、他は設定ページで編集する。
+- `noh ql run` はグループも実行できる。子に `command` があるときは `--yes` が必須で、
+  無いとグループ全体を拒否して終了コード 1。
+
+### 14.9 `on_running = "ask"` (M4)
+
+`[window] on_running = "ask"` では、起動対象と同じ exe が既に動いていて、そのメイン
+ウィンドウを前に出せるとき、起動もアクティブ化もせずにユーザーへ確認する。
+
+- 浮層は「Este programa já está aberto.」と項目名を出し、ボタンは「Ir para ele」
+  (実行中のプログラムへ切り替え)・「Abrir outra vez」(別インスタンスを起動)・「Cancelar」。
+- 「Ir para ele」は見つかったプロセス ID を指定して起動をやり直す。メインウィンドウが
+  見つからないときは新規起動に切り替える (クリックが無反応にならないように)。
+- 使用回数はユーザーが選んだ後だけ記録する。「Cancelar」では記録しない。
+- ウィンドウが隠れているときは、ダイアログの前にウィンドウを表示する。
+- 設定ページの「プログラムが既に実行中のとき」に「Perguntar sempre」が増える。
+- 対象は通常の `.exe` 起動だけ (§8.3 と同じ制約)。管理者起動と `.lnk` は常に新規起動で、
+  `ask` の確認は出ない。CLI には画面が無いため、`noh ql run` では `ask` を `activate` と
+  して扱う。
+
+### 14.10 動的分組 (`folder:` / `recent` / `most_used`、M4)
+
+`[[group]]` に `source` を書くと、そのグループの項目はファイルではなく実行時に生成される
+**読み取り専用**の動的分組になる。
+
+```toml
+[[group]]
+id = "tools"
+name = "Ferramentas"
+source = "folder:%USERPROFILE%\\bin"
+```
+
+- `source` は `folder:<パス>` / `recent` / `most_used`。それ以外の値は警告のうえ「不明」と
+  して扱い、ファイルに書かれた項目を持つ普通のグループのまま残す。
+- `source` のあるグループに `[[group.item]]` を書いても破棄され、警告
+  (`ItemsInDynamicGroup`) が出る。保存時も項目は書き戻さず、`id` / `name` / `source` だけを書く。
+- `folder:<パス>`: パス変数を展開し、**直下だけ**を読む (再帰しない)。名前の大文字小文字を
+  無視して並べ、隠しファイルとシステムファイルを除き、スロット 0 から最大 512 項目。
+  種類は `item_for_path` が決める。読み込みはバックグラウンドで行い、ウィンドウを表示した
+  ときと、そのグループに切り替えたときに、前回から 30 秒以上経っていれば読み直す。
+  ファイル監視はしない。ディレクトリが無いときは「Pasta não encontrada」を出して項目は空。
+- `recent` / `most_used`: 使用履歴から生成する。`recent` は最終使用の新しい順、
+  `most_used` は回数の多い順 (同数は最終使用順)。現在の設定に残っている元項目だけを対象にし、
+  動的分組自身は除く。最大 `columns × 2`、32 項目まで (D7)。スロットは 0 から振り直し、
+  起動と健全性チェックはコピー元の項目に記録する。ウィンドウを表示したときと、起動が
+  成功するたびに作り直す。常駐モード (`state.redb` なし) では
+  「Indisponível no modo residente」を出して項目は空。
+- 読み取り専用: 項目の追加・移動・編集・削除・並べ替えは無効で、ドラッグの受け入れと
+  「Editar」はグレー表示になる。ただし「Abrir localização」と「Copiar caminho」は使える。
+  グループ自体の改名・削除・並べ替えはできる。
+- 設定ページの「Novo grupo」は「Normal / Pasta / Recentes / Mais usados」を選べる。
+  フォルダーはディレクトリ選択ダイアログで選ぶ。グループ一覧には `source` をそのまま表示し、
+  動的分組の項目一覧は読み取り専用で
+  「Itens gerados automaticamente; não podem ser editados.」を添える。
+- Launcher の `@` 検索は `folder:` の生成項目を含め、`recent` / `most_used` は含めない
+  (元項目と重複するため)。`prune_usage` は動的分組を有効な項目として数えない。
+- CLI: `noh ql list` は動的分組を `(dynamic: <source>)` と表示して項目を出さない。
+  `add` / `remove` は拒否して終了コード 1。`run` は「run its items from the window」と拒否する。
+
+### 14.11 仕様との差異
 
 仕様 (`QuickDock-技术实现方案与边界约定.md`) と実装が違う点、および仕様に後から追記された点:
 
@@ -482,4 +655,10 @@ pub fn set_quick_launch_hooks(cx: &mut App, hooks: QuickLaunchHooks);
 | 編集時の種別 | `type` は変更できる | 変更できない。パスから `app` / `folder` / `file` を再判定する (仕様 §12.3 の 4 フィールドのみ) |
 | 使用回数・ウィンドウ位置 | `state.redb` | 主モードは仕様どおり。常駐モードは `state.redb` を開けないため記録しない |
 | `init` の引数 | 規定なし | 主モード / 常駐モードを区別する `Mode` を受け取る (M2 の未決問題 6 として承認済み) |
+| `uwp` のアイコン | §9 はパスから抽出する | AUMID はファイルパスではないため抽出できず、タイルは種別のプレースホルダーになる。`icon` に `.ico` / `.png` を書けばその画像を使う |
+| `on_running` の対象 | §17.2 F は「実行中のプログラム」 | §8.3 の制約をそのまま適用し、通常の `.exe` だけが対象。管理者起動と `.lnk` は常に新規起動で、`ask` も確認しない |
+| クイック起動ウィンドウでの編集 | §17.2 E.4 は `group` を名前だけに限定 | `command` もカードでは保存できない (パスを持たず、`shell` / `script` がカードに無いため)。`command` は設定ページでのみ編集する |
+| 確認ダイアログの作業ディレクトリ | §17.2 D.3「作業ディレクトリ」 | ファイルに書かれた原文を表示し、変数は展開しない。未設定は「—」 |
+| 信頼キーの `cwd` | §17.2 D.1 は `cwd` を含む | 展開後ではなく**書かれた原文**をハッシュする。`%ENV%` の指す先だけが変わっても再確認しない (文面が変われば再確認する) |
+| CLI の `--yes` | D6 は「コマンドラインで `command` を実行するとき」 | 実装が要求するのはグループの子コマンドだけ。単体の `command` を `noh ql run` で直接実行するときは `--yes` を要求しない |
 
