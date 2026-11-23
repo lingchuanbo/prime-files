@@ -1189,6 +1189,66 @@ fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str)
     .detach();
 }
 
+/// Deletes the usage records that name no item any more (§17.1 E2).
+///
+/// A `noh ql remove` or a hand edit leaves them behind, and the next item put in
+/// that slot would inherit the count. Only the main process has the store: the
+/// resident one runs without it.
+fn prune_usage(cx: &mut App) {
+    let Some(quick_launch) = state(cx) else {
+        return;
+    };
+    if quick_launch.mode != Mode::Main {
+        return;
+    }
+    let Some(kv) = quick_launch.kv.clone() else {
+        return;
+    };
+    let valid: std::collections::HashSet<(String, u32)> = quick_launch
+        .config
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .items
+                .iter()
+                .map(move |item| (group.id.clone(), item.slot))
+        })
+        .collect();
+    cx.background_spawn(async move {
+        let entries = match kv.list_namespace(KV_NAMESPACE) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(target: "quick_launch", "could not list usage records: {error}");
+                return;
+            }
+        };
+        let prefix = format!("{KV_NAMESPACE}.");
+        let stale: Vec<KvOp> = entries
+            .into_iter()
+            .filter_map(|(key, _)| {
+                let name = key.as_str().strip_prefix(&prefix)?;
+                let rest = name.strip_prefix("usage_")?;
+                let (group, slot) = rest.rsplit_once('_')?;
+                let slot = slot.parse::<u32>().ok()?;
+                (!valid.contains(&(group.to_string(), slot))).then_some(KvOp::Delete { key })
+            })
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            target: "quick_launch",
+            keys = stale.len(),
+            "deleting usage records of items that are gone"
+        );
+        if let Err(error) = kv.batch(stale) {
+            tracing::warn!(target: "quick_launch", "could not delete stale usage records: {error}");
+        }
+    })
+    .detach();
+}
+
 /// Whether one item is known to be broken, so the view can grey it (§12.1).
 pub(crate) fn is_missing(cx: &App, group: usize, slot: u32) -> bool {
     health_of(cx, group, slot).is_some_and(|health| health != Health::Ok)
@@ -2052,6 +2112,9 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     ensure_selection(cx);
     sync_hotkey(cx);
     cx.refresh_windows();
+    // E2: records of items the file no longer has go now, so the next occupant of
+    // a slot does not inherit them.
+    prune_usage(cx);
 }
 
 /// Selects the group the last session was on, by id (§6).
@@ -3543,8 +3606,20 @@ mod tests {
             Ok(())
         }
 
-        fn list_namespace(&self, _namespace: &str) -> nohrs_store::Result<Vec<(KvKey, Vec<u8>)>> {
-            Ok(Vec::new())
+        fn list_namespace(&self, namespace: &str) -> nohrs_store::Result<Vec<(KvKey, Vec<u8>)>> {
+            let prefix = format!("{namespace}.");
+            let mut entries = Vec::new();
+            if let Ok(map) = self.0.lock() {
+                for (key, value) in map.iter() {
+                    let Some(name) = key.strip_prefix(&prefix) else {
+                        continue;
+                    };
+                    if let Ok(key) = KvKey::new(namespace, name) {
+                        entries.push((key, value.clone()));
+                    }
+                }
+            }
+            Ok(entries)
         }
 
         fn batch(&self, ops: Vec<KvOp>) -> nohrs_store::Result<()> {
@@ -3636,6 +3711,62 @@ mod tests {
         assert_eq!(
             store.get(&moved_usage).expect("the test store"),
             Some(b"y".to_vec())
+        );
+    }
+
+    /// §6, E2: a load deletes the usage records that name no item, and only those.
+    #[gpui::test]
+    fn a_load_deletes_the_usage_records_of_items_that_are_gone(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut group = group_of(2);
+            group.id = "general".to_string();
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let kept = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            let gone = KvKey::new(KV_NAMESPACE, "usage_general_9").expect("valid key");
+            let other = KvKey::new(KV_NAMESPACE, "last_group").expect("valid key");
+            store.put(&kept, b"a").expect("the test store");
+            store.put(&gone, b"b").expect("the test store");
+            store.put(&other, b"c").expect("the test store");
+            apply_loaded(
+                cx,
+                FileRead {
+                    hash: 4321,
+                    parsed: Some(Ok(Parsed {
+                        config: QuickLaunchConfig {
+                            groups: vec![group_of(2)],
+                            ..QuickLaunchConfig::default()
+                        },
+                        warnings: Vec::new(),
+                    })),
+                },
+            );
+        });
+        // The prune runs on a background task; like the other worker tests, wait
+        // for it rather than assuming the first tick has run it.
+        let gone = KvKey::new(KV_NAMESPACE, "usage_general_9").expect("valid key");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            if store.get(&gone).expect("the test store").is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let kept = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        let other = KvKey::new(KV_NAMESPACE, "last_group").expect("valid key");
+        assert_eq!(
+            store.get(&kept).expect("the test store"),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(store.get(&gone).expect("the test store"), None);
+        assert_eq!(
+            store.get(&other).expect("the test store"),
+            Some(b"c".to_vec()),
+            "only usage records are touched"
         );
     }
 
