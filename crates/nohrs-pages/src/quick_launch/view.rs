@@ -132,6 +132,8 @@ struct Frame {
     drawn: Rc<Vec<Drawn>>,
     view: View,
     cell_size: f32,
+    /// Draw the cells' blocks, empty ones included.
+    show_cells: bool,
     /// True while a filter is typed: the grid packs the matches instead of
     /// leaving the holes their slots would leave (§12.2).
     packed: bool,
@@ -734,10 +736,11 @@ impl Render for QuickLaunchView {
                     items,
                     config.window.view,
                     f32::from(config.window.cell_size),
+                    config.window.show_cells,
                     !state.filter.trim().is_empty(),
                 )
             };
-            let (groups, items, view, cell_size, packed) = planned;
+            let (groups, items, view, cell_size, show_cells, packed) = planned;
             // The icons are asked for here, once per rebuild, because
             // `super::icon` needs the mutable state.
             let drawn: Rc<Vec<Drawn>> = Rc::new(
@@ -765,6 +768,7 @@ impl Render for QuickLaunchView {
                 drawn,
                 view,
                 cell_size,
+                show_cells,
                 packed,
             });
         }
@@ -775,6 +779,7 @@ impl Render for QuickLaunchView {
         let drawn = frame.drawn.clone();
         let view = frame.view;
         let cell_size = frame.cell_size;
+        let show_cells = frame.show_cells;
         let list_columns = fitted_list_columns(window);
         let packed = frame.packed;
         let list_icon = list_icon_size(configured_icon_size);
@@ -850,6 +855,7 @@ impl Render for QuickLaunchView {
                 &missing,
                 grid,
                 grid_icon,
+                show_cells,
                 packed,
                 &entity,
                 &self.scroll_handle,
@@ -1091,8 +1097,8 @@ fn group_shortcut(key: &str) -> Option<usize> {
     usize::try_from(digit).ok()?.checked_sub(1)
 }
 
-/// The gap between two grid cells, in logical pixels (the row's `gap_1`).
-const CELL_GAP: f32 = 4.0;
+/// The gap between two grid cells, in logical pixels.
+const CELL_GAP: f32 = 5.0;
 
 /// The narrowest a list column gets before another one is shown instead: its
 /// icon, name and path need that much to stay readable.
@@ -1425,6 +1431,7 @@ fn grid_view(
     missing: &HashMap<u32, bool>,
     grid: Grid,
     icon_size: f32,
+    show_cells: bool,
     packed: bool,
     entity: &WeakEntity<QuickLaunchView>,
     scroll_handle: &UniformListScrollHandle,
@@ -1482,6 +1489,7 @@ fn grid_view(
                                 grid.cell_width,
                                 grid.cell_height,
                                 icon_size,
+                                show_cells,
                                 &entity,
                             ));
                         }
@@ -1504,6 +1512,7 @@ fn grid_view(
                                 group_editable,
                                 grid.cell_width,
                                 grid.cell_height,
+                                show_cells,
                                 &entity,
                             ));
                         }
@@ -1588,6 +1597,7 @@ fn empty_cell(
     group_editable: bool,
     cell_width: f32,
     cell_height: f32,
+    show_cells: bool,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
@@ -1598,9 +1608,11 @@ fn empty_cell(
         .h(px(cell_height))
         .flex_shrink_0()
         .rounded(px(8.0))
-        .bg(rgb(theme::bg_secondary()))
+        .when(show_cells, |this| this.bg(rgb(theme::bg_secondary())))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme::bg_hover())))
+        .when(show_cells, |this| {
+            this.hover(|style| style.bg(rgb(theme::bg_hover())))
+        })
         .context_menu(move |menu, _window, cx| {
             let handle = handle.clone();
             let folder_handle = folder_handle.clone();
@@ -1779,6 +1791,7 @@ fn tile(
     cell_width: f32,
     cell_height: f32,
     icon_size: f32,
+    show_cells: bool,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
@@ -1816,7 +1829,7 @@ fn tile(
         .justify_center()
         .gap_1()
         .rounded(px(8.0))
-        .bg(rgb(theme::bg_secondary()))
+        .when(show_cells, |this| this.bg(rgb(theme::bg_secondary())))
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))

@@ -83,6 +83,8 @@ pub(super) enum Action {
     OnRunning(OnRunning),
     /// Keep the process alive after the main window closes.
     KeepRunning(bool),
+    /// Draw the cells' blocks, the empty ones included.
+    ShowCells(bool),
     /// Wait for the next key press to become the summon chord.
     RecordHotkey,
     /// Add a group at the end and start its rename.
@@ -276,6 +278,17 @@ impl Section {
                 ),
             )
             .wide(),
+            Row::new(
+                t!("Mostrar células"),
+                None,
+                page.switch_pick_when(
+                    "quick-launch-show-cells",
+                    window.show_cells,
+                    Pick::QuickLaunch(Action::ShowCells(!window.show_cells)),
+                    enabled,
+                    cx,
+                ),
+            ),
             Row::new(
                 t!("Esconder ao perder o foco"),
                 None,
@@ -1276,6 +1289,7 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
             set_window(cx, move |window| window.close_after_launch = on)
         }
         Action::Topmost(on) => set_window(cx, move |window| window.topmost = on),
+        Action::ShowCells(on) => set_window(cx, move |window| window.show_cells = on),
         Action::OnRunning(on_running) => {
             set_window(cx, move |window| window.on_running = on_running)
         }

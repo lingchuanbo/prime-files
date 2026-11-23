@@ -8378,4 +8378,15 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "新建文件夹条目",
         ],
     ),
+    (
+        "Mostrar células",
+        [
+            "Afficher les cellules",
+            "Zellen anzeigen",
+            "Mostra le celle",
+            "Показывать ячейки",
+            "セルを表示",
+            "显示格子",
+        ],
+    ),
 ];

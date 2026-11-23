@@ -130,10 +130,11 @@ schema_version = 1
 [window]
 hotkey = "ctrl+alt+Space"   # global-hotkey の形式。空文字なら OS に登録しない
 view = "grid"               # "grid" | "list"
-columns = 8                 # 2..=16
-cell_size = 100             # 64..=160
+columns = 8                 # 2..=16 (旧バージョンとの互換。今は cell_size と窓の幅で決まる)
+cell_size = 100             # 64..=160。格子はこの大きさを目安に窓を埋める
 icon_size = 64              # 16/24/32/48/64 のどれか (他の値は最も近いもの)
-list_columns = 2            # 1..=3
+show_cells = true           # 格子の枠を描く (空きマスも)
+list_columns = 2            # 1..=3 (旧バージョンとの互換。今は窓の幅で決まる)
 auto_hide = true
 topmost = false
 close_after_launch = true

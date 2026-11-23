@@ -80,15 +80,20 @@ pub struct WindowSettings {
     pub hotkey: String,
     /// Grid or list.
     pub view: View,
-    /// Grid columns, clamped to `2..=16`.
+    /// Grid columns, clamped to `2..=16`. Kept for files written before the grid
+    /// sized itself: its columns now come from `cell_size` and the window.
     pub columns: u8,
     /// Grid cell edge in logical pixels, clamped to `64..=160`.
     pub cell_size: u16,
     /// Icon edge in logical pixels; any other value snaps to the nearest of
     /// [`ICON_SIZES`].
     pub icon_size: u16,
-    /// Columns of the list view, clamped to `1..=3`.
+    /// Columns of the list view, clamped to `1..=3`. Kept for files written
+    /// before the list sized itself: its columns now come from the window's width.
     pub list_columns: u8,
+    /// Draw the cells' blocks, the empty ones included. Off leaves the icons and
+    /// names on the window's own background (§12.1).
+    pub show_cells: bool,
     /// Hide the window when it loses focus.
     pub auto_hide: bool,
     /// Keep the window above ordinary windows.
@@ -111,6 +116,7 @@ impl Default for WindowSettings {
             cell_size: 100,
             icon_size: 64,
             list_columns: 2,
+            show_cells: true,
             auto_hide: true,
             topmost: false,
             close_after_launch: true,
@@ -1431,6 +1437,7 @@ colors = true
         assert_eq!(window.columns, 8);
         assert_eq!(window.cell_size, 100);
         assert_eq!(window.icon_size, 64);
+        assert!(window.show_cells);
         assert_eq!(window.list_columns, 2);
         assert!(window.auto_hide);
         assert!(!window.topmost);
