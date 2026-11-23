@@ -18,6 +18,13 @@
         "name": {
           "description": "What the group bar shows. Not translated: what the author typed is what\nis displayed (§14).",
           "type": "string"
+        },
+        "source": {
+          "description": "A dynamic group's source (`folder:<path>`, `recent`, `most_used`), §17.2 G.\n\nA group with one has no items of its own: its items are generated at\nruntime and never written back, so a file that also lists items drops them\nwith a warning.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -120,6 +127,11 @@
         {
           "const": "new",
           "description": "Start a second instance.",
+          "type": "string"
+        },
+        {
+          "const": "ask",
+          "description": "Ask every time (§17.2 F).",
           "type": "string"
         }
       ]

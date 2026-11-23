@@ -1468,11 +1468,13 @@ mod tests {
                 id: "first".to_string(),
                 name: "Primeiro".to_string(),
                 items: Vec::new(),
+                source: None,
             },
             LaunchGroup {
                 id: "second".to_string(),
                 name: "Segundo".to_string(),
                 items: Vec::new(),
+                source: None,
             },
         ];
         assert_eq!(section.chosen_group(&groups), Some(0));

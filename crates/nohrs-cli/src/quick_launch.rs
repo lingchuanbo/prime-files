@@ -682,6 +682,7 @@ mod tests {
                 .iter()
                 .map(|slot| model::Item::new(*slot, "app", "Item"))
                 .collect(),
+            source: None,
         }
     }
 

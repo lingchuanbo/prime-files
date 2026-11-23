@@ -1504,6 +1504,7 @@ pub(crate) fn add_group(cx: &mut App) -> Option<usize> {
         id,
         name: nohrs_core::t!("Novo grupo").to_string(),
         items: Vec::new(),
+        source: None,
     });
     state.group = index;
     state.slot = None;
@@ -3380,6 +3381,7 @@ mod tests {
             items: (0..count)
                 .map(|slot| Item::new(slot, "app", format!("Item {slot}")))
                 .collect(),
+            source: None,
         }
     }
 
@@ -3513,11 +3515,13 @@ mod tests {
                     id: "group_1".to_string(),
                     name: "Um".to_string(),
                     items: Vec::new(),
+                    source: None,
                 },
                 Group {
                     id: "group_3".to_string(),
                     name: "Tres".to_string(),
                     items: Vec::new(),
+                    source: None,
                 },
             ],
             ..QuickLaunchConfig::default()
@@ -4933,6 +4937,7 @@ mod tests {
                     id: "general".to_string(),
                     name: "Geral".to_string(),
                     items: Vec::new(),
+                    source: None,
                 }],
                 ..QuickLaunchConfig::default()
             },
@@ -4994,6 +4999,7 @@ mod tests {
             id: "dev".to_string(),
             name: "Dev".to_string(),
             items: Vec::new(),
+            source: None,
         });
         state.set_group(1);
         assert_eq!(state.group, 1);
