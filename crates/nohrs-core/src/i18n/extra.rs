@@ -8378,15 +8378,4 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "新建文件夹条目",
         ],
     ),
-    (
-        "Máximo de colunas; a janela mostra menos quando não cabem.",
-        [
-            "Nombre maximal de colonnes ; une fenêtre plus étroite en montre moins.",
-            "Höchstzahl der Spalten; ein schmaleres Fenster zeigt weniger.",
-            "Numero massimo di colonne; una finestra più stretta ne mostra meno.",
-            "Максимум столбцов; в более узком окне их меньше.",
-            "最大列数。ウインドウが狭いと表示数が減ります。",
-            "最多列数；窗口变窄时会少显示几列。",
-        ],
-    ),
 ];

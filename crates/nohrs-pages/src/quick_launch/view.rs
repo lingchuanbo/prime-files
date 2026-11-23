@@ -131,7 +131,6 @@ struct Frame {
     groups: Rc<Vec<(String, bool)>>,
     drawn: Rc<Vec<Drawn>>,
     view: View,
-    columns: usize,
     cell_size: f32,
     /// True while a filter is typed: the grid packs the matches instead of
     /// leaving the holes their slots would leave (§12.2).
@@ -216,20 +215,17 @@ impl QuickLaunchView {
             cx.stop_propagation();
             return;
         }
-        let (view, cell_size, max_columns) = super::state(cx)
+        let (view, cell_size) = super::state(cx)
             .map(|quick_launch| {
                 let window = &quick_launch.config().window;
-                (
-                    window.view,
-                    f32::from(window.cell_size),
-                    usize::from(window.columns.max(1)),
-                )
+                (window.view, f32::from(window.cell_size))
             })
-            .unwrap_or((View::Grid, 100.0, 8));
+            .unwrap_or((View::Grid, 100.0));
         let columns = if view == View::List {
             fitted_list_columns(window)
         } else {
-            fitted_columns(window, cell_size, max_columns)
+            let width = f32::from(window.viewport_size().width) - GROUP_BAR_WIDTH;
+            fit_count(width, cell_size)
         };
         let columns = i64::try_from(columns).unwrap_or(8);
         if modifiers.alt
@@ -737,12 +733,11 @@ impl Render for QuickLaunchView {
                     groups,
                     items,
                     config.window.view,
-                    usize::from(config.window.columns.max(1)),
                     f32::from(config.window.cell_size),
                     !state.filter.trim().is_empty(),
                 )
             };
-            let (groups, items, view, columns, cell_size, packed) = planned;
+            let (groups, items, view, cell_size, packed) = planned;
             // The icons are asked for here, once per rebuild, because
             // `super::icon` needs the mutable state.
             let drawn: Rc<Vec<Drawn>> = Rc::new(
@@ -769,7 +764,6 @@ impl Render for QuickLaunchView {
                 groups,
                 drawn,
                 view,
-                columns,
                 cell_size,
                 packed,
             });
@@ -781,18 +775,31 @@ impl Render for QuickLaunchView {
         let drawn = frame.drawn.clone();
         let view = frame.view;
         let cell_size = frame.cell_size;
-        // The configured count is the maximum; the window's width decides how many
-        // actually fit (and a narrow window shows fewer).
-        let columns = fitted_columns(window, cell_size, frame.columns);
         let list_columns = fitted_list_columns(window);
         let packed = frame.packed;
-        let grid_icon = grid_icon_size(configured_icon_size, cell_size);
         let list_icon = list_icon_size(configured_icon_size);
         let hovered = self.hovered;
         let ever_hovered = Rc::new(self.ever_hovered.clone());
 
         let filter_text = super::filter(cx).to_string();
         let filtered_count = drawn.len();
+        // The window's height less what the rows above and below the grid take;
+        // the grid is laid out over the rest.
+        let chrome = TITLE_BAR_HEIGHT
+            + if filter_text.is_empty() { 0.0 } else { 24.0 }
+            + if read_only.is_some() { 30.0 } else { 0.0 }
+            + if message.is_some() {
+                FOOTER_HEIGHT
+            } else {
+                0.0
+            };
+        let viewport = window.viewport_size();
+        let grid = grid_metrics(
+            f32::from(viewport.width) - GROUP_BAR_WIDTH,
+            f32::from(viewport.height) - chrome,
+            cell_size,
+        );
+        let grid_icon = grid_icon_size(configured_icon_size, grid.cell_height);
         let title_bar = self.render_title_bar(editable, cx);
         let group_bar = render_group_bar(&groups, self.renaming.as_ref(), editable, cx);
         let entity = cx.entity().downgrade();
@@ -841,8 +848,7 @@ impl Render for QuickLaunchView {
                 editable,
                 group_editable,
                 &missing,
-                columns,
-                cell_size,
+                grid,
                 grid_icon,
                 packed,
                 &entity,
@@ -1107,22 +1113,43 @@ fn list_icon_size(configured: u16) -> f32 {
     f32::from(configured).clamp(16.0, LIST_ROW_HEIGHT - 16.0)
 }
 
-/// How many cells of `cell_size` fit in `width`, never more than `max_columns`.
-fn fit_columns(width: f32, cell_size: f32, max_columns: usize) -> usize {
+/// How many cells of `cell_size` fit in `available` logical pixels.
+fn fit_count(available: f32, cell_size: f32) -> usize {
     let cell = cell_size.max(1.0);
-    let fit = ((width + CELL_GAP) / (cell + CELL_GAP)).floor();
-    let fit = if fit.is_finite() && fit >= 1.0 {
+    let fit = ((available + CELL_GAP) / (cell + CELL_GAP)).floor();
+    if fit.is_finite() && fit >= 1.0 {
         usize::try_from(fit as u64).unwrap_or(1)
     } else {
         1
-    };
-    fit.min(max_columns.max(1)).max(1)
+    }
 }
 
-/// [`fit_columns`] for the window's width, once the group bar is taken out.
-fn fitted_columns(window: &Window, cell_size: f32, max_columns: usize) -> usize {
-    let width = f32::from(window.viewport_size().width) - GROUP_BAR_WIDTH;
-    fit_columns(width, cell_size, max_columns)
+/// A grid that covers the window.
+///
+/// The cell size setting says how big a cell should be; the window's size says how
+/// many fit; the cells then stretch so the window is filled exactly. An item that
+/// does not fit adds rows below, which scroll.
+#[derive(Clone, Copy)]
+struct Grid {
+    columns: usize,
+    /// How many rows the window's height shows at once.
+    fill_rows: usize,
+    cell_width: f32,
+    cell_height: f32,
+}
+
+/// [`Grid`] for `width` by `height` of usable content area.
+fn grid_metrics(width: f32, height: f32, cell_size: f32) -> Grid {
+    let columns = fit_count(width, cell_size);
+    let fill_rows = fit_count(height, cell_size);
+    let cell_width = ((width - CELL_GAP * (columns - 1) as f32) / columns as f32).max(1.0);
+    let cell_height = ((height - CELL_GAP * (fill_rows - 1) as f32) / fill_rows as f32).max(1.0);
+    Grid {
+        columns,
+        fill_rows,
+        cell_width,
+        cell_height,
+    }
 }
 
 /// How many list columns `width` has room for: one more whenever another
@@ -1396,20 +1423,20 @@ fn grid_view(
     editable: bool,
     group_editable: bool,
     missing: &HashMap<u32, bool>,
-    columns: usize,
-    cell_size: f32,
+    grid: Grid,
     icon_size: f32,
     packed: bool,
     entity: &WeakEntity<QuickLaunchView>,
     scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
+    let columns = grid.columns;
     let items: Vec<Item> = drawn.iter().map(|drawn| drawn.item.clone()).collect();
     let cells = if packed {
         packed_cells(&items, columns)
     } else {
         grid_cells(&items, columns)
     };
-    let rows = cells.len().div_ceil(columns.max(1));
+    let rows = cells.len().div_ceil(columns.max(1)).max(grid.fill_rows);
     let cells = Rc::new(cells);
     let drawn = Rc::new(drawn.to_vec());
     // The icon of a cell is the one the item got; the cell index is the slot.
@@ -1428,11 +1455,11 @@ fn grid_view(
             let mut lines = Vec::with_capacity(range.len());
             for row in range {
                 let mut line = div()
-                    .h(px(cell_size))
+                    .h(px(grid.cell_height))
                     .w_full()
                     .flex()
                     .items_center()
-                    .gap_1();
+                    .gap(px(CELL_GAP));
                 for column in 0..columns.max(1) {
                     let index = row.saturating_mul(columns.max(1)).saturating_add(column);
                     match cells.get(index).and_then(Option::as_ref) {
@@ -1452,7 +1479,8 @@ fn grid_view(
                                 group,
                                 editable,
                                 group_editable,
-                                cell_size,
+                                grid.cell_width,
+                                grid.cell_height,
                                 icon_size,
                                 &entity,
                             ));
@@ -1462,8 +1490,8 @@ fn grid_view(
                             // padding of the last row: there is no slot to add to.
                             line = line.child(
                                 div()
-                                    .w(px(cell_size))
-                                    .h(px(cell_size))
+                                    .w(px(grid.cell_width))
+                                    .h(px(grid.cell_height))
                                     .flex_shrink_0()
                                     .rounded(px(8.0)),
                             );
@@ -1474,7 +1502,8 @@ fn grid_view(
                                 slot,
                                 group,
                                 group_editable,
-                                cell_size,
+                                grid.cell_width,
+                                grid.cell_height,
                                 &entity,
                             ));
                         }
@@ -1557,17 +1586,19 @@ fn empty_cell(
     slot: u32,
     group: usize,
     group_editable: bool,
-    cell_size: f32,
+    cell_width: f32,
+    cell_height: f32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
     let folder_handle = entity.clone();
     div()
         .id(("quick-launch-empty", slot))
-        .w(px(cell_size))
-        .h(px(cell_size))
+        .w(px(cell_width))
+        .h(px(cell_height))
         .flex_shrink_0()
         .rounded(px(8.0))
+        .bg(rgb(theme::bg_secondary()))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(theme::bg_hover())))
         .context_menu(move |menu, _window, cx| {
@@ -1745,7 +1776,8 @@ fn tile(
     group: usize,
     editable: bool,
     group_editable: bool,
-    cell_size: f32,
+    cell_width: f32,
+    cell_height: f32,
     icon_size: f32,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
@@ -1756,7 +1788,7 @@ fn tile(
     let drag_name = SharedString::from(item.name.clone());
     let drop_handle = entity.clone();
     let hover_handle = entity.clone();
-    let (icon_rest, icon_grown) = hover_icon_edges(icon_size, cell_size);
+    let (icon_rest, icon_grown) = hover_icon_edges(icon_size, cell_height);
     let icon = div()
         .flex_none()
         .size(px(icon_rest))
@@ -1775,8 +1807,8 @@ fn tile(
     );
     div()
         .id(("quick-launch-tile", slot))
-        .w(px(cell_size))
-        .h(px(cell_size))
+        .w(px(cell_width))
+        .h(px(cell_height))
         .flex_shrink_0()
         .flex()
         .flex_col()
@@ -1784,6 +1816,7 @@ fn tile(
         .justify_center()
         .gap_1()
         .rounded(px(8.0))
+        .bg(rgb(theme::bg_secondary()))
         .cursor_pointer()
         .when(selected, |this| this.bg(rgb(theme::accent_subtle())))
         .hover(|style| style.bg(rgb(theme::bg_hover())))
@@ -1834,7 +1867,7 @@ fn tile(
         .child(icon)
         .child(
             div()
-                .max_w(px(cell_size - 6.0))
+                .max_w(px(cell_width - 6.0))
                 .h(px(NAME_LINE_HEIGHT))
                 .overflow_hidden()
                 .text_ellipsis()
@@ -2506,21 +2539,20 @@ mod tests {
         assert!(row_grown <= LIST_ROW_HEIGHT && row_grown > row_rest);
     }
 
-    /// The grid shows as many columns as fit the window, up to the configured
-    /// maximum, and never fewer than one.
+    /// The grid covers the window: as many cells of the configured size as fit,
+    /// stretched so their rows and columns reach the edges, and no fewer than one.
     #[test]
-    fn the_grid_shows_the_columns_that_fit_the_window() {
-        let wide = 980.0 - GROUP_BAR_WIDTH;
-        assert_eq!(fit_columns(wide, 100.0, 8), 8);
-        assert_eq!(fit_columns(240.0, 100.0, 8), 2);
-        assert_eq!(
-            fit_columns(1200.0, 100.0, 8),
-            8,
-            "the setting is the maximum"
-        );
-        assert_eq!(fit_columns(1200.0, 100.0, 16), 11);
-        assert_eq!(fit_columns(0.0, 100.0, 8), 1, "narrower than a cell");
-        assert_eq!(fit_columns(50.0, 100.0, 8), 1);
+    fn the_grid_fills_the_window() {
+        let grid = grid_metrics(860.0, 800.0, 100.0);
+        assert_eq!(grid.columns, 8);
+        assert_eq!(grid.fill_rows, 7);
+        let covered = grid.cell_width * 8.0 + CELL_GAP * 7.0;
+        assert!((covered - 860.0).abs() < 0.001, "the cells fill the width");
+        assert!(grid.cell_width >= 100.0, "the cells stretch, not shrink");
+        let narrow = grid_metrics(240.0, 100.0, 100.0);
+        assert_eq!(narrow.columns, 2);
+        assert_eq!(narrow.fill_rows, 1);
+        assert_eq!(grid_metrics(10.0, 10.0, 100.0).columns, 1);
     }
 
     /// The icon is the configured size unless the cell is too small for it.

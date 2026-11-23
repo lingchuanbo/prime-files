@@ -32,17 +32,6 @@ use nohrs_ui::theme::theme;
 use super::{Pick, Row, SettingsPage};
 use crate::quick_launch;
 
-/// The grid column counts offered, inside the `2..=16` of §4.
-const COLUMNS: [(&str, u8); 7] = [
-    ("2", 2),
-    ("4", 4),
-    ("6", 6),
-    ("8", 8),
-    ("10", 10),
-    ("12", 12),
-    ("16", 16),
-];
-
 /// The cell sizes offered, inside the `64..=160` of §4.
 const CELL_SIZES: [(&str, u16); 8] = [
     ("64", 64),
@@ -77,7 +66,7 @@ pub(super) enum Action {
     /// A new layout for the grid.
     View(View),
     /// A new grid column count.
-    Columns(u8),
+
     /// A new grid cell edge.
     CellSize(u16),
     /// A new icon edge.
@@ -263,18 +252,6 @@ impl Section {
                     cx,
                 ),
             ),
-            Row::hint(
-                t!("Colunas"),
-                t!("Máximo de colunas; a janela mostra menos quando não cabem."),
-                page.chips_when(
-                    "quick-launch-columns",
-                    &numbered(&COLUMNS, window.columns, Action::Columns),
-                    false,
-                    enabled,
-                    cx,
-                ),
-            )
-            .wide(),
             Row::new(
                 t!("Tamanho da célula"),
                 None,
@@ -1292,7 +1269,6 @@ enum Field {
 pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<SettingsPage>) {
     match action {
         Action::View(view) => set_window(cx, move |window| window.view = view),
-        Action::Columns(columns) => set_window(cx, move |window| window.columns = columns),
         Action::CellSize(size) => set_window(cx, move |window| window.cell_size = size),
         Action::IconSize(size) => set_window(cx, move |window| window.icon_size = size),
         Action::AutoHide(on) => set_window(cx, move |window| window.auto_hide = on),
@@ -2196,9 +2172,6 @@ mod tests {
     /// The numeric controls only offer values inside the limits of §4.
     #[test]
     fn the_number_controls_stay_inside_the_limits_of_the_file() {
-        for &(_, value) in &COLUMNS {
-            assert!((2..=16).contains(&value));
-        }
         for &(_, value) in &CELL_SIZES {
             assert!((64..=160).contains(&value));
         }
