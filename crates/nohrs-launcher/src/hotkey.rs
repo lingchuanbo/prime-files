@@ -355,7 +355,6 @@ pub fn parse(text: &str) -> Result<HotKey> {
     text.parse::<HotKey>()
         .map_err(|error| anyhow!("could not read the hotkey {text:?}: {error}"))
 }
-
 /// Starts the portal conversation and forwards its activations.
 ///
 /// The D-Bus session talks over threads, so it runs on the background executor;
@@ -652,6 +651,33 @@ mod tests {
         }
     }
 
+    /// §17.1 B: every chord the converter produces is one the registration takes.
+    ///
+    /// The check needs `parse`, which core does not have, so it lives here.
+    #[test]
+    fn every_converted_chord_is_accepted_by_the_registration() {
+        for recorded in [
+            "ctrl-alt-space",
+            "alt-ctrl-n",
+            "shift-ctrl-alt-super-5",
+            "ctrl-alt-f12",
+            "ctrl-alt--",
+            "ctrl-alt-up",
+            "ctrl-alt-,",
+            "ctrl-alt-;",
+            "ctrl-alt-'",
+            "ctrl-alt-`",
+            "ctrl-alt-\\",
+            "ctrl-alt-[",
+            "ctrl-alt-]",
+            "ctrl-alt-=",
+            "ctrl-alt-.",
+            "ctrl-alt-/",
+        ] {
+            let text = nohrs_core::shortcuts::gpui_keys_to_hotkey(recorded).expect(recorded);
+            assert!(parse(&text).is_ok(), "{recorded} -> {text}");
+        }
+    }
     #[test]
     fn a_configured_chord_is_read_the_way_the_registration_writes_it() {
         let chord = parse("ctrl+alt+Space").expect("the default quick-launch chord parses");

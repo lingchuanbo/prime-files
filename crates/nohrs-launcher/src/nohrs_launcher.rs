@@ -37,7 +37,7 @@ use std::sync::Arc;
 use gpui::{App, AppContext, actions};
 use nohrs_services::search::file_index::{FileIndexConfig, FileNameIndex};
 
-pub use crate::ranking::{ItemKind, LauncherItem, rank};
+pub use crate::ranking::{ItemKind, LauncherItem, QuickLaunchEntry, rank, rank_quick_launch};
 pub use crate::view::LauncherView;
 pub use crate::window::{
     LAUNCHER_HEIGHT, LAUNCHER_WIDTH, launcher_bounds, launcher_window_options,
@@ -46,6 +46,36 @@ pub use crate::window::{
 pub use hotkey::{
     HotkeyId, describe_hotkey, is_registered, parse as parse_hotkey, register, unregister,
 };
+
+/// What the launcher asks the quick launch for, injected by the binary (M3 D).
+///
+/// `nohrs-launcher` may not depend on `nohrs-pages` (§3.4), so the two directions
+/// are function pointers set by `nohrs/src/app.rs`, the same shape as the chord
+/// hooks of M1.
+#[derive(Clone, Copy)]
+pub struct QuickLaunchHooks {
+    /// Every entry, cloned from the pages layer's memory. Runs on the foreground
+    /// and touches nothing but memory.
+    pub snapshot: fn(&App) -> Vec<QuickLaunchEntry>,
+    /// Starts the entry in `group`/`slot`, or shows its place when `reveal`.
+    pub activate: fn(&mut App, group: &str, slot: u32, reveal: bool),
+}
+
+/// The hooks, once the binary has installed them.
+struct QuickLaunchHooksGlobal(Option<QuickLaunchHooks>);
+
+impl gpui::Global for QuickLaunchHooksGlobal {}
+
+/// Installs the quick launch's hooks (M3 D).
+pub fn set_quick_launch_hooks(cx: &mut App, hooks: QuickLaunchHooks) {
+    cx.set_global(QuickLaunchHooksGlobal(Some(hooks)));
+}
+
+/// The hooks, when the binary has installed them.
+pub fn quick_launch_hooks(cx: &App) -> Option<QuickLaunchHooks> {
+    cx.try_global::<QuickLaunchHooksGlobal>()
+        .and_then(|global| global.0)
+}
 
 actions!(
     launcher,

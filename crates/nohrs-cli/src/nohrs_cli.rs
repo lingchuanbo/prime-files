@@ -12,6 +12,8 @@ pub mod doctor;
 pub mod ledger;
 /// `log`: read back the rolling log file nohrs writes about itself.
 pub mod log;
+/// `quick-launch` (`ql`): manage the Quick Launch entries from a terminal.
+pub mod quick_launch;
 /// `rm`: trash-by-default removal.
 pub mod rm;
 /// `shim`: install and remove the symlinks that shadow a system command.
@@ -58,6 +60,10 @@ pub enum Command {
     /// operation took.
     #[command(subcommand)]
     Log(log::Command),
+    /// List, add, remove, start and check Quick Launch entries. Also available
+    /// under the shorter name `ql`.
+    #[command(subcommand, alias = "ql")]
+    QuickLaunch(quick_launch::Command),
     /// Check that the pieces `noh rm` relies on are in place.
     Doctor,
     /// Install or remove the symlinks that put `noh` in front of a system
@@ -203,6 +209,19 @@ mod tests {
         }
         assert!(!reads(&["noh", "rm", "notes.txt"]));
         assert!(!reads(&["rm", "-rf", "build"]));
+    }
+
+    #[test]
+    fn the_quick_launch_command_answers_to_its_alias() {
+        for name in ["quick-launch", "ql"] {
+            let invocation = Invocation::try_parse_from(argv(&["noh", name, "list"])).unwrap();
+            match invocation {
+                Invocation::Direct(Cli {
+                    command: Command::QuickLaunch(quick_launch::Command::List(args)),
+                }) => assert!(!args.json),
+                other => panic!("{name} did not parse as quick-launch list: {other:?}"),
+            }
+        }
     }
 
     #[test]

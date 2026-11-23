@@ -55,6 +55,8 @@ pub enum SettingsSection {
     Search,
     /// Opening folders from Windows and other programs here.
     Integrations,
+    /// The quick-launch window: its chord, layout and groups.
+    QuickLaunch,
     /// The keyboard shortcuts, for reference.
     Shortcuts,
     /// Version, updates and the config file itself.
@@ -62,7 +64,7 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::General,
         Self::Tabs,
         Self::Appearance,
@@ -71,6 +73,7 @@ impl SettingsSection {
         Self::Media,
         Self::Search,
         Self::Integrations,
+        Self::QuickLaunch,
         Self::Shortcuts,
         Self::About,
     ];
@@ -85,6 +88,7 @@ impl SettingsSection {
             Self::Media => t!("Mídia"),
             Self::Search => t!("Busca"),
             Self::Integrations => t!("Integração com o Windows"),
+            Self::QuickLaunch => t!("Inicialização rápida"),
             Self::Shortcuts => t!("Atalhos"),
             Self::About => t!("Sobre"),
         }
@@ -104,6 +108,9 @@ impl SettingsSection {
             Self::Integrations => {
                 t!("Abrir no LumaFiles as pastas do Windows e de outros programas.")
             }
+            Self::QuickLaunch => {
+                t!("Atalho global, aparência e os grupos da inicialização rápida.")
+            }
             Self::Shortcuts => t!("Mude as teclas de cada comando do explorador."),
             Self::About => t!("Versão, atualizações e o arquivo de configuração."),
         }
@@ -121,6 +128,7 @@ impl SettingsSection {
             Self::Media => "icons/music.svg",
             Self::Search => "icons/search.svg",
             Self::Integrations => "icons/app-window.svg",
+            Self::QuickLaunch => "icons/pin.svg",
             Self::Shortcuts => "icons/case-sensitive.svg",
             Self::About => "icons/info.svg",
         }
@@ -170,6 +178,8 @@ enum Pick {
     ResetAllShortcuts,
     // Starts LumaFiles minimized at sign-in, or stops it.
     StartWithWindows(bool),
+    // A change of the quick-launch window, which keeps its own file (§17.1 B).
+    QuickLaunch(quick_launch::Action),
 }
 
 // One setting: its name, what it does, and the control that changes it.
@@ -278,6 +288,8 @@ pub struct SettingsPage {
     focus_handle: FocusHandle,
     // The command whose new keys are being waited for.
     recording: Option<Action>,
+    // The quick-launch section: its form, the recorded chord and the group list.
+    quick_launch: quick_launch::Section,
 }
 
 /// The colour wheel while it is open: the colour the handles point at, and
@@ -345,6 +357,7 @@ impl SettingsPage {
             space_map_colors: Vec::new(),
             focus_handle: cx.focus_handle(),
             recording: None,
+            quick_launch: quick_launch::Section::default(),
         };
         page.refresh_default_explorer(cx);
         page.refresh_listary(cx);
@@ -562,6 +575,7 @@ impl SettingsPage {
                 self.edit_keybindings(vec![(shortcuts::info_of(action).id, None)], None, cx);
             }
             Pick::StartWithWindows(enable) => self.set_start_with_windows(enable, cx),
+            Pick::QuickLaunch(action) => quick_launch::apply(self, action, cx),
             Pick::ResetAllShortcuts => {
                 self.recording = None;
                 let edits = shortcuts::ACTIONS
@@ -627,6 +641,10 @@ impl SettingsPage {
     // A key pressed while a command waits for its shortcut. Modifiers alone
     // wait for the rest; Esc gives up.
     fn record_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.quick_launch.is_recording() {
+            quick_launch::record_key(self, event, cx);
+            return;
+        }
         let Some(action) = self.recording else {
             return;
         };
@@ -1282,9 +1300,14 @@ impl SettingsPage {
             SettingsSection::Media => self.media(cx),
             SettingsSection::Search => self.search_section(cx),
             SettingsSection::Integrations => self.integrations(cx),
+            SettingsSection::QuickLaunch => self.quick_launch(cx),
             SettingsSection::Shortcuts => self.shortcuts(cx),
             SettingsSection::About => self.about(cx),
         }
+    }
+
+    fn quick_launch(&self, cx: &mut Context<Self>) -> Vec<Group> {
+        self.quick_launch.groups(self, cx)
     }
 
     fn tabs(&self, cx: &mut Context<Self>) -> Vec<Group> {
@@ -3333,6 +3356,19 @@ impl SettingsPage {
         pick: Pick,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        self.switch_pick_when(id, on, pick, true, cx)
+    }
+
+    // The same switch, greyed and inert while the quick-launch file is
+    // read-only (§17.1 B).
+    fn switch_pick_when(
+        &self,
+        id: &'static str,
+        on: bool,
+        pick: Pick,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         const WIDTH: f32 = 38.0;
         const HEIGHT: f32 = 22.0;
         const KNOB: f32 = 16.0;
@@ -3343,8 +3379,13 @@ impl SettingsPage {
             .flex()
             .items_center()
             .gap_2()
-            .cursor_pointer()
-            .on_click(cx.listener(move |page, _event, _window, cx| page.pick(pick.clone(), cx)))
+            .when(enabled, |this| this.cursor_pointer())
+            .when(enabled, |this| {
+                this.on_click(
+                    cx.listener(move |page, _event, _window, cx| page.pick(pick.clone(), cx)),
+                )
+            })
+            .when(!enabled, |this| this.opacity(0.45))
             .child(
                 div()
                     .text_xs()
@@ -3451,6 +3492,18 @@ impl SettingsPage {
         toggles: bool,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.chips_when(id, options, toggles, true, cx)
+    }
+
+    // The chips of `chips`, greyed and inert while `enabled` is false (§17.1 B).
+    fn chips_when(
+        &self,
+        id: &'static str,
+        options: &[(&'static str, bool, Pick)],
+        toggles: bool,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             // Only long rows wrap: a short row beside its text measured at
@@ -3462,6 +3515,7 @@ impl SettingsPage {
             .bg(rgb(theme::bg()))
             .border_1()
             .border_color(rgb(theme::border()))
+            .when(!enabled, |this| this.opacity(0.45))
             .children(
                 options
                     .iter()
@@ -3477,7 +3531,7 @@ impl SettingsPage {
                             .items_center()
                             .gap_1()
                             .rounded(px(5.0))
-                            .cursor_pointer()
+                            .when(enabled, |this| this.cursor_pointer())
                             .text_sm()
                             .whitespace_nowrap()
                             .map(|this| {
@@ -3492,7 +3546,7 @@ impl SettingsPage {
                                     })
                                 }
                             })
-                            .when(!selected || toggles, |this| {
+                            .when(enabled && (!selected || toggles), |this| {
                                 this.on_click(cx.listener(move |page, _event, _window, cx| {
                                     page.pick(pick.clone(), cx)
                                 }))
@@ -4062,6 +4116,11 @@ impl Render for SettingsPage {
         self.ensure_tab_width_select(window, cx);
         let query = input.read(cx).value().to_string();
         let searching = !query.trim().is_empty();
+        // The quick-launch rows may hold text fields; they need a window, and
+        // only the section and a search draw them.
+        if searching || self.section == SettingsSection::QuickLaunch {
+            quick_launch::ensure_inputs(self, window, cx);
+        }
         let width = f32::from(window.viewport_size().width);
         let narrow = width < NARROW;
         let content_width = if narrow { width } else { width - NAV_WIDTH };
@@ -4228,6 +4287,8 @@ fn pointer_events(page: Entity<SettingsPage>, part: WheelPart) -> AnyElement {
     .size_full()
     .into_any_element()
 }
+
+mod quick_launch;
 
 #[cfg(test)]
 #[path = "settings/tests.rs"]

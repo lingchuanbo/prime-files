@@ -1,9 +1,12 @@
-# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.4
+# 快速启动（Quick Launch）技术实现方案与边界约定 · v2.7
 
 > v2.1（2026-11-22）：写入 Q1–Q5 的确认结果，新增 §15.0（主程序常驻）和 §15.1（常驻模式）。
 > v2.2（2026-11-22，M1 验收后）：§8.4 改为启动、图标两条线程。M1 的具体问题见 `docs/QuickLaunch-M1-验收报告.md`。
 > v2.3（2026-11-22，M1 复查后）：§8.5 失败提示改为窗口底部一行；§4.2 补充 BOM 的处理。
 > v2.4（2026-11-22，M2 开工前）：新增 §12.3，规定 M2 的添加和编辑界面。
+> v2.5（2026-11-22）：新增 §11.1 锁定按钮。
+> v2.6（2026-11-23）：新增 §17.1，M3 实现细则。
+> v2.7（2026-11-23，M3 验收后）：更正 §17.1 B 中 `gpui_keys_to_hotkey` 的位置，改放到 `nohrs-core`。
 
 > 这是一份**实现规格**，执行方（DeepSeek）按它写代码。写着“必须 / 禁止”的条款不能自行改动；没写到的情况按 §19 处理。
 > 需求见 `docs/LumaFiles-快速启动工具方案.md`。两份文档有冲突时，**以本文为准**。
@@ -363,6 +366,32 @@ pub fn parse(text: &str) -> Result<HotKey>;   // 用 global_hotkey 的 FromStr�
 
 ---
 
+### 11.1 锁定按钮（v2.5，BoBO 2026-11-22 提出）
+
+问题：从资源管理器或桌面往快速启动里拖文件时，要先点击别的窗口去选文件，快速启动窗口一失去焦点就会在 150 ms 后自动隐藏，导致无法拖入。
+
+规定：
+- 标题栏右侧、“⋯”按钮**左边**加一个“锁定”按钮（图钉或锁图标）。图标优先用 gpui-component 自带的 `IconName`；没有合适的图标时，把一个 SVG 放进 `nohrs-ui` 的 assets，**不要**用文字或 emoji 代替。
+- 锁定状态**复用已有的 `window.topmost` 字段**，不新增配置项：
+  - 锁定：`topmost = true`，窗口保持在最前（`set_topmost(window, true)`），失去焦点**不自动隐藏**（现有的 `activation_changed` 已经在 `topmost` 为真时跳过隐藏）。
+  - 解锁：`topmost = false`，恢复原来的行为。
+- 点击后立即生效，并通过 `mark_dirty()` + `touch()` 保存，下次打开时保持上次的状态。只读状态下按钮仍然可以切换，但只在本次会话内有效、不写回文件，提示文字后面加上“（不会保存）”。
+- 按钮外观：锁定时用 `theme::accent()` 高亮显示，解锁时用普通的幽灵按钮样式。提示文字：
+  - 解锁时：`t!("Fixar: a janela não se esconde e fica na frente")`，中文为“锁定：窗口不会自动隐藏，并保持在最前”；
+  - 锁定时：`t!("Desafixar")`，中文为“解除锁定”。
+  - 9 种语言都要补齐。
+- 锁定期间的隐藏规则：
+  | 触发 | 解锁时 | 锁定时 |
+  |---|---|---|
+  | 失去焦点 | 150 ms 后隐藏 | **不隐藏** |
+  | 启动条目后（`close_after_launch`） | 隐藏 | **不隐藏** |
+  | Shift+单击“打开所在位置”后 | 隐藏 | **不隐藏** |
+  | Esc（没有过滤内容时） | 隐藏 | 隐藏（用户明确要求） |
+  | 再按一次全局热键、托盘菜单 | 切换显示 | 切换显示 |
+- 热重载：`quicklaunch.toml` 中的 `topmost` 被外部修改后，对已经打开的窗口也要调用 `set_topmost`，按钮状态同步更新（目前只在创建窗口时设置一次）。
+- 测试：切换会改变 `config.window.topmost` 并标记为待保存；只读状态下切换不会保存；锁定时 `close_after_launch` 和 reveal 都不会隐藏窗口；热重载改变 `topmost` 后，状态同步更新。
+- 手测：锁定后点击桌面，再从桌面拖一个文件进来，窗口始终可见，条目加入成功；解锁后点击桌面，窗口隐藏。
+
 ## 12. 交互
 
 ### 12.1 布局
@@ -533,6 +562,106 @@ BoBO 于 2026-11-22 确认 Q5：主窗口关闭后，即使托盘图标也关着
 每个里程碑结束时，在 `docs/launcher.md` 里补充或更新“Quick Launch”一节，记录实际实现和本文的差异。
 
 ---
+
+## 17.1 M3 实现细则（v2.6，2026-11-23）
+
+> §17 中 M3 只有一行。本节在核对现有代码后，把它拆成可以直接实现的规定。M3 只做本节列出的内容。
+
+### A. 共享的基础：先把两个函数移出 `nohrs-pages`
+
+CLI（`nohrs-cli`）不能依赖 gpui，也就不能依赖 `nohrs-pages`。它要用到的两段逻辑现在都在 `quick_launch.rs` 里，**先移走，再写 CLI**：
+
+| 现位置 | 新位置 | 说明 |
+|---|---|---|
+| `quick_launch.rs::item_for_path(path, slot, is_dir)` | `nohrs_core::config::quick_launch::item_for_path` | 纯函数，原样移过去；`nohrs-pages` 改为调用新位置，测试一并移动 |
+| `quick_launch.rs::write_atomically` | `nohrs_services::fs::write_atomically(path, contents) -> io::Result<u64>` | 保持语义不变：写 `.tmp` → `sync_all` → 复制出 `.bak` → rename，返回内容哈希；带 `#[allow(clippy::disallowed_methods)]` 并注明原因 |
+
+### B. 设置页“快速启动”（§13 的补充）
+
+- `SettingsSection::QuickLaunch` 放在 `Integrations` 之后，同步修改 `ALL` 的长度和顺序；标签用 `t!("Inicialização rápida")`。
+- 写在 `settings/quick_launch.rs` 中，使用 `settings.rs` 现有的 `Group` / `Row` / `Pick` 写法。行标签必须是 `&'static str` 并走 `t!`，这样 settings 现有的搜索（`fold(row.label)`）就能直接搜到，**不要另写搜索**。
+- **常驻模式（Standalone）没有设置页**，什么都不用做。
+- 页面分四组：
+
+| 组 | 行 | 实现 |
+|---|---|---|
+| 窗口 | 热键、视图（网格/列表）、列数、格子大小、图标大小、列表列数、失焦自动隐藏、启动后隐藏、锁定（置顶）、程序已运行时（激活/新开）、关闭主窗口后保持运行 | 每项改完调用新增的 `set_window(cx, f: impl FnOnce(&mut WindowSettings))`：`touch()` + `mark_dirty()`；改 `topmost` 还要 `sync_topmost`，改 `hotkey` 还要 `sync_hotkey`。数值用现有的步进或下拉控件，范围与 §4 一致 |
+| 分组 | 分组列表：新建、改名、删除、上移、下移 | 新建、改名、删除复用 M2 的 `add_group` / `rename_group` / `delete_group`（含确认和“最后一个不能删”）。新增 `move_group(cx, from, to)`；健康状态和 usage 都按分组 id 记录，排序不需要迁移 |
+| 条目 | 先在下拉框选分组，再看条目列表（名称、类型、路径），选中一个条目后显示完整表单 | 表单字段：类型（只能选 app / folder / file / url；未知类型只读显示）、名称、路径（带“浏览…”）、参数、工作目录（带“浏览…”）、以管理员运行、图标、标签（逗号分隔）。保存走新增的 `update_item(cx, group, slot, ItemEdit)`，规则同 `edit_item`（名称和路径不能为空、只读时拒绝、`recheck_health`、路径变化时按 S4 重新判断类型）。`edit_item` 改成调用 `update_item`，不保留两套逻辑 |
+| 文件 | 文件路径（只读显示）、“打开 quicklaunch.toml”、“在 LumaFiles 中显示” | 打开文件在后台用 `ShellExecuteExW`（verb 为 NULL）；按钮旁显示提示 `t!("Editar pela interface reescreve o arquivo e remove os comentários.")`。只读状态时，在本组顶部用红字显示原因，并把其他三组的所有控件置灰 |
+
+- **热键录制**：复用 settings 已有的 `RecordShortcut` / `record_key` 机制。录到的 gpui 按键（`ctrl-alt-space`）用新增的纯函数 `gpui_keys_to_hotkey(&str) -> Option<String>` 转成 global-hotkey 的写法（`ctrl+alt+Space`），放在 **`nohrs-core`**（v2.7 更正：v2.6 写的是 `nohrs-launcher/src/hotkey.rs`，但设置页所在的 `nohrs-pages` 不能依赖 `nohrs-launcher`），并写测试，覆盖修饰键顺序、字母、数字、F 键、空格、无法转换的键。录完后通过 `sync_hotkey` 注册：
+  - 成功：行尾显示“已注册”；
+  - 失败：显示 `hotkey_error`，并保留原来的热键（M1 已实现这一点）；
+  - 与 Launcher 的热键相同：显示“和搜索启动器的热键冲突”。
+- 设置页和快速启动窗口**读写的是同一个 `QuickLaunch` 全局状态**，任何一边修改，另一边下一帧就能看到（`touch()` + `cx.refresh_windows()`）。
+
+### C. 命令行：`noh quick-launch`（别名 `noh ql`）
+
+| 子命令 | 行为 |
+|---|---|
+| `list [--json]` | 列出所有分组和条目：分组 id、槽位、类型、名称、路径。第一行打印正在使用的 `quicklaunch.toml` 路径 |
+| `add <路径> [--group <id>] [--name <名称>] [--slot <n>] [--args <参数>] [--admin]` | 用 `item_for_path` 判断类型。`--group` 默认取第一个分组；`--slot` 默认取第一个空槽，指定的槽已被占用时报错并以退出码 1 退出，**不覆盖**。文件不存在时报错 |
+| `remove <分组id> <槽位>` | 删除条目 |
+| `run <分组id> <槽位> [--admin]` | Windows：初始化 COM 后用 `LaunchRegistry::with_builtins()` 启动。文件夹（`OpenFolder`）通过 `noh.exe` 同目录下的 `LumaFiles.exe <路径>` 打开（已运行的实例会接管）；找不到 `LumaFiles.exe` 就报错。非 Windows 平台输出“仅支持 Windows” |
+| `check [--json]` | 对每个条目做健康检查（规则同 `LaunchAction::health`），有失效条目时退出码为 1 |
+
+规则：
+- 配置路径与 GUI 的解析方式完全相同（`paths::quick_launch_file()`，包括便携模式）。
+- 写入前先 `parse`：遇到 `Parse` 或 `UnsupportedVersion` 时**拒绝写入**，打印原因，退出码 2；写入走 `nohrs_services::fs::write_atomically`。
+- **CLI 不打开 `state.redb`**（GUI 运行时它被独占锁定）。所以 `remove` 留下的 usage 记录由 GUI 清理（见 E）。
+- GUI 正在运行时，CLI 写入的结果由 GUI 的热重载读进去（按 §5.3，以外部文件为准）。
+- 输出文字使用英文，与现有 `noh` 子命令保持一致，不走 `t!`。
+- 测试放在 `crates/nohrs-cli/tests/quick_launch.rs`：使用临时配置目录（设置绝对路径的 `XDG_CONFIG_HOME`），覆盖 add 后 list、占用槽位报错、remove、解析失败时拒绝写入、`list --json` 的结构。
+
+### D. 搜索启动器里的 `@`（Launcher 数据源）
+
+依赖方向：`nohrs-launcher` 不能依赖 `nohrs-pages`（§3.4），所以用**钩子**连接，写法和 M1 的 `HotkeyHooks` 一样：
+
+```rust
+// nohrs-launcher
+pub struct QuickLaunchEntry { pub group: SharedString, pub slot: u32, pub name: SharedString,
+                              pub tags: Vec<SharedString>, pub kind: SharedString, pub path: SharedString }
+#[derive(Clone, Copy)]
+pub struct QuickLaunchHooks {
+    pub snapshot: fn(&App) -> Vec<QuickLaunchEntry>,                    // 在前台调用，只克隆内存里的数据
+    pub activate: fn(&mut App, group: &str, slot: u32, reveal: bool),
+}
+pub fn set_quick_launch_hooks(cx: &mut App, hooks: QuickLaunchHooks);   // 存成 Global
+```
+
+- `nohrs/src/app.rs` 在主模式和常驻模式下都调用 `set_quick_launch_hooks`，实现转发到 `nohrs_pages::quick_launch` 中新增的 `launcher_snapshot` / `activate_by_id`。
+- `ranking::ItemKind` 新增 `QuickLaunch` 变体，`badge` 返回 `t!("Inicialização rápida")`，`icon_path` 使用已有的启动类图标。`LauncherItem` 新增 `pub quick_launch: Option<(SharedString, u32)>`；文件搜索结果一律填 `None`。
+- **只在查询以 `@` 开头时**搜索快速启动条目（D1）：去掉 `@` 后，在 `schedule_search` 里先在前台取快照，再到后台用 nucleo 匹配名称和标签，按分数、分组顺序、槽位排序，最多返回 `MAX_RESULTS` 条。此时**不搜索文件**。查询不以 `@` 开头时，行为和现在**完全一样**，现有权重一律不改。
+- `open_selected`：`quick_launch` 为 `Some` 时调用 `activate(group, slot, false)`，否则保持原行为。`reveal_selected`：调用 `activate(.., true)`，即 Shift+单击时的“打开所在位置”。两种情况都关闭 Launcher 窗口。
+- 只有 `@`、后面没有内容时，列出全部条目（按分组和槽位排序），方便浏览。
+- placeholder 提示补充 `@`：在现有提示后面加 `t!("@ para a inicialização rápida")`。
+- 测试：ranking 测试覆盖 `@` 时只返回快速启动条目、不带 `@` 时结果与改动前完全一致（用现有测试保证）、名称和标签匹配、空 `@` 列出全部；`activate_by_id` 测试覆盖分组 id 不存在时什么都不做。
+
+### E. M2 遗留和补充
+
+1. **`exe,索引` 图标进磁盘缓存**（M2 未决问题 5）：缓存键加入索引号，`split_icon_index` 的结果参与 `icon_cache_file` 的哈希；补一个测试，验证同一个 exe 的不同索引得到不同的缓存文件。
+2. **加载时清理无主的 usage 记录**（只在主模式下，因为常驻模式没有 KV）：每次 `apply_loaded` 成功后，在后台列出 `quick_launch` 命名空间里的 `usage_*`，把不对应任何现有（分组 id，槽位）的键用一次 `batch` 删掉。这样 CLI 删除条目或用户手改文件后，新放进同一个槽位的条目不会继承旧的次数。补测试。
+3. **`docs/launcher.md`** 补充“Quick Launch”一节（§17 要求每个里程碑都写，M1 和 M2 都没写）：实际的模块位置、配置文件、热键、常驻模式、`@` 搜索，以及与本规格的差异（失败提示改为底部一行、编辑器用窗口内浮层、复制路径等）。
+4. **schema**：`QuickLaunchConfig` 及其子类型派生 `JsonSchema`，新增 `crates/nohrs-core/examples/quicklaunch_schema.rs`，输出 `docs/quicklaunch.schema.json`，写法照抄 `examples/schema.rs`；如果现有 schema 有一致性测试，照样加一个。`docs/config.md` 增加一节介绍 `quicklaunch.toml`，并链接到这个 schema。
+
+### F. M3 的决定（BoBO 未另行指定时按这里执行）
+
+| # | 问题 | 做法 |
+|---|---|---|
+| D1 | `@` 以外的普通搜索，要不要混入快速启动条目 | 不混入。只有 `@` 时搜索，现有排序完全不变 |
+| D2 | `noh.exe` 要不要放进安装包 | 不放。M3 的 CLI 只在开发和便携场景下使用；以后要放时另行决定 |
+| D3 | 设置页里的条目要不要支持拖动排序 | 不支持。用快速启动窗口的拖动，或在表单里修改槽位 |
+
+### G. M3 验收
+- 自动测试：A–E 中列出的全部测试；fmt、clippy 与 main 对比、test 的原始输出。
+- 由 BoBO 手测：
+  1. 在设置页改热键，新热键立刻生效，旧热键失效；
+  2. 设置页改名称和图标后，快速启动窗口立刻更新；
+  3. 设置页的修改在 1 秒内写进 `quicklaunch.toml`；
+  4. 在 Launcher 里输入 `@ps` 能找到 Photoshop，回车启动；
+  5. `noh ql add` 加一个条目，正在运行的快速启动窗口里立刻出现；
+  6. 在设置页的搜索框里输入“热键”，能找到快速启动的热键这一行。
 
 ## 18. 禁止事项
 - 不实现插件宿主，只保留 `LaunchRegistry::register`。

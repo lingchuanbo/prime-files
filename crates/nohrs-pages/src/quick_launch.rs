@@ -40,6 +40,7 @@ use nohrs_core::config::ConfigWatcher;
 use nohrs_core::config::paths;
 use nohrs_core::config::quick_launch::{
     Group, Item, OnRunning, Parsed, QuickLaunchConfig, QuickLaunchError, View, Warning,
+    WindowSettings,
 };
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::launch::LaunchRegistry;
@@ -512,9 +513,12 @@ impl Drop for ComApartment {
 }
 
 /// The disk cache path of one icon (§9).
-fn icon_cache_file(file: &Path, edge: u32) -> PathBuf {
+fn icon_cache_file(file: &Path, edge: u32, index: Option<u32>) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     file.to_string_lossy().to_lowercase().hash(&mut hasher);
+    // E1: the icon at an index is a different picture of the same file, so the
+    // index is part of the key.
+    index.hash(&mut hasher);
     if let Ok(metadata) = std::fs::metadata(file) {
         metadata.len().hash(&mut hasher);
         if let Ok(modified) = metadata.modified()
@@ -545,10 +549,21 @@ fn icon_image(context: &ExpandContext, raw: &str, edge: u32) -> Option<Arc<Rende
     // first icon, and the Shell's index-free extraction cannot express it (§9).
     if let Some((program, index)) = split_icon_index(raw)
         && let Ok(program) = nohrs_services::launch::expand(program, context)
-        && let Some((pixels, width, height)) =
-            nohrs_services::launch::indexed_icon(&program.to_string_lossy(), index, edge)
     {
-        return thumbnails::render_image(width, height, pixels).map(Arc::new);
+        let cache = icon_cache_file(&program, edge, Some(index));
+        if let Ok(bytes) = std::fs::read(&cache)
+            && let Some(image) = decode_cached_icon(&bytes)
+        {
+            return Some(Arc::new(image));
+        }
+        let (pixels, width, height) =
+            nohrs_services::launch::indexed_icon(&program.to_string_lossy(), index, edge)?;
+        let image = thumbnails::render_image(width, height, pixels)?;
+        let image = Arc::new(image);
+        if let Some(bytes) = encode_cached_icon(&image) {
+            write_icon_cache(&cache, &bytes);
+        }
+        return Some(image);
     }
     // A custom `.png` is the picture itself; anything else asks the Shell, which
     // knows `.ico`, programs and folders (§9).
@@ -558,7 +573,7 @@ fn icon_image(context: &ExpandContext, raw: &str, edge: u32) -> Option<Arc<Rende
     {
         return decode_png_icon(&file, edge).map(Arc::new);
     }
-    let cache = icon_cache_file(&file, edge);
+    let cache = icon_cache_file(&file, edge, None);
     if let Ok(bytes) = std::fs::read(&cache)
         && let Some(image) = decode_cached_icon(&bytes)
     {
@@ -781,13 +796,36 @@ pub enum Mode {
 /// What the binary injects so the window can own a global chord without this
 /// crate depending on the launcher crate (§3.4, §10).
 ///
-/// The error is a `String` rather than `anyhow::Error` because the binary does
-/// not depend on `anyhow`, and this struct is built there.
+/// Why a chord was refused, as the binary knows it (§10, M3 S3).
+///
+/// The settings page has its own words for the launcher conflict, so it must be
+/// able to tell the kinds apart without reading the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotkeyRefusal {
+    /// The chord belongs to the search launcher, which was asked for it first.
+    LauncherConflict,
+    /// Anything else: the text does not parse, the OS refused it, and so on.
+    Other(String),
+}
+
+impl std::fmt::Display for HotkeyRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LauncherConflict => formatter.write_str("the Launcher's own shortcut"),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// A chord the binary registers, and how it is taken away again.
+///
+/// The error is not `anyhow::Error` because the binary does not depend on
+/// `anyhow`, and this struct is built there.
 #[derive(Clone, Copy)]
 pub struct HotkeyHooks {
     /// Parses and registers `text`, returning an opaque id for
     /// [`HotkeyHooks::unregister`].
-    pub register: fn(&mut App, &str) -> std::result::Result<u64, String>,
+    pub register: fn(&mut App, &str) -> std::result::Result<u64, HotkeyRefusal>,
     /// Removes a chord registered by [`HotkeyHooks::register`].
     pub unregister: fn(&mut App, u64) -> std::result::Result<(), String>,
 }
@@ -818,6 +856,8 @@ pub(crate) struct QuickLaunch {
     hotkey: Option<u64>,
     hotkey_text: Option<String>,
     hotkey_error: Option<String>,
+    /// Why the last registration failed, when it did (§10, M3 S3).
+    hotkey_refusal: Option<HotkeyRefusal>,
     /// A read is in flight; one at a time.
     loading: bool,
     /// An edit waiting for the throttle window, and when it ends (§5.2).
@@ -962,24 +1002,21 @@ fn start_health_check(cx: &mut App) {
         loop {
             cx.background_executor().timer(HEALTH_PAUSE).await;
             let batch = cx.update(|cx| {
-                let Some(quick_launch) = state_mut(cx) else {
-                    return None;
-                };
+                let quick_launch = state_mut(cx)?;
                 let mut sent = 0usize;
                 while sent < HEALTH_BATCH {
+                    // An empty queue ends the pass rather than the state being
+                    // gone, so this one is a `break`.
                     let Some((group, slot, item)) = quick_launch.health_queue.pop_front() else {
                         break;
                     };
-                    if let Some(workers) = quick_launch.workers.as_ref() {
-                        workers.send_health(HealthRequest {
-                            group,
-                            slot,
-                            item: Box::new(item),
-                        });
-                        sent = sent.saturating_add(1);
-                    } else {
-                        return None;
-                    }
+                    let workers = quick_launch.workers.as_ref()?;
+                    workers.send_health(HealthRequest {
+                        group,
+                        slot,
+                        item: Box::new(item),
+                    });
+                    sent = sent.saturating_add(1);
                 }
                 (sent > 0).then_some(sent)
             });
@@ -1084,6 +1121,30 @@ pub(crate) fn toggle_lock(cx: &mut App) -> bool {
     locked
 }
 
+/// Changes one field of the window settings (§13, §17.1 B).
+///
+/// Every control of the settings page's window group goes through here, so an
+/// edit always touches the state, marks the file and tells the open window about
+/// the two fields it keeps live: the pin and the summon chord.
+pub(crate) fn set_window(cx: &mut App, change: impl FnOnce(&mut WindowSettings)) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let previous_topmost = quick_launch.config.window.topmost;
+    let previous_hotkey = quick_launch.config.window.hotkey.clone();
+    change(&mut quick_launch.config.window);
+    let topmost = quick_launch.config.window.topmost;
+    let hotkey = quick_launch.config.window.hotkey.clone();
+    quick_launch.touch();
+    mark_dirty(cx);
+    if topmost != previous_topmost {
+        sync_topmost(cx, topmost);
+    }
+    if hotkey != previous_hotkey {
+        sync_hotkey(cx);
+    }
+}
+
 /// Applies `topmost` to the open window, for a hot reload that changed it
 /// (§11.1).
 fn sync_topmost(cx: &mut App, topmost: bool) {
@@ -1118,7 +1179,9 @@ fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str)
             .background_spawn(async move {
                 let is_dir = path_is_directory(&path);
                 path.is_file()
-                    .then(|| item_for_path(&path, slot, is_dir).kind)
+                    .then(|| {
+                        nohrs_core::config::quick_launch::item_for_path(&path, slot, is_dir).kind
+                    })
                     .or_else(|| is_dir.then(|| "folder".to_string()))
             })
             .await;
@@ -1143,7 +1206,68 @@ fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str)
             mark_dirty(cx);
             recheck_health(cx, group, slot);
             cx.refresh_windows();
-        });
+        })
+        .log_err();
+    })
+    .detach();
+}
+
+/// Deletes the usage records that name no item any more (§17.1 E2).
+///
+/// A `noh ql remove` or a hand edit leaves them behind, and the next item put in
+/// that slot would inherit the count. Only the main process has the store: the
+/// resident one runs without it.
+fn prune_usage(cx: &mut App) {
+    let Some(quick_launch) = state(cx) else {
+        return;
+    };
+    if quick_launch.mode != Mode::Main {
+        return;
+    }
+    let Some(kv) = quick_launch.kv.clone() else {
+        return;
+    };
+    let valid: std::collections::HashSet<(String, u32)> = quick_launch
+        .config
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .items
+                .iter()
+                .map(move |item| (group.id.clone(), item.slot))
+        })
+        .collect();
+    cx.background_spawn(async move {
+        let entries = match kv.list_namespace(KV_NAMESPACE) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(target: "quick_launch", "could not list usage records: {error}");
+                return;
+            }
+        };
+        let prefix = format!("{KV_NAMESPACE}.");
+        let stale: Vec<KvOp> = entries
+            .into_iter()
+            .filter_map(|(key, _)| {
+                let name = key.as_str().strip_prefix(&prefix)?;
+                let rest = name.strip_prefix("usage_")?;
+                let (group, slot) = rest.rsplit_once('_')?;
+                let slot = slot.parse::<u32>().ok()?;
+                (!valid.contains(&(group.to_string(), slot))).then_some(KvOp::Delete { key })
+            })
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            target: "quick_launch",
+            keys = stale.len(),
+            "deleting usage records of items that are gone"
+        );
+        if let Err(error) = kv.batch(stale) {
+            tracing::warn!(target: "quick_launch", "could not delete stale usage records: {error}");
+        }
     })
     .detach();
 }
@@ -1245,21 +1369,36 @@ pub(crate) fn put_item(cx: &mut App, group: usize, slot: u32, mut item: Item) ->
     true
 }
 
-/// Applies the four fields the edit dialog offers (§12.3): name, path,
-/// arguments and "run as administrator".
-pub(crate) fn edit_item(
-    cx: &mut App,
-    group: usize,
-    slot: u32,
-    name: &str,
-    path: &str,
-    args: &str,
-    admin: bool,
-) -> bool {
-    let name = name.trim();
-    let path = path.trim();
+/// Everything the settings page's item form can change (§17.1 B).
+#[derive(Clone)]
+pub(crate) struct ItemEdit {
+    /// The `type` the form chose. A form that cannot offer the item's own type
+    /// keeps it, so the settings page never rewrites a kind it cannot build.
+    pub kind: String,
+    /// What the tile shows.
+    pub name: String,
+    /// The target, possibly with the variables of §7.
+    pub path: String,
+    /// Command-line arguments, empty for none.
+    pub args: String,
+    /// Working directory, empty for the executable's own folder.
+    pub cwd: String,
+    /// Start elevated (`runas`).
+    pub admin: bool,
+    /// Custom icon, empty for the program's own.
+    pub icon: String,
+    /// Extra words the filter matches on.
+    pub tags: Vec<String>,
+}
+
+/// Applies the item form of the settings page (§17.1 B), with the rules of the
+/// window's edit dialog: no empty name or path, no edits while the file is
+/// read-only, a fresh health check and a kind judged again from a new path.
+pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit) -> bool {
+    let name = edit.name.trim();
+    let path = edit.path.trim();
     // An item without a name would be an empty tile, and one without a path
-    // could never start: the dialog treats both as "cancel".
+    // could never start: the form treats both as "cancel".
     if name.is_empty() || path.is_empty() || !editable(cx) {
         return false;
     }
@@ -1272,19 +1411,84 @@ pub(crate) fn edit_item(
     let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
         return false;
     };
+    // Only the four kinds the form offers may be introduced; every other kind
+    // (uwp, command, group, plugin:…) is kept as it is, since this milestone
+    // cannot build those and changing one would change what the entry means.
+    if !matches!(edit.kind.as_str(), "app" | "folder" | "file" | "url") && edit.kind != item.kind {
+        return false;
+    }
     let previous_kind = item.kind.clone();
+    let previous_path = item.path.clone();
+    item.kind = edit.kind.clone();
     item.name = name.to_string();
     item.path = Some(path.to_string());
-    let args = args.trim();
+    let args = edit.args.trim();
     item.args = (!args.is_empty()).then(|| args.to_string());
-    item.admin = admin;
+    let cwd = edit.cwd.trim();
+    item.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+    let icon = edit.icon.trim();
+    item.icon = (!icon.is_empty()).then(|| icon.to_string());
+    item.admin = edit.admin;
+    item.tags = edit
+        .tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect();
+    let path_changed = item.path != previous_path;
     state.touch();
     mark_dirty(cx);
     recheck_health(cx, group, slot);
     // S4: a path that now points at a folder (or a program) changes the kind, so
-    // the item keeps working after the edit.
-    retype_after_edit(cx, group, slot, &previous_kind);
+    // the item keeps working after the edit. An unchanged path keeps the kind
+    // the form chose.
+    if path_changed {
+        retype_after_edit(cx, group, slot, &previous_kind);
+    }
     true
+}
+
+/// Applies the four fields the window's edit dialog offers (§12.3): name, path,
+/// arguments and "run as administrator".
+pub(crate) fn edit_item(
+    cx: &mut App,
+    group: usize,
+    slot: u32,
+    name: &str,
+    path: &str,
+    args: &str,
+    admin: bool,
+) -> bool {
+    // The dialog does not offer the other fields, so they keep what the item
+    // already has; a missing item is refused by `update_item` too.
+    let Some(item) = item_at(cx, group, slot) else {
+        return false;
+    };
+    let previous_kind = item.kind.clone();
+    let path_changed = item.path.as_deref().unwrap_or_default().trim() != path.trim();
+    let edited = update_item(
+        cx,
+        group,
+        slot,
+        &ItemEdit {
+            kind: item.kind,
+            name: name.to_string(),
+            path: path.to_string(),
+            args: args.to_string(),
+            cwd: item.cwd.unwrap_or_default(),
+            admin,
+            icon: item.icon.unwrap_or_default(),
+            tags: item.tags,
+        },
+    );
+    // The dialog judges the kind after every edit, as it did before the form
+    // existed; the form only asks for that when its path changed, so a kind
+    // chosen by hand with the path kept is not overruled from the disk.
+    if edited && !path_changed {
+        retype_after_edit(cx, group, slot, &previous_kind);
+    }
+    edited
 }
 
 /// Adds a group at the end and makes it the current one (§12.3). The caller
@@ -1322,6 +1526,34 @@ pub(crate) fn rename_group(cx: &mut App, index: usize, name: &str) -> bool {
     };
     group.name = name.to_string();
     state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// Moves a group to another place in the bar (§17.1 B), by swapping it with its
+/// neighbour: the settings page's "up" and "down" buttons.
+///
+/// Health answers and usage records are kept by group id, so a move needs no
+/// migration; the window follows the swap when it was showing one of the two.
+pub(crate) fn move_group(cx: &mut App, from: usize, to: usize) -> bool {
+    if from == to || !editable(cx) {
+        return false;
+    }
+    let Some(quick_launch) = state_mut(cx) else {
+        return false;
+    };
+    if from >= quick_launch.config.groups.len() || to >= quick_launch.config.groups.len() {
+        return false;
+    }
+    quick_launch.config.groups.swap(from, to);
+    if quick_launch.group == from {
+        quick_launch.group = to;
+    } else if quick_launch.group == to {
+        quick_launch.group = from;
+    }
+    // The slot belonged to the group that just left this index.
+    quick_launch.slot = None;
+    quick_launch.touch();
     mark_dirty(cx);
     true
 }
@@ -1415,11 +1647,9 @@ pub(crate) fn move_item_to_group(
     let mut item = source.items.remove(position);
     let Some(target) = state.config.groups.get_mut(to_group) else {
         // Put it back: the destination vanished between the menu and the click.
-        state
-            .config
-            .groups
-            .get_mut(from_group)
-            .map(|source| source.items.push(item));
+        if let Some(source) = state.config.groups.get_mut(from_group) {
+            source.items.push(item);
+        }
         return false;
     };
     let new_slot = first_free_slot(target);
@@ -1565,36 +1795,6 @@ fn first_free_slot(group: &Group) -> u32 {
     next_free_slot_from(group, 0)
 }
 
-/// The item a path picked or dropped into `slot` becomes (§12.3): an executable
-/// or shortcut is an `app`, a folder a `folder`, everything else a `file`.
-///
-/// `is_dir` comes from the caller: whether the path is a folder needs the disk,
-/// and the window may not wait for a network path (S1).
-pub(crate) fn item_for_path(path: &Path, slot: u32, is_dir: bool) -> Item {
-    let extension = path
-        .extension()
-        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
-    let kind = if is_dir {
-        "folder"
-    } else if matches!(
-        extension.as_deref(),
-        Some("exe" | "lnk" | "com" | "bat" | "cmd")
-    ) {
-        "app"
-    } else {
-        "file"
-    };
-    let name = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .or_else(|| path.file_name().and_then(|name| name.to_str()))
-        .unwrap_or_default()
-        .to_string();
-    let mut item = Item::new(slot, kind, name);
-    item.path = Some(path.to_string_lossy().to_string());
-    item
-}
-
 /// Where an item dropped on the group bar (or anywhere in the content area)
 /// goes: the first empty slot, else past the last item (§12.2).
 pub(crate) fn next_free_slot(cx: &App, group: usize) -> u32 {
@@ -1609,15 +1809,6 @@ pub(crate) fn next_free_slot(cx: &App, group: usize) -> u32 {
 /// item then is: something the Shell has to be asked to open.
 pub(crate) fn path_is_directory(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
-}
-
-/// The item a path becomes, with the folder question answered on this thread.
-///
-/// Only the tests use this: the window asks [`path_is_directory`] on a background
-/// task and then builds the item with [`item_for_path`] (S1).
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
-    item_for_path(path, slot, path.is_dir())
 }
 
 /// Moves one item's usage record to the place it went, in one transaction
@@ -1757,6 +1948,7 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         hotkey: None,
         hotkey_text: None,
         hotkey_error: None,
+        hotkey_refusal: None,
         loading: false,
         pending_save: false,
         save_due: None,
@@ -1898,6 +2090,11 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
         // read: the content is what is already loaded.
         return;
     }
+    // Only a file that parsed describes the items the usage records belong to: a
+    // missing file loads a default configuration and a broken one keeps the old
+    // one, and pruning against either would delete counts that are still wanted
+    // (B1).
+    let mut parsed_ok = false;
     match read.parsed {
         None => {
             quick_launch.config = QuickLaunchConfig::with_default_group();
@@ -1906,6 +2103,7 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
             quick_launch.file_hash = read.hash;
         }
         Some(Ok(parsed)) => {
+            parsed_ok = true;
             for warning in &parsed.warnings {
                 tracing::warn!(target: "quick_launch", "{warning}");
             }
@@ -1932,6 +2130,11 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     ensure_selection(cx);
     sync_hotkey(cx);
     cx.refresh_windows();
+    // E2: records of items the file no longer has go now, so the next occupant of
+    // a slot does not inherit them — but only when this read is the file (B1).
+    if parsed_ok {
+        prune_usage(cx);
+    }
 }
 
 /// Selects the group the last session was on, by id (§6).
@@ -2020,6 +2223,7 @@ fn sync_hotkey(cx: &mut App) {
             quick_launch.hotkey = None;
             quick_launch.hotkey_text = None;
             quick_launch.hotkey_error = None;
+            quick_launch.hotkey_refusal = None;
         }
         return;
     }
@@ -2042,10 +2246,12 @@ fn sync_hotkey(cx: &mut App) {
                 quick_launch.hotkey = Some(id);
                 quick_launch.hotkey_text = Some(wanted.clone());
                 quick_launch.hotkey_error = None;
+                quick_launch.hotkey_refusal = None;
             }
             tracing::info!(target: "quick_launch", "listening on {wanted}");
         }
-        Err(error) => {
+        Err(refusal) => {
+            let error = refusal.to_string();
             // §15.1: the same user may run the main program and the resident
             // one; the chord the first registered is the one that answers, and the
             // second says so at info level only.
@@ -2058,6 +2264,7 @@ fn sync_hotkey(cx: &mut App) {
                     quick_launch.hotkey = None;
                     quick_launch.hotkey_text = None;
                     quick_launch.hotkey_error = None;
+                    quick_launch.hotkey_refusal = None;
                 }
                 return;
             }
@@ -2071,6 +2278,7 @@ fn sync_hotkey(cx: &mut App) {
                 quick_launch.hotkey = restored;
                 quick_launch.hotkey_text = previous_text.filter(|_| restored.is_some());
                 quick_launch.hotkey_error = Some(error);
+                quick_launch.hotkey_refusal = Some(refusal);
             }
             if let Some(id) = restored {
                 tracing::warn!(
@@ -2170,7 +2378,7 @@ fn save_in_background(cx: &mut App) {
     let path = paths::quick_launch_file();
     cx.spawn(async move |cx| {
         let written = cx
-            .background_spawn(async move { write_atomically(&path, &text) })
+            .background_spawn(async move { nohrs_services::fs::write_atomically(&path, &text) })
             .await;
         cx.update(|cx| match written {
             Ok(hash) => {
@@ -2211,7 +2419,7 @@ fn save_now(quick_launch: &mut QuickLaunch) {
         }
     };
     let path = paths::quick_launch_file();
-    match write_atomically(&path, &text) {
+    match nohrs_services::fs::write_atomically(&path, &text) {
         Ok(hash) => quick_launch.file_hash = hash,
         Err(error) => {
             tracing::error!(target: "quick_launch", "could not write {}: {error}", path.display());
@@ -2225,27 +2433,6 @@ fn save_now(quick_launch: &mut QuickLaunch) {
 /// temporary file is written and flushed first, and only then renamed over the
 /// target, which is atomic on both platforms LumaFiles runs on.
 #[allow(clippy::disallowed_methods)] // the exit path and the throttled save
-fn write_atomically(path: &Path, contents: &str) -> std::io::Result<u64> {
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(directory)?;
-    let temporary = path.with_extension("toml.tmp");
-    let backup = path.with_extension("toml.bak");
-    let mut file = std::fs::File::create(&temporary)?;
-    {
-        use std::io::Write as _;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-    }
-    drop(file);
-    if path.exists() {
-        std::fs::copy(path, &backup)?;
-    }
-    std::fs::rename(&temporary, path)?;
-    let mut hasher = DefaultHasher::new();
-    contents.as_bytes().hash(&mut hasher);
-    Ok(hasher.finish())
-}
-
 /// Writes one KV value in the background, logging rather than failing (§6).
 fn write_kv_name(cx: &mut App, name: String, bytes: Vec<u8>) {
     let Some(kv) = state(cx).and_then(|quick_launch| quick_launch.kv.clone()) else {
@@ -2953,13 +3140,84 @@ pub(crate) fn copy_text(cx: &App, slot: u32) -> Option<String> {
     )
 }
 
+/// One quick-launch entry as the launcher's `@` search needs it (M3 D).
+///
+/// A plain data copy: the launcher crate cannot name this module's types, so the
+/// binary maps these into its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LauncherEntry {
+    /// The group id activation needs.
+    pub group: String,
+    /// The item's slot in that group.
+    pub slot: u32,
+    /// What the row shows.
+    pub name: String,
+    /// Words the query also matches.
+    pub tags: Vec<String>,
+    /// The item's `type`.
+    pub kind: String,
+    /// The item's path as written.
+    pub path: String,
+}
+
+/// Every entry, cloned from memory for the launcher (M3 D).
+///
+/// Runs on the foreground and reads nothing but the state, which is what makes it
+/// safe from a keystroke handler: the matching itself happens on the background.
+pub fn launcher_snapshot(cx: &App) -> Vec<LauncherEntry> {
+    let Some(quick_launch) = state(cx) else {
+        return Vec::new();
+    };
+    quick_launch
+        .config
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group.items.iter().map(move |item| LauncherEntry {
+                group: group.id.clone(),
+                slot: item.slot,
+                name: item.name.clone(),
+                tags: item.tags.clone(),
+                kind: item.kind.clone(),
+                path: item.path.clone().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Starts the entry at `group`/`slot`, or shows its place when `reveal` (M3 D).
+///
+/// The launcher names an entry by its group id rather than its position, because
+/// the file may have been reordered since the rows were built; a group that is gone
+/// does nothing at all.
+pub fn activate_by_id(cx: &mut App, group: &str, slot: u32, reveal: bool) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let Some(index) = quick_launch
+        .config
+        .groups
+        .iter()
+        .position(|candidate| candidate.id == group)
+    else {
+        return;
+    };
+    quick_launch.group = index;
+    quick_launch.slot = Some(slot);
+    quick_launch.touch();
+    if reveal {
+        reveal_item(cx, slot);
+    } else {
+        activate_with(cx, slot, ClickKind::Plain);
+    }
+    cx.refresh_windows();
+}
+
 /// One item's path with the variables of §7 resolved, using the context built at init (S2).
 fn expanded_path(cx: &App, item: &Item) -> Option<PathBuf> {
     let state = state(cx)?;
     let raw = item.path.as_deref()?.trim();
-    nohrs_services::launch::expand(raw, &state.expand)
-        .ok()
-        .map(PathBuf::from)
+    nohrs_services::launch::expand(raw, &state.expand).ok()
 }
 
 /// The message the footer shows, if the last launch failed.
@@ -2968,8 +3226,50 @@ fn message(cx: &App) -> Option<&str> {
 }
 
 /// The read-only banner's text, if the file must not be written back (§5.2).
-fn read_only_reason(cx: &App) -> Option<&str> {
+pub(crate) fn read_only_reason(cx: &App) -> Option<&str> {
     state(cx).and_then(|quick_launch| quick_launch.status.error())
+}
+
+/// The window settings as the settings page shows them (§13); the defaults
+/// before the first read has landed.
+pub(crate) fn window_settings(cx: &App) -> WindowSettings {
+    state(cx)
+        .map(|quick_launch| quick_launch.config.window.clone())
+        .unwrap_or_default()
+}
+
+/// A copy of the groups, for the settings page (§13).
+///
+/// The page and the window read the same state; the copy only lasts for the
+/// frame being built.
+pub(crate) fn groups(cx: &App) -> Vec<Group> {
+    state(cx)
+        .map(|quick_launch| quick_launch.config.groups.clone())
+        .unwrap_or_default()
+}
+
+/// The chord the OS is actually holding, if one is registered (§10).
+pub(crate) fn registered_hotkey(cx: &App) -> Option<&str> {
+    let quick_launch = state(cx)?;
+    quick_launch.hotkey?;
+    quick_launch.hotkey_text.as_deref()
+}
+
+/// Why the last registration failed, if it did (§10).
+pub(crate) fn hotkey_error(cx: &App) -> Option<&str> {
+    state(cx).and_then(|quick_launch| quick_launch.hotkey_error.as_deref())
+}
+
+/// Whether the last registration failed because the chord belongs to the
+/// Launcher (§10, M3 S3).
+///
+/// The binary refuses that chord before the OS is asked and says so with the same
+/// enum; the settings page shows the user's own words for it, so it asks for the
+/// kind rather than reading the message.
+pub(crate) fn hotkey_conflicts_with_launcher(cx: &App) -> bool {
+    state(cx).is_some_and(|quick_launch| {
+        quick_launch.hotkey_refusal == Some(HotkeyRefusal::LauncherConflict)
+    })
 }
 
 /// Whether the first read is still running.
@@ -3011,11 +3311,12 @@ pub fn poll_reload(cx: &mut App) {
 }
 
 /// The pointer's monitor, numbered the way the platform lists displays (§11).
+///
+/// `GetCursorPos` and `MonitorFromPoint` are the only way to learn where the
+/// pointer is while no LumaFiles window has the foreground.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod platform {
-    //! `GetCursorPos` and `MonitorFromPoint`, which is the only way to learn
-    //! where the pointer is while no LumaFiles window has the foreground.
 
     use windows::Win32::Foundation::{LPARAM, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{
@@ -3171,6 +3472,21 @@ mod tests {
         slots
     }
 
+    /// §9, E1: the same program at two icon indexes gets two cache files.
+    #[test]
+    fn an_indexed_icon_has_its_own_cache_file() {
+        let program = Path::new("C:/Windows/System32/shell32.dll");
+        let plain = icon_cache_file(program, 48, None);
+        let third = icon_cache_file(program, 48, Some(3));
+        let fourth = icon_cache_file(program, 48, Some(4));
+        assert_ne!(third, fourth, "each index is its own picture");
+        assert_ne!(plain, third, "no index is not the same as an index");
+        // The size still separates the files, and the same question answers the
+        // same file: the lookup has to be stable for the cache to work.
+        assert_eq!(third, icon_cache_file(program, 48, Some(3)));
+        assert_ne!(third, icon_cache_file(program, 32, Some(3)));
+    }
+
     /// §9: a custom icon may name an index inside a program.
     #[test]
     fn a_custom_icon_can_name_an_index_inside_a_program() {
@@ -3191,19 +3507,21 @@ mod tests {
     /// §12.3: a group gets the first free `group_<n>` id.
     #[test]
     fn a_new_group_gets_the_first_free_id() {
-        let mut config = QuickLaunchConfig::default();
-        config.groups = vec![
-            Group {
-                id: "group_1".to_string(),
-                name: "Um".to_string(),
-                items: Vec::new(),
-            },
-            Group {
-                id: "group_3".to_string(),
-                name: "Tres".to_string(),
-                items: Vec::new(),
-            },
-        ];
+        let config = QuickLaunchConfig {
+            groups: vec![
+                Group {
+                    id: "group_1".to_string(),
+                    name: "Um".to_string(),
+                    items: Vec::new(),
+                },
+                Group {
+                    id: "group_3".to_string(),
+                    name: "Tres".to_string(),
+                    items: Vec::new(),
+                },
+            ],
+            ..QuickLaunchConfig::default()
+        };
         assert_eq!(next_group_id(&config), "group_2");
     }
 
@@ -3250,59 +3568,6 @@ mod tests {
             assert_eq!(name(cx, 3), Some("Tres".to_string()));
         });
     }
-
-    /// §12.2: a move or a drop into a group goes to its first empty slot, and
-    /// past the last item when nothing is empty.
-    #[test]
-    fn a_move_lands_in_the_first_empty_slot() {
-        let mut group = group_of(0);
-        group.items = vec![
-            Item::new(0, "app", "A"),
-            Item::new(1, "app", "B"),
-            Item::new(3, "app", "D"),
-        ];
-        assert_eq!(first_free_slot(&group), 2);
-        group.items.push(Item::new(2, "app", "C"));
-        assert_eq!(first_free_slot(&group), 4);
-        assert_eq!(first_free_slot(&group_of(0)), 0);
-    }
-
-    /// §12.3, S1: the kind comes from the metadata the caller read on a background
-    /// task, and the reader answers about paths that are not there.
-    #[test]
-    fn a_kind_comes_from_the_metadata_the_caller_read() {
-        let directory = tempfile::tempdir().unwrap();
-        let folder = directory.path().join("Uma pasta");
-        std::fs::create_dir(&folder).unwrap();
-        assert!(path_is_directory(&folder));
-        assert!(!path_is_directory(&folder.join("nao-existe")));
-        // The flag decides, not a second look at the disk.
-        assert_eq!(item_for_path(&folder, 0, true).kind, "folder");
-        assert_eq!(item_for_path(&folder, 0, false).kind, "file");
-    }
-
-    /// §12.3: what a picked or dropped path becomes.
-    #[test]
-    fn a_picked_path_becomes_the_item_its_extension_says() {
-        let directory = tempfile::tempdir().unwrap();
-        let folder = directory.path().join("Uma pasta");
-        std::fs::create_dir(&folder).unwrap();
-        let folder_item = item_from_path(&folder, 3);
-        assert_eq!(folder_item.kind, "folder");
-        assert_eq!(folder_item.name, "Uma pasta");
-        assert_eq!(folder_item.slot, 3);
-
-        let shortcut = directory.path().join("atalho.lnk");
-        std::fs::write(&shortcut, b"").unwrap();
-        assert_eq!(item_from_path(&shortcut, 0).kind, "app");
-
-        let document = directory.path().join("notas.txt");
-        std::fs::write(&document, b"oi").unwrap();
-        let document_item = item_from_path(&document, 0);
-        assert_eq!(document_item.kind, "file");
-        assert_eq!(document_item.name, "notas");
-    }
-
     /// §6: the usage key of one item.
     #[test]
     fn a_usage_record_is_named_after_its_group_and_slot() {
@@ -3369,8 +3634,20 @@ mod tests {
             Ok(())
         }
 
-        fn list_namespace(&self, _namespace: &str) -> nohrs_store::Result<Vec<(KvKey, Vec<u8>)>> {
-            Ok(Vec::new())
+        fn list_namespace(&self, namespace: &str) -> nohrs_store::Result<Vec<(KvKey, Vec<u8>)>> {
+            let prefix = format!("{namespace}.");
+            let mut entries = Vec::new();
+            if let Ok(map) = self.0.lock() {
+                for (key, value) in map.iter() {
+                    let Some(name) = key.strip_prefix(&prefix) else {
+                        continue;
+                    };
+                    if let Ok(key) = KvKey::new(namespace, name) {
+                        entries.push((key, value.clone()));
+                    }
+                }
+            }
+            Ok(entries)
         }
 
         fn batch(&self, ops: Vec<KvOp>) -> nohrs_store::Result<()> {
@@ -3462,6 +3739,120 @@ mod tests {
         assert_eq!(
             store.get(&moved_usage).expect("the test store"),
             Some(b"y".to_vec())
+        );
+    }
+
+    /// §6, B1: a missing file must not delete any usage record.
+    #[gpui::test]
+    fn a_missing_file_keeps_the_usage_records(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install(cx, vec![group_of(2)]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let record = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            store.put(&record, b"a").expect("the test store");
+            apply_loaded(
+                cx,
+                FileRead {
+                    hash: 99,
+                    parsed: None,
+                },
+            );
+        });
+        cx.run_until_parked();
+        let record = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        assert_eq!(
+            store.get(&record).expect("the test store"),
+            Some(b"a".to_vec())
+        );
+    }
+
+    /// §6, B1: a file that does not parse must not delete any usage record either.
+    #[gpui::test]
+    fn a_broken_file_keeps_the_usage_records(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install(cx, vec![group_of(2)]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let record = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            store.put(&record, b"a").expect("the test store");
+            apply_loaded(
+                cx,
+                FileRead {
+                    hash: 77,
+                    parsed: Some(Err(QuickLaunchError::Parse {
+                        line: 1,
+                        column: 1,
+                        message: "quebrado".to_string(),
+                    })),
+                },
+            );
+        });
+        cx.run_until_parked();
+        let record = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        assert_eq!(
+            store.get(&record).expect("the test store"),
+            Some(b"a".to_vec())
+        );
+    }
+
+    /// §6, E2: a load deletes the usage records that name no item, and only those.
+    #[gpui::test]
+    fn a_load_deletes_the_usage_records_of_items_that_are_gone(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut group = group_of(2);
+            group.id = "general".to_string();
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let kept = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+            let gone = KvKey::new(KV_NAMESPACE, "usage_general_9").expect("valid key");
+            let other = KvKey::new(KV_NAMESPACE, "last_group").expect("valid key");
+            store.put(&kept, b"a").expect("the test store");
+            store.put(&gone, b"b").expect("the test store");
+            store.put(&other, b"c").expect("the test store");
+            apply_loaded(
+                cx,
+                FileRead {
+                    hash: 4321,
+                    parsed: Some(Ok(Parsed {
+                        config: QuickLaunchConfig {
+                            groups: vec![group_of(2)],
+                            ..QuickLaunchConfig::default()
+                        },
+                        warnings: Vec::new(),
+                    })),
+                },
+            );
+        });
+        // The prune runs on a background task; like the other worker tests, wait
+        // for it rather than assuming the first tick has run it.
+        let gone = KvKey::new(KV_NAMESPACE, "usage_general_9").expect("valid key");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            if store.get(&gone).expect("the test store").is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let kept = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("valid key");
+        let other = KvKey::new(KV_NAMESPACE, "last_group").expect("valid key");
+        assert_eq!(
+            store.get(&kept).expect("the test store"),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(store.get(&gone).expect("the test store"), None);
+        assert_eq!(
+            store.get(&other).expect("the test store"),
+            Some(b"c".to_vec()),
+            "only usage records are touched"
         );
     }
 
@@ -3651,11 +4042,7 @@ mod tests {
             let mut item = Item::new(0, "folder", "Pasta");
             item.path = Some("{luma}".to_string());
             let expanded = expanded_path(cx, &item);
-            assert_eq!(
-                expanded,
-                stored.map(std::path::PathBuf::from),
-                "{{luma}} expands from the stored context"
-            );
+            assert_eq!(expanded, stored, "{{luma}} expands from the stored context");
         });
     }
 
@@ -3843,6 +4230,22 @@ mod tests {
             }
             assert!(!put_item(cx, 0, 4, Item::new(4, "app", "Novo")));
             assert!(!edit_item(cx, 0, 0, "Nome", "C:\\a.exe", "", false));
+            assert!(!update_item(
+                cx,
+                0,
+                0,
+                &ItemEdit {
+                    kind: "app".to_string(),
+                    name: "Nome".to_string(),
+                    path: "C:\\a.exe".to_string(),
+                    args: String::new(),
+                    cwd: String::new(),
+                    admin: false,
+                    icon: String::new(),
+                    tags: Vec::new(),
+                }
+            ));
+            assert!(!move_group(cx, 0, 1));
             assert!(!add_group(cx).is_some());
             assert!(!rename_group(cx, 0, "Outro"));
             assert!(!delete_item(cx, 0, 0));
@@ -3907,6 +4310,122 @@ mod tests {
             let other = add_group(cx).unwrap();
             assert!(delete_group(cx, other, false));
             assert!(add_group(cx).is_some());
+        });
+    }
+
+    /// §17.1 B: the settings page's form changes the fields the window's dialog
+    /// does not offer, and only lets the four kinds of the form be introduced.
+    #[gpui::test]
+    fn a_settings_page_item_form_covers_the_other_fields(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(0)]);
+            assert!(put_item(cx, 0, 2, Item::new(2, "app", "Antigo")));
+            let edit = ItemEdit {
+                kind: "folder".to_string(),
+                name: "  Nova  ".to_string(),
+                path: " C:\\Pasta ".to_string(),
+                args: " /a ".to_string(),
+                cwd: "C:\\Trabalho".to_string(),
+                admin: true,
+                icon: "C:\\icone.png".to_string(),
+                tags: vec![" um ".to_string(), String::new(), "dois".to_string()],
+            };
+            assert!(update_item(cx, 0, 2, &edit));
+            let item = item_at(cx, 0, 2).expect("the item is still there");
+            assert_eq!(item.kind, "folder");
+            assert_eq!(item.name, "Nova");
+            assert_eq!(item.path.as_deref(), Some("C:\\Pasta"));
+            assert_eq!(item.args.as_deref(), Some("/a"));
+            assert_eq!(item.cwd.as_deref(), Some("C:\\Trabalho"));
+            assert_eq!(item.icon.as_deref(), Some("C:\\icone.png"));
+            assert!(item.admin);
+            assert_eq!(item.tags, vec!["um".to_string(), "dois".to_string()]);
+
+            // A name or a path left empty is "cancel", as in the dialog.
+            let mut empty = edit.clone();
+            empty.name = "   ".to_string();
+            assert!(!update_item(cx, 0, 2, &empty));
+            empty.name = "Nova".to_string();
+            empty.path = String::new();
+            assert!(!update_item(cx, 0, 2, &empty));
+
+            // A kind outside the four is kept, never introduced.
+            let mut command = item_at(cx, 0, 2).expect("the item is still there");
+            command.kind = "command".to_string();
+            assert!(put_item(cx, 0, 2, command));
+            let kept = ItemEdit {
+                kind: "command".to_string(),
+                name: "Comando".to_string(),
+                path: "cmd.exe".to_string(),
+                ..edit.clone()
+            };
+            assert!(update_item(cx, 0, 2, &kept));
+            assert_eq!(
+                item_at(cx, 0, 2).map(|item| item.kind),
+                Some("command".to_string())
+            );
+            let introduced = ItemEdit {
+                kind: "plugin:x".to_string(),
+                ..kept.clone()
+            };
+            assert!(!update_item(cx, 0, 2, &introduced));
+        });
+    }
+
+    /// §17.1 B: a group moves by swapping with its neighbour, and the window
+    /// keeps showing the group it was showing.
+    #[gpui::test]
+    fn a_settings_page_move_reorders_groups(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut first = group_of(0);
+            first.id = "first".to_string();
+            first.name = "Primeiro".to_string();
+            let mut second = group_of(0);
+            second.id = "second".to_string();
+            second.name = "Segundo".to_string();
+            let mut third = group_of(0);
+            third.id = "third".to_string();
+            third.name = "Terceiro".to_string();
+            install(cx, vec![first, second, third]);
+            assert!(move_group(cx, 0, 1));
+            assert_eq!(
+                state(cx).map(|state| state.config.groups[1].name.clone()),
+                Some("Primeiro".to_string())
+            );
+            assert_eq!(
+                state(cx).map(|state| state.group),
+                Some(1),
+                "the window follows the group it was showing"
+            );
+            assert!(!move_group(cx, 1, 1), "a move onto itself is nothing");
+            assert!(!move_group(cx, 0, 9), "past the end");
+            assert_eq!(
+                state(cx).map(|state| state.config.groups.len()),
+                Some(3),
+                "a refused move changes nothing"
+            );
+        });
+    }
+
+    /// §17.1 B: every window setting of the page goes through `set_window`,
+    /// which touches and marks the file.
+    #[gpui::test]
+    fn the_settings_page_window_changes_are_marked_for_saving(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(0)]);
+            set_window(cx, |window| window.view = View::List);
+            assert_eq!(
+                state(cx).map(|state| state.config.window.view),
+                Some(View::List)
+            );
+            let (pending, revision) = state(cx)
+                .map(|state| (state.pending_save, state.revision))
+                .expect("the state is installed");
+            assert!(pending, "an edit asks for a save");
+            set_window(cx, |window| window.hotkey = "ctrl+alt+Space".to_string());
+            assert!(state(cx).is_some_and(|state| state.revision > revision));
+            set_window(cx, |window| window.topmost = true);
+            assert!(state(cx).is_some_and(|state| state.config.window.topmost));
         });
     }
 
@@ -4331,8 +4850,8 @@ mod tests {
         // directory gets refused by the on-access scanner on some machines.
         let file = directory.path().join("programa.txt");
         std::fs::write(&file, b"nao e um exe de verdade").unwrap();
-        let small = icon_cache_file(&file, 32);
-        let large = icon_cache_file(&file, 64);
+        let small = icon_cache_file(&file, 32, None);
+        let large = icon_cache_file(&file, 64, None);
         assert_ne!(small, large);
         assert_eq!(
             small.parent(),
@@ -4432,6 +4951,7 @@ mod tests {
             hotkey: None,
             hotkey_text: None,
             hotkey_error: None,
+            hotkey_refusal: None,
             loading: false,
             pending_save: false,
             save_due: None,
@@ -4491,52 +5011,6 @@ mod tests {
             Some("line 2, column 3: bad")
         );
     }
-
-    #[test]
-    fn the_throttle_window_is_the_one_the_specification_names() {
-        assert_eq!(SAVE_THROTTLE, Duration::from_millis(300));
-        // The first edit sets the deadline; an edit inside the window does not
-        // move it, which is what "merged into one save" means.
-        let started = Instant::now();
-        let due = started + SAVE_THROTTLE;
-        assert!(started + SAVE_THROTTLE / 2 < due);
-    }
-
-    #[test]
-    fn the_atomic_write_replaces_the_file_and_keeps_a_backup() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("quicklaunch.toml");
-        write_atomically(&path, "schema_version = 1\n").unwrap();
-        let first = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(first, "schema_version = 1\n");
-
-        let hash = write_atomically(&path, "schema_version = 1\n\n[[group]]\n").unwrap();
-        assert_ne!(hash, 0);
-        let second = std::fs::read_to_string(&path).unwrap();
-        assert!(second.contains("[[group]]"), "{second}");
-        // The previous content is kept beside it.
-        let backup = directory.path().join("quicklaunch.toml.bak");
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), first);
-        assert!(!directory.path().join("quicklaunch.toml.tmp").exists());
-    }
-
-    #[test]
-    fn a_failed_write_leaves_the_original_file_alone() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("quicklaunch.toml");
-        write_atomically(&path, "schema_version = 1\n").unwrap();
-        // A directory where the temporary file belongs makes the write fail,
-        // which is the "disk full / read-only folder" case without changing any
-        // attribute of the test directory.
-        std::fs::create_dir_all(directory.path().join("quicklaunch.toml.tmp")).unwrap();
-        assert!(write_atomically(&path, "schema_version = 99\n").is_err());
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "schema_version = 1\n",
-            "the original file must not be touched"
-        );
-    }
-
     #[test]
     fn the_icon_edge_snaps_up_to_a_supported_size() {
         // The steps are what the Shell extracts well; anything between two of

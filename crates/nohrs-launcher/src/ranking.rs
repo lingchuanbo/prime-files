@@ -36,6 +36,8 @@ pub enum ItemKind {
     File,
     /// A directory on disk.
     Folder,
+    /// An entry of the quick launch, found by a query starting with `@` (M3 D).
+    QuickLaunch,
 }
 
 impl ItemKind {
@@ -44,6 +46,7 @@ impl ItemKind {
         match self {
             ItemKind::File => "File",
             ItemKind::Folder => "Folder",
+            ItemKind::QuickLaunch => nohrs_core::t!("Inicialização rápida"),
         }
     }
 
@@ -52,6 +55,7 @@ impl ItemKind {
         match self {
             ItemKind::File => "icons/file.svg",
             ItemKind::Folder => "icons/folder.svg",
+            ItemKind::QuickLaunch => "icons/pin.svg",
         }
     }
 }
@@ -73,6 +77,29 @@ pub struct LauncherItem {
     /// deduplicated, for highlighting. Empty when the query only matched the
     /// full path rather than the name itself.
     pub title_matches: Vec<u32>,
+    /// Which quick-launch entry the row is, by group id and slot (M3 D). `None`
+    /// for everything the file index produced.
+    pub quick_launch: Option<(SharedString, u32)>,
+}
+
+/// One quick-launch entry, as the launcher sees it (M3 D).
+///
+/// Cloned from the pages layer's memory on the foreground by the hook the binary
+/// installs; `nohrs-launcher` itself cannot depend on `nohrs-pages`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickLaunchEntry {
+    /// The group's id, which is what activation needs.
+    pub group: SharedString,
+    /// The item's slot in that group.
+    pub slot: u32,
+    /// What the row shows.
+    pub name: SharedString,
+    /// Extra words the `@` query also matches.
+    pub tags: Vec<SharedString>,
+    /// The item's `type`.
+    pub kind: SharedString,
+    /// The item's path as written, for the row's subtitle.
+    pub path: SharedString,
 }
 
 /// Scores `entries` against `query` and returns the best `limit` as rows.
@@ -189,9 +216,140 @@ pub fn rank(
                 },
                 score,
                 title_matches: indices.clone(),
+                quick_launch: None,
             })
         })
         .collect()
+}
+
+/// Ranks the quick-launch entries for a query that started with `@` (M3 D).
+///
+/// An empty query after the `@` lists every entry, so typing just `@` is a browsable
+/// overview; otherwise the name and the tags are matched, and the order is score,
+/// then the group's position in the file, then the slot.
+pub fn rank_quick_launch(
+    entries: &[QuickLaunchEntry],
+    query: &str,
+    limit: usize,
+) -> Vec<LauncherItem> {
+    let query = query.trim();
+    if limit == 0 {
+        return Vec::new();
+    }
+    // The group order is the file's order: the snapshot arrives group by group,
+    // so a group's position is the one it first appears at.
+    let mut order = std::collections::HashMap::new();
+    for entry in entries {
+        let next = order.len();
+        order.entry(entry.group.clone()).or_insert(next);
+    }
+
+    if query.is_empty() {
+        let mut rows: Vec<LauncherItem> = entries
+            .iter()
+            .map(|entry| quick_launch_row(entry, 0, Vec::new()))
+            .collect();
+        rows.sort_by_key(|row| {
+            (
+                row.quick_launch
+                    .as_ref()
+                    .map(|(group, _)| *order.get(group).unwrap_or(&0))
+                    .unwrap_or(0),
+                row.quick_launch
+                    .as_ref()
+                    .map(|(_, slot)| *slot)
+                    .unwrap_or(0),
+            )
+        });
+        rows.truncate(limit);
+        return rows;
+    }
+
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut haystack_buffer = Vec::new();
+    let mut scored: Vec<(u32, usize, LauncherItem)> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let mut best = pattern
+            .score(
+                Utf32Str::new(&entry.name, &mut haystack_buffer),
+                &mut matcher,
+            )
+            .map(|score| (score, entry.name.to_string()));
+        if best.is_none() {
+            for tag in &entry.tags {
+                if let Some(score) =
+                    pattern.score(Utf32Str::new(tag, &mut haystack_buffer), &mut matcher)
+                {
+                    best = Some((score, tag.to_string()));
+                    break;
+                }
+            }
+        }
+        let Some((score, matched)) = best else {
+            continue;
+        };
+        let mut indices = Vec::new();
+        if pattern
+            .indices(
+                Utf32Str::new(&matched, &mut haystack_buffer),
+                &mut matcher,
+                &mut indices,
+            )
+            .is_some()
+        {
+            indices.sort_unstable();
+            indices.dedup();
+        } else {
+            indices.clear();
+        }
+        // The highlighting belongs to the title only: a tag match marks nothing.
+        let matches = if matched == entry.name.as_ref() {
+            indices
+        } else {
+            Vec::new()
+        };
+        scored.push((score, index, quick_launch_row(entry, score, matches)));
+    }
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| {
+                let left_order = left
+                    .2
+                    .quick_launch
+                    .as_ref()
+                    .map(|(group, _)| *order.get(group).unwrap_or(&0))
+                    .unwrap_or(0);
+                let right_order = right
+                    .2
+                    .quick_launch
+                    .as_ref()
+                    .map(|(group, _)| *order.get(group).unwrap_or(&0))
+                    .unwrap_or(0);
+                left_order.cmp(&right_order)
+            })
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, row)| row)
+        .collect()
+}
+
+/// One quick-launch entry as a result row.
+fn quick_launch_row(entry: &QuickLaunchEntry, score: u32, title_matches: Vec<u32>) -> LauncherItem {
+    LauncherItem {
+        path: std::path::PathBuf::from(entry.path.as_ref()),
+        title: entry.name.clone(),
+        subtitle: entry.group.clone(),
+        kind: ItemKind::QuickLaunch,
+        score,
+        title_matches,
+        quick_launch: Some((entry.group.clone(), entry.slot)),
+    }
 }
 
 fn boost(base: u32, entry: &IndexedEntry, query: &str, home: Option<&Path>) -> u32 {
@@ -244,6 +402,68 @@ mod tests {
 
     fn titles(items: &[LauncherItem]) -> Vec<&str> {
         items.iter().map(|item| item.title.as_ref()).collect()
+    }
+
+    fn quick_entry(group: &str, slot: u32, name: &str, tags: &[&str]) -> QuickLaunchEntry {
+        QuickLaunchEntry {
+            group: SharedString::from(group.to_string()),
+            slot,
+            name: SharedString::from(name.to_string()),
+            tags: tags
+                .iter()
+                .map(|tag| SharedString::from((*tag).to_string()))
+                .collect(),
+            kind: "app".into(),
+            path: format!("C:/x/{name}.exe").into(),
+        }
+    }
+
+    fn quick(entries: &[QuickLaunchEntry], query: &str) -> Vec<LauncherItem> {
+        rank_quick_launch(entries, query, 50)
+    }
+
+    /// M3 D: a bare `@` lists every entry in group order, then slot order.
+    #[test]
+    fn a_bare_at_lists_every_quick_launch_entry() {
+        let entries = vec![
+            quick_entry("dev", 4, "Terminal", &[]),
+            quick_entry("general", 7, "Notepad", &[]),
+            quick_entry("general", 0, "Chrome", &[]),
+        ];
+        let items = quick(&entries, "");
+        assert_eq!(titles(&items), vec!["Terminal", "Chrome", "Notepad"]);
+        assert!(items.iter().all(|item| item.kind == ItemKind::QuickLaunch));
+        assert_eq!(
+            items[1].quick_launch,
+            Some((SharedString::from("general"), 0))
+        );
+    }
+
+    /// M3 D: the name and the tags are what a query matches.
+    #[test]
+    fn an_at_query_matches_names_and_tags() {
+        let entries = vec![
+            quick_entry("general", 0, "Photoshop", &["adobe", "design"]),
+            quick_entry("general", 1, "Terminal", &["shell"]),
+            quick_entry("general", 2, "Fotos", &[]),
+        ];
+        assert_eq!(titles(&quick(&entries, "photo")), vec!["Photoshop"]);
+        assert_eq!(titles(&quick(&entries, "adobe")), vec!["Photoshop"]);
+        assert_eq!(titles(&quick(&entries, "shell")), vec!["Terminal"]);
+        assert!(quick(&entries, "zzz").is_empty());
+        // A tag match highlights nothing in the title.
+        let by_tag = quick(&entries, "adobe");
+        assert!(by_tag[0].title_matches.is_empty());
+    }
+
+    /// M3 D: a file search is unchanged, and its rows carry no quick-launch id.
+    #[test]
+    fn a_plain_query_still_ranks_files_and_carries_no_quick_launch_id() {
+        let files = vec![entry("/home/u/notes.md", false)];
+        let items = rank(&files, "notes", 10, None);
+        assert_eq!(titles(&items), vec!["notes.md"]);
+        assert_eq!(items[0].quick_launch, None);
+        assert_eq!(items[0].kind, ItemKind::File);
     }
 
     #[test]

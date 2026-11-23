@@ -8,6 +8,9 @@
 //! [`Warning`] rather than staying silent: the file is hand-written, so a value
 //! that was quietly ignored is a value the author believes is in effect.
 
+use std::path::Path;
+
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Version of the `quicklaunch.toml` schema this build understands.
@@ -45,7 +48,7 @@ pub const DEFAULT_GROUP_ID: &str = "general";
 pub const ICON_SIZES: [u16; 6] = [16, 24, 32, 48, 64, 96];
 
 /// How the window lays its items out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum View {
     /// A grid of icon tiles.
@@ -56,7 +59,7 @@ pub enum View {
 }
 
 /// What launching an application that is already running should do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OnRunning {
     /// Bring the existing window to the front.
@@ -67,7 +70,7 @@ pub enum OnRunning {
 }
 
 /// Window-level settings (`[window]` in the file).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct WindowSettings {
     /// The global summon chord, in `global-hotkey` syntax. Empty = not
@@ -118,7 +121,7 @@ impl Default for WindowSettings {
 /// One named group of items (`[[group]]`).
 //
 // Not `Eq`: `Item::extra` is a `toml::Table`, whose values include floats.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
     /// Identifier used by `last_group` and by `group` item references:
@@ -133,7 +136,7 @@ pub struct Group {
 }
 
 /// One launchable entry (`[[group.item]]`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
     /// Position in the group's grid, `0..=4095`.
@@ -171,6 +174,9 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<String>,
     /// Free-form data for `command` / `plugin:*`; must be empty otherwise.
+    // `toml::Value` has no `JsonSchema`, and the schema only needs to say that
+    // the table's values are unconstrained.
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
     #[serde(default, skip_serializing_if = "is_empty_table")]
     pub extra: toml::Table,
 }
@@ -254,8 +260,39 @@ impl Item {
     }
 }
 
+/// The item a path becomes (§12.3): a folder is a `folder`, an executable or
+/// shortcut is an `app`, everything else a `file`.
+///
+/// `is_dir` comes from the caller: whether the path is a folder needs the disk,
+/// and the window may not wait for a network path (M2 S1). Keeping the disk out of
+/// this function is also what lets the CLI and the window agree on the rule.
+pub fn item_for_path(path: &Path, slot: u32, is_dir: bool) -> Item {
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+    let kind = if is_dir {
+        "folder"
+    } else if matches!(
+        extension.as_deref(),
+        Some("exe" | "lnk" | "com" | "bat" | "cmd")
+    ) {
+        "app"
+    } else {
+        "file"
+    };
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or_default()
+        .to_string();
+    let mut item = Item::new(slot, kind, name);
+    item.path = Some(path.to_string_lossy().to_string());
+    item
+}
+
 /// The whole file.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuickLaunchConfig {
     /// Schema the file was written with.
@@ -883,10 +920,53 @@ fn truncate_name(name: &mut String, owner: &str, warnings: &mut Vec<Warning>) {
     });
 }
 
+/// Generate the JSON Schema for [`QuickLaunchConfig`] as pretty JSON.
+///
+/// Backs the committed `docs/quicklaunch.schema.json`, which editors use for
+/// completion and validation; [`super::settings::json_schema_string`] is the
+/// same output for `config.toml`. The value is normalized the same way (object
+/// keys sorted, schemars' non-standard Rust integer `format`s dropped), so the
+/// committed file is byte-for-byte reproducible.
+pub fn json_schema_string() -> serde_json::Result<String> {
+    let schema = schemars::schema_for!(QuickLaunchConfig);
+    let value = serde_json::to_value(&schema)?;
+    serde_json::to_string_pretty(&super::settings::normalize_schema(value))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    /// §12.3: the kind of an item follows the metadata and the extension.
+    #[test]
+    fn an_item_takes_its_kind_from_the_path_and_the_metadata() {
+        let program = item_for_path(Path::new("C:/x/programa.exe"), 4, false);
+        assert_eq!(program.kind, "app");
+        assert_eq!(program.name, "programa");
+        assert_eq!(program.slot, 4);
+        assert_eq!(
+            item_for_path(Path::new("C:/x/atalho.lnk"), 0, false).kind,
+            "app"
+        );
+        assert_eq!(
+            item_for_path(Path::new("C:/x/notas.txt"), 0, false).kind,
+            "file"
+        );
+        assert_eq!(
+            item_for_path(Path::new("C:/x/notas.txt"), 0, false).name,
+            "notas"
+        );
+        // The flag wins: something without an extension is a folder when the
+        // caller says so.
+        assert_eq!(
+            item_for_path(Path::new("C:/x/Pasta"), 0, true).kind,
+            "folder"
+        );
+        assert_eq!(
+            item_for_path(Path::new("C:/x/Pasta"), 0, false).kind,
+            "file"
+        );
+    }
 
     fn parse_ok(text: &str) -> Parsed {
         parse(text).expect("the document should parse")
@@ -894,6 +974,36 @@ mod tests {
 
     fn item(slot: u32, kind: &str, name: &str) -> Item {
         Item::new(slot, kind, name)
+    }
+
+    #[test]
+    fn the_json_schema_is_generatable() {
+        let schema = json_schema_string().expect("the schema should generate");
+        assert!(schema.contains("\"QuickLaunchConfig\""));
+        assert!(schema.contains("\"window\""));
+        assert!(schema.contains("\"group\""));
+    }
+
+    #[test]
+    // The committed schema lives in the repository, not on the user's disk, so
+    // reading it here is not the blocking I/O the lint is about.
+    #[allow(clippy::disallowed_methods)]
+    fn the_committed_schema_is_up_to_date() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/quicklaunch.schema.json"
+        );
+        // Git may check the file out with CRLF (`core.autocrlf` on Windows);
+        // the generator always writes LF.
+        let committed = std::fs::read_to_string(path)
+            .expect("docs/quicklaunch.schema.json should be committed")
+            .replace("\r\n", "\n");
+        let generated = json_schema_string().expect("the schema should generate");
+        assert_eq!(
+            committed.trim_end(),
+            generated.trim_end(),
+            "docs/quicklaunch.schema.json is stale; regenerate with `cargo run -p nohrs-core --example quicklaunch_schema > docs/quicklaunch.schema.json`"
+        );
     }
 
     #[test]

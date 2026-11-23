@@ -18,6 +18,7 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ, SelectObject,
 };
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::Diagnostics::Debug::{
     FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
 };
@@ -274,6 +275,39 @@ fn premultiply_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
         pixel[2] = scale(pixel[2]);
     }
     pixels
+}
+
+/// A COM apartment entered on this thread, left when it is dropped (§8.4).
+///
+/// The Shell's calls need one, and the CLI is a console program that starts with
+/// none; this is the one place that knows how to enter and leave it.
+pub struct ComApartment {
+    initialized: bool,
+}
+
+impl ComApartment {
+    /// Enters a single-threaded apartment, or reports why not.
+    #[allow(unsafe_code)]
+    pub fn enter() -> Result<Self, LaunchError> {
+        // SAFETY: no arguments outlive the call, and a successful call is balanced
+        // by `CoUninitialize` in `Drop`.
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .map(|()| Self { initialized: true })
+            .map_err(|error| LaunchError::Internal(error.to_string()))
+    }
+}
+
+#[allow(unsafe_code)]
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if !self.initialized {
+            return;
+        }
+        // SAFETY: balances the successful `CoInitializeEx` in `enter`, and every
+        // object made through it has been released by now.
+        unsafe { CoUninitialize() };
+    }
 }
 
 /// An application or shortcut, started through the Shell.

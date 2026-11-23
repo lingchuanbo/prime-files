@@ -2,6 +2,8 @@
 //! plus synchronous file mutation operations (see [`ops`]) and the trash
 //! (see [`trash`]).
 
+/// The atomic write the configuration files use.
+pub mod atomic;
 /// Synchronous directory listing.
 pub mod listing;
 /// Synchronous file mutation operations with cross-volume and conflict handling.
@@ -12,3 +14,4 @@ pub mod space;
 pub mod transfer;
 /// Listing, restoring from, and emptying the trash.
 pub mod trash;
+pub use atomic::write_atomically;

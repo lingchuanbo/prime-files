@@ -2775,7 +2775,7 @@ const RUST_INT_FORMATS: &[&str] = &[
     "int64", "int128",
 ];
 
-fn normalize_schema(value: serde_json::Value) -> serde_json::Value {
+pub(crate) fn normalize_schema(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
             let mut entries: Vec<_> = map.into_iter().collect();

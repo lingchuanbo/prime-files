@@ -367,7 +367,7 @@ impl QuickLaunchView {
                         .iter()
                         .map(|path| {
                             let is_dir = super::path_is_directory(path);
-                            super::item_for_path(path, 0, is_dir)
+                            nohrs_core::config::quick_launch::item_for_path(path, 0, is_dir)
                         })
                         .collect::<Vec<_>>()
                 })
@@ -562,7 +562,7 @@ impl QuickLaunchView {
                         .iter()
                         .map(|path| {
                             let is_dir = super::path_is_directory(path);
-                            super::item_for_path(path, 0, is_dir)
+                            nohrs_core::config::quick_launch::item_for_path(path, 0, is_dir)
                         })
                         .collect::<Vec<_>>()
                 })
