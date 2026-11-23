@@ -1878,9 +1878,7 @@ impl ExplorerPage {
         }
         // "Recently closed" is a fly-out to the right, so the menu itself stays
         // short whatever the list holds.
-        let recent_heading = if !self.tab_menu_recent && self.tab_list_menu.is_some() {
-            None
-        } else if self.recently_closed.is_empty() || self.tab_list_menu.is_some() {
+        let recent_heading = if self.recently_closed.is_empty() || self.tab_list_menu.is_some() {
             None
         } else {
             Some(rows.len())

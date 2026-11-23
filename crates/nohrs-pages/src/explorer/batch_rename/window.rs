@@ -138,6 +138,9 @@ impl RenameWindow {
         self.schedule_preview(cx);
     }
 
+    // The button is a click, so this runs on the UI thread; registered in
+    // docs/Clippy基线清理-规格.md §7.
+    #[allow(clippy::disallowed_methods)]
     pub(super) fn load_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = nohrs_core::config::paths::state_dir().join("batch-rename-list.txt");
         match std::fs::read_to_string(&path) {
@@ -153,6 +156,9 @@ impl RenameWindow {
         cx.notify();
     }
 
+    // The button is a click, so this runs on the UI thread; registered in
+    // docs/Clippy基线清理-规格.md §7.
+    #[allow(clippy::disallowed_methods)]
     pub(super) fn save_list(&mut self, cx: &mut Context<Self>) {
         let path = nohrs_core::config::paths::state_dir().join("batch-rename-list.txt");
         let value = self.list_input.read(cx).value().to_string();

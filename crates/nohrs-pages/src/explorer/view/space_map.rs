@@ -972,6 +972,9 @@ fn text_on(fill: Hsla) -> (Hsla, Hsla) {
 
 /// Paints the rectangles: every fill first in the order the layout gave them
 /// (parents before their children), then the hovered tile's ring on top.
+// One argument per piece of the paint: the layout, what to highlight, how, and
+// the palette. A struct would only move the same ten fields elsewhere.
+#[allow(clippy::too_many_arguments)]
 fn paint_mosaic(
     tiles: &[Tile],
     focus_node: &SpaceNode,

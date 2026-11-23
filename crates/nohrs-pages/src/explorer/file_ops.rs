@@ -870,10 +870,10 @@ impl ExplorerPane {
                         }
                         None => ops::delete_permanent(Path::new(&path)),
                     };
-                    if let Err(error) = result {
-                        if !matches!(error, Error::Cancelled) {
-                            report.failed(format!("{path}: {error}"));
-                        }
+                    if let Err(error) = result
+                        && !matches!(error, Error::Cancelled)
+                    {
+                        report.failed(format!("{path}: {error}"));
                     }
                     if let Some(progress) = &progress {
                         progress.item_done();
@@ -1470,7 +1470,7 @@ fn parse_new_folder_name(name: &str) -> std::result::Result<Vec<String>, NewFold
     }
 
     let mut components = Vec::new();
-    for raw in name.split(|character| character == '/' || character == '\\') {
+    for raw in name.split(['/', '\\']) {
         let component = raw.trim();
         if component.is_empty() || component == "." || component == ".." {
             return Err(NewFolderNameError::Invalid);

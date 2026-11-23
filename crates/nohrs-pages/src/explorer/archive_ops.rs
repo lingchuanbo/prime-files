@@ -362,6 +362,9 @@ impl ToolLog {
             .map_err(|error| error.to_string())
     }
 
+    // Archive tools run in a background task (`run_archive_task` spawns them),
+    // and this reads the tool's log after it exits.
+    #[allow(clippy::disallowed_methods)]
     fn read(&self) -> String {
         std::fs::read_to_string(&self.path).unwrap_or_default()
     }

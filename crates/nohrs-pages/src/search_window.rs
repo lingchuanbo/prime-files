@@ -1544,7 +1544,7 @@ impl gpui::Global for OpenSearchWindow {}
 pub fn toggle(cx: &mut App) -> anyhow::Result<()> {
     let existing = cx
         .try_global::<OpenSearchWindow>()
-        .and_then(|state| state.0.clone());
+        .and_then(|state| state.0);
     if let Some(handle) = existing.filter(|handle| {
         cx.windows()
             .iter()

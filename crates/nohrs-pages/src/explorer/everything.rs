@@ -991,9 +991,7 @@ impl Query {
                     || initials
                         .as_deref()
                         .is_some_and(|initials| initials.contains(part.as_str()))
-                    || full_pinyin
-                        .as_deref()
-                        .is_some_and(|full| full.contains(part.as_str()))
+                    || full_pinyin.is_some_and(|full| full.contains(part.as_str()))
             }
             Term::Pattern(pattern) => wildcard(pattern, name),
             Term::Path(_) => true,
@@ -1462,7 +1460,7 @@ pub(crate) mod mft {
                 );
             }
             self.count += 1;
-            if self.count % 4096 == 0 {
+            if self.count.is_multiple_of(4096) {
                 self.progress.fetch_add(4096, Ordering::Relaxed);
             }
         }
@@ -2601,7 +2599,9 @@ pub(crate) mod remote {
             let end = start.checked_add(count.checked_add(1)?.checked_mul(2)?)?;
             let data = buffer.get(start..end)?;
             let units: Vec<u16> = data
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .take(count)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
@@ -3463,6 +3463,8 @@ fn number(bytes: &[u8], at: usize) -> Option<u64> {
     ))
 }
 
+// The snapshot is loaded from a background task (see `ensure`, which spawns it).
+#[allow(clippy::disallowed_methods)]
 fn load(path: &Path) -> Option<Index> {
     let bytes = std::fs::read(path).ok()?;
     let entry_bytes = match bytes.get(..8)? {
@@ -4316,7 +4318,7 @@ pub(crate) fn ensure(cx: &mut App) {
         cx.update(|cx| {
             let state = cx.default_global::<Everything>();
             state.loading = false;
-            let stale = loaded.as_ref().map_or(true, Index::stale);
+            let stale = loaded.as_ref().is_none_or(Index::stale);
             if let Some(index) = loaded {
                 state.index = Some(Arc::new(index));
                 state.generation += 1;
@@ -4530,7 +4532,7 @@ pub(crate) fn rebuild(cx: &mut App) {
                 Err(async_channel::TryRecvError::Empty) => {
                     let touched = cx.update(|cx| {
                         let state = cx.global_mut::<Everything>();
-                        if ticks % 12 == 0 && state.walking_is_new() {
+                        if ticks.is_multiple_of(12) && state.walking_is_new() {
                             state.generation += 1;
                         }
                     });

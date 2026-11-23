@@ -78,7 +78,7 @@ fn to_render_image(bytes: &[u8]) -> Option<RenderImage> {
     let decoded = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (width, height) = decoded.dimensions();
     let mut bgra = decoded.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         let alpha = u16::from(pixel[3]);
         let premultiply = |channel: u8| ((u16::from(channel) * alpha + 127) / 255) as u8;
         let (red, green, blue) = (pixel[0], pixel[1], pixel[2]);
