@@ -22,7 +22,6 @@ use std::path::PathBuf;
 use nohrs_core::config::quick_launch::{Item, OnRunning};
 
 #[cfg(windows)]
-#[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::ComApartment;
