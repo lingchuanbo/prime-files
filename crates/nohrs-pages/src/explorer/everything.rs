@@ -2809,7 +2809,6 @@ pub(crate) mod remote {
                 // A test binary runs from `target/<profile>/deps`, one level
                 // below the folder the app itself runs from.
                 #[cfg(test)]
-                // Tests build fixture files; there is no UI thread here.
                 {
                     if let Some(above) = folder.parent() {
                         candidates.push(above.join("dll").join(name).into_os_string());
