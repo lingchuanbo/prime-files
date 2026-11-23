@@ -11,16 +11,18 @@
 //! second copy of the configuration (§13).
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, ImageSource, IntoElement,
-    KeyDownEvent, Render, RenderImage, SharedString, Subscription, Task, UniformListScrollHandle,
-    WeakEntity, Window, WindowControlArea, div, img, px, rgb, uniform_list,
+    Animation, AnimationExt as _, AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity,
+    FocusHandle, ImageSource, IntoElement, KeyDownEvent, Render, RenderImage, SharedString,
+    Subscription, Task, UniformListScrollHandle, WeakEntity, Window, WindowControlArea, div,
+    ease_out_quint, img, px, rgb, uniform_list,
 };
 use gpui_component::{
     Icon, IconName, WindowExt as _,
@@ -61,6 +63,13 @@ pub(crate) struct QuickLaunchView {
     /// changed (S6). Rebuilding it clones the group's items, so it is not done
     /// per frame.
     frame: Option<Frame>,
+    /// The item the pointer is over, if any: its tile is drawn a little bigger
+    /// (§12.1).
+    hovered: Option<u32>,
+    /// Every item a pointer has been over. A tile that is in here animates back
+    /// down when the pointer leaves it; one that is not is drawn at rest, so it
+    /// does not shrink into place when the window opens.
+    ever_hovered: HashSet<u32>,
     /// The item editor open over the window, if any (§12.3).
     editor: Option<Editor>,
     /// The group whose name is being edited in place, if any (§12.3).
@@ -152,6 +161,8 @@ impl QuickLaunchView {
             hide_task: None,
             scroll_handle: UniformListScrollHandle::new(),
             frame: None,
+            hovered: None,
+            ever_hovered: HashSet::new(),
             editor: None,
             renaming: None,
             _activation: subscription,
@@ -572,6 +583,20 @@ impl QuickLaunchView {
         cx.notify();
     }
 
+    /// Remembers the tile the pointer is over: that tile zooms and the one it
+    /// left shrinks back (§12.1).
+    fn set_hovered(&mut self, slot: u32, hovered: bool, cx: &mut Context<Self>) {
+        let next = hovered.then_some(slot);
+        if self.hovered == next {
+            return;
+        }
+        self.hovered = next;
+        if hovered {
+            self.ever_hovered.insert(slot);
+        }
+        cx.notify();
+    }
+
     /// A click selects the cell and does what its modifiers ask for (§12.2).
     fn clicked(&mut self, slot: u32, kind: super::ClickKind, cx: &mut Context<Self>) {
         if let Some(quick_launch) = super::state_mut(cx) {
@@ -760,6 +785,8 @@ impl Render for QuickLaunchView {
         let packed = frame.packed;
         let grid_icon = grid_icon_size(configured_icon_size, cell_size);
         let list_icon = list_icon_size(configured_icon_size);
+        let hovered = self.hovered;
+        let ever_hovered = Rc::new(self.ever_hovered.clone());
 
         let filter_text = super::filter(cx).to_string();
         let filtered_count = drawn.len();
@@ -790,6 +817,8 @@ impl Render for QuickLaunchView {
             list_view(
                 &drawn,
                 selected,
+                hovered,
+                &ever_hovered,
                 group,
                 editable,
                 group_editable,
@@ -803,6 +832,8 @@ impl Render for QuickLaunchView {
             grid_view(
                 &drawn,
                 selected,
+                hovered,
+                &ever_hovered,
                 group,
                 editable,
                 group_editable,
@@ -1027,17 +1058,18 @@ fn type_icon(item: &Item) -> Icon {
     }
 }
 
-/// The picture of one item: the extracted icon, or the type's icon.
+/// The picture of one item: the extracted icon, or the type's icon, filling the
+/// box its tile sizes for it.
 ///
-/// `size` is in logical pixels: the image may have been extracted at a larger
-/// physical size for the display's scale, and drawing it at that size would make
-/// every icon bigger than the one the settings ask for.
-fn picture(item: &Item, image: Option<&Arc<RenderImage>>, size: f32) -> AnyElement {
+/// The box is sized in logical pixels: the image may have been extracted at a
+/// larger physical size for the display's scale, and filling its box keeps every
+/// icon the size the settings ask for.
+fn picture(item: &Item, image: Option<&Arc<RenderImage>>) -> AnyElement {
     match image {
         Some(image) => img(ImageSource::Render(image.clone()))
-            .size(px(size))
+            .size_full()
             .into_any_element(),
-        None => type_icon(item).size(px(size)).into_any_element(),
+        None => type_icon(item).size_full().into_any_element(),
     }
 }
 
@@ -1081,6 +1113,76 @@ fn fit_columns(width: f32, cell_size: f32, max_columns: usize) -> usize {
 fn fitted_columns(window: &Window, cell_size: f32, max_columns: usize) -> usize {
     let width = f32::from(window.viewport_size().width) - GROUP_BAR_WIDTH;
     fit_columns(width, cell_size, max_columns)
+}
+
+/// How long a tile takes to grow into the pointer and back (§12.1).
+const HOVER_MS: u64 = 120;
+
+/// The grid icon at rest and grown: a fifth bigger, as far as the cell's name
+/// line leaves room.
+fn hover_icon_edges(icon_size: f32, cell_size: f32) -> (f32, f32) {
+    let grown = (icon_size * 1.2)
+        .min(cell_size - NAME_LINE_HEIGHT - 6.0)
+        .max(icon_size);
+    (icon_size, grown)
+}
+
+/// The list row's icon at rest and grown.
+fn hover_list_icon_edges(icon_size: f32) -> (f32, f32) {
+    (
+        icon_size,
+        (icon_size * 1.2).min(LIST_ROW_HEIGHT - 10.0).max(icon_size),
+    )
+}
+
+/// One element's hover zoom: the size it has at rest and when the pointer is
+/// over it.
+#[derive(Clone, Copy)]
+struct Zoom {
+    slot: u32,
+    hovered: bool,
+    ever_hovered: bool,
+    rest: f32,
+    grown: f32,
+}
+
+/// Applies the hover zoom to `element`, growing it while the pointer is over the
+/// tile and shrinking it back after the pointer left.
+///
+/// `ever_hovered` is what keeps a tile that was never hovered at its resting
+/// size: it has nothing to shrink from. The element id carries which direction is
+/// running, so every change starts a fresh animation; once one finishes its state
+/// holds the final value and the frames stop.
+fn hover_zoom(
+    element: Div,
+    name: &'static str,
+    zoom: Zoom,
+    place: impl Fn(Div, f32) -> Div + Copy + 'static,
+) -> AnyElement {
+    let animation =
+        || Animation::new(Duration::from_millis(HOVER_MS)).with_easing(ease_out_quint());
+    let at = move |progress: f32| zoom.rest + (zoom.grown - zoom.rest) * progress;
+    let id = |zooming: bool| {
+        (
+            name,
+            usize::try_from(zoom.slot).unwrap_or(usize::MAX) * 2 + usize::from(zooming),
+        )
+    };
+    if zoom.hovered {
+        element
+            .with_animation(id(true), animation(), move |element, delta| {
+                place(element, at(delta))
+            })
+            .into_any_element()
+    } else if zoom.ever_hovered {
+        element
+            .with_animation(id(false), animation(), move |element, delta| {
+                place(element, at(1.0 - delta))
+            })
+            .into_any_element()
+    } else {
+        place(element, zoom.rest).into_any_element()
+    }
 }
 
 /// The grid's cells, in reading order, with the items placed by slot (§12.1).
@@ -1259,6 +1361,8 @@ fn packed_cells(items: &[Item], columns: usize) -> Vec<Option<Item>> {
 fn grid_view(
     drawn: &[Drawn],
     selected: Option<u32>,
+    hovered: Option<u32>,
+    ever_hovered: &HashSet<u32>,
     group: usize,
     editable: bool,
     group_editable: bool,
@@ -1286,6 +1390,7 @@ fn grid_view(
         .collect();
     let pictures_by_slot = Rc::new(pictures_by_slot);
     let missing = Rc::new(missing.clone());
+    let ever_hovered = Rc::new(ever_hovered.clone());
     let entity = entity.clone();
     uniform_list(
         "quick-launch-grid",
@@ -1312,6 +1417,8 @@ fn grid_view(
                                 item,
                                 image,
                                 selected,
+                                hovered == Some(item.slot),
+                                ever_hovered.contains(&item.slot),
                                 missing,
                                 group,
                                 editable,
@@ -1359,6 +1466,8 @@ fn grid_view(
 fn list_view(
     drawn: &[Drawn],
     selected: Option<u32>,
+    hovered: Option<u32>,
+    ever_hovered: &HashSet<u32>,
     group: usize,
     editable: bool,
     group_editable: bool,
@@ -1372,6 +1481,7 @@ fn list_view(
     let rows = drawn.len().div_ceil(list_columns);
     let drawn = Rc::new(drawn.to_vec());
     let missing = Rc::new(missing.clone());
+    let ever_hovered = Rc::new(ever_hovered.clone());
     let entity = entity.clone();
     uniform_list(
         "quick-launch-list",
@@ -1389,6 +1499,8 @@ fn list_view(
                             line = line.child(div().flex_1().min_w(px(0.0)).child(row_of(
                                 entry,
                                 selected,
+                                hovered == Some(entry.item.slot),
+                                ever_hovered.contains(&entry.item.slot),
                                 missing,
                                 group,
                                 editable,
@@ -1598,6 +1710,8 @@ fn tile(
     item: &Item,
     image: Option<Arc<RenderImage>>,
     selected: bool,
+    hovered: bool,
+    ever_hovered: bool,
     missing: bool,
     group: usize,
     editable: bool,
@@ -1612,6 +1726,24 @@ fn tile(
     let slot = item.slot;
     let drag_name = SharedString::from(item.name.clone());
     let drop_handle = entity.clone();
+    let hover_handle = entity.clone();
+    let (icon_rest, icon_grown) = hover_icon_edges(icon_size, cell_size);
+    let icon = div()
+        .flex_none()
+        .size(px(icon_rest))
+        .child(picture(item, image.as_ref()));
+    let icon = hover_zoom(
+        icon,
+        "quick-launch-icon",
+        Zoom {
+            slot,
+            hovered,
+            ever_hovered,
+            rest: icon_rest,
+            grown: icon_grown,
+        },
+        |icon, edge| icon.size(px(edge)),
+    );
     div()
         .id(("quick-launch-tile", slot))
         .w(px(cell_size))
@@ -1629,6 +1761,11 @@ fn tile(
         .on_click(move |event, _window, cx| {
             handle
                 .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
+                .log_err();
+        })
+        .on_hover(move |over: &bool, _window, cx| {
+            hover_handle
+                .update(cx, |view, cx| view.set_hovered(slot, *over, cx))
                 .log_err();
         })
         .when(group_editable, |this| {
@@ -1665,7 +1802,7 @@ fn tile(
                 cx,
             )
         })
-        .child(picture(item, image.as_ref(), icon_size))
+        .child(icon)
         .child(
             div()
                 .max_w(px(cell_size - 6.0))
@@ -1694,6 +1831,8 @@ fn tile(
 fn row_of(
     drawn: &Drawn,
     selected: bool,
+    hovered: bool,
+    ever_hovered: bool,
     missing: bool,
     group: usize,
     editable: bool,
@@ -1708,6 +1847,24 @@ fn row_of(
     let drag_name = SharedString::from(drawn.item.name.clone());
     let item = &drawn.item;
     let slot = item.slot;
+    let hover_handle = entity.clone();
+    let (icon_rest, icon_grown) = hover_list_icon_edges(icon_size);
+    let icon = div()
+        .flex_none()
+        .size(px(icon_rest))
+        .child(picture(item, drawn.image.as_ref()));
+    let icon = hover_zoom(
+        icon,
+        "quick-launch-row-icon",
+        Zoom {
+            slot,
+            hovered,
+            ever_hovered,
+            rest: icon_rest,
+            grown: icon_grown,
+        },
+        |icon, edge| icon.size(px(edge)),
+    );
     let subtitle = match item.action_kind() {
         ActionKind::Unknown(_) => nohrs_core::t!("Tipo não suportado").to_string(),
         _ => item.path.clone().unwrap_or_default(),
@@ -1727,6 +1884,11 @@ fn row_of(
         .on_click(move |event, _window, cx| {
             handle
                 .update(cx, |view, cx| view.clicked(slot, click_kind(event), cx))
+                .log_err();
+        })
+        .on_hover(move |over: &bool, _window, cx| {
+            hover_handle
+                .update(cx, |view, cx| view.set_hovered(slot, *over, cx))
                 .log_err();
         })
         .when(group_editable, |this| {
@@ -1763,7 +1925,7 @@ fn row_of(
                 cx,
             )
         })
-        .child(picture(item, drawn.image.as_ref(), icon_size))
+        .child(icon)
         .child(
             div()
                 .flex_1()
@@ -2290,6 +2452,19 @@ fn input_with(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The hover grows only the icon, and only as far as the cell's name line
+    /// leaves room; the cell itself stays the size it is.
+    #[test]
+    fn the_hover_zoom_stays_inside_the_cell() {
+        let (icon_rest, icon_grown) = hover_icon_edges(64.0, 100.0);
+        assert_eq!(icon_rest, 64.0);
+        assert!(icon_grown > icon_rest);
+        assert!(icon_grown + NAME_LINE_HEIGHT <= 100.0, "{icon_grown}");
+        let (row_rest, row_grown) = hover_list_icon_edges(28.0);
+        assert_eq!(row_rest, 28.0);
+        assert!(row_grown <= LIST_ROW_HEIGHT && row_grown > row_rest);
+    }
 
     /// The grid shows as many columns as fit the window, up to the configured
     /// maximum, and never fewer than one.
