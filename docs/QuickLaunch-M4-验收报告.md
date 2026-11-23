@@ -158,3 +158,41 @@ R1、R2、R3 修复，BoBO 重测第 8 项，并验证 R2：在 Windows 上通�
 
 ## F. 合入条件
 R4 修好（S1、S2 一起改），并且 E 节 4 项重测全部通过，之后合入 main，清理临时分支（包括 `m4-before-r2-docfix`）。
+
+
+---
+
+# 复查（第 3 轮，2026-11-23 17:20）
+
+> 审查对象：6d3f405（提交第 2 轮报告）、8a3fc71（R4）、cf37f03（S1）、043ef4c（S2）。工作区与 HEAD 一致，第 2 轮报告已按原文提交，没有删减。
+> 结论：**代码通过**。等 BoBO 用 17:08 编译的版本完成第 2 轮 E 节的 4 项重测后，即可合入。
+
+| 项 | 结果 | 依据 |
+|---|---|---|
+| R4 | ✅ | listener 改为 `move \|page, _event, window, cx\| browse(page, field, window, cx)`；`browse` 从传入的 `page` 读取表单类型，不再调用 `cx.entity().read(cx)`；`browse_want` 纯函数测试了 6 种情况；`#[gpui::test]` 在 `page.update` 内部读取，不会 panic。`nohrs-pages` 全量搜索：`cx.entity().read(cx)` / `.update(` 为 0 处；其余 27 处 `.entity()` 是 `downgrade`、在绘制闭包里使用或交给子组件，经执行方逐处核对，接受 |
+| S1 | ✅ | 改为正面写法：`if folder_entry_offered(..) { menu.item(新建文件夹条目) } else { menu }` |
+| S2 | ✅ | 只选文件时的提示文字改为 `Escolher um caminho` |
+| 验证 | ✅ | fmt 无输出；逐包 `--no-deps` clippy 与 main 一致；`cargo build` 无 rustc 警告；`nohrs-pages` 545 个测试通过 |
+
+**备注**：R4 的 gpui 测试只覆盖了“在 update 内部读取 page”这一形态，没有真正弹出文件对话框（测试平台上做不到）。崩溃是否已经修复，以 BoBO 重测第 4 项为准。
+
+
+## 第 3 轮重测结果（BoBO，2026-11-23 17:33，使用 17:08 编译的版本）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | Launcher 的 `@` | ✅ |
+| 2 | 新建条目可以选到 notepad.exe | ✅ |
+| 3 | 新建文件夹条目 | ✅ |
+| 4 | 设置页三个“浏览…” | ✅ 不再崩溃，文件和文件夹都能选。BoBO 另外反馈：**对话框没有自动跳到对应位置，下方也没有出现跳转条** |
+
+**对第 4 项反馈的分析（不是 M4 引入的问题）**：
+- BoBO 更正：说的不是搜索框，而是**对话框下方的跳转条**。也就是 LumaFiles 自带的“文件对话框跳转栏”（`dialog_jump.rs`）：在其他程序的打开/保存对话框下方贴一条栏，里面有 LumaFiles 打开的文件夹、常用文件夹和 Ctrl+G 提示（栏内还带一个搜索框）；新对话框打开时还会自动跳到 LumaFiles 当前所在的文件夹一次。
+- `dialog_jump::process_name()` 遇到**本进程**的对话框会返回 `None`（`if pid == std::process::id() { return None; }`），`is_file_dialog()` 因此返回 false，所以 **LumaFiles 自己弹出的对话框一律不显示跳转栏，也不会自动跳转**。这段代码在 M1 之前（eac7738）就已存在，原因没有注明。
+- gpui 的 `PathPromptOptions` 没有“初始目录”字段，所以快速启动的“浏览…”打不开在条目当前所在的文件夹，只能落在 Windows 记住的上一次位置。
+- 结论：第 4 项按 M4 的验收标准**通过**；“自己的对话框也要有跳转栏，并且自动定位到条目所在的文件夹”是新需求，处理方式由 BoBO 决定（见下一节）。
+
+- **BoBO 决定（17:38）**：先合入 M4；跳转条单独作为 **M4.1** 处理，规格另写。
+
+## M4 结论
+**验收通过，可以合入 main。** 第 2 轮 E 节的 4 项重测全部通过；第 4 项附带提出的跳转条需求转到 M4.1 处理。
