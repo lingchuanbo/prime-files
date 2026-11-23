@@ -977,24 +977,21 @@ fn start_health_check(cx: &mut App) {
         loop {
             cx.background_executor().timer(HEALTH_PAUSE).await;
             let batch = cx.update(|cx| {
-                let Some(quick_launch) = state_mut(cx) else {
-                    return None;
-                };
+                let quick_launch = state_mut(cx)?;
                 let mut sent = 0usize;
                 while sent < HEALTH_BATCH {
+                    // An empty queue ends the pass rather than the state being
+                    // gone, so this one is a `break`.
                     let Some((group, slot, item)) = quick_launch.health_queue.pop_front() else {
                         break;
                     };
-                    if let Some(workers) = quick_launch.workers.as_ref() {
-                        workers.send_health(HealthRequest {
-                            group,
-                            slot,
-                            item: Box::new(item),
-                        });
-                        sent = sent.saturating_add(1);
-                    } else {
-                        return None;
-                    }
+                    let workers = quick_launch.workers.as_ref()?;
+                    workers.send_health(HealthRequest {
+                        group,
+                        slot,
+                        item: Box::new(item),
+                    });
+                    sent = sent.saturating_add(1);
                 }
                 (sent > 0).then_some(sent)
             });
@@ -1184,7 +1181,8 @@ fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str)
             mark_dirty(cx);
             recheck_health(cx, group, slot);
             cx.refresh_windows();
-        });
+        })
+        .log_err();
     })
     .detach();
 }
@@ -1624,11 +1622,9 @@ pub(crate) fn move_item_to_group(
     let mut item = source.items.remove(position);
     let Some(target) = state.config.groups.get_mut(to_group) else {
         // Put it back: the destination vanished between the menu and the click.
-        state
-            .config
-            .groups
-            .get_mut(from_group)
-            .map(|source| source.items.push(item));
+        if let Some(source) = state.config.groups.get_mut(from_group) {
+            source.items.push(item);
+        }
         return false;
     };
     let new_slot = first_free_slot(target);
@@ -1788,16 +1784,6 @@ pub(crate) fn next_free_slot(cx: &App, group: usize) -> u32 {
 /// item then is: something the Shell has to be asked to open.
 pub(crate) fn path_is_directory(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
-}
-
-/// The item a path becomes, with the folder question answered on this thread.
-///
-/// Only the tests use this: the window asks [`path_is_directory`] on a background
-/// task and then builds the item with
-/// [`nohrs_core::config::quick_launch::item_for_path`] (S1).
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn item_from_path(path: &Path, slot: u32) -> Item {
-    nohrs_core::config::quick_launch::item_for_path(path, slot, path.is_dir())
 }
 
 /// Moves one item's usage record to the place it went, in one transaction
@@ -3200,9 +3186,7 @@ pub fn activate_by_id(cx: &mut App, group: &str, slot: u32, reveal: bool) {
 fn expanded_path(cx: &App, item: &Item) -> Option<PathBuf> {
     let state = state(cx)?;
     let raw = item.path.as_deref()?.trim();
-    nohrs_services::launch::expand(raw, &state.expand)
-        .ok()
-        .map(PathBuf::from)
+    nohrs_services::launch::expand(raw, &state.expand).ok()
 }
 
 /// The message the footer shows, if the last launch failed.
@@ -3294,11 +3278,12 @@ pub fn poll_reload(cx: &mut App) {
 }
 
 /// The pointer's monitor, numbered the way the platform lists displays (§11).
+///
+/// `GetCursorPos` and `MonitorFromPoint` are the only way to learn where the
+/// pointer is while no LumaFiles window has the foreground.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod platform {
-    //! `GetCursorPos` and `MonitorFromPoint`, which is the only way to learn
-    //! where the pointer is while no LumaFiles window has the foreground.
 
     use windows::Win32::Foundation::{LPARAM, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{
@@ -3489,19 +3474,21 @@ mod tests {
     /// §12.3: a group gets the first free `group_<n>` id.
     #[test]
     fn a_new_group_gets_the_first_free_id() {
-        let mut config = QuickLaunchConfig::default();
-        config.groups = vec![
-            Group {
-                id: "group_1".to_string(),
-                name: "Um".to_string(),
-                items: Vec::new(),
-            },
-            Group {
-                id: "group_3".to_string(),
-                name: "Tres".to_string(),
-                items: Vec::new(),
-            },
-        ];
+        let config = QuickLaunchConfig {
+            groups: vec![
+                Group {
+                    id: "group_1".to_string(),
+                    name: "Um".to_string(),
+                    items: Vec::new(),
+                },
+                Group {
+                    id: "group_3".to_string(),
+                    name: "Tres".to_string(),
+                    items: Vec::new(),
+                },
+            ],
+            ..QuickLaunchConfig::default()
+        };
         assert_eq!(next_group_id(&config), "group_2");
     }
 
@@ -4022,11 +4009,7 @@ mod tests {
             let mut item = Item::new(0, "folder", "Pasta");
             item.path = Some("{luma}".to_string());
             let expanded = expanded_path(cx, &item);
-            assert_eq!(
-                expanded,
-                stored.map(std::path::PathBuf::from),
-                "{{luma}} expands from the stored context"
-            );
+            assert_eq!(expanded, stored, "{{luma}} expands from the stored context");
         });
     }
 

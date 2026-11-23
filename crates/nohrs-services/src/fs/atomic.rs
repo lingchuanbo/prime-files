@@ -36,7 +36,7 @@ pub fn write_atomically(path: &Path, contents: &str) -> std::io::Result<u64> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
