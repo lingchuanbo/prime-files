@@ -516,8 +516,9 @@ pub struct IndexStatus {
 
 /// Writes the fixed-size index status response.
 pub fn write_index_status(out: &mut impl Write, status: IndexStatus) -> io::Result<()> {
+    // The multiplies bind tighter than the or; the parentheses say so out loud.
     let flags =
-        u8::from(status.ready) * STATUS_READY | u8::from(status.refreshing) * STATUS_REFRESHING;
+        (u8::from(status.ready) * STATUS_READY) | (u8::from(status.refreshing) * STATUS_REFRESHING);
     out.write_all(STATUS_MAGIC)?;
     out.write_all(&VERSION.to_le_bytes())?;
     out.write_all(&[flags])?;
