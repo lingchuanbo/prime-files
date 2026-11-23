@@ -3180,7 +3180,7 @@ fn apply_loaded(cx: &mut App, read: FileRead) {
     restore_last_group(cx);
     // G.1: every dynamic group is generated again after a successful read.
     refresh_dynamic_groups_for(cx, RefreshReason::Loaded);
-    ensure_selection(cx);
+    drop_stale_selection(cx);
     sync_hotkey(cx);
     cx.refresh_windows();
     // E2: records of items the file no longer has go now, so the next occupant of
@@ -3662,7 +3662,7 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
             // G.2, G.3: a folder group is read again at most every 30 s, and
             // the `recent`/`most_used` groups follow the use records.
             refresh_dynamic_groups_for(cx, RefreshReason::Shown);
-            ensure_selection(cx);
+            drop_stale_selection(cx);
             tracing::debug!(
                 target: "quick_launch",
                 elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -3702,7 +3702,7 @@ pub(crate) fn show(cx: &mut App) -> Result<()> {
     }
     // G.2, G.3: the window opens on freshly generated dynamic groups.
     refresh_dynamic_groups_for(cx, RefreshReason::Shown);
-    ensure_selection(cx);
+    drop_stale_selection(cx);
     // §12.1: the items are checked once the window has been shown, a batch at a
     // time, on the icon thread.
     start_health_check(cx);
@@ -4776,7 +4776,7 @@ fn select_group(cx: &mut App, index: usize) {
     // G.2: a `folder:` group reads its directory again when it is switched to,
     // if the last read is older than 30 s.
     refresh_dynamic_groups_for(cx, RefreshReason::GroupSwitch(index));
-    ensure_selection(cx);
+    drop_stale_selection(cx);
     cx.refresh_windows();
 }
 
@@ -4820,8 +4820,26 @@ fn move_selection(cx: &mut App, delta: i64) {
     cx.refresh_windows();
 }
 
+/// Drops a selection the window no longer shows, without picking a new one.
+///
+/// Opening the window, switching the group, loading the file and the tick all call
+/// this: a fresh group must not open with its first item highlighted just because
+/// the selection had to be somewhere.
+fn drop_stale_selection(cx: &mut App) {
+    let kept = filtered_slots(cx);
+    if let Some(quick_launch) = state_mut(cx)
+        && quick_launch.slot.is_some_and(|slot| !kept.contains(&slot))
+    {
+        quick_launch.slot = None;
+    }
+}
+
 /// Makes sure one item is selected, so `Enter` has something to start and the
 /// grid has a highlighted cell (§12.2).
+///
+/// Only the filter uses this: after a keystroke the first match is what `Enter`
+/// would start, so it is selected and highlighted. Everywhere else the selection
+/// is the user's.
 fn ensure_selection(cx: &mut App) {
     let kept = filtered_slots(cx);
     let Some(quick_launch) = state_mut(cx) else {
@@ -5051,7 +5069,7 @@ pub fn poll_reload(cx: &mut App) {
             quick_launch.pending_hide = false;
         }
     }
-    ensure_selection(cx);
+    drop_stale_selection(cx);
     poll_save(cx);
 }
 
@@ -6407,7 +6425,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_group_switch_selects_an_item_of_the_new_group(cx: &mut gpui::TestAppContext) {
+    fn a_group_switch_forgets_the_old_selection_without_picking_a_new_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             let mut first = group_of(0);
             first.items = vec![Item::new(0, "app", "A")];
@@ -6422,11 +6442,15 @@ mod tests {
             assert_eq!(state(cx).map(|state| state.group), Some(1));
             assert_eq!(
                 state(cx).and_then(|state| state.slot),
-                Some(3),
-                "the new group's first item is selected, not the old group's slot"
+                None,
+                "the new group opens with nothing highlighted, not its first item"
             );
             move_selection(cx, 1);
-            assert_eq!(state(cx).and_then(|state| state.slot), Some(3));
+            assert_eq!(
+                state(cx).and_then(|state| state.slot),
+                Some(3),
+                "the first arrow press lands on the new group's first item"
+            );
         });
     }
 

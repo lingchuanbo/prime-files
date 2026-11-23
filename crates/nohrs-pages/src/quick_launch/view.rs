@@ -270,7 +270,7 @@ impl QuickLaunchView {
             "escape" => {
                 if !super::filter(cx).is_empty() {
                     super::set_filter(cx, String::new());
-                    super::ensure_selection(cx);
+                    super::drop_stale_selection(cx);
                     cx.notify();
                 } else {
                     super::hide_in(cx, window);
