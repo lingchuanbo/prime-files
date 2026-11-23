@@ -2852,8 +2852,10 @@ pub fn load_from_files(main: &Path, appearance: &Path, search: &Path) -> (Config
     (config, diagnostics)
 }
 
-// Config is read synchronously at startup, before the GPUI foreground loop runs
-// (same call path as `load_from_path`), so blocking I/O here cannot stall rendering.
+// Read once at startup, before the GPUI foreground loop runs (the same call path as
+// `load_from_path`), and again on the UI thread whenever the file changes: the hot
+// reload in `nohrs-pages/src/root.rs:672` calls `load_from_files` inside `update_in`.
+// Registered in docs/Clippy基线清理-规格.md §7.
 #[allow(clippy::disallowed_methods)]
 fn read_config_table(path: &Path, diagnostics: &mut Vec<Diagnostic>) -> toml::Table {
     match std::fs::read_to_string(path) {

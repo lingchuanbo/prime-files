@@ -52,7 +52,7 @@
 | 文件:行 | lint | 理由 | 在哪个线程执行 |
 |---|---|---|---|
 | `crates/nohrs-core/src/config/paths.rs:94`（`read_portable_mode`） | `disallowed_methods` | 惰性判定便携模式，被本模块每个路径辅助函数调用 | **UI 线程**（首次可能发生在渲染/按键处理里）；已登记 §7 |
-| `crates/nohrs-core/src/config/settings.rs:2860`（`read_config_table`） | `disallowed_methods` | 与紧邻的 `load_from_path` 同一条调用路径：启动时、GPUI 前台循环之前 | 启动线程（尚无窗口） |
+| `crates/nohrs-core/src/config/settings.rs:2858`（`read_config_table`） | `disallowed_methods` | 启动时一次（与 `load_from_path` 同一条路径），之后每次配置文件变化都由 `nohrs-pages/src/root.rs:672` 的热重载再调用 | **UI 线程**（热重载在 `update_in` 里调用 `load_from_files`）；启动那一次尚无窗口。已登记 §7 |
 | `crates/nohrs-services/src/fs/space.rs:647`（`place_children`） | `too_many_arguments`（8） | 递归状态的每一项各一个参数，打包成结构体只是换个地方声明 | 后台（空间图计算） |
 | `crates/nohrs-services/src/search/indexer.rs:237`（`index_single_directory`） | `too_many_arguments`（9） | 每个被索引字段一个 `Field`，只是名字不同 | 后台（搜索索引线程） |
 | `crates/nohrs-services/src/search/indexer.rs:266`（`index_single_file`） | `too_many_arguments`（9） | 同上 | 后台 |
@@ -134,25 +134,20 @@ let target = if super::network::is_unc(&typed) || path.is_dir() {
 
 ---
 
-## 5. 门槛命令的原始输出
+## 5. 门槛命令的原始输出（R1–R4 修完后的最后一轮）
 
 ### `cargo fmt --all -- --check`
 
-退出码 0，无 diff。stdout 里有 rustfmt 的既有提示（`rustfmt.toml` 的 nightly 选项被 stable 忽略），与本次改动无关：
-
-```
-Warning: can't set `imports_granularity = Crate`, unstable features are only available in nightly channel.
-Warning: can't set `group_imports = StdExternalCrate`, unstable features are only available in nightly channel.
-```
+退出码 0，无 diff（stdout 里只有 rustfmt 的既有提示：`rustfmt.toml` 的 nightly 选项被 stable 忽略）。
 
 ### `cargo clippy --workspace --all-targets --release -- -D warnings`
 
 ```
-    Finished `release` profile [optimized] target(s) in 1m 05s
+    Finished `release` profile [optimized] target(s) in 10.73s
 warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
 note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
 ```
-退出码 0。**0 个 clippy/rustc warning 或 error**；最后那条是依赖 `proc-macro-error2` 的未来兼容提示，不归本次管（§8 不允许升级依赖）。
+退出码 0，**0 个 clippy/rustc warning 或 error**（最后那条是依赖 `proc-macro-error2` 的未来兼容提示，§8 不允许升级依赖）。
 
 ### `cargo test --release -p nohrs-core -p nohrs-services -p nohrs-store -p nohrs-models -p nohrs-indexer -p nohrs-launcher -p nohrs-cli`
 
@@ -170,7 +165,7 @@ running 30 tests     ... test result: ok. 30 passed; 0 failed       ← store
                         test result: ok. 1 passed; 0 failed
 running 2 tests      ... test result: ok. 2 passed; 0 failed
 ```
-**0 个失败**，退出码 0。测试数量没有减少（对比 `main`：core 146、services 139、indexer 41、launcher 53、cli 86+4+16，一致）。
+退出码 0，**0 个失败**，共 20 秒。
 
 ### `cargo test --release -p nohrs-pages`
 
@@ -178,27 +173,31 @@ running 2 tests      ... test result: ok. 2 passed; 0 failed
 running 558 tests
 test result: ok. 545 passed; 0 failed; 13 ignored
 ```
-（`main` 上同样是 545 passed / 13 ignored。）
+**已知（与本分支无关）**：`explorer::tags::tests::cards_keep_the_order_they_are_dragged_into` 偶发失败——测试并行执行时共用进程级 `static TAGGED`，一个测试的 `install` 会覆盖另一个正在读的数据。在 `main` 上重复 12 次失败 3 次（同样 544+1），重跑即通过；本分支没有改这个测试的逻辑（只加了测试模块的 allow，并把 `&[one.clone()]` 改成 `std::slice::from_ref(&one)`）。
 
 ### `cargo build --release -p nohrs -p nohrs-cli`
 
 ```
-    Finished `release` profile [optimized] target(s) in 34.60s
-LumaFiles.exe  size=48,084,480  built=2026-11-23 19:12:30
-noh.exe        size= 6,634,496  built=2026-11-23 19:16:26
+    Finished `release` profile [optimized] target(s) in 12.60s
+LumaFiles.exe  size=48,084,480  built=2026-11-23 20:57:39
+noh.exe        size= 6,634,496  built=2026-11-23 20:57:34
 ```
-
----
 
 ## 6. `git diff --stat main..chore/clippy-baseline`
 
 ```
- 53 files changed, 847 insertions(+), 270 deletions(-)
+ 53 files changed, 862 insertions(+), 270 deletions(-)
 ```
 
-提交（每个一步）：
+提交（含复查第 1 轮之后的修正）：
 
 ```
+f9989c9 Say where read_config_table really runs                    ← R4
+aea57c2 Drop the allows that guard nothing                         ← R3
+982182d Drop the unused per-test copy and say what the tests do    ← R2
+e7876bc Keep the log tests off the developer's real log directory  ← R1
+9a36c4c Record the first clippy baseline review
+851c3b4 Document the clippy gate and fill the spec's thread table
 68fda2c Clear the cli's dead code and make the four log tests pass
 f7b7f6b Clear the clippy findings of the nohrs-pages tests
 b8b4b71 Clear the clippy findings of the nohrs-pages library
@@ -209,8 +208,6 @@ e12e0d9 Clear the nohrs-core clippy findings
 292b6da Update the clippy baseline spec to v1.1
 c910528 Add the clippy baseline spec
 ```
-
----
 
 ## 7. `nohrs-cli` 集成测试的复制与日志目录（与规格 §4.4 的实际情况）
 
@@ -231,6 +228,23 @@ c910528 Add the clippy baseline spec
 - 规格 §7 已按实际执行线程填好（3 行）。
 - 没有改 `clippy.toml`、`[workspace.lints]`、`rust-toolchain.toml`，没有加 `#![allow(clippy::all)]`，没有升级依赖，没有碰 `third_party/gpui`。
 
+
+---
+
+## 复查第 1 轮的修正（执行方）
+
+- **R1**（`e7876bc`）：每个日志测试有自己的 state 临时目录，子进程始终 `XDG_STATE_HOME` 指向它；`log_dir()` 分平台——Windows 用副本所在目录，其他平台用 `<state>/nohrs/logs`；`Mutex` 只在 Windows 上（只有那里 4 个测试共用目录，每个测试开头清掉上次的日志）。非 Windows 上各测试目录独立，可并行。
+- **R2**（`982182d`）：删掉从未被调用的 `copy_for_test()` 和两处 `#[allow(dead_code)]`；日志测试改用共享的 `binary_under_test()` 副本。报告 §7 与 `docs/testing.md` §7 第 4、5 条按实际做法重写，第 5 条补了“与 quick_launch 测试共用副本目录，改用 nextest 这类并行执行器时需要分开”。
+- **R3**（`aea57c2`）：删掉 6 个不覆盖任何文件读写的 allow（`everything.rs` 的 `search_tests`、`push`、`index_status_poll_tests`、代码块共 4 个，`navigation.rs` 的 `LISTING_WAIT`、`OPENED_WITH_DEFAULT_APP` 共 2 个），连同前面的注释。随后把本分支新增的 20 个 `allow(clippy::disallowed_methods)` 临时改成 `expect(...)`（组合属性拆开、只对 disallowed_methods 用 expect），跑 §2 的 clippy，只报 1 处不满足：
+
+  ```
+  warning: this lint expectation is unfulfilled
+   --> crates\nohrs-cli\tests\support\binary_under_test.rs:8:11
+    |
+  8 | #![expect(clippy::disallowed_methods)]
+  ```
+  它所在的模块只做 `fs::copy`/`rename`/`metadata`/`create_dir_all`，`clippy.toml` 没有禁这些，所以这个 allow 也删掉；其余 19 个改回 allow。
+- **R4**（`f9989c9`）：`read_config_table` 的注释改为“启动时一次，之后每次配置文件变化由 `nohrs-pages/src/root.rs:672` 的热重载在 UI 线程上再调用”，并补进规格 §7 与报告 §2 表格（线程一栏标 UI 线程）。
 
 ---
 
