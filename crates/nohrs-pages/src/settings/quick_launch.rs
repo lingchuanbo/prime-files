@@ -276,7 +276,8 @@ impl Section {
                     enabled,
                     cx,
                 ),
-            ),
+            )
+            .wide(),
             Row::new(
                 t!("Tamanho da célula"),
                 None,
@@ -287,7 +288,8 @@ impl Section {
                     enabled,
                     cx,
                 ),
-            ),
+            )
+            .wide(),
             Row::new(
                 t!("Tamanho do ícone"),
                 None,
@@ -298,7 +300,8 @@ impl Section {
                     enabled,
                     cx,
                 ),
-            ),
+            )
+            .wide(),
             Row::new(
                 t!("Colunas da lista"),
                 None,
