@@ -133,7 +133,6 @@ struct Frame {
     view: View,
     columns: usize,
     cell_size: f32,
-    list_columns: usize,
     /// True while a filter is typed: the grid packs the matches instead of
     /// leaving the holes their slots would leave (§12.2).
     packed: bool,
@@ -217,16 +216,22 @@ impl QuickLaunchView {
             cx.stop_propagation();
             return;
         }
-        let (cell_size, max_columns) = super::state(cx)
+        let (view, cell_size, max_columns) = super::state(cx)
             .map(|quick_launch| {
                 let window = &quick_launch.config().window;
                 (
+                    window.view,
                     f32::from(window.cell_size),
                     usize::from(window.columns.max(1)),
                 )
             })
-            .unwrap_or((100.0, 8));
-        let columns = i64::try_from(fitted_columns(window, cell_size, max_columns)).unwrap_or(8);
+            .unwrap_or((View::Grid, 100.0, 8));
+        let columns = if view == View::List {
+            fitted_list_columns(window)
+        } else {
+            fitted_columns(window, cell_size, max_columns)
+        };
+        let columns = i64::try_from(columns).unwrap_or(8);
         if modifiers.alt
             && !modifiers.control
             && !modifiers.platform
@@ -734,11 +739,10 @@ impl Render for QuickLaunchView {
                     config.window.view,
                     usize::from(config.window.columns.max(1)),
                     f32::from(config.window.cell_size),
-                    usize::from(config.window.list_columns.max(1)),
                     !state.filter.trim().is_empty(),
                 )
             };
-            let (groups, items, view, columns, cell_size, list_columns, packed) = planned;
+            let (groups, items, view, columns, cell_size, packed) = planned;
             // The icons are asked for here, once per rebuild, because
             // `super::icon` needs the mutable state.
             let drawn: Rc<Vec<Drawn>> = Rc::new(
@@ -767,7 +771,6 @@ impl Render for QuickLaunchView {
                 view,
                 columns,
                 cell_size,
-                list_columns,
                 packed,
             });
         }
@@ -781,7 +784,7 @@ impl Render for QuickLaunchView {
         // The configured count is the maximum; the window's width decides how many
         // actually fit (and a narrow window shows fewer).
         let columns = fitted_columns(window, cell_size, frame.columns);
-        let list_columns = frame.list_columns;
+        let list_columns = fitted_list_columns(window);
         let packed = frame.packed;
         let grid_icon = grid_icon_size(configured_icon_size, cell_size);
         let list_icon = list_icon_size(configured_icon_size);
@@ -1085,6 +1088,13 @@ fn group_shortcut(key: &str) -> Option<usize> {
 /// The gap between two grid cells, in logical pixels (the row's `gap_1`).
 const CELL_GAP: f32 = 4.0;
 
+/// The narrowest a list column gets before another one is shown instead: its
+/// icon, name and path need that much to stay readable.
+const LIST_COLUMN_MIN_WIDTH: f32 = 260.0;
+
+/// The gap between two list columns, in logical pixels (the line's `gap_2`).
+const LIST_GAP: f32 = 8.0;
+
 /// The icon edge a cell gets: the configured size, kept small enough that the
 /// name's line still fits under it.
 fn grid_icon_size(configured: u16, cell_size: f32) -> f32 {
@@ -1113,6 +1123,25 @@ fn fit_columns(width: f32, cell_size: f32, max_columns: usize) -> usize {
 fn fitted_columns(window: &Window, cell_size: f32, max_columns: usize) -> usize {
     let width = f32::from(window.viewport_size().width) - GROUP_BAR_WIDTH;
     fit_columns(width, cell_size, max_columns)
+}
+
+/// How many list columns `width` has room for: one more whenever another
+/// minimum-width column fits, so the list widens with the window instead of
+/// leaving the space empty.
+fn fit_list_columns(width: f32) -> usize {
+    let fit = ((width + LIST_GAP) / (LIST_COLUMN_MIN_WIDTH + LIST_GAP)).floor();
+    if fit.is_finite() && fit >= 1.0 {
+        // Cap only to keep a very wide window from making the rows unreadably
+        // thin; the columns still share the row's width.
+        usize::try_from(fit as u64).unwrap_or(1).min(8)
+    } else {
+        1
+    }
+}
+
+/// [`fit_list_columns`] for the window's width, once the group bar is taken out.
+fn fitted_list_columns(window: &Window) -> usize {
+    fit_list_columns(f32::from(window.viewport_size().width) - GROUP_BAR_WIDTH)
 }
 
 /// How long a tile takes to grow into the pointer and back (§12.1).
@@ -2452,6 +2481,17 @@ fn input_with(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The list shows one more column for every minimum-width column the window
+    /// has room for, and never more than its cap.
+    #[test]
+    fn the_list_shows_the_columns_that_fit_the_window() {
+        assert_eq!(fit_list_columns(540.0), 2, "the default list window");
+        assert_eq!(fit_list_columns(240.0), 1, "narrower than one column");
+        assert_eq!(fit_list_columns(1224.0), 4, "a wide grid-like window");
+        assert_eq!(fit_list_columns(10_000.0), 8, "the cap");
+        assert_eq!(fit_list_columns(0.0), 1);
+    }
 
     /// The hover grows only the icon, and only as far as the cell's name line
     /// leaves room; the cell itself stays the size it is.

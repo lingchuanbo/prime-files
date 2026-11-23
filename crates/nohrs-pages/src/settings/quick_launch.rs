@@ -58,9 +58,6 @@ const CELL_SIZES: [(&str, u16); 8] = [
 /// The icon sizes offered; the file accepts only these (§4).
 const ICON_SIZES: [(&str, u16); 5] = [("16", 16), ("24", 24), ("32", 32), ("48", 48), ("64", 64)];
 
-/// The list-view column counts offered, inside the `1..=3` of §4.
-const LIST_COLUMNS: [(&str, u8); 3] = [("1", 1), ("2", 2), ("3", 3)];
-
 /// The kinds of group the new-group chooser offers (§17.2 G.6).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum NewGroupKind {
@@ -86,7 +83,7 @@ pub(super) enum Action {
     /// A new icon edge.
     IconSize(u16),
     /// A new list column count.
-    ListColumns(u8),
+
     /// Hide the window when it loses focus, or stop hiding it.
     AutoHide(bool),
     /// Hide the window after a launch, or keep it.
@@ -302,17 +299,6 @@ impl Section {
                 ),
             )
             .wide(),
-            Row::new(
-                t!("Colunas da lista"),
-                None,
-                page.chips_when(
-                    "quick-launch-list-columns",
-                    &numbered(&LIST_COLUMNS, window.list_columns, Action::ListColumns),
-                    false,
-                    enabled,
-                    cx,
-                ),
-            ),
             Row::new(
                 t!("Esconder ao perder o foco"),
                 None,
@@ -1309,7 +1295,6 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
         Action::Columns(columns) => set_window(cx, move |window| window.columns = columns),
         Action::CellSize(size) => set_window(cx, move |window| window.cell_size = size),
         Action::IconSize(size) => set_window(cx, move |window| window.icon_size = size),
-        Action::ListColumns(columns) => set_window(cx, move |window| window.list_columns = columns),
         Action::AutoHide(on) => set_window(cx, move |window| window.auto_hide = on),
         Action::CloseAfterLaunch(on) => {
             set_window(cx, move |window| window.close_after_launch = on)
@@ -2218,10 +2203,7 @@ mod tests {
             assert!((64..=160).contains(&value));
         }
         for &(_, value) in &ICON_SIZES {
-            assert!(matches!(value, 16 | 24 | 32 | 48 | 64 | 96));
-        }
-        for &(_, value) in &LIST_COLUMNS {
-            assert!((1..=3).contains(&value));
+            assert!(matches!(value, 16 | 24 | 32 | 48 | 64));
         }
     }
 
