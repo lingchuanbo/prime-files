@@ -602,6 +602,8 @@ fn project_summary(
 }
 
 #[cfg(test)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

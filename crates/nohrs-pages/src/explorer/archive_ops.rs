@@ -524,6 +524,8 @@ impl ExplorerPane {
 }
 
 #[cfg(test)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::{Tool, hatchzip_reads, pick_tool};
     use nohrs_core::config::ArchiveTool;

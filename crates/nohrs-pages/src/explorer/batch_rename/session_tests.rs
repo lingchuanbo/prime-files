@@ -5,8 +5,10 @@ use super::*;
 fn raw_inputs_and_all_options_survive_repeated_disk_saves() {
     let directory = tempfile::tempdir().expect("state directory");
     let path = directory.path().join("nested/batch-rename.json");
-    let mut data = Session::default();
-    data.values = ["[拼音]_[C]", "", "中国", "", "invalid", "0", ""].map(String::from);
+    let mut data = Session {
+        values: ["[拼音]_[C]", "", "中国", "", "invalid", "0", ""].map(String::from),
+        ..Session::default()
+    };
     data.case = CaseMode::Title;
     data.first_only = true;
     data.include_extension = true;

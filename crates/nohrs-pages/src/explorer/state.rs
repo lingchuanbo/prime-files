@@ -1751,6 +1751,23 @@ fn sort_key_from_config(order: config::SortOrder) -> SortKey {
 pub(crate) fn is_hidden(name: &str) -> bool {
     name.starts_with('.')
 }
+/// What a workspace page is showing: the tag it is, the cards read for the
+/// folders it holds, and the read still running while they are counted.
+pub(crate) struct WorkspaceView {
+    pub tag: u32,
+    pub cards: Option<std::rc::Rc<Vec<super::view::workspace::Card>>>,
+    pub task: Option<gpui::Task<()>>,
+}
+
+/// A copy, move, delete, extract or compress still running, and the dialog that
+/// shows it: the title names the action, the board the worker updates.
+pub(crate) struct ActiveTransfer {
+    /// What the dialog calls the run: 复制 / 移动 / 解压 / 压缩 / 删除到回收站 /
+    /// 永久删除.
+    pub(crate) title: &'static str,
+    /// Counters and the Cancel flag, shared with the worker.
+    pub(crate) progress: std::sync::Arc<nohrs_services::fs::transfer::TransferProgress>,
+}
 
 #[cfg(test)]
 mod tests {
@@ -1771,21 +1788,4 @@ mod tests {
         assert!(sort_key_from_config(config::SortOrder::Size) == SortKey::Size);
         assert!(sort_key_from_config(config::SortOrder::Kind) == SortKey::Type);
     }
-}
-/// What a workspace page is showing: the tag it is, the cards read for the
-/// folders it holds, and the read still running while they are counted.
-pub(crate) struct WorkspaceView {
-    pub tag: u32,
-    pub cards: Option<std::rc::Rc<Vec<super::view::workspace::Card>>>,
-    pub task: Option<gpui::Task<()>>,
-}
-
-/// A copy, move, delete, extract or compress still running, and the dialog that
-/// shows it: the title names the action, the board the worker updates.
-pub(crate) struct ActiveTransfer {
-    /// What the dialog calls the run: 复制 / 移动 / 解压 / 压缩 / 删除到回收站 /
-    /// 永久删除.
-    pub(crate) title: &'static str,
-    /// Counters and the Cancel flag, shared with the worker.
-    pub(crate) progress: std::sync::Arc<nohrs_services::fs::transfer::TransferProgress>,
 }

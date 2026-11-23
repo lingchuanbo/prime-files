@@ -130,7 +130,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<DROPFILES>(), header.pFiles as usize);
         assert!(header.fWide.as_bool());
         let names: Vec<u16> = bytes[header.pFiles as usize..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         assert_eq!(

@@ -298,6 +298,8 @@ fn extract_with_7z(archive: &Path, inner: &str, folder: &Path) -> Result<(), Str
 }
 
 #[cfg(test)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

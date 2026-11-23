@@ -1587,6 +1587,8 @@ pub fn toggle(cx: &mut App) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+// Tests build fixture files; there is no UI thread here.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use gpui::{
         AppContext as _, Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, WindowHandle,

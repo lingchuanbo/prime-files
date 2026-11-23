@@ -113,21 +113,6 @@ fn query_terms(query: &str) -> Vec<String> {
     query.split_whitespace().map(str::to_lowercase).collect()
 }
 
-#[cfg(test)]
-mod indexed_search_tests {
-    use super::query_terms;
-
-    #[test]
-    fn query_terms_ignore_extra_spaces_and_fold_case() {
-        assert_eq!(query_terms("  Project   README "), ["project", "readme"]);
-    }
-
-    #[test]
-    fn whitespace_only_query_has_no_terms() {
-        assert!(query_terms(" \t\n ").is_empty());
-    }
-}
-
 use gpui::{Context, IntoElement, Render, Window};
 
 /// Whether two paths name the same place. Windows paths are compared without
@@ -145,5 +130,20 @@ pub(crate) fn same_path(left: &str, right: &str) -> bool {
 impl Render for ExplorerPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         view::render(self, window, cx)
+    }
+}
+
+#[cfg(test)]
+mod indexed_search_tests {
+    use super::query_terms;
+
+    #[test]
+    fn query_terms_ignore_extra_spaces_and_fold_case() {
+        assert_eq!(query_terms("  Project   README "), ["project", "readme"]);
+    }
+
+    #[test]
+    fn whitespace_only_query_has_no_terms() {
+        assert!(query_terms(" \t\n ").is_empty());
     }
 }

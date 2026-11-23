@@ -889,7 +889,12 @@ mod tests {
         let mesh = load(&format!("{home}/Downloads/model coelho foda.fbx")).unwrap();
         assert!(!mesh.triangles.is_empty());
         let pixels = rasterize_pixels(&mesh, -0.6, 0.35, 1.0, 320, 240);
-        let covered = pixels.chunks_exact(4).filter(|p| p[3] == 255).count();
+        let covered = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] == 255)
+            .count();
         eprintln!(
             "{} triangles, {covered} pixels covered",
             mesh.triangles.len()
