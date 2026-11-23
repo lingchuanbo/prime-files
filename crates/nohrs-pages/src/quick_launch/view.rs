@@ -1149,7 +1149,9 @@ fn grid_metrics(width: f32, height: f32, cell_size: f32) -> Grid {
     let columns = fit_count(width, cell_size);
     let fill_rows = fit_count(height, cell_size);
     let cell_width = ((width - CELL_GAP * (columns - 1) as f32) / columns as f32).max(1.0);
-    let cell_height = ((height - CELL_GAP * (fill_rows - 1) as f32) / fill_rows as f32).max(1.0);
+    // Every row carries the gap above it, the first one included, so the rows are
+    // as far apart as the columns and the grid still ends at the window's edge.
+    let cell_height = ((height - CELL_GAP * fill_rows as f32) / fill_rows as f32).max(1.0);
     Grid {
         columns,
         fill_rows,
@@ -1462,7 +1464,8 @@ fn grid_view(
             let mut lines = Vec::with_capacity(range.len());
             for row in range {
                 let mut line = div()
-                    .h(px(grid.cell_height))
+                    .h(px(grid.cell_height + CELL_GAP))
+                    .pt(px(CELL_GAP))
                     .w_full()
                     .flex()
                     .items_center()
@@ -2561,6 +2564,8 @@ mod tests {
         assert_eq!(grid.fill_rows, 7);
         let covered = grid.cell_width * 8.0 + CELL_GAP * 7.0;
         assert!((covered - 860.0).abs() < 0.001, "the cells fill the width");
+        let covered = (grid.cell_height + CELL_GAP) * 7.0;
+        assert!((covered - 800.0).abs() < 0.001, "the rows fill the height");
         assert!(grid.cell_width >= 100.0, "the cells stretch, not shrink");
         let narrow = grid_metrics(240.0, 100.0, 100.0);
         assert_eq!(narrow.columns, 2);

@@ -756,6 +756,9 @@ impl Section {
                     div()
                         .flex_1()
                         .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
                         .text_sm()
                         .child(item.name.clone()),
                 )
@@ -763,6 +766,9 @@ impl Section {
                     div()
                         .flex_shrink_0()
                         .max_w(px(280.0))
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_xs()
                         .whitespace_nowrap()
                         .text_color(rgb(theme::fg_secondary()))
@@ -842,7 +848,7 @@ impl Section {
         };
         let cwd_enabled = enabled && !uwp;
         let mut rows = vec![
-            Row::new(t!("Tipo"), None, kind_control),
+            Row::new(t!("Tipo"), None, kind_control).wide(),
             Row::new(t!("Nome"), None, input_row(&form.name, enabled)).wide(),
         ];
         if !command && !group {
