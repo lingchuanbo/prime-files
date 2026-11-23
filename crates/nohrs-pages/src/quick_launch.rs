@@ -40,6 +40,7 @@ use nohrs_core::config::ConfigWatcher;
 use nohrs_core::config::paths;
 use nohrs_core::config::quick_launch::{
     Group, Item, OnRunning, Parsed, QuickLaunchConfig, QuickLaunchError, View, Warning,
+    WindowSettings,
 };
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::launch::LaunchRegistry;
@@ -1084,6 +1085,30 @@ pub(crate) fn toggle_lock(cx: &mut App) -> bool {
     locked
 }
 
+/// Changes one field of the window settings (§13, §17.1 B).
+///
+/// Every control of the settings page's window group goes through here, so an
+/// edit always touches the state, marks the file and tells the open window about
+/// the two fields it keeps live: the pin and the summon chord.
+pub(crate) fn set_window(cx: &mut App, change: impl FnOnce(&mut WindowSettings)) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    let previous_topmost = quick_launch.config.window.topmost;
+    let previous_hotkey = quick_launch.config.window.hotkey.clone();
+    change(&mut quick_launch.config.window);
+    let topmost = quick_launch.config.window.topmost;
+    let hotkey = quick_launch.config.window.hotkey.clone();
+    quick_launch.touch();
+    mark_dirty(cx);
+    if topmost != previous_topmost {
+        sync_topmost(cx, topmost);
+    }
+    if hotkey != previous_hotkey {
+        sync_hotkey(cx);
+    }
+}
+
 /// Applies `topmost` to the open window, for a hot reload that changed it
 /// (§11.1).
 fn sync_topmost(cx: &mut App, topmost: bool) {
@@ -1247,21 +1272,36 @@ pub(crate) fn put_item(cx: &mut App, group: usize, slot: u32, mut item: Item) ->
     true
 }
 
-/// Applies the four fields the edit dialog offers (§12.3): name, path,
-/// arguments and "run as administrator".
-pub(crate) fn edit_item(
-    cx: &mut App,
-    group: usize,
-    slot: u32,
-    name: &str,
-    path: &str,
-    args: &str,
-    admin: bool,
-) -> bool {
-    let name = name.trim();
-    let path = path.trim();
+/// Everything the settings page's item form can change (§17.1 B).
+#[derive(Clone)]
+pub(crate) struct ItemEdit {
+    /// The `type` the form chose. A form that cannot offer the item's own type
+    /// keeps it, so the settings page never rewrites a kind it cannot build.
+    pub kind: String,
+    /// What the tile shows.
+    pub name: String,
+    /// The target, possibly with the variables of §7.
+    pub path: String,
+    /// Command-line arguments, empty for none.
+    pub args: String,
+    /// Working directory, empty for the executable's own folder.
+    pub cwd: String,
+    /// Start elevated (`runas`).
+    pub admin: bool,
+    /// Custom icon, empty for the program's own.
+    pub icon: String,
+    /// Extra words the filter matches on.
+    pub tags: Vec<String>,
+}
+
+/// Applies the item form of the settings page (§17.1 B), with the rules of the
+/// window's edit dialog: no empty name or path, no edits while the file is
+/// read-only, a fresh health check and a kind judged again from a new path.
+pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit) -> bool {
+    let name = edit.name.trim();
+    let path = edit.path.trim();
     // An item without a name would be an empty tile, and one without a path
-    // could never start: the dialog treats both as "cancel".
+    // could never start: the form treats both as "cancel".
     if name.is_empty() || path.is_empty() || !editable(cx) {
         return false;
     }
@@ -1274,19 +1314,84 @@ pub(crate) fn edit_item(
     let Some(item) = target.items.iter_mut().find(|item| item.slot == slot) else {
         return false;
     };
+    // Only the four kinds the form offers may be introduced; every other kind
+    // (uwp, command, group, plugin:…) is kept as it is, since this milestone
+    // cannot build those and changing one would change what the entry means.
+    if !matches!(edit.kind.as_str(), "app" | "folder" | "file" | "url") && edit.kind != item.kind {
+        return false;
+    }
     let previous_kind = item.kind.clone();
+    let previous_path = item.path.clone();
+    item.kind = edit.kind.clone();
     item.name = name.to_string();
     item.path = Some(path.to_string());
-    let args = args.trim();
+    let args = edit.args.trim();
     item.args = (!args.is_empty()).then(|| args.to_string());
-    item.admin = admin;
+    let cwd = edit.cwd.trim();
+    item.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+    let icon = edit.icon.trim();
+    item.icon = (!icon.is_empty()).then(|| icon.to_string());
+    item.admin = edit.admin;
+    item.tags = edit
+        .tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect();
+    let path_changed = item.path != previous_path;
     state.touch();
     mark_dirty(cx);
     recheck_health(cx, group, slot);
     // S4: a path that now points at a folder (or a program) changes the kind, so
-    // the item keeps working after the edit.
-    retype_after_edit(cx, group, slot, &previous_kind);
+    // the item keeps working after the edit. An unchanged path keeps the kind
+    // the form chose.
+    if path_changed {
+        retype_after_edit(cx, group, slot, &previous_kind);
+    }
     true
+}
+
+/// Applies the four fields the window's edit dialog offers (§12.3): name, path,
+/// arguments and "run as administrator".
+pub(crate) fn edit_item(
+    cx: &mut App,
+    group: usize,
+    slot: u32,
+    name: &str,
+    path: &str,
+    args: &str,
+    admin: bool,
+) -> bool {
+    // The dialog does not offer the other fields, so they keep what the item
+    // already has; a missing item is refused by `update_item` too.
+    let Some(item) = item_at(cx, group, slot) else {
+        return false;
+    };
+    let previous_kind = item.kind.clone();
+    let path_changed = item.path.as_deref().unwrap_or_default().trim() != path.trim();
+    let edited = update_item(
+        cx,
+        group,
+        slot,
+        &ItemEdit {
+            kind: item.kind,
+            name: name.to_string(),
+            path: path.to_string(),
+            args: args.to_string(),
+            cwd: item.cwd.unwrap_or_default(),
+            admin,
+            icon: item.icon.unwrap_or_default(),
+            tags: item.tags,
+        },
+    );
+    // The dialog judges the kind after every edit, as it did before the form
+    // existed; the form only asks for that when its path changed, so a kind
+    // chosen by hand with the path kept is not overruled from the disk.
+    if edited && !path_changed {
+        retype_after_edit(cx, group, slot, &previous_kind);
+    }
+    edited
 }
 
 /// Adds a group at the end and makes it the current one (§12.3). The caller
@@ -1324,6 +1429,34 @@ pub(crate) fn rename_group(cx: &mut App, index: usize, name: &str) -> bool {
     };
     group.name = name.to_string();
     state.touch();
+    mark_dirty(cx);
+    true
+}
+
+/// Moves a group to another place in the bar (§17.1 B), by swapping it with its
+/// neighbour: the settings page's "up" and "down" buttons.
+///
+/// Health answers and usage records are kept by group id, so a move needs no
+/// migration; the window follows the swap when it was showing one of the two.
+pub(crate) fn move_group(cx: &mut App, from: usize, to: usize) -> bool {
+    if from == to || !editable(cx) {
+        return false;
+    }
+    let Some(quick_launch) = state_mut(cx) else {
+        return false;
+    };
+    if from >= quick_launch.config.groups.len() || to >= quick_launch.config.groups.len() {
+        return false;
+    }
+    quick_launch.config.groups.swap(from, to);
+    if quick_launch.group == from {
+        quick_launch.group = to;
+    } else if quick_launch.group == to {
+        quick_launch.group = from;
+    }
+    // The slot belonged to the group that just left this index.
+    quick_launch.slot = None;
+    quick_launch.touch();
     mark_dirty(cx);
     true
 }
@@ -2920,8 +3053,48 @@ fn message(cx: &App) -> Option<&str> {
 }
 
 /// The read-only banner's text, if the file must not be written back (§5.2).
-fn read_only_reason(cx: &App) -> Option<&str> {
+pub(crate) fn read_only_reason(cx: &App) -> Option<&str> {
     state(cx).and_then(|quick_launch| quick_launch.status.error())
+}
+
+/// The window settings as the settings page shows them (§13); the defaults
+/// before the first read has landed.
+pub(crate) fn window_settings(cx: &App) -> WindowSettings {
+    state(cx)
+        .map(|quick_launch| quick_launch.config.window.clone())
+        .unwrap_or_default()
+}
+
+/// A copy of the groups, for the settings page (§13).
+///
+/// The page and the window read the same state; the copy only lasts for the
+/// frame being built.
+pub(crate) fn groups(cx: &App) -> Vec<Group> {
+    state(cx)
+        .map(|quick_launch| quick_launch.config.groups.clone())
+        .unwrap_or_default()
+}
+
+/// The chord the OS is actually holding, if one is registered (§10).
+pub(crate) fn registered_hotkey(cx: &App) -> Option<&str> {
+    let quick_launch = state(cx)?;
+    quick_launch.hotkey?;
+    quick_launch.hotkey_text.as_deref()
+}
+
+/// Why the last registration failed, if it did (§10).
+pub(crate) fn hotkey_error(cx: &App) -> Option<&str> {
+    state(cx).and_then(|quick_launch| quick_launch.hotkey_error.as_deref())
+}
+
+/// Whether the last registration failed because the chord belongs to the
+/// Launcher.
+///
+/// The binary refuses that chord before the OS is asked and says why in its own
+/// error text (§10); the settings page shows the user's own words for it, so the
+/// only thing to look for here is that refusal.
+pub(crate) fn hotkey_conflicts_with_launcher(cx: &App) -> bool {
+    hotkey_error(cx).is_some_and(|error| error.contains("Launcher's own shortcut"))
 }
 
 /// Whether the first read is still running.
@@ -3742,6 +3915,22 @@ mod tests {
             }
             assert!(!put_item(cx, 0, 4, Item::new(4, "app", "Novo")));
             assert!(!edit_item(cx, 0, 0, "Nome", "C:\\a.exe", "", false));
+            assert!(!update_item(
+                cx,
+                0,
+                0,
+                &ItemEdit {
+                    kind: "app".to_string(),
+                    name: "Nome".to_string(),
+                    path: "C:\\a.exe".to_string(),
+                    args: String::new(),
+                    cwd: String::new(),
+                    admin: false,
+                    icon: String::new(),
+                    tags: Vec::new(),
+                }
+            ));
+            assert!(!move_group(cx, 0, 1));
             assert!(!add_group(cx).is_some());
             assert!(!rename_group(cx, 0, "Outro"));
             assert!(!delete_item(cx, 0, 0));
@@ -3806,6 +3995,122 @@ mod tests {
             let other = add_group(cx).unwrap();
             assert!(delete_group(cx, other, false));
             assert!(add_group(cx).is_some());
+        });
+    }
+
+    /// §17.1 B: the settings page's form changes the fields the window's dialog
+    /// does not offer, and only lets the four kinds of the form be introduced.
+    #[gpui::test]
+    fn a_settings_page_item_form_covers_the_other_fields(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(0)]);
+            assert!(put_item(cx, 0, 2, Item::new(2, "app", "Antigo")));
+            let edit = ItemEdit {
+                kind: "folder".to_string(),
+                name: "  Nova  ".to_string(),
+                path: " C:\\Pasta ".to_string(),
+                args: " /a ".to_string(),
+                cwd: "C:\\Trabalho".to_string(),
+                admin: true,
+                icon: "C:\\icone.png".to_string(),
+                tags: vec![" um ".to_string(), String::new(), "dois".to_string()],
+            };
+            assert!(update_item(cx, 0, 2, &edit));
+            let item = item_at(cx, 0, 2).expect("the item is still there");
+            assert_eq!(item.kind, "folder");
+            assert_eq!(item.name, "Nova");
+            assert_eq!(item.path.as_deref(), Some("C:\\Pasta"));
+            assert_eq!(item.args.as_deref(), Some("/a"));
+            assert_eq!(item.cwd.as_deref(), Some("C:\\Trabalho"));
+            assert_eq!(item.icon.as_deref(), Some("C:\\icone.png"));
+            assert!(item.admin);
+            assert_eq!(item.tags, vec!["um".to_string(), "dois".to_string()]);
+
+            // A name or a path left empty is "cancel", as in the dialog.
+            let mut empty = edit.clone();
+            empty.name = "   ".to_string();
+            assert!(!update_item(cx, 0, 2, &empty));
+            empty.name = "Nova".to_string();
+            empty.path = String::new();
+            assert!(!update_item(cx, 0, 2, &empty));
+
+            // A kind outside the four is kept, never introduced.
+            let mut command = item_at(cx, 0, 2).expect("the item is still there");
+            command.kind = "command".to_string();
+            assert!(put_item(cx, 0, 2, command));
+            let kept = ItemEdit {
+                kind: "command".to_string(),
+                name: "Comando".to_string(),
+                path: "cmd.exe".to_string(),
+                ..edit.clone()
+            };
+            assert!(update_item(cx, 0, 2, &kept));
+            assert_eq!(
+                item_at(cx, 0, 2).map(|item| item.kind),
+                Some("command".to_string())
+            );
+            let introduced = ItemEdit {
+                kind: "plugin:x".to_string(),
+                ..kept.clone()
+            };
+            assert!(!update_item(cx, 0, 2, &introduced));
+        });
+    }
+
+    /// §17.1 B: a group moves by swapping with its neighbour, and the window
+    /// keeps showing the group it was showing.
+    #[gpui::test]
+    fn a_settings_page_move_reorders_groups(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut first = group_of(0);
+            first.id = "first".to_string();
+            first.name = "Primeiro".to_string();
+            let mut second = group_of(0);
+            second.id = "second".to_string();
+            second.name = "Segundo".to_string();
+            let mut third = group_of(0);
+            third.id = "third".to_string();
+            third.name = "Terceiro".to_string();
+            install(cx, vec![first, second, third]);
+            assert!(move_group(cx, 0, 1));
+            assert_eq!(
+                state(cx).map(|state| state.config.groups[1].name.clone()),
+                Some("Primeiro".to_string())
+            );
+            assert_eq!(
+                state(cx).map(|state| state.group),
+                Some(1),
+                "the window follows the group it was showing"
+            );
+            assert!(!move_group(cx, 1, 1), "a move onto itself is nothing");
+            assert!(!move_group(cx, 0, 9), "past the end");
+            assert_eq!(
+                state(cx).map(|state| state.config.groups.len()),
+                Some(3),
+                "a refused move changes nothing"
+            );
+        });
+    }
+
+    /// §17.1 B: every window setting of the page goes through `set_window`,
+    /// which touches and marks the file.
+    #[gpui::test]
+    fn the_settings_page_window_changes_are_marked_for_saving(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(0)]);
+            set_window(cx, |window| window.view = View::List);
+            assert_eq!(
+                state(cx).map(|state| state.config.window.view),
+                Some(View::List)
+            );
+            let (pending, revision) = state(cx)
+                .map(|state| (state.pending_save, state.revision))
+                .expect("the state is installed");
+            assert!(pending, "an edit asks for a save");
+            set_window(cx, |window| window.hotkey = "ctrl+alt+Space".to_string());
+            assert!(state(cx).is_some_and(|state| state.revision > revision));
+            set_window(cx, |window| window.topmost = true);
+            assert!(state(cx).is_some_and(|state| state.config.window.topmost));
         });
     }
 

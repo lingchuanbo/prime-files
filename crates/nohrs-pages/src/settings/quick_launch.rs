@@ -1,0 +1,1609 @@
+//! The "Quick Launch" section of the settings page (§13, §17.1 B).
+//!
+//! Four cards: the window (the summon chord and the layout), the groups, the
+//! form that edits one entry, and the file itself. Everything here writes the
+//! same [`crate::quick_launch`] global the floating window draws, so an edit on
+//! either side is visible on the other at the next frame; the file is written by
+//! the state's own throttle, never from this module.
+//!
+//! When `quicklaunch.toml` cannot be written back, every control of the first
+//! three cards is greyed and inert, and the file card opens with the reason.
+
+use gpui::prelude::*;
+use gpui::{
+    AnyElement, Context, Div, ElementId, Entity, KeyDownEvent, PathPromptOptions, SharedString,
+    Stateful, Window, div, px, rgb,
+};
+use gpui_component::Sizable as _;
+use gpui_component::input::{Input, InputState};
+use nohrs_core::config::paths;
+use nohrs_core::config::quick_launch::{
+    Group as LaunchGroup, Item, OnRunning, View, WindowSettings,
+};
+use nohrs_core::shortcuts::Chord;
+use nohrs_core::telemetry::LogErr;
+use nohrs_core::{t, tf};
+use nohrs_services::launch::{ExpandContext, LaunchMode, LaunchRegistry, LaunchRequest};
+use nohrs_ui::theme::theme;
+
+use super::{Pick, Row, SettingsPage};
+use crate::quick_launch;
+
+/// The grid column counts offered, inside the `2..=16` of §4.
+const COLUMNS: [(&str, u8); 7] = [
+    ("2", 2),
+    ("4", 4),
+    ("6", 6),
+    ("8", 8),
+    ("10", 10),
+    ("12", 12),
+    ("16", 16),
+];
+
+/// The cell sizes offered, inside the `64..=160` of §4.
+const CELL_SIZES: [(&str, u16); 7] = [
+    ("64", 64),
+    ("80", 80),
+    ("96", 96),
+    ("112", 112),
+    ("128", 128),
+    ("144", 144),
+    ("160", 160),
+];
+
+/// The icon sizes offered; the file accepts only these (§4).
+const ICON_SIZES: [(&str, u16); 6] = [
+    ("16", 16),
+    ("24", 24),
+    ("32", 32),
+    ("48", 48),
+    ("64", 64),
+    ("96", 96),
+];
+
+/// The list-view column counts offered, inside the `1..=3` of §4.
+const LIST_COLUMNS: [(&str, u8); 3] = [("1", 1), ("2", 2), ("3", 3)];
+
+/// What one click on the section does.
+#[derive(Clone, Copy)]
+pub(super) enum Action {
+    /// A new layout for the grid.
+    View(View),
+    /// A new grid column count.
+    Columns(u8),
+    /// A new grid cell edge.
+    CellSize(u16),
+    /// A new icon edge.
+    IconSize(u16),
+    /// A new list column count.
+    ListColumns(u8),
+    /// Hide the window when it loses focus, or stop hiding it.
+    AutoHide(bool),
+    /// Hide the window after a launch, or keep it.
+    CloseAfterLaunch(bool),
+    /// Pin the window, or let it go.
+    Topmost(bool),
+    /// What to do when the program is already running.
+    OnRunning(OnRunning),
+    /// Keep the process alive after the main window closes.
+    KeepRunning(bool),
+    /// Wait for the next key press to become the summon chord.
+    RecordHotkey,
+    /// Add a group at the end and start its rename.
+    NewGroup,
+    /// Start renaming the group at this index.
+    RenameGroup(usize),
+    /// Write the renamed group back.
+    SaveRename,
+    /// Leave the group's name as it was.
+    CancelRename,
+    /// Delete the group at this index, asking once when it has items.
+    DeleteGroup(usize),
+    /// Move the group at this index one place up.
+    MoveGroupUp(usize),
+    /// Move the group at this index one place down.
+    MoveGroupDown(usize),
+    /// Show the group at this index in the item editor.
+    SelectGroup(usize),
+    /// Open the form of one item of the chosen group.
+    SelectItem(u32),
+    /// Change the kind of the item being edited.
+    SetKind(&'static str),
+    /// Flip "run as administrator" of the item being edited.
+    ToggleAdmin,
+    /// Write the item form back.
+    SaveItem,
+    /// Open `quicklaunch.toml` in its own program.
+    OpenFile,
+    /// Show `quicklaunch.toml` in LumaFiles.
+    RevealFile,
+}
+
+/// The section's own state: which item is being edited, which group is being
+/// renamed, and the key recording that the page's `record_key` hands to.
+#[derive(Default)]
+pub(super) struct Section {
+    /// The group the item editor is on, by id: a reorder does not move it.
+    group: Option<String>,
+    /// The item waiting for a window to make its fields.
+    select: Option<(String, u32)>,
+    /// The form of the item being edited.
+    form: Option<Form>,
+    /// The group whose name is being edited, by id.
+    renaming: Option<String>,
+    /// The field of that group, made on the first frame after the click.
+    rename_input: Option<Entity<InputState>>,
+    /// The group whose deletion waits for a second click, by id.
+    confirm_delete: Option<String>,
+    /// Waiting for the next key press to become the summon chord.
+    recording: bool,
+}
+
+impl Section {
+    /// Whether a key press belongs to the summon chord rather than to a
+    /// command's shortcut.
+    pub(super) fn is_recording(&self) -> bool {
+        self.recording
+    }
+
+    /// The groups as cards of rows, for the search field and the section.
+    pub(super) fn groups(
+        &self,
+        page: &SettingsPage,
+        cx: &mut Context<SettingsPage>,
+    ) -> Vec<super::Group> {
+        let window = quick_launch::window_settings(cx);
+        let groups = quick_launch::groups(cx);
+        let enabled = quick_launch::editable(cx);
+        let read_only = quick_launch::read_only_reason(cx).map(str::to_string);
+        vec![
+            self.window_group(page, &window, enabled, cx),
+            self.groups_group(&groups, enabled, cx),
+            self.items_group(page, &groups, enabled, cx),
+            self.file_group(&read_only, cx),
+        ]
+    }
+
+    /// The group the item editor shows, resolved by id so a reorder does not
+    /// change it.
+    fn chosen_group(&self, groups: &[LaunchGroup]) -> Option<usize> {
+        match &self.group {
+            Some(id) => groups.iter().position(|group| &group.id == id),
+            None => (!groups.is_empty()).then_some(0),
+        }
+    }
+
+    /// The window card: the chord first, then the layout of the grid or list.
+    fn window_group(
+        &self,
+        page: &SettingsPage,
+        window: &WindowSettings,
+        enabled: bool,
+        cx: &mut Context<SettingsPage>,
+    ) -> super::Group {
+        let view_options = [
+            (
+                t!("Grade"),
+                window.view == View::Grid,
+                Pick::QuickLaunch(Action::View(View::Grid)),
+            ),
+            (
+                t!("Lista"),
+                window.view == View::List,
+                Pick::QuickLaunch(Action::View(View::List)),
+            ),
+        ];
+        let running_options = [
+            (
+                t!("Ativar"),
+                window.on_running == OnRunning::Activate,
+                Pick::QuickLaunch(Action::OnRunning(OnRunning::Activate)),
+            ),
+            (
+                t!("Abrir outra vez"),
+                window.on_running == OnRunning::New,
+                Pick::QuickLaunch(Action::OnRunning(OnRunning::New)),
+            ),
+        ];
+        let rows = vec![
+            Row::hint(
+                t!("Atalho global"),
+                t!("Clique e aperte a combinação que abre a inicialização rápida de qualquer programa; Esc desiste."),
+                self.hotkey_control(window, enabled, cx),
+            )
+            .wide(),
+            Row::new(
+                t!("Exibir"),
+                None,
+                page.chips_when(
+                    "quick-launch-view",
+                    &view_options,
+                    false,
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::new(
+                t!("Colunas"),
+                None,
+                page.chips_when(
+                    "quick-launch-columns",
+                    &numbered(&COLUMNS, window.columns, Action::Columns),
+                    false,
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::new(
+                t!("Tamanho da célula"),
+                None,
+                page.chips_when(
+                    "quick-launch-cell-size",
+                    &numbered(&CELL_SIZES, window.cell_size, Action::CellSize),
+                    false,
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::new(
+                t!("Tamanho do ícone"),
+                None,
+                page.chips_when(
+                    "quick-launch-icon-size",
+                    &numbered(&ICON_SIZES, window.icon_size, Action::IconSize),
+                    false,
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::new(
+                t!("Colunas da lista"),
+                None,
+                page.chips_when(
+                    "quick-launch-list-columns",
+                    &numbered(&LIST_COLUMNS, window.list_columns, Action::ListColumns),
+                    false,
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::new(
+                t!("Esconder ao perder o foco"),
+                None,
+                page.switch_pick_when(
+                    "quick-launch-auto-hide",
+                    window.auto_hide,
+                    Pick::QuickLaunch(Action::AutoHide(!window.auto_hide)),
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::new(
+                t!("Fechar depois de abrir"),
+                None,
+                page.switch_pick_when(
+                    "quick-launch-close-after-launch",
+                    window.close_after_launch,
+                    Pick::QuickLaunch(Action::CloseAfterLaunch(!window.close_after_launch)),
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::hint(
+                t!("Manter na frente"),
+                t!("Fixar: a janela não se esconde e fica na frente"),
+                page.switch_pick_when(
+                    "quick-launch-topmost",
+                    window.topmost,
+                    Pick::QuickLaunch(Action::Topmost(!window.topmost)),
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::new(
+                t!("Quando o programa já está aberto"),
+                None,
+                page.chips_when(
+                    "quick-launch-on-running",
+                    &running_options,
+                    false,
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::hint(
+                t!("Continuar em segundo plano"),
+                t!("Depois de fechar a janela principal, o processo continua rodando para o atalho continuar funcionando."),
+                page.switch_pick_when(
+                    "quick-launch-keep-running",
+                    window.keep_running,
+                    Pick::QuickLaunch(Action::KeepRunning(!window.keep_running)),
+                    enabled,
+                    cx,
+                ),
+            ),
+        ];
+        super::Group::titled(t!("Janela"), rows)
+    }
+
+    /// The chord control: what is registered, the recording state, and why the
+    /// last registration failed.
+    fn hotkey_control(
+        &self,
+        window: &WindowSettings,
+        enabled: bool,
+        cx: &mut Context<SettingsPage>,
+    ) -> AnyElement {
+        let shown = if self.recording {
+            t!("Aperte as teclas…").to_string()
+        } else if window.hotkey.trim().is_empty() {
+            t!("Nenhum").to_string()
+        } else {
+            window.hotkey.clone()
+        };
+        let button = div()
+            .id("quick-launch-hotkey")
+            .min_w(px(170.0))
+            .h(px(28.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .border_1()
+            .text_sm()
+            .whitespace_nowrap()
+            .map(|this| {
+                if self.recording {
+                    this.border_color(rgb(theme::accent()))
+                        .bg(rgb(theme::accent_subtle()))
+                        .text_color(rgb(theme::accent()))
+                } else {
+                    this.border_color(rgb(theme::border_hover()))
+                        .bg(rgb(theme::bg()))
+                        .text_color(rgb(theme::fg()))
+                        .hover(|style| style.bg(rgb(theme::bg_hover())))
+                }
+            })
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .on_click(cx.listener(|page, _event, window, cx| {
+                        window.focus(&page.focus_handle);
+                        page.pick(Pick::QuickLaunch(Action::RecordHotkey), cx);
+                    }))
+            })
+            .when(!enabled, |this| this.opacity(0.45))
+            .child(shown);
+        let mut control = div().flex().flex_col().items_end().gap_1().child(button);
+        if quick_launch::hotkey_error(cx).is_some() {
+            if quick_launch::hotkey_conflicts_with_launcher(cx) {
+                control =
+                    control.child(status_line(t!("Conflita com o atalho do buscador."), true));
+            } else {
+                control = control.child(status_line(
+                    t!("Não foi possível registrar o atalho."),
+                    true,
+                ));
+                if let Some(error) = quick_launch::hotkey_error(cx) {
+                    control = control.child(status_line(error.to_string(), true));
+                }
+            }
+        } else if quick_launch::registered_hotkey(cx).is_some() {
+            control = control.child(status_line(t!("Registrado"), false));
+        }
+        control.into_any_element()
+    }
+
+    /// The groups card: one line per group with rename, delete and move, and
+    /// the button that adds another.
+    fn groups_group(
+        &self,
+        groups: &[LaunchGroup],
+        enabled: bool,
+        cx: &mut Context<SettingsPage>,
+    ) -> super::Group {
+        let mut entries: Vec<AnyElement> = groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| self.group_entry(group, index, groups.len(), enabled, cx))
+            .collect();
+        entries.push(
+            action_button(
+                "quick-launch-group-add",
+                t!("Novo grupo"),
+                false,
+                enabled,
+                Action::NewGroup,
+                cx,
+            )
+            .into_any_element(),
+        );
+        let control = div().flex().flex_col().gap_1().w_full().children(entries);
+        super::Group::new(vec![Row::new(t!("Grupos"), None, control).wide()])
+    }
+
+    /// One group line. While it is being renamed, the line is the field and
+    /// the two buttons; a non-empty group asks once before it is deleted.
+    fn group_entry(
+        &self,
+        group: &LaunchGroup,
+        index: usize,
+        count: usize,
+        enabled: bool,
+        cx: &mut Context<SettingsPage>,
+    ) -> AnyElement {
+        if self.renaming.as_deref() == Some(group.id.as_str()) {
+            let Some(input) = self.rename_input.as_ref() else {
+                return div().into_any_element();
+            };
+            return div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .child(Input::new(input).small().w(px(240.0)).into_any_element())
+                .child(action_button(
+                    "quick-launch-rename-save",
+                    t!("Salvar"),
+                    false,
+                    enabled,
+                    Action::SaveRename,
+                    cx,
+                ))
+                .child(action_button(
+                    "quick-launch-rename-cancel",
+                    t!("Cancelar"),
+                    false,
+                    enabled,
+                    Action::CancelRename,
+                    cx,
+                ))
+                .into_any_element();
+        }
+        let confirming = self.confirm_delete.as_deref() == Some(group.id.as_str());
+        let delete_label = if confirming {
+            t!("Confirmar exclusão")
+        } else {
+            t!("Excluir")
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .py_1()
+            .w_full()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_sm()
+                    .text_color(rgb(theme::fg()))
+                    .child(group.name.clone()),
+            )
+            .child(action_button(
+                ElementId::Name(SharedString::from(format!(
+                    "quick-launch-group-up-{}",
+                    group.id
+                ))),
+                "↑",
+                false,
+                enabled && index > 0,
+                Action::MoveGroupUp(index),
+                cx,
+            ))
+            .child(action_button(
+                ElementId::Name(SharedString::from(format!(
+                    "quick-launch-group-down-{}",
+                    group.id
+                ))),
+                "↓",
+                false,
+                enabled && index + 1 < count,
+                Action::MoveGroupDown(index),
+                cx,
+            ))
+            .child(action_button(
+                ElementId::Name(SharedString::from(format!(
+                    "quick-launch-group-rename-{}",
+                    group.id
+                ))),
+                t!("Renomear"),
+                false,
+                enabled,
+                Action::RenameGroup(index),
+                cx,
+            ))
+            .child(action_button(
+                ElementId::Name(SharedString::from(format!(
+                    "quick-launch-group-delete-{}",
+                    group.id
+                ))),
+                delete_label,
+                confirming,
+                enabled && count > 1,
+                Action::DeleteGroup(index),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// The items card: the group choice, the items of that group, then the form
+    /// of the selected one.
+    fn items_group(
+        &self,
+        page: &SettingsPage,
+        groups: &[LaunchGroup],
+        enabled: bool,
+        cx: &mut Context<SettingsPage>,
+    ) -> super::Group {
+        let chosen = self.chosen_group(groups);
+        let Some(index) = chosen else {
+            return super::Group::new(vec![Row::new(
+                t!("Itens"),
+                None,
+                status_line(t!("Nenhum"), false),
+            )]);
+        };
+        let Some(group) = groups.get(index) else {
+            return super::Group::new(vec![Row::new(
+                t!("Itens"),
+                None,
+                status_line(t!("Nenhum"), false),
+            )]);
+        };
+        let mut rows = vec![
+            Row::new(
+                t!("Grupo"),
+                None,
+                self.group_tabs(groups, chosen, enabled, cx),
+            )
+            .wide(),
+        ];
+        let mut list = self.item_list(group, enabled, cx);
+        if group.items.is_empty() {
+            list = list.child(status_line(t!("Nenhum item neste grupo."), false));
+        } else if self.form.is_none() {
+            list = list.child(status_line(t!("Selecione um item para editar."), false));
+        }
+        rows.push(Row::new(t!("Itens"), None, list).wide());
+        if let Some(form) = self.form.as_ref().filter(|form| form.group == group.id) {
+            rows.extend(self.form_rows(page, form, enabled, cx));
+        }
+        super::Group::titled(t!("Itens"), rows)
+    }
+
+    /// The chips that choose which group the item editor shows. The names are
+    /// the author's, so this is not the shared chip row: its labels are static.
+    fn group_tabs(
+        &self,
+        groups: &[LaunchGroup],
+        chosen: Option<usize>,
+        enabled: bool,
+        cx: &mut Context<SettingsPage>,
+    ) -> AnyElement {
+        if groups.is_empty() {
+            return status_line(t!("Nenhum"), false).into_any_element();
+        }
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children(groups.iter().enumerate().map(|(index, group)| {
+                let selected = chosen == Some(index);
+                let pick = Pick::QuickLaunch(Action::SelectGroup(index));
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "quick-launch-group-tab-{}",
+                        group.id
+                    ))))
+                    .h(px(26.0))
+                    .px(px(11.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.0))
+                    .text_sm()
+                    .whitespace_nowrap()
+                    .when(enabled, |this| this.cursor_pointer())
+                    .map(|this| {
+                        if selected {
+                            this.bg(rgb(theme::accent()))
+                                .text_color(rgb(theme::accent_fg()))
+                        } else {
+                            this.text_color(rgb(theme::fg_secondary())).hover(|style| {
+                                style
+                                    .bg(rgb(theme::bg_hover()))
+                                    .text_color(rgb(theme::fg()))
+                            })
+                        }
+                    })
+                    .when(enabled, |this| {
+                        this.on_click(
+                            cx.listener(move |page, _event, _window, cx| {
+                                page.pick(pick.clone(), cx)
+                            }),
+                        )
+                    })
+                    .when(!enabled, |this| this.opacity(0.45))
+                    .child(group.name.clone())
+            }))
+            .into_any_element()
+    }
+
+    /// The entries of one group: name, kind and path, clickable to edit.
+    fn item_list(&self, group: &LaunchGroup, enabled: bool, cx: &mut Context<SettingsPage>) -> Div {
+        let list = div().flex().flex_col().gap_1().w_full();
+        if group.items.is_empty() {
+            return list;
+        }
+        list.children(group.items.iter().map(|item| {
+            let selected = self
+                .form
+                .as_ref()
+                .is_some_and(|form| form.group == group.id && form.slot == item.slot);
+            let pick = Pick::QuickLaunch(Action::SelectItem(item.slot));
+            let path = item.path.clone().unwrap_or_default();
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "quick-launch-item-{}-{}",
+                    group.id, item.slot
+                ))))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(px(8.0))
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .map(|this| {
+                    if selected {
+                        this.bg(rgb(theme::accent_subtle()))
+                            .text_color(rgb(theme::accent()))
+                    } else {
+                        this.text_color(rgb(theme::fg()))
+                            .hover(|style| style.bg(rgb(theme::bg_hover())))
+                    }
+                })
+                .when(enabled, |this| this.cursor_pointer())
+                .when(enabled, |this| {
+                    this.on_click(
+                        cx.listener(move |page, _event, _window, cx| page.pick(pick.clone(), cx)),
+                    )
+                })
+                .when(!enabled, |this| this.opacity(0.45))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_sm()
+                        .child(item.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(px(280.0))
+                        .text_xs()
+                        .whitespace_nowrap()
+                        .text_color(rgb(theme::fg_secondary()))
+                        .child(format!("{} · {path}", item.kind)),
+                )
+        }))
+    }
+
+    /// The rows of the item form (§17.1 B): kind, name, path with browsing,
+    /// arguments, working directory with browsing, elevation, icon and tags.
+    fn form_rows(
+        &self,
+        page: &SettingsPage,
+        form: &Form,
+        enabled: bool,
+        cx: &mut Context<SettingsPage>,
+    ) -> Vec<Row> {
+        let kind_control = if matches!(form.kind.as_str(), "app" | "folder" | "file" | "url") {
+            let options = [
+                (
+                    t!("Aplicativo"),
+                    form.kind == "app",
+                    Pick::QuickLaunch(Action::SetKind("app")),
+                ),
+                (
+                    t!("Pasta"),
+                    form.kind == "folder",
+                    Pick::QuickLaunch(Action::SetKind("folder")),
+                ),
+                (
+                    t!("Arquivo"),
+                    form.kind == "file",
+                    Pick::QuickLaunch(Action::SetKind("file")),
+                ),
+                (
+                    t!("URL"),
+                    form.kind == "url",
+                    Pick::QuickLaunch(Action::SetKind("url")),
+                ),
+            ];
+            page.chips_when("quick-launch-item-kind", &options, false, enabled, cx)
+        } else {
+            // A kind this milestone cannot build (`command`, `group`, a plugin)
+            // is shown as it is: the form cannot offer it, and changing it would
+            // change what the entry means.
+            status_line(form.kind.clone(), false)
+        };
+        vec![
+            Row::new(t!("Tipo"), None, kind_control),
+            Row::new(t!("Nome"), None, input_row(&form.name, enabled)).wide(),
+            Row::new(
+                t!("Caminho"),
+                None,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .child(input_row(&form.path, enabled))
+                    .child(browse_button(Field::Path, enabled, cx)),
+            )
+            .wide(),
+            Row::new(t!("Argumentos"), None, input_row(&form.args, enabled)).wide(),
+            Row::new(
+                t!("Pasta de trabalho"),
+                None,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .child(input_row(&form.cwd, enabled))
+                    .child(browse_button(Field::Cwd, enabled, cx)),
+            )
+            .wide(),
+            Row::new(
+                t!("Executar como administrador"),
+                None,
+                page.switch_pick_when(
+                    "quick-launch-item-admin",
+                    form.admin,
+                    Pick::QuickLaunch(Action::ToggleAdmin),
+                    enabled,
+                    cx,
+                ),
+            ),
+            Row::new(t!("Ícone"), None, input_row(&form.icon, enabled)).wide(),
+            Row::new(
+                t!("Etiquetas (separadas por vírgula)"),
+                None,
+                input_row(&form.tags, enabled),
+            )
+            .wide(),
+            Row::new(
+                t!("Salvar"),
+                None,
+                action_button(
+                    "quick-launch-item-save",
+                    t!("Salvar"),
+                    false,
+                    enabled,
+                    Action::SaveItem,
+                    cx,
+                ),
+            )
+            .wide(),
+        ]
+    }
+
+    /// The file card (§17.1 B): the path, the two buttons and the warning that
+    /// an edit through the interface rewrites the file; the read-only reason
+    /// opens the card in red.
+    fn file_group(
+        &self,
+        read_only: &Option<String>,
+        cx: &mut Context<SettingsPage>,
+    ) -> super::Group {
+        let path = paths::quick_launch_file();
+        let mut rows = Vec::new();
+        if let Some(reason) = read_only {
+            rows.push(
+                Row::new(
+                    t!("Somente leitura"),
+                    None,
+                    status_line(reason.clone(), true),
+                )
+                .wide(),
+            );
+        }
+        rows.push(
+            Row::hint(
+                t!("Arquivo quicklaunch.toml"),
+                t!("Editar pela interface reescreve o arquivo e remove os comentários."),
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::fg_secondary()))
+                            .child(path.display().to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(action_button(
+                                "quick-launch-open-file",
+                                t!("Abrir"),
+                                false,
+                                true,
+                                Action::OpenFile,
+                                cx,
+                            ))
+                            .child(action_button(
+                                "quick-launch-reveal-file",
+                                t!("Mostrar no LumaFiles"),
+                                false,
+                                true,
+                                Action::RevealFile,
+                                cx,
+                            )),
+                    ),
+            )
+            .wide(),
+        );
+        super::Group::titled(t!("Arquivo"), rows)
+    }
+}
+
+/// The item form as the fields hold it while it is open.
+struct Form {
+    /// The group the item belongs to, by id.
+    group: String,
+    /// The slot of the item in that group.
+    slot: u32,
+    /// The kind shown by the chips; a kind outside the four stays as it was.
+    kind: String,
+    /// Whether the item is started elevated.
+    admin: bool,
+    name: Entity<InputState>,
+    path: Entity<InputState>,
+    args: Entity<InputState>,
+    cwd: Entity<InputState>,
+    icon: Entity<InputState>,
+    tags: Entity<InputState>,
+}
+
+/// Which field the file picker under the form fills.
+#[derive(Clone, Copy)]
+enum Field {
+    Path,
+    Cwd,
+}
+
+/// The whole section, with the state the page's click handlers go through.
+pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<SettingsPage>) {
+    match action {
+        Action::View(view) => set_window(cx, move |window| window.view = view),
+        Action::Columns(columns) => set_window(cx, move |window| window.columns = columns),
+        Action::CellSize(size) => set_window(cx, move |window| window.cell_size = size),
+        Action::IconSize(size) => set_window(cx, move |window| window.icon_size = size),
+        Action::ListColumns(columns) => set_window(cx, move |window| window.list_columns = columns),
+        Action::AutoHide(on) => set_window(cx, move |window| window.auto_hide = on),
+        Action::CloseAfterLaunch(on) => {
+            set_window(cx, move |window| window.close_after_launch = on)
+        }
+        Action::Topmost(on) => set_window(cx, move |window| window.topmost = on),
+        Action::OnRunning(on_running) => {
+            set_window(cx, move |window| window.on_running = on_running)
+        }
+        Action::KeepRunning(on) => set_window(cx, move |window| window.keep_running = on),
+        Action::RecordHotkey => {
+            page.quick_launch.recording = !page.quick_launch.recording;
+            cx.notify();
+        }
+        Action::SelectGroup(index) => {
+            let groups = quick_launch::groups(cx);
+            let Some(group) = groups.get(index) else {
+                return;
+            };
+            page.quick_launch.group = Some(group.id.clone());
+            page.quick_launch.form = None;
+            cx.notify();
+        }
+        Action::SelectItem(slot) => {
+            let groups = quick_launch::groups(cx);
+            let Some(index) = page.quick_launch.chosen_group(&groups) else {
+                return;
+            };
+            let Some(group) = groups.get(index) else {
+                return;
+            };
+            page.quick_launch.select = Some((group.id.clone(), slot));
+            page.quick_launch.form = None;
+            cx.notify();
+        }
+        Action::SetKind(kind) => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                form.kind = kind.to_string();
+            }
+            cx.notify();
+        }
+        Action::ToggleAdmin => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                form.admin = !form.admin;
+            }
+            cx.notify();
+        }
+        Action::NewGroup => {
+            if !quick_launch::editable(cx) || quick_launch::add_group(cx).is_none() {
+                return;
+            }
+            let groups = quick_launch::groups(cx);
+            let Some(group) = groups.last() else {
+                return;
+            };
+            page.quick_launch.renaming = Some(group.id.clone());
+            page.quick_launch.rename_input = None;
+            cx.refresh_windows();
+            cx.notify();
+        }
+        Action::RenameGroup(index) => {
+            let groups = quick_launch::groups(cx);
+            let Some(group) = groups.get(index) else {
+                return;
+            };
+            page.quick_launch.renaming = Some(group.id.clone());
+            page.quick_launch.rename_input = None;
+            cx.notify();
+        }
+        Action::SaveRename => save_rename(page, cx),
+        Action::CancelRename => {
+            page.quick_launch.renaming = None;
+            page.quick_launch.rename_input = None;
+            cx.notify();
+        }
+        Action::DeleteGroup(index) => delete_group(page, index, cx),
+        Action::MoveGroupUp(index) => move_group(cx, index, index.checked_sub(1)),
+        Action::MoveGroupDown(index) => move_group(cx, index, index.checked_add(1)),
+        Action::SaveItem => save_item(page, cx),
+        Action::OpenFile => open_file(cx),
+        Action::RevealFile => reveal_file(cx),
+    }
+}
+
+/// A key pressed while the summon chord waits for one: Esc gives up, the
+/// modifiers alone wait, and a key that cannot be a global chord says so.
+pub(super) fn record_key(
+    page: &mut SettingsPage,
+    event: &KeyDownEvent,
+    cx: &mut Context<SettingsPage>,
+) {
+    cx.stop_propagation();
+    let keystroke = &event.keystroke;
+    let key = keystroke.key.to_lowercase();
+    if nohrs_core::shortcuts::MODIFIER_KEYS.contains(&key.as_str()) {
+        return;
+    }
+    let modifiers = keystroke.modifiers;
+    if key == "escape" && !(modifiers.control || modifiers.alt || modifiers.shift) {
+        page.quick_launch.recording = false;
+        cx.notify();
+        return;
+    }
+    let chord = Chord {
+        ctrl: modifiers.control || modifiers.platform,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+        key,
+    };
+    if chord.is_typing_key() {
+        page.status = Some((
+            t!("Letras, números e símbolos precisam de Ctrl ou Alt: sozinhos, eles digitam no filtro.").to_string(),
+            true,
+        ));
+        cx.notify();
+        return;
+    }
+    // `nohrs-pages` cannot depend on `nohrs-launcher` (§3.4), so the spelling
+    // conversion the launcher crate exports for its own callers is repeated
+    // here: a recorded `ctrl-alt-space` becomes the registration's
+    // `ctrl+alt+Space`. A key the registration cannot name is refused.
+    let Some(text) = gpui_keys_to_hotkey(&chord.to_config()) else {
+        page.status = Some((
+            t!("Tecla não suportada como atalho global.").to_string(),
+            true,
+        ));
+        cx.notify();
+        return;
+    };
+    page.quick_launch.recording = false;
+    page.status = None;
+    quick_launch::set_window(cx, move |window| window.hotkey = text);
+    cx.refresh_windows();
+    cx.notify();
+}
+
+/// Converts a recorded GPUI chord into the syntax the OS registration takes
+/// (`ctrl+alt+Space`).
+///
+/// Kept in step with `nohrs_launcher::gpui_keys_to_hotkey`, which cannot be
+/// called from here: the dependency direction of §3.4 lets the launcher use the
+/// pages crate, not the other way round.
+fn gpui_keys_to_hotkey(keys: &str) -> Option<String> {
+    let keys = keys.trim().to_ascii_lowercase();
+    let mut control = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut rest = keys.as_str();
+    while let Some((head, tail)) = rest.split_once('-') {
+        match head {
+            "ctrl" | "control" | "platform" | "cmd" | "command" | "super" => control = true,
+            "alt" | "option" => alt = true,
+            "shift" => shift = true,
+            _ => break,
+        }
+        rest = tail;
+    }
+    if !(control || alt || shift) {
+        return None;
+    }
+    let key = match rest {
+        "space" => "Space".to_string(),
+        "up" => "ArrowUp".to_string(),
+        "down" => "ArrowDown".to_string(),
+        "left" => "ArrowLeft".to_string(),
+        "right" => "ArrowRight".to_string(),
+        "escape" | "esc" => "Escape".to_string(),
+        "enter" | "return" => "Enter".to_string(),
+        "tab" => "Tab".to_string(),
+        "backspace" => "Backspace".to_string(),
+        "delete" => "Delete".to_string(),
+        "insert" => "Insert".to_string(),
+        "home" => "Home".to_string(),
+        "end" => "End".to_string(),
+        "pageup" => "PageUp".to_string(),
+        "pagedown" => "PageDown".to_string(),
+        "=" | "equal" => "Equal".to_string(),
+        "-" | "minus" => "Minus".to_string(),
+        "," | "comma" => "Comma".to_string(),
+        "." | "period" => "Period".to_string(),
+        "/" | "slash" => "Slash".to_string(),
+        ";" | "semicolon" => "Semicolon".to_string(),
+        "'" | "quote" => "Quote".to_string(),
+        "`" | "backquote" => "Backquote".to_string(),
+        "\\" | "backslash" => "Backslash".to_string(),
+        "[" | "bracketleft" => "BracketLeft".to_string(),
+        "]" | "bracketright" => "BracketRight".to_string(),
+        other => {
+            let mut characters = other.chars();
+            let character = characters.next()?;
+            if characters.next().is_some() {
+                let number = other.strip_prefix('f')?.parse::<u8>().ok()?;
+                if !(1..=24).contains(&number) {
+                    return None;
+                }
+                format!("F{number}")
+            } else if character.is_ascii_alphabetic() {
+                format!("Key{}", character.to_ascii_uppercase())
+            } else if character.is_ascii_digit() {
+                format!("Digit{character}")
+            } else {
+                return None;
+            }
+        }
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    if control {
+        parts.push("ctrl");
+    }
+    if alt {
+        parts.push("alt");
+    }
+    if shift {
+        parts.push("shift");
+    }
+    parts.push(&key);
+    Some(parts.join("+"))
+}
+
+/// Makes the fields the previous frame asked for: the form of a selected item
+/// and the rename field of a group.
+pub(super) fn ensure_inputs(
+    page: &mut SettingsPage,
+    window: &mut Window,
+    cx: &mut Context<SettingsPage>,
+) {
+    let groups = quick_launch::groups(cx);
+    if let Some((group_id, slot)) = page.quick_launch.select.take() {
+        let item = groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .and_then(|found| found.items.iter().find(|item| item.slot == slot))
+            .cloned();
+        page.quick_launch.form = item
+            .as_ref()
+            .map(|item| form_of(&group_id, item, window, cx));
+    }
+    // A form whose item is gone (deleted, moved, or edited by hand in the file)
+    // closes rather than editing whatever took its place.
+    let stale = page.quick_launch.form.as_ref().is_some_and(|form| {
+        !groups.iter().any(|group| {
+            group.id == form.group && group.items.iter().any(|item| item.slot == form.slot)
+        })
+    });
+    if stale {
+        page.quick_launch.form = None;
+    }
+    match page.quick_launch.renaming.clone() {
+        Some(id) => {
+            if !groups.iter().any(|group| group.id == id) {
+                page.quick_launch.renaming = None;
+                page.quick_launch.rename_input = None;
+                return;
+            }
+            if page.quick_launch.rename_input.is_none() {
+                let name = groups
+                    .iter()
+                    .find(|group| group.id == id)
+                    .map(|group| group.name.clone())
+                    .unwrap_or_default();
+                page.quick_launch.rename_input = Some(field(window, cx, t!("Nome"), &name));
+            }
+        }
+        None => {
+            page.quick_launch.rename_input = None;
+        }
+    }
+}
+
+/// The form of one item, filled from the item the file holds now.
+fn form_of(group: &str, item: &Item, window: &mut Window, cx: &mut Context<SettingsPage>) -> Form {
+    Form {
+        group: group.to_string(),
+        slot: item.slot,
+        kind: item.kind.clone(),
+        admin: item.admin,
+        name: field(window, cx, t!("Nome"), &item.name),
+        path: field(
+            window,
+            cx,
+            t!("Caminho"),
+            item.path.as_deref().unwrap_or_default(),
+        ),
+        args: field(
+            window,
+            cx,
+            t!("Argumentos"),
+            item.args.as_deref().unwrap_or_default(),
+        ),
+        cwd: field(
+            window,
+            cx,
+            t!("Pasta de trabalho"),
+            item.cwd.as_deref().unwrap_or_default(),
+        ),
+        icon: field(
+            window,
+            cx,
+            t!("Ícone"),
+            item.icon.as_deref().unwrap_or_default(),
+        ),
+        tags: field(window, cx, t!("Etiquetas"), &item.tags.join(", ")),
+    }
+}
+
+/// One text field of the form, made with its value already in it.
+fn field(
+    window: &mut Window,
+    cx: &mut Context<SettingsPage>,
+    placeholder: &'static str,
+    value: &str,
+) -> Entity<InputState> {
+    let input = cx.new(|cx| InputState::new(window, cx));
+    input.update(cx, |state, cx| {
+        state.set_placeholder(placeholder, window, cx);
+        state.set_value(value.to_string(), window, cx);
+    });
+    input
+}
+
+/// One form field as an element, sized for the row.
+fn input_row(input: &Entity<InputState>, enabled: bool) -> AnyElement {
+    div()
+        .flex_1()
+        .min_w(px(0.0))
+        .when(!enabled, |this| this.opacity(0.45))
+        .child(Input::new(input).small().w(px(360.0)))
+        .into_any_element()
+}
+
+/// The "browse…" button beside a path field.
+fn browse_button(field: Field, enabled: bool, cx: &mut Context<SettingsPage>) -> AnyElement {
+    let id = match field {
+        Field::Path => "quick-launch-browse-path",
+        Field::Cwd => "quick-launch-browse-cwd",
+    };
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(12.0))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .rounded(px(6.0))
+        .text_sm()
+        .whitespace_nowrap()
+        .border_1()
+        .border_color(rgb(theme::border_hover()))
+        .bg(rgb(theme::bg()))
+        .text_color(rgb(theme::fg()))
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::bg_hover())))
+                .on_click(cx.listener(move |_page, _event, window, cx| browse(field, window, cx)))
+        })
+        .when(!enabled, |this| this.opacity(0.45))
+        .child(t!("Procurar…"))
+        .into_any_element()
+}
+
+/// Opens a file picker for one of the form's two path fields, on the window.
+fn browse(field: Field, window: &mut Window, cx: &mut Context<SettingsPage>) {
+    let cwd = matches!(field, Field::Cwd);
+    let receiver = cx.prompt_for_paths(PathPromptOptions {
+        files: !cwd,
+        directories: true,
+        multiple: false,
+        prompt: Some(SharedString::from(t!("Escolher um arquivo ou uma pasta"))),
+    });
+    cx.spawn_in(window, async move |this, cx| {
+        let Ok(Ok(Some(paths))) = receiver.await else {
+            return;
+        };
+        let Some(path) = paths.first() else {
+            return;
+        };
+        let value = path.to_string_lossy().to_string();
+        this.update_in(cx, |page, window, cx| {
+            let Some(form) = page.quick_launch.form.as_ref() else {
+                return;
+            };
+            let input = match field {
+                Field::Path => form.path.clone(),
+                Field::Cwd => form.cwd.clone(),
+            };
+            input.update(cx, |state, cx| state.set_value(value.clone(), window, cx));
+        })
+        .log_err();
+    })
+    .detach();
+}
+
+/// Writes the rename field back; an empty name cancels, as in §12.3.
+fn save_rename(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
+    if !quick_launch::editable(cx) {
+        return;
+    }
+    let (Some(input), Some(id)) = (
+        page.quick_launch.rename_input.clone(),
+        page.quick_launch.renaming.clone(),
+    ) else {
+        page.quick_launch.renaming = None;
+        page.quick_launch.rename_input = None;
+        cx.notify();
+        return;
+    };
+    let name = input.read(cx).value().trim().to_string();
+    page.quick_launch.renaming = None;
+    page.quick_launch.rename_input = None;
+    if name.is_empty() {
+        cx.notify();
+        return;
+    }
+    let groups = quick_launch::groups(cx);
+    if let Some(index) = groups.iter().position(|group| group.id == id) {
+        quick_launch::rename_group(cx, index, &name);
+        cx.refresh_windows();
+    }
+    cx.notify();
+}
+
+/// Deletes the group at `index`; a group with items asks for a second click.
+fn delete_group(page: &mut SettingsPage, index: usize, cx: &mut Context<SettingsPage>) {
+    if !quick_launch::editable(cx) {
+        return;
+    }
+    let groups = quick_launch::groups(cx);
+    let Some(group) = groups.get(index) else {
+        return;
+    };
+    let id = group.id.clone();
+    if page.quick_launch.confirm_delete.as_deref() != Some(id.as_str()) {
+        page.quick_launch.confirm_delete = Some(id);
+        cx.notify();
+        return;
+    }
+    page.quick_launch.confirm_delete = None;
+    if !quick_launch::delete_group(cx, index, true) {
+        cx.notify();
+        return;
+    }
+    if page.quick_launch.group.as_deref() == Some(id.as_str()) {
+        page.quick_launch.group = None;
+    }
+    if page
+        .quick_launch
+        .form
+        .as_ref()
+        .is_some_and(|form| form.group == id)
+    {
+        page.quick_launch.form = None;
+    }
+    cx.refresh_windows();
+    cx.notify();
+}
+
+/// Moves one group to `to`, then tells both windows about the new order.
+fn move_group(cx: &mut Context<SettingsPage>, from: usize, to: Option<usize>) {
+    if !quick_launch::editable(cx) {
+        return;
+    }
+    let Some(to) = to else {
+        return;
+    };
+    if quick_launch::move_group(cx, from, to) {
+        cx.refresh_windows();
+        cx.notify();
+    }
+}
+
+/// Writes the item form back through the state's own edit path.
+fn save_item(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
+    if !quick_launch::editable(cx) {
+        return;
+    }
+    let Some(form) = page.quick_launch.form.as_ref() else {
+        return;
+    };
+    let groups = quick_launch::groups(cx);
+    let Some(index) = groups.iter().position(|group| group.id == form.group) else {
+        page.status = Some((t!("O grupo deste item não existe mais.").to_string(), true));
+        cx.notify();
+        return;
+    };
+    let slot = form.slot;
+    let edit = quick_launch::ItemEdit {
+        kind: form.kind.clone(),
+        name: form.name.read(cx).value().to_string(),
+        path: form.path.read(cx).value().to_string(),
+        args: form.args.read(cx).value().to_string(),
+        cwd: form.cwd.read(cx).value().to_string(),
+        admin: form.admin,
+        icon: form.icon.read(cx).value().to_string(),
+        tags: form
+            .tags
+            .read(cx)
+            .value()
+            .split(',')
+            .map(str::to_string)
+            .collect(),
+    };
+    if quick_launch::update_item(cx, index, slot, &edit) {
+        page.status = None;
+        cx.refresh_windows();
+    } else {
+        page.status = Some((
+            t!("Não foi possível salvar o item. Confira o nome e o caminho.").to_string(),
+            true,
+        ));
+    }
+    cx.notify();
+}
+
+/// Opens `quicklaunch.toml` with its own program, off the foreground (§18):
+/// the file's own launch action hands it to the Shell with the default verb.
+fn open_file(cx: &mut Context<SettingsPage>) {
+    let path = paths::quick_launch_file();
+    let opened = cx.background_spawn(async move {
+        let mut item = Item::new(0, "file", "quicklaunch.toml");
+        item.path = Some(path.to_string_lossy().to_string());
+        let request = LaunchRequest {
+            mode: LaunchMode::Normal,
+            on_running: OnRunning::Activate,
+            expand: ExpandContext::current(),
+        };
+        LaunchRegistry::with_builtins().launch(&item, &request)
+    });
+    cx.spawn(async move |this, cx| {
+        let outcome = opened.await;
+        this.update(cx, |page, cx| {
+            page.status = match outcome {
+                Ok(_) => None,
+                Err(error) => Some((
+                    tf!(
+                        "Não foi possível abrir o quicklaunch.toml: {error}",
+                        error = error
+                    ),
+                    true,
+                )),
+            };
+            cx.notify();
+        })
+        .log_err();
+    })
+    .detach();
+}
+
+/// Shows `quicklaunch.toml` in LumaFiles, through the same reveal path the
+/// quick-launch window uses.
+fn reveal_file(cx: &mut Context<SettingsPage>) {
+    quick_launch::open_in_explorer(cx, paths::quick_launch_file());
+}
+
+/// Sends one window-settings change to the state and repaints both sides.
+fn set_window(cx: &mut Context<SettingsPage>, change: impl FnOnce(&mut WindowSettings)) {
+    quick_launch::set_window(cx, change);
+    cx.refresh_windows();
+    cx.notify();
+}
+
+/// The chip options of one numeric setting.
+fn numbered<T: Copy + PartialEq>(
+    choices: &[(&'static str, T)],
+    chosen: T,
+    action: impl Fn(T) -> Action,
+) -> Vec<(&'static str, bool, Pick)> {
+    choices
+        .iter()
+        .map(|&(label, value)| (label, value == chosen, Pick::QuickLaunch(action(value))))
+        .collect()
+}
+
+/// A small line of text under a control, red when it is a reason the setting
+/// cannot be applied.
+fn status_line(text: impl Into<SharedString>, error: bool) -> Div {
+    div()
+        .text_xs()
+        .text_color(rgb(if error {
+            theme::danger()
+        } else {
+            theme::fg_secondary()
+        }))
+        .child(text.into())
+}
+
+/// A button of this section: greyed and inert while `enabled` is false.
+fn action_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    danger: bool,
+    enabled: bool,
+    action: Action,
+    cx: &mut Context<SettingsPage>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(12.0))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .rounded(px(6.0))
+        .text_sm()
+        .whitespace_nowrap()
+        .border_1()
+        .bg(rgb(theme::bg()))
+        .map(|this| {
+            if danger {
+                this.border_color(rgb(theme::danger()))
+                    .text_color(rgb(theme::danger()))
+            } else {
+                this.border_color(rgb(theme::border_hover()))
+                    .text_color(rgb(theme::fg()))
+            }
+        })
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::bg_hover())))
+                .on_click(cx.listener(move |page, _event, _window, cx| {
+                    page.pick(Pick::QuickLaunch(action), cx)
+                }))
+        })
+        .when(!enabled, |this| this.opacity(0.45))
+        .child(label)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// §17.1 B: the chord conversion keeps the fixed modifier order and names
+    /// keys the way the registration reads them.
+    #[test]
+    fn recorded_keys_become_the_registration_spelling() {
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-alt-space").as_deref(),
+            Some("ctrl+alt+Space")
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("alt-shift-n").as_deref(),
+            Some("alt+shift+KeyN")
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-5").as_deref(),
+            Some("ctrl+Digit5")
+        );
+        assert_eq!(
+            gpui_keys_to_hotkey("ctrl-alt-f5").as_deref(),
+            Some("ctrl+alt+F5")
+        );
+        assert_eq!(gpui_keys_to_hotkey("n"), None);
+        assert_eq!(gpui_keys_to_hotkey("ctrl-alt-maiusculo"), None);
+    }
+
+    /// §17.1 B: the section builds its four cards even before the quick launch has
+    /// a state, and its labels are the searchable static ones the field looks at.
+    #[gpui::test]
+    fn the_section_builds_its_four_cards(cx: &mut gpui::TestAppContext) {
+        let page = cx.new(crate::settings::SettingsPage::new);
+        page.update(cx, |page, cx| {
+            page.show_section(crate::settings::SettingsSection::QuickLaunch, cx);
+            let groups = page.groups(crate::settings::SettingsSection::QuickLaunch, cx);
+            assert_eq!(groups.len(), 4, "window, groups, items and file");
+            assert!(
+                groups[0]
+                    .rows
+                    .iter()
+                    .any(|row| row.label == t!("Atalho global")),
+                "the chord has its row"
+            );
+            assert_eq!(groups[3].title, Some(t!("Arquivo")));
+            let labels: Vec<&str> = groups
+                .iter()
+                .flat_map(|group| &group.rows)
+                .map(|row| row.label)
+                .collect();
+            assert!(labels.contains(&t!("Grupos")));
+            assert!(labels.contains(&t!("Itens")));
+        });
+    }
+
+    /// The item editor follows the group by id, so a reorder does not move it.
+    #[test]
+    fn the_editor_follows_its_group_by_id() {
+        let mut section = Section::default();
+        assert_eq!(section.chosen_group(&[]), None);
+        let groups = vec![
+            LaunchGroup {
+                id: "first".to_string(),
+                name: "Primeiro".to_string(),
+                items: Vec::new(),
+            },
+            LaunchGroup {
+                id: "second".to_string(),
+                name: "Segundo".to_string(),
+                items: Vec::new(),
+            },
+        ];
+        assert_eq!(section.chosen_group(&groups), Some(0));
+        section.group = Some("second".to_string());
+        assert_eq!(section.chosen_group(&groups), Some(1));
+        section.group = Some("gone".to_string());
+        assert_eq!(section.chosen_group(&groups), None);
+    }
+
+    /// The numeric controls only offer values inside the limits of §4.
+    #[test]
+    fn the_number_controls_stay_inside_the_limits_of_the_file() {
+        for &(_, value) in &COLUMNS {
+            assert!((2..=16).contains(&value));
+        }
+        for &(_, value) in &CELL_SIZES {
+            assert!((64..=160).contains(&value));
+        }
+        for &(_, value) in &ICON_SIZES {
+            assert!(matches!(value, 16 | 24 | 32 | 48 | 64 | 96));
+        }
+        for &(_, value) in &LIST_COLUMNS {
+            assert!((1..=3).contains(&value));
+        }
+    }
+}
