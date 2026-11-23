@@ -2038,7 +2038,7 @@ fn group_command_overlay(
                 .bg(rgb(theme::gray_100()))
                 .border_1()
                 .border_color(rgb(theme::border()))
-                .font_family("Mono")
+                .font(crate::terminal::code_font())
                 .text_size(px(12.0))
                 .line_height(px(16.0))
                 .text_color(rgb(theme::fg()))
