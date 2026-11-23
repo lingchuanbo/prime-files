@@ -440,6 +440,14 @@ impl<'a> Session<'a> {
         if target.item.action_kind() == model::ActionKind::Group {
             return self.run_group(&target.group, &target.item, target.on_running, args);
         }
+        // D6: a command runs from the terminal only when the caller says so; the
+        // group path above makes the same check for its children.
+        if target.item.action_kind() == model::ActionKind::Command && !args.yes {
+            return self.fail(format_args!(
+                "{:?} is a command: pass --yes to run a command",
+                target.item.name
+            ));
+        }
         let item = target;
         let mode = if args.admin {
             LaunchMode::Admin

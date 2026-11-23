@@ -144,6 +144,70 @@ fn fixture_dir(root: &Path, name: &str) -> PathBuf {
     directory
 }
 
+/// A file with one command item in the default group.
+fn command_file(root: &Path) -> PathBuf {
+    let file = config_file(root);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(
+        &file,
+        r#"
+schema_version = 1
+
+[[group]]
+id = "general"
+name = "Geral"
+
+[[group.item]]
+slot = 0
+type = "command"
+name = "Echo"
+
+[group.item.extra]
+shell = "cmd"
+script = "exit 0"
+"#,
+    )
+    .unwrap();
+    file
+}
+
+/// D6: a single command is refused without `--yes`, before anything is started.
+#[test]
+fn running_a_single_command_needs_yes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    command_file(root);
+
+    let refused = noh(root, &["ql", "run", "general", "0"]);
+    assert_eq!(exit_code(&refused), 1, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("pass --yes to run a command"),
+        "the refusal should name the flag: {}",
+        stderr(&refused)
+    );
+}
+
+/// D6: with `--yes` the check passes and the command is started for real.
+///
+/// Ignored because it starts a process outside the test's control.
+#[test]
+#[ignore = "starts a real process"]
+fn a_single_command_runs_with_yes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    command_file(root);
+
+    let started = noh(root, &["ql", "run", "general", "0", "--yes"]);
+    assert_eq!(exit_code(&started), 0, "{}", stderr(&started));
+    assert!(
+        stdout(&started).contains("started"),
+        "the run should report the start: {}",
+        stdout(&started)
+    );
+}
+
 #[test]
 fn an_item_added_by_name_is_listed_with_its_kind_and_path() {
     let directory = tempfile::tempdir().unwrap();
