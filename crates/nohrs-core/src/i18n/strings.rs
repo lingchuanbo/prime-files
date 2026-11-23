@@ -2429,6 +2429,11 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Run as administrator",
         "Ejecutar como administrador",
     ),
+    (
+        "Comandos não podem ser executados como administrador",
+        "Commands cannot run as administrator",
+        "Los comandos no se pueden ejecutar como administrador",
+    ),
     ("Filtrar", "Filter", "Filtrar"),
     ("Indisponível", "Unavailable", "No disponible"),
     ("Mover para", "Move to", "Mover a"),

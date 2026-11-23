@@ -30,10 +30,12 @@ fn binary_under_test() -> PathBuf {
 ///
 /// The directory is named after the source's size and modification time, so it is
 /// reused for as long as the build is the same: a per-process name made every run a
-/// brand-new executable for antivirus to scan, which took minutes. An existing copy
-/// is used as it is — it may even be the image of a child that has not exited, and
-/// overwriting that would fail with "access denied" — and a fresh one is written
-/// under a temporary name and renamed, so a half-written file is never run.
+/// brand-new executable for antivirus to scan, which took minutes. A copy that is
+/// already there is used as it is — it may even be the image of a child that has
+/// not exited, and overwriting that would fail with "access denied". A fresh copy
+/// is written under a name no other process uses, then renamed into place; when a
+/// scanner still holds the new file, another attempt is made, and a copy that only
+/// resisted the rename is run where it is.
 fn copy_binary_once() -> PathBuf {
     let source = PathBuf::from(env!("CARGO_BIN_EXE_noh"));
     let name = if cfg!(windows) {
@@ -57,19 +59,40 @@ fn copy_binary_once() -> PathBuf {
         return binary;
     }
     std::fs::create_dir_all(&directory).expect("a directory for the copied binary");
-    let partial = directory.join(format!("{name}.partial"));
-    std::fs::copy(&source, &partial).expect("copying the binary under test");
-    match std::fs::rename(&partial, &binary) {
-        Ok(()) => binary,
-        Err(error) => {
-            // Another test process may have placed the same build first.
-            if binary.exists() {
-                binary
-            } else {
-                panic!("placing the copied binary: {error}");
+    let mut placed = None;
+    for attempt in 0..10 {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        let partial = directory.join(format!(
+            "{name}.{}.{stamp}.{attempt}.partial",
+            std::process::id()
+        ));
+        if let Err(error) = std::fs::copy(&source, &partial) {
+            eprintln!("copying the binary (attempt {attempt}): {error}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        match std::fs::rename(&partial, &binary) {
+            Ok(()) => return binary,
+            Err(error) => {
+                if binary.exists() {
+                    return binary;
+                }
+                eprintln!("placing the copied binary (attempt {attempt}): {error}");
+                placed = Some(partial);
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
     }
+    // A complete copy that only resisted the rename can still be run.
+    if let Some(partial) = placed
+        && partial.exists()
+    {
+        return partial;
+    }
+    panic!("copying the binary under test");
 }
 
 fn noh(root: &Path, args: &[&str]) -> Output {

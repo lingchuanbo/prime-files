@@ -19,6 +19,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+use nohrs_core::config::quick_launch::command_spec;
 use nohrs_core::config::quick_launch::{Item, OnRunning};
 
 #[cfg(windows)]
@@ -36,8 +38,13 @@ pub const KIND_FILE: &str = "file";
 pub const KIND_URL: &str = "url";
 /// `type` of an application started by its AppUserModelID (M4).
 pub const KIND_UWP: &str = "uwp";
+/// `type` of a shell script (M4).
+///
+/// Only Windows starts one (§17.2 C), so the kind is not part of
+/// [`BUILTIN_KINDS`]: elsewhere the registry leaves it unknown.
+pub const KIND_COMMAND: &str = "command";
 
-/// The kind names this milestone implements.
+/// The kind names every platform's registry knows.
 pub const BUILTIN_KINDS: [&str; 5] = [KIND_APP, KIND_FOLDER, KIND_URL, KIND_FILE, KIND_UWP];
 
 /// One application the user's Apps folder lists, for the `uwp` picker
@@ -348,7 +355,10 @@ impl LaunchRegistry {
             app_action(),
             file_action(),
             uwp_action(),
-        ];
+        ]
+        .into_iter()
+        .chain(command_action())
+        .collect();
         for action in builtins {
             // The kinds are distinct constants; a duplicate would be a mistake
             // in this file, and is reported rather than silently replacing.
@@ -414,6 +424,33 @@ fn item_path(item: &Item, context: &ExpandContext) -> Result<PathBuf, LaunchErro
             "the {} item {:?} has no path",
             item.kind, item.name
         ))),
+    }
+}
+
+/// The health of a `command` item, without running anything (§17.2 C.4).
+///
+/// The shell and the script are checked first, then a `cwd` that is set has to
+/// exist. Whether the shell itself is installed is deliberately not checked:
+/// looking it up on `PATH` would spend the health check's 5 ms budget (§8.1).
+/// A command marked `admin` is invalid because this milestone cannot start one
+/// elevated (§17.2 C.2, D4).
+#[cfg(windows)]
+pub(crate) fn command_health(item: &Item, context: &ExpandContext) -> Health {
+    if item.admin {
+        return Health::Invalid(
+            nohrs_core::t!("Comandos não podem ser executados como administrador").to_string(),
+        );
+    }
+    if let Err(message) = command_spec(item) {
+        return Health::Invalid(message);
+    }
+    match item.cwd.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => match expand(raw, context) {
+            Ok(path) if path.is_dir() => Health::Ok,
+            Ok(_) => Health::Missing,
+            Err(error) => Health::Invalid(error.to_string()),
+        },
+        _ => Health::Ok,
     }
 }
 
@@ -516,6 +553,18 @@ fn uwp_action() -> Box<dyn LaunchAction> {
 #[cfg(not(windows))]
 fn uwp_action() -> Box<dyn LaunchAction> {
     Box::new(UnsupportedAction { kind: KIND_UWP })
+}
+
+#[cfg(windows)]
+fn command_action() -> Option<Box<dyn LaunchAction>> {
+    Some(Box::new(windows::CommandAction))
+}
+
+#[cfg(not(windows))]
+fn command_action() -> Option<Box<dyn LaunchAction>> {
+    // §17.2 C.1 registers the command action on Windows only, so an item of
+    // this type is unknown here rather than a kind that always fails.
+    None
 }
 
 /// A kind this build cannot start on this platform.
@@ -721,6 +770,12 @@ mod tests {
             registry.health(&item(KIND_UWP, "{config}"), &context()),
             Health::Invalid(_)
         ));
+        // §17.2 C: `command` is registered on Windows only. Elsewhere the kind
+        // is unknown rather than a type that always fails.
+        #[cfg(windows)]
+        assert!(registry.get(KIND_COMMAND).is_some());
+        #[cfg(not(windows))]
+        assert!(registry.get(KIND_COMMAND).is_none());
     }
 
     #[test]

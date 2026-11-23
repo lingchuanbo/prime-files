@@ -7495,6 +7495,17 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
         ],
     ),
     (
+        "Comandos não podem ser executados como administrador",
+        [
+            "Les commandes ne peuvent pas s'exécuter en tant qu'administrateur",
+            "Befehle können nicht als Administrator ausgeführt werden",
+            "I comandi non possono essere eseguiti come amministratore",
+            "Команды нельзя запускать от имени администратора",
+            "コマンドは管理者として実行できません",
+            "命令无法以管理员身份运行",
+        ],
+    ),
+    (
         "Filtrar",
         ["Filtrer", "Filtern", "Filtra", "Фильтр", "絞り込み", "过滤"],
     ),

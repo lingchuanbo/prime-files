@@ -9,9 +9,11 @@
 //! URLs — rather than `CreateProcessW` plus a shortcut parser plus a UAC path:
 //! one call already covers all three, and it is the call Explorer itself makes.
 
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use nohrs_core::config::quick_launch::Item;
+use nohrs_core::config::quick_launch::{CommandSpec, Item, Shell, command_spec};
 use nohrs_core::telemetry::LogErr;
 use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HWND, LPARAM, MAX_PATH};
 use windows::Win32::Graphics::Gdi::{
@@ -30,7 +32,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    CREATE_NEW_CONSOLE, CREATE_NO_WINDOW, OpenProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MENU, keybd_event,
@@ -49,8 +52,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, Error as WindowsError, Interface, PCWSTR, PWSTR};
 
 use crate::launch::{
-    ExpandContext, Health, InstalledApp, KIND_APP, KIND_FILE, KIND_URL, KIND_UWP, LaunchAction,
-    LaunchError, LaunchMode, LaunchOutcome, LaunchRequest, expand, item_path, validate_url,
+    ExpandContext, Health, InstalledApp, KIND_APP, KIND_COMMAND, KIND_FILE, KIND_URL, KIND_UWP,
+    LaunchAction, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest, command_health, expand,
+    item_path, validate_url,
 };
 
 /// A document (`file`): the Shell picks the program and the verb is left to it
@@ -558,6 +562,183 @@ fn os_error(error: &WindowsError) -> LaunchError {
     }
 }
 
+/// One argument of a command line (§17.2 C.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Arg {
+    /// Passed through Rust's own quoting (`Command::arg`).
+    Literal(String),
+    /// Written to the command line as it is (`Command::raw_arg`). `cmd.exe`
+    /// gets its quoted script this way, so the quoting is the one the script
+    /// author wrote and not a second layer added by Rust (§17.2 C.1).
+    Raw(String),
+}
+
+/// A shell script, started through `std::process::Command` (§17.2 C).
+///
+/// **The services layer does not confirm anything.** The first run of a script
+/// is confirmed by the pages layer, which only then asks for this launch
+/// (§17.2 C.3, §17.2 D): a launch that reaches here is a confirmed one.
+pub(crate) struct CommandAction;
+
+impl LaunchAction for CommandAction {
+    fn kind(&self) -> &str {
+        KIND_COMMAND
+    }
+
+    fn health(&self, item: &Item, context: &ExpandContext) -> Health {
+        command_health(item, context)
+    }
+
+    fn launch(&self, item: &Item, request: &LaunchRequest) -> Result<LaunchOutcome, LaunchError> {
+        // D4: running a command elevated is not part of this milestone
+        // (§17.2 C.2).
+        if item.admin || request.mode == LaunchMode::Admin {
+            return Err(LaunchError::Unsupported(format!(
+                "{KIND_COMMAND} as administrator"
+            )));
+        }
+        let spec = command_spec(item).map_err(LaunchError::Blocked)?;
+        let directory = working_directory(item, &request.expand)?;
+        let (program, arguments) = command_line(&spec);
+        let mut command = Command::new(&program);
+        for argument in arguments {
+            match argument {
+                Arg::Literal(value) => {
+                    command.arg(value);
+                }
+                Arg::Raw(value) => {
+                    command.raw_arg(value);
+                }
+            }
+        }
+        command.creation_flags(creation_flags(spec.hidden));
+        if let Some(directory) = directory {
+            command.current_dir(directory);
+        }
+        match command.spawn() {
+            // Dropping the handle neither waits for nor stops the process: the
+            // script runs on its own after the click (§17.2 C.1).
+            Ok(_process) => Ok(LaunchOutcome::Started),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(LaunchError::NotFound(PathBuf::from(program)))
+            }
+            Err(error) => {
+                let Some(code) = error.raw_os_error() else {
+                    return Err(LaunchError::Internal(error.to_string()));
+                };
+                let code = u32::try_from(code).unwrap_or(0);
+                Err(LaunchError::Os {
+                    code,
+                    message: system_message(code),
+                })
+            }
+        }
+    }
+}
+
+/// The folder a `command` item runs in: its own `cwd`, expanded, or the user's
+/// profile when the item has none (§17.2 C.1).
+fn working_directory(item: &Item, context: &ExpandContext) -> Result<Option<PathBuf>, LaunchError> {
+    match item.cwd.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => Ok(Some(expand(raw, context)?)),
+        // `None` leaves `Command`'s working directory unset, which is the
+        // inherited one: no profile variable means no stated preference.
+        _ => Ok(std::env::var_os("USERPROFILE").map(PathBuf::from)),
+    }
+}
+
+/// How `spec` is started: the program and its arguments (§17.2 C.1).
+///
+/// Pure so that every shell, `keep_open` and `hidden` combination is checked
+/// without starting anything.
+pub(crate) fn command_line(spec: &CommandSpec) -> (String, Vec<Arg>) {
+    match spec.shell {
+        Shell::Cmd => {
+            let switch = if spec.keep_open { "/k" } else { "/c" };
+            (
+                command_interpreter(),
+                vec![
+                    Arg::Literal("/d".to_string()),
+                    Arg::Literal("/s".to_string()),
+                    Arg::Literal(switch.to_string()),
+                    // **One** pair of quotes around the script, added here and
+                    // written raw: `/s /c` takes everything between them as the
+                    // script, which is the form `cmd.exe` documents.
+                    Arg::Raw(format!("\"{}\"", spec.script)),
+                ],
+            )
+        }
+        Shell::Pwsh => power_shell_line("pwsh.exe", spec),
+        Shell::PowerShell => power_shell_line("powershell.exe", spec),
+        Shell::Python => {
+            let mut arguments = Vec::new();
+            if spec.keep_open {
+                arguments.push(Arg::Literal("-i".to_string()));
+            }
+            arguments.push(Arg::Literal("-c".to_string()));
+            // Rust quotes the script for this one, which is what §17.2 C.1 asks
+            // for: Python's `-c` takes the source as a single argument.
+            arguments.push(Arg::Literal(spec.script.clone()));
+            ("python.exe".to_string(), arguments)
+        }
+    }
+}
+
+/// The powershell family's line, which differs only in the program (§17.2 C.1).
+fn power_shell_line(program: &str, spec: &CommandSpec) -> (String, Vec<Arg>) {
+    let mut arguments = vec![
+        Arg::Literal("-NoLogo".to_string()),
+        Arg::Literal("-NoProfile".to_string()),
+    ];
+    if spec.keep_open {
+        arguments.push(Arg::Literal("-NoExit".to_string()));
+    }
+    // Encoded so that no quote in the script can end the command line early
+    // (§17.2 C.1).
+    arguments.push(Arg::Literal("-EncodedCommand".to_string()));
+    arguments.push(Arg::Literal(encoded_command(&spec.script)));
+    (program.to_string(), arguments)
+}
+
+/// The program `cmd` items run through: `%ComSpec%` names the system's own
+/// shell, and `cmd.exe` is the fallback when the variable is not set.
+fn command_interpreter() -> String {
+    std::env::var_os("ComSpec")
+        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+/// The creation flags for a `command` (§17.2 C.1): hidden runs without a
+/// console window, visible runs with one of its own.
+fn creation_flags(hidden: bool) -> u32 {
+    if hidden {
+        CREATE_NO_WINDOW.0
+    } else {
+        CREATE_NEW_CONSOLE.0
+    }
+}
+
+/// `script` as the UTF-16LE base64 `-EncodedCommand` expects (§17.2 C.1).
+fn encoded_command(script: &str) -> String {
+    /// The base64 alphabet, in its standard order.
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = u32::from(chunk[0]);
+        let second = chunk.get(1).map_or(0, |unit| u32::from(*unit));
+        let third = chunk.get(2).map_or(0, |unit| u32::from(*unit));
+        let triple = (first << 16) | (second << 8) | third;
+        let sextet = |shift: u32| char::from(ALPHABET[((triple >> shift) & 0x3f) as usize]);
+        encoded.push(sextet(18));
+        encoded.push(sextet(12));
+        encoded.push(if chunk.len() > 1 { sextet(6) } else { '=' });
+        encoded.push(if chunk.len() > 2 { sextet(0) } else { '=' });
+    }
+    encoded
+}
+
 /// A `http` / `https` / `mailto` address.
 pub(crate) struct UrlAction;
 
@@ -1050,5 +1231,271 @@ mod tests {
                 .any(|app| !app.name.is_empty() && !app.aumid.is_empty()),
             "at least one app should have a display name and an AppUserModelID"
         );
+    }
+
+    /// A `command` item with what §17.2 A.3 asks `extra` to hold.
+    fn command_item(shell: &str, script: &str) -> Item {
+        let mut item = Item::new(0, KIND_COMMAND, "Script");
+        item.extra.insert("shell".to_string(), shell.into());
+        item.extra.insert("script".to_string(), script.into());
+        item
+    }
+
+    fn decode_base64(text: &str) -> Option<Vec<u8>> {
+        fn sextet(unit: u8) -> Option<u32> {
+            match unit {
+                b'A'..=b'Z' => Some(u32::from(unit - b'A')),
+                b'a'..=b'z' => Some(u32::from(unit - b'a') + 26),
+                b'0'..=b'9' => Some(u32::from(unit - b'0') + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                b'=' => Some(0),
+                _ => None,
+            }
+        }
+        let mut decoded = Vec::new();
+        for chunk in text.as_bytes().chunks(4) {
+            if chunk.len() != 4 {
+                return None;
+            }
+            let padding = chunk.iter().rev().take_while(|unit| **unit == b'=').count();
+            let mut triple = 0u32;
+            for unit in chunk {
+                triple = (triple << 6) | sextet(*unit)?;
+            }
+            decoded.push((triple >> 16) as u8);
+            if padding < 2 {
+                decoded.push((triple >> 8) as u8);
+            }
+            if padding < 1 {
+                decoded.push(triple as u8);
+            }
+        }
+        Some(decoded)
+    }
+
+    /// §17.2 C.1 and C.5: the program and arguments of every shell, with
+    /// `keep_open` and `hidden` both ways.
+    #[test]
+    fn every_shell_and_flag_combination_builds_its_command_line() {
+        for shell in [Shell::Cmd, Shell::Pwsh, Shell::PowerShell, Shell::Python] {
+            for keep_open in [false, true] {
+                for hidden in [false, true] {
+                    let spec = CommandSpec {
+                        shell,
+                        script: "echo ok".to_string(),
+                        hidden,
+                        keep_open,
+                    };
+                    let (program, arguments) = command_line(&spec);
+                    let expected = match shell {
+                        Shell::Cmd => {
+                            assert!(
+                                program.to_ascii_lowercase().ends_with("cmd.exe"),
+                                "cmd runs through the system shell, got {program:?}"
+                            );
+                            vec![
+                                Arg::Literal("/d".to_string()),
+                                Arg::Literal("/s".to_string()),
+                                Arg::Literal(if keep_open { "/k" } else { "/c" }.to_string()),
+                                Arg::Raw("\"echo ok\"".to_string()),
+                            ]
+                        }
+                        Shell::Pwsh | Shell::PowerShell => {
+                            assert_eq!(
+                                program,
+                                if shell == Shell::Pwsh {
+                                    "pwsh.exe"
+                                } else {
+                                    "powershell.exe"
+                                }
+                            );
+                            let mut expected = vec![
+                                Arg::Literal("-NoLogo".to_string()),
+                                Arg::Literal("-NoProfile".to_string()),
+                            ];
+                            if keep_open {
+                                expected.push(Arg::Literal("-NoExit".to_string()));
+                            }
+                            expected.push(Arg::Literal("-EncodedCommand".to_string()));
+                            expected.push(Arg::Literal(encoded_command("echo ok")));
+                            expected
+                        }
+                        Shell::Python => {
+                            assert_eq!(program, "python.exe");
+                            let mut expected = Vec::new();
+                            if keep_open {
+                                expected.push(Arg::Literal("-i".to_string()));
+                            }
+                            expected.push(Arg::Literal("-c".to_string()));
+                            expected.push(Arg::Literal("echo ok".to_string()));
+                            expected
+                        }
+                    };
+                    assert_eq!(
+                        arguments, expected,
+                        "{shell:?} with keep_open={keep_open} hidden={hidden}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// §17.2 C.1 and C.5: PowerShell's `-EncodedCommand` survives quotes and
+    /// non-ASCII characters, and matches what PowerShell itself produces.
+    #[test]
+    fn the_encoded_command_round_trips_quotes_and_non_ascii() {
+        for script in [
+            r#"Write-Output "olá, mundo""#,
+            "echo 'aspas simples' & \"aspas duplas\"",
+            "Write-Host \"中文 café ✓\"",
+            "linha 1\r\nlinha \"2\"",
+            "",
+        ] {
+            let encoded = encoded_command(script);
+            let expected: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            assert_eq!(
+                decode_base64(&encoded),
+                Some(expected),
+                "{script:?} did not round-trip through {encoded:?}"
+            );
+        }
+        // A known vector, so the encoding is the one PowerShell expects and not
+        // merely this file's own inverse.
+        assert_eq!(encoded_command("echo ok"), "ZQBjAGgAbwAgAG8AawA=");
+    }
+
+    /// §17.2 C.1: a hidden command gets no console window; a visible one gets
+    /// its own.
+    #[test]
+    fn the_creation_flags_follow_the_hidden_setting() {
+        assert_eq!(creation_flags(true), CREATE_NO_WINDOW.0);
+        assert_eq!(creation_flags(false), CREATE_NEW_CONSOLE.0);
+    }
+
+    /// §17.2 C.2 and C.4: the health check judges what the item says, and never
+    /// starts anything.
+    #[test]
+    fn a_command_item_is_judged_by_what_it_says() {
+        let context = ExpandContext::current();
+        assert_eq!(
+            CommandAction.health(&command_item("cmd", "echo ok"), &context),
+            Health::Ok
+        );
+        let apostrophe = command_item("pwsh", "Write-Output \"olá\"");
+        assert_eq!(CommandAction.health(&apostrophe, &context), Health::Ok);
+        let python = command_item("python", "print('ok')");
+        assert_eq!(CommandAction.health(&python, &context), Health::Ok);
+
+        for item in [
+            command_item("bash", "echo ok"),
+            command_item("cmd", ""),
+            {
+                let mut without_script = command_item("cmd", "echo ok");
+                without_script.extra.remove("script");
+                without_script
+            },
+            {
+                let mut without_shell = command_item("cmd", "echo ok");
+                without_shell.extra.remove("shell");
+                without_shell
+            },
+            {
+                let mut not_a_flag = command_item("cmd", "echo ok");
+                not_a_flag.extra.insert("hidden".to_string(), "sim".into());
+                not_a_flag
+            },
+        ] {
+            assert!(
+                matches!(CommandAction.health(&item, &context), Health::Invalid(_)),
+                "{item:?} should be invalid"
+            );
+        }
+
+        let mut admin = command_item("cmd", "echo ok");
+        admin.admin = true;
+        assert_eq!(
+            CommandAction.health(&admin, &context),
+            Health::Invalid(
+                nohrs_core::t!("Comandos não podem ser executados como administrador").to_string()
+            )
+        );
+
+        let directory = tempfile::TempDir::new().expect("a temporary directory");
+        let mut missing_cwd = command_item("cmd", "echo ok");
+        missing_cwd.cwd = Some(
+            directory
+                .path()
+                .join("nao-existe")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert_eq!(
+            CommandAction.health(&missing_cwd, &context),
+            Health::Missing
+        );
+        let mut existing_cwd = command_item("cmd", "echo ok");
+        existing_cwd.cwd = Some(directory.path().to_string_lossy().into_owned());
+        assert_eq!(CommandAction.health(&existing_cwd, &context), Health::Ok);
+    }
+
+    /// §17.2 C.2: an elevated command is refused before anything is started.
+    #[test]
+    fn an_admin_command_is_refused_without_starting_anything() {
+        let mut item = command_item("cmd", "echo ok");
+        item.admin = true;
+        let request = LaunchRequest {
+            mode: LaunchMode::Normal,
+            on_running: nohrs_core::config::quick_launch::OnRunning::Activate,
+            expand: ExpandContext::current(),
+        };
+        let error = CommandAction
+            .launch(&item, &request)
+            .expect_err("an admin command is not supported");
+        assert!(matches!(error, LaunchError::Unsupported(_)), "{error:?}");
+
+        let call = |mode| {
+            CommandAction.launch(
+                &command_item("cmd", "echo ok"),
+                &LaunchRequest {
+                    mode,
+                    on_running: nohrs_core::config::quick_launch::OnRunning::Activate,
+                    expand: ExpandContext::current(),
+                },
+            )
+        };
+        let error = call(LaunchMode::Admin).expect_err("the request asked for admin");
+        assert!(matches!(error, LaunchError::Unsupported(_)), "{error:?}");
+    }
+
+    /// §17.2 C.5: a real `cmd` script writes its file. Run by hand:
+    /// `cargo test --release -p nohrs-services -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "runs a real command; run by hand for the PR"]
+    fn a_cmd_script_writes_a_file_under_temp() {
+        let file = std::env::temp_dir().join("ql-test.txt");
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("could not clear {}: {error}", file.display()),
+        }
+        let mut item = command_item("cmd", r"echo ok > %TEMP%\ql-test.txt");
+        item.extra.insert("hidden".to_string(), true.into());
+        let request = LaunchRequest {
+            mode: LaunchMode::Normal,
+            on_running: nohrs_core::config::quick_launch::OnRunning::Activate,
+            expand: ExpandContext::current(),
+        };
+        assert_eq!(
+            CommandAction
+                .launch(&item, &request)
+                .expect("the script starts"),
+            LaunchOutcome::Started
+        );
+        let wrote = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            file.is_file()
+        });
+        assert!(wrote, "{} was not written", file.display());
     }
 }
