@@ -8367,4 +8367,15 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "最常使用",
         ],
     ),
+    (
+        "Novo item de pasta",
+        [
+            "Nouvel élément de dossier",
+            "Neues Ordner-Element",
+            "Nuovo elemento cartella",
+            "Новый элемент папки",
+            "新しいフォルダ項目",
+            "新建文件夹条目",
+        ],
+    ),
 ];

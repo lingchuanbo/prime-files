@@ -2695,4 +2695,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ("Normal", "Normal", "Normal"),
     ("Recentes", "Recent", "Recientes"),
     ("Mais usados", "Most used", "Más usados"),
+    (
+        "Novo item de pasta",
+        "New folder item",
+        "Nuevo elemento de carpeta",
+    ),
 ];

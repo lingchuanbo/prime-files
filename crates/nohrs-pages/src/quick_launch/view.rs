@@ -19,9 +19,8 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, ImageSource, IntoElement,
-    KeyDownEvent, PathPromptOptions, Render, RenderImage, SharedString, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, WindowControlArea, div, img, px, rgb,
-    uniform_list,
+    KeyDownEvent, Render, RenderImage, SharedString, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window, WindowControlArea, div, img, px, rgb, uniform_list,
 };
 use gpui_component::{
     Icon, IconName, WindowExt as _,
@@ -360,24 +359,28 @@ impl QuickLaunchView {
 
     /// Adds what the file picker returned to the slot the menu was opened on
     /// (§12.3, §12.2): the first path fills that slot, the rest follow.
+    ///
+    /// `want` is what the dialog may pick: the menu offers files and folders
+    /// together where the platform allows it, and files alone (plus a folder-only
+    /// entry) where it does not (§17.2 R2).
     fn new_item_at(
         &mut self,
         group: usize,
         slot: u32,
+        want: super::PathWant,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !super::group_editable(cx, group) {
             return;
         }
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: true,
-            prompt: Some(SharedString::from(nohrs_core::t!(
-                "Escolher um arquivo ou uma pasta"
-            ))),
-        });
+        let prompt = match want {
+            super::PathWant::Folders => nohrs_core::t!("Escolher uma pasta"),
+            super::PathWant::Files | super::PathWant::Either => {
+                nohrs_core::t!("Escolher um arquivo ou uma pasta")
+            }
+        };
+        let receiver = cx.prompt_for_paths(super::path_prompt_for(cx, want, true, prompt));
         cx.spawn_in(window, async move |this, cx| {
             let picked = match receiver.await {
                 Ok(Ok(Some(paths))) => paths,
@@ -511,12 +514,28 @@ impl QuickLaunchView {
     /// The "浏览…" button of the editor: picks a path and puts it in the field
     /// (§12.3).
     fn browse_for_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: false,
-            prompt: Some(SharedString::from(nohrs_core::t!("Escolher um caminho"))),
-        });
+        // A `folder` item picks a folder; every other kind picks a file (§17.2 R2).
+        let folder = self
+            .editor
+            .as_ref()
+            .and_then(|editor| {
+                super::state(cx)
+                    .and_then(|state| state.config.groups.get(editor.group))
+                    .and_then(|group| group.items.iter().find(|item| item.slot == editor.slot))
+            })
+            .is_some_and(|item| item.kind == "folder");
+        let (want, prompt) = if folder {
+            (
+                super::PathWant::Folders,
+                nohrs_core::t!("Escolher uma pasta"),
+            )
+        } else {
+            (
+                super::PathWant::Files,
+                nohrs_core::t!("Escolher um caminho"),
+            )
+        };
+        let receiver = cx.prompt_for_paths(super::path_prompt_for(cx, want, false, prompt));
         cx.spawn_in(window, async move |this, cx| {
             let picked = match receiver.await {
                 Ok(Ok(Some(paths))) => paths,
@@ -1353,6 +1372,7 @@ fn empty_cell(
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
     let handle = entity.clone();
+    let folder_handle = entity.clone();
     div()
         .id(("quick-launch-empty", slot))
         .w(px(cell_size))
@@ -1361,17 +1381,43 @@ fn empty_cell(
         .rounded(px(8.0))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .context_menu(move |menu, _window, _cx| {
+        .context_menu(move |menu, _window, cx| {
             let handle = handle.clone();
-            menu.item(
+            let folder_handle = folder_handle.clone();
+            let menu = menu.item(
                 PopupMenuItem::new(nohrs_core::t!("Novo item"))
                     .disabled(!group_editable)
                     .on_click(move |_, window, cx| {
                         handle
-                            .update(cx, |view, cx| view.new_item_at(group, slot, window, cx))
+                            .update(cx, |view, cx| {
+                                view.new_item_at(group, slot, super::PathWant::Either, window, cx)
+                            })
                             .log_err();
                     }),
-            )
+            );
+            // §17.2 R2: where the dialog can only pick one of the two, folders get
+            // an entry of their own.
+            if !super::folder_entry_offered(cx.can_select_mixed_files_and_dirs()) {
+                menu
+            } else {
+                menu.item(
+                    PopupMenuItem::new(nohrs_core::t!("Novo item de pasta"))
+                        .disabled(!group_editable)
+                        .on_click(move |_, window, cx| {
+                            folder_handle
+                                .update(cx, |view, cx| {
+                                    view.new_item_at(
+                                        group,
+                                        slot,
+                                        super::PathWant::Folders,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                                .log_err();
+                        }),
+                )
+            }
         })
         .into_any_element()
 }

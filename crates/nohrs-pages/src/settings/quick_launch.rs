@@ -1787,14 +1787,29 @@ fn browse_button(field: Field, enabled: bool, cx: &mut Context<SettingsPage>) ->
 }
 
 /// Opens a file picker for one of the form's two path fields, on the window.
+///
+/// A `folder` item picks a folder, every other kind picks a file, and the working
+/// directory is always a folder (§17.2 R2: the Windows dialog can only do one).
 fn browse(field: Field, window: &mut Window, cx: &mut Context<SettingsPage>) {
-    let cwd = matches!(field, Field::Cwd);
-    let receiver = cx.prompt_for_paths(PathPromptOptions {
-        files: !cwd,
-        directories: true,
-        multiple: false,
-        prompt: Some(SharedString::from(t!("Escolher um arquivo ou uma pasta"))),
-    });
+    let folder = match field {
+        Field::Cwd => true,
+        Field::Path => cx
+            .entity()
+            .read(cx)
+            .quick_launch
+            .form
+            .as_ref()
+            .is_some_and(|form| form.kind == "folder"),
+    };
+    let (want, prompt) = if folder {
+        (quick_launch::PathWant::Folders, t!("Escolher uma pasta"))
+    } else {
+        (
+            quick_launch::PathWant::Files,
+            t!("Escolher um arquivo ou uma pasta"),
+        )
+    };
+    let receiver = cx.prompt_for_paths(quick_launch::path_prompt_for(cx, want, false, prompt));
     cx.spawn_in(window, async move |this, cx| {
         let Ok(Ok(Some(paths))) = receiver.await else {
             return;

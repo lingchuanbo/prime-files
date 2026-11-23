@@ -32,8 +32,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gpui::{
-    App, AppContext as _, Bounds, Global, Pixels, PlatformDisplay, Point, RenderImage, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Global, PathPromptOptions, Pixels, PlatformDisplay, Point,
+    RenderImage, SharedString, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    point, px, size,
 };
 use gpui_component::Root;
 use nohrs_core::config::ConfigWatcher;
@@ -2762,6 +2763,60 @@ pub(crate) fn path_is_directory(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// What a path prompt may pick (§17.2, M4 R2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathWant {
+    /// Files only.
+    Files,
+    /// Folders only.
+    Folders,
+    /// Both, where the platform allows it.
+    Either,
+}
+
+/// The options a path prompt gets, adjusted to what the platform can do (§17.2 R2).
+///
+/// gpui's Windows implementation adds `FOS_PICKFOLDERS` as soon as `directories`
+/// is set, and then the dialog can only pick folders; asking for both there would
+/// silently make a file picker useless. A platform without mixed selection falls
+/// back to files, the common case.
+pub(crate) fn path_prompt(
+    want: PathWant,
+    multiple: bool,
+    prompt: &str,
+    mixed_supported: bool,
+) -> PathPromptOptions {
+    let (files, directories) = match want {
+        PathWant::Files => (true, false),
+        PathWant::Folders => (false, true),
+        PathWant::Either => (true, mixed_supported),
+    };
+    PathPromptOptions {
+        files,
+        directories,
+        multiple,
+        prompt: Some(SharedString::from(prompt.to_string())),
+    }
+}
+
+/// [`path_prompt`] for the platform this process runs on.
+pub(crate) fn path_prompt_for(
+    cx: &App,
+    want: PathWant,
+    multiple: bool,
+    prompt: &str,
+) -> PathPromptOptions {
+    path_prompt(want, multiple, prompt, cx.can_select_mixed_files_and_dirs())
+}
+
+/// Whether the empty-cell menu offers the folder-only entry (§17.2 R2).
+///
+/// Where the platform can mix files and folders in one dialog there is nothing to
+/// split; where it cannot, "new item" picks files and folders get their own entry.
+pub(crate) fn folder_entry_offered(mixed_supported: bool) -> bool {
+    !mixed_supported
+}
+
 /// Moves one item's usage record to the place it went, in one transaction
 /// (S3): the old key is removed only when the new one is written.
 fn move_usage(cx: &mut App, from: (String, u32), to: (String, u32)) {
@@ -5053,6 +5108,36 @@ mod platform {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    /// §17.2 R2: the prompt asks for what the platform can actually pick.
+    #[test]
+    fn a_path_prompt_follows_what_the_platform_can_pick() {
+        let files = path_prompt(PathWant::Files, true, "p", true);
+        assert!(files.files);
+        assert!(!files.directories);
+        assert!(files.multiple);
+        let folders = path_prompt(PathWant::Folders, false, "p", true);
+        assert!(!folders.files);
+        assert!(folders.directories);
+        assert!(!folders.multiple);
+        // Where both may be picked, `Either` asks for both.
+        let either = path_prompt(PathWant::Either, true, "p", true);
+        assert!(either.files);
+        assert!(either.directories);
+        // Where they cannot be mixed, it falls back to files rather than to the
+        // folder-only dialog Windows would otherwise force (§17.2 R2).
+        let fallback = path_prompt(PathWant::Either, true, "p", false);
+        assert!(fallback.files);
+        assert!(!fallback.directories);
+    }
+
+    /// §17.2 R2: the folder-only menu entry exists only where the two cannot be
+    /// picked together.
+    #[test]
+    fn the_folder_entry_is_offered_only_without_mixed_selection() {
+        assert!(!folder_entry_offered(true));
+        assert!(folder_entry_offered(false));
+    }
 
     /// A group of `count` items, the size §16.2 measures a switch with.
     fn group_of(count: u32) -> Group {
