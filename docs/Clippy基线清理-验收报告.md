@@ -212,18 +212,18 @@ c910528 Add the clippy baseline spec
 
 ---
 
-## 7. 与规格 §4.4 的一处偏差（需要知道）
+## 7. `nohrs-cli` 集成测试的复制与日志目录（与规格 §4.4 的实际情况）
 
-§4.4 的修法（把 `binary_under_test()` 挪到 `tests/support/`，两个测试文件都用它）已经照做，但**只做这一步 4 个日志测试仍然失败**：Windows 上 `log_dir()` 不是 `$XDG_STATE_HOME/nohrs/logs`，而是**可执行文件所在目录**（`docs/logging.md` 明确如此，`paths::log_dir()` 的 Windows 分支）。所以现在的做法是：
+§4.4 的修法（`binary_under_test()` 挪到 `tests/support/`，两个测试文件都用 `#[path]` 引入）已经照做。实际做法：
 
-- `binary_under_test()` 仍是每个进程只拷一次，`quick_launch.rs` 用它；
-- 日志测试用同一个模块里的 `copy_for_test()` 复制到自己的目录，并把这个目录当作日志目录（Windows 上二者本来就是同一个）；
-- 4 个日志测试共享这一份副本，用一把 `Mutex` 轮流执行，每个测试开始时清掉上次留下的日志；
-- 另外把 `fs::copy` 改成“先写唯一文件名、不重命名”，因为杀毒软件持有刚写完的文件时 `rename` 会一直返回“拒绝访问”（这正是 M3/M4 里反复出现的那类偶发失败）。
+- `tests/support/binary_under_test.rs` 的 `binary_under_test()` 每个测试进程把 `noh` 复制到 `%TEMP%` 下一个按“源文件大小 + 修改时间”命名的目录，**每个进程只复制一次**，两个测试文件共用这份副本。复制先写唯一临时文件再改名（带重试），因为杀毒软件持有刚写完的文件时 `rename` 会返回“拒绝访问”。
+- 子进程一律设置 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`、`XDG_CACHE_HOME` 指向测试自己的临时目录，并去掉继承的 `RUST_LOG`。
+- **日志测试**（`tests/log_command_leaves_the_log_alone.rs`）：每个测试有自己的 state 临时目录，子进程的 `XDG_STATE_HOME` 指向它，所以不会碰到开发者真实的日志目录。日志目录按平台取：
+  - **Windows**：可执行文件所在目录（`docs/logging.md`），也就是那份共享副本的目录。4 个测试因此共用一个目录，用一把 `Mutex` 轮流执行，每个测试开始时清掉上次留下的日志。
+  - **其他平台**：`<state>/nohrs/logs`，每个测试一个，可以并行。
+- logo 之外的 `nohrs-cli` 测试（`quick_launch.rs`）只用同样的副本和 XDG 隔离，不涉及日志目录。
 
-`docs/testing.md` §7 第 4、5 条已按这个实际情况改写。
-
----
+**已知限制（登记）**：Windows 上 `quick_launch.rs` 的测试和日志测试共用同一个副本目录，quick_launch 的子进程会把日志写进这个目录。cargo 默认按顺序一个个跑测试二进制，加上日志测试的 `turn()` 先清理，所以现在没有问题；如果以后改用 nextest 这类并行执行器，就需要给两者分开目录。
 
 ## 8. 其余说明
 

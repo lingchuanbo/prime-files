@@ -8,39 +8,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// Copies the binary into `directory` for one test, under a name of its own.
-///
-/// The log tests need a directory whose only other file is the binary, so they
-/// cannot share the copy `binary_under_test` hands out. The name carries the process
-/// and a timestamp, so nothing is ever renamed over: an antivirus holding the file it
-/// just scanned refuses the rename, and that is the failure mode this avoids.
-// Used by the log tests; the quick_launch target compiles this module and only needs
-// binary_under_test, so it sees this one as unused.
-#[allow(dead_code)]
-pub fn copy_for_test(directory: &Path) -> PathBuf {
-    let source = PathBuf::from(env!("CARGO_BIN_EXE_noh"));
-    let extension = if cfg!(windows) { ".exe" } else { "" };
-    let mut last = String::new();
-    for attempt in 0..20 {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or(0);
-        let target = directory.join(format!(
-            "noh-under-test-{}-{stamp}-{attempt}{extension}",
-            std::process::id()
-        ));
-        match std::fs::copy(&source, &target) {
-            Ok(_) => return target,
-            Err(error) => {
-                last = error.to_string();
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-    }
-    panic!("copying the binary for a test: {last}");
-}
-
 /// Copies the binary into `directory`, under a stable name it can be reused from.
 ///
 /// A plain `std::fs::copy` onto a fixed name is flaky on Windows: an antivirus can
@@ -100,9 +67,6 @@ fn copy_into(directory: &Path) -> PathBuf {
 /// The directory is named after the source's size and modification time, so it is
 /// reused for as long as the build is the same: a per-process name made every run a
 /// brand-new executable for antivirus to scan, which took minutes.
-// Used by the quick_launch test target; this module is compiled into each integration
-// test, and the log tests only need copy_into, so this target sees it as unused.
-#[allow(dead_code)]
 pub fn binary_under_test() -> PathBuf {
     let source = PathBuf::from(env!("CARGO_BIN_EXE_noh"));
     let metadata = std::fs::metadata(&source).expect("the binary cargo just built");

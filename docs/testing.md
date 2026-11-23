@@ -258,8 +258,12 @@ cargo doc --no-deps --all-features --workspace
    以前は `target\release\userdata\config.toml` の `portable_mode = true` により
    子プロセスも `XDG_*` を無視し、さらに Windows ではログが実行ファイルの隣に
    書かれるため、`$XDG_STATE_HOME` を見るテストが失敗していた。
-   現在は各テストが `noh` のコピーを自分の一時ディレクトリに置き、
-   そのディレクトリをログの置き場所として扱う。
+   現在は各テストが自分の一時 state ディレクトリを子プロセスに渡し
+   （`XDG_STATE_HOME`）、ログの置き場所はプラットフォームで分ける:
+   Windows はコピーした実行ファイルのディレクトリ、それ以外は
+   `<state>/nohrs/logs`。Windows だけは 4 つのテストが同じディレクトリを
+   共有するので、`Mutex` で順番に実行し、各テストの冒頭で前回のログを消す。
+   実際のユーザーのログディレクトリには触れない。
 
 5. **`nohrs-cli` の統合テストは、バイナリを一時ディレクトリへコピーしてから実行する。**
    `CARGO_BIN_EXE_noh` は `target\release\noh.exe` を指し、その隣の `userdata` が
@@ -268,8 +272,9 @@ cargo doc --no-deps --all-features --workspace
    その実装は `crates/nohrs-cli/tests/support/binary_under_test.rs` の
    `binary_under_test()` で、各テストファイルが
    `#[path = "support/binary_under_test.rs"] mod binary_under_test;` で読み込む。
-   プロセスごとに一度だけコピーする（`quick_launch.rs` と
-   `log_command_leaves_the_log_alone.rs` が使う）。
-   ログのテストはさらに一歩進めて、テストごとのディレクトリにコピーする:
-   Windows ではログの置き場所が実行ファイルの隣なので、コピー先がそのまま
-   ログのディレクトリになり、テスト同士が互いのログを消さない。
+   プロセスごとに一度だけコピーし、`quick_launch.rs` と
+   `log_command_leaves_the_log_alone.rs` が共用する。
+   Windows では両者が同じコピー先ディレクトリを使うため、ログテストの子プロセスが
+   書くログもそのディレクトリに入る。cargo はテストバイナリを順番に実行し、
+   ログテストは冒頭で消すので問題ないが、**nextest のような並列実行器に変えるときは
+   両者でコピー先を分けること**。
