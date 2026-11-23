@@ -3440,12 +3440,6 @@ fn save_now(quick_launch: &mut QuickLaunch) {
     }
 }
 
-/// Replaces `path` with `contents` through a temporary file and a backup.
-///
-/// A crash or a full disk in the middle leaves the original file alone: the
-/// temporary file is written and flushed first, and only then renamed over the
-/// target, which is atomic on both platforms LumaFiles runs on.
-#[allow(clippy::disallowed_methods)] // the exit path and the throttled save
 /// Writes one KV value in the background, logging rather than failing (§6).
 fn write_kv_name(cx: &mut App, name: String, bytes: Vec<u8>) {
     let Some(kv) = state(cx).and_then(|quick_launch| quick_launch.kv.clone()) else {
