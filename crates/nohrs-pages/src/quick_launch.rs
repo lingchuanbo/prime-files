@@ -39,18 +39,19 @@ use gpui_component::Root;
 use nohrs_core::config::ConfigWatcher;
 use nohrs_core::config::paths;
 use nohrs_core::config::quick_launch::{
-    Group, Item, OnRunning, Parsed, QuickLaunchConfig, QuickLaunchError, View, Warning,
-    WindowSettings,
+    ActionKind, CommandSpec, Group, Item, OnRunning, Parsed, QuickLaunchConfig, QuickLaunchError,
+    View, Warning, WindowSettings, command_spec,
 };
 use nohrs_core::telemetry::LogErr;
 use nohrs_services::launch::LaunchRegistry;
 use nohrs_services::launch::{
-    ExpandContext, Health, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
+    ExpandContext, Health, KIND_COMMAND, LaunchError, LaunchMode, LaunchOutcome, LaunchRequest,
 };
 use nohrs_store::{KvKey, KvOp, KvStore};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatchConfig, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::explorer::thumbnails;
 
@@ -89,6 +90,12 @@ const KV_NAMESPACE: &str = "quick_launch";
 
 /// The key of the last group shown (§6).
 const LAST_GROUP_KEY: &str = "last_group";
+
+/// The name prefix of a command's trust record (§6, §17.2 D.1).
+const TRUSTED_PREFIX: &str = "trusted_";
+
+/// How many hex characters of the SHA-256 digest name a trust record (§17.2 D.1).
+const TRUST_KEY_HEX_LENGTH: usize = 32;
 
 /// How the state came to hold its configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,12 +752,16 @@ impl From<SavedBounds> for Bounds<Pixels> {
     }
 }
 
-/// What the store remembered: where the window was on each display, and which
-/// group was last shown (§6).
+/// What the store remembered: where the window was on each display, which
+/// group was last shown, and which commands the user trusted (§6).
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Restored {
     positions: HashMap<String, SavedBounds>,
     last_group: Option<String>,
+    /// The hex part of every `trusted_*` key the store held (§17.2 D.1). A
+    /// resident process adds the ones the user confirmed to this set without a
+    /// store, so they last until the process ends (§17.2 D.5).
+    trusted: HashSet<String>,
 }
 
 impl Restored {
@@ -768,6 +779,14 @@ impl Restored {
                 }
                 continue;
             }
+            if let Some(trusted) = name.strip_prefix(TRUSTED_PREFIX) {
+                // Only the values this program writes count: a stray key with
+                // another value is not a confirmation anyone made.
+                if bytes.as_slice() == b"true" && trusted.len() == TRUST_KEY_HEX_LENGTH {
+                    restored.trusted.insert(trusted.to_string());
+                }
+                continue;
+            }
             if let Some(position) = name.strip_prefix("window_")
                 && let Ok(saved) = serde_json::from_slice::<SavedBounds>(&bytes)
             {
@@ -778,6 +797,53 @@ impl Restored {
         }
         restored
     }
+}
+
+/// The trust key of one command (§17.2 D.1): the first 32 hex characters of
+/// SHA-256 over its shell, script, working directory and two flags.
+///
+/// SHA-256 rather than `DefaultHasher`: a collision here would let one script
+/// inherit another one's trust. The working directory is hashed as written, not
+/// expanded, so the key follows the file's text and any edit asks again.
+fn command_trust_key(item: &Item, spec: &CommandSpec) -> String {
+    let mut hasher = Sha256::new();
+    let hidden = if spec.hidden { "1" } else { "0" };
+    let keep_open = if spec.keep_open { "1" } else { "0" };
+    for part in [
+        spec.shell.as_str(),
+        spec.script.as_str(),
+        item.cwd.as_deref().unwrap_or_default(),
+        hidden,
+        keep_open,
+    ] {
+        hasher.update(part.as_bytes());
+        // A NUL cannot occur in a TOML string, so it cannot join two fields
+        // into the same input as another combination.
+        hasher.update([0u8]);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex.truncate(TRUST_KEY_HEX_LENGTH);
+    hex
+}
+
+/// Whether a command still needs its first-run confirmation (§17.2 D.2).
+///
+/// Answers `None` for anything that is not a command with a valid spec: there
+/// is no trust key to compare, and the launch itself reports what is wrong.
+fn command_needs_confirmation(
+    quick_launch: &QuickLaunch,
+    item: &Item,
+) -> Option<(CommandSpec, String)> {
+    if item.action_kind() != ActionKind::Command {
+        return None;
+    }
+    let spec = command_spec(item).ok()?;
+    let trust_key = command_trust_key(item, &spec);
+    (!quick_launch.restored.trusted.contains(&trust_key)).then_some((spec, trust_key))
 }
 
 /// Which process the quick launch is running in (§15.1).
@@ -830,6 +896,43 @@ pub struct HotkeyHooks {
     pub unregister: fn(&mut App, u64) -> std::result::Result<(), String>,
 }
 
+/// One `command` the user has asked to run but has not confirmed yet
+/// (§17.2 D.3). It keeps everything the eventual launch needs, so the item may
+/// change on disk while the dialog is open without changing what was shown.
+struct PendingCommand {
+    /// The group the item came from, recorded once it starts.
+    group: String,
+    /// The slot the item came from, recorded once it starts.
+    slot: u32,
+    /// The item itself: the launch uses this copy, not the one in the file.
+    item: Item,
+    /// What the dialog shows and what the trust key was built from.
+    spec: CommandSpec,
+    /// The key written when the user clicks "Run" (§17.2 D.1).
+    trust_key: String,
+    /// How the click asked for the launch, kept until the dialog answers.
+    mode: LaunchMode,
+}
+
+/// What the window's command dialog draws (§17.2 D.3): a copy of the pending
+/// command's fields, so the view does not hold the state borrow while it builds
+/// the overlay.
+pub(crate) struct CommandConfirmation {
+    /// What the tile shows.
+    pub(crate) name: String,
+    /// The shell the script runs through.
+    pub(crate) shell: &'static str,
+    /// The working directory as written, when one is set.
+    pub(crate) cwd: Option<String>,
+    /// Whether the script runs without a console window.
+    pub(crate) hidden: bool,
+    /// The whole script, shown as written.
+    pub(crate) script: String,
+    /// Whether this process has a store, so the confirmation survives a restart
+    /// (§17.2 D.5).
+    pub(crate) remembered: bool,
+}
+
 /// The in-memory state, read and written through the GPUI global (§13).
 pub(crate) struct QuickLaunch {
     config: QuickLaunchConfig,
@@ -869,6 +972,8 @@ pub(crate) struct QuickLaunch {
     generation: u64,
     /// The most recent launch failure, shown in the window's footer (§8.5).
     message: Option<String>,
+    /// A command waiting for the user's first-run confirmation (§17.2 D.3).
+    pending_command: Option<PendingCommand>,
     /// A hide asked for while GPUI had the window out for an update. The 400 ms
     /// tick performs it, outside any update, rather than the request being lost.
     pending_hide: bool,
@@ -1217,6 +1322,9 @@ fn retype_after_edit(cx: &mut App, group: usize, slot: u32, previous_kind: &str)
 /// A `noh ql remove` or a hand edit leaves them behind, and the next item put in
 /// that slot would inherit the count. Only the main process has the store: the
 /// resident one runs without it.
+///
+/// Only `usage_*` keys are ever candidates (§17.2 D.8): a `trusted_*` record is
+/// about a script, not a slot, and must survive the item being moved or deleted.
 fn prune_usage(cx: &mut App) {
     let Some(quick_launch) = state(cx) else {
         return;
@@ -1389,19 +1497,73 @@ pub(crate) struct ItemEdit {
     pub icon: String,
     /// Extra words the filter matches on.
     pub tags: Vec<String>,
+    /// The `command` fields the settings form offers (§17.2 A.3, D.6). `None`
+    /// keeps the item's `extra` as it is, which is what the window's edit dialog
+    /// and every other kind of item need.
+    pub command: Option<CommandEdit>,
+}
+
+/// What the settings page's form knows about a `command` item (§17.2 A.3).
+#[derive(Clone)]
+pub(crate) struct CommandEdit {
+    /// One of `cmd`, `pwsh`, `powershell`, `python`.
+    pub shell: String,
+    /// The script, passed to the shell as written.
+    pub script: String,
+    /// Run without a console window.
+    pub hidden: bool,
+    /// Keep the console open after the script ends.
+    pub keep_open: bool,
 }
 
 /// Applies the item form of the settings page (§17.1 B), with the rules of the
 /// window's edit dialog: no empty name or path, no edits while the file is
 /// read-only, a fresh health check and a kind judged again from a new path.
+///
+/// A `command` saved through the form is trusted at once (D5, §17.2 D.6): the
+/// form is the one path where the user read and wrote the script themselves.
 pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit) -> bool {
     let name = edit.name.trim();
     let path = edit.path.trim();
+    // A command has no path; the rest of the form still needs one.
+    let command_extra = match (edit.kind.as_str(), edit.command.as_ref()) {
+        (KIND_COMMAND, Some(command)) => {
+            let mut probe = Item::new(0, KIND_COMMAND, "command");
+            probe
+                .extra
+                .insert("shell".to_string(), command.shell.clone().into());
+            probe
+                .extra
+                .insert("script".to_string(), command.script.clone().into());
+            if command.hidden {
+                probe.extra.insert("hidden".to_string(), true.into());
+            }
+            if command.keep_open {
+                probe.extra.insert("keep_open".to_string(), true.into());
+            }
+            if command_spec(&probe).is_err() {
+                return false;
+            }
+            Some(probe.extra)
+        }
+        _ => None,
+    };
+    let is_command = command_extra.is_some();
     // An item without a name would be an empty tile, and one without a path
     // could never start: the form treats both as "cancel".
-    if name.is_empty() || path.is_empty() || !editable(cx) {
+    if name.is_empty() || (!is_command && path.is_empty()) || !editable(cx) {
         return false;
     }
+    let cwd = edit.cwd.trim();
+    // The key is built from what the form is saving, before the state borrow.
+    let trust_key = command_extra.as_ref().and_then(|extra| {
+        let mut probe = Item::new(slot, KIND_COMMAND, name);
+        probe.extra = extra.clone();
+        probe.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+        command_spec(&probe)
+            .ok()
+            .map(|spec| command_trust_key(&probe, &spec))
+    });
     let Some(state) = state_mut(cx) else {
         return false;
     };
@@ -1412,11 +1574,11 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
         return false;
     };
     // Only the kinds the form offers may be introduced; every other kind
-    // (command, group, plugin:…) is kept as it is, since this milestone cannot
-    // build those and changing one would change what the entry means.
+    // (group, plugin:…) is kept as it is, since this milestone cannot build
+    // those and changing one would change what the entry means.
     if !matches!(
         edit.kind.as_str(),
-        "app" | "folder" | "file" | "url" | "uwp"
+        "app" | "folder" | "file" | "url" | "uwp" | KIND_COMMAND
     ) && edit.kind != item.kind
     {
         return false;
@@ -1425,14 +1587,13 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     let previous_path = item.path.clone();
     item.kind = edit.kind.clone();
     item.name = name.to_string();
-    item.path = Some(path.to_string());
+    item.path = (!is_command).then(|| path.to_string());
     let args = edit.args.trim();
     item.args = (!args.is_empty()).then(|| args.to_string());
-    let cwd = edit.cwd.trim();
     item.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
     let icon = edit.icon.trim();
     item.icon = (!icon.is_empty()).then(|| icon.to_string());
-    item.admin = edit.admin;
+    item.admin = if is_command { false } else { edit.admin };
     item.tags = edit
         .tags
         .iter()
@@ -1440,6 +1601,13 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
         .filter(|tag| !tag.is_empty())
         .map(str::to_string)
         .collect();
+    match command_extra {
+        Some(extra) => item.extra = extra,
+        // A command changed into another kind has no use for its fields, and
+        // the file only keeps `extra` for `command` and `plugin:*` (§4.2).
+        None if previous_kind == KIND_COMMAND => item.extra.clear(),
+        None => {}
+    }
     let path_changed = item.path != previous_path;
     state.touch();
     mark_dirty(cx);
@@ -1447,8 +1615,11 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
     // S4: a path that now points at a folder (or a program) changes the kind, so
     // the item keeps working after the edit. An unchanged path keeps the kind
     // the form chose.
-    if path_changed {
+    if path_changed && !is_command {
         retype_after_edit(cx, group, slot, &previous_kind);
+    }
+    if let Some(trust_key) = trust_key {
+        remember_trust(cx, trust_key);
     }
     true
 }
@@ -1484,6 +1655,7 @@ pub(crate) fn edit_item(
             admin,
             icon: item.icon.unwrap_or_default(),
             tags: item.tags,
+            command: None,
         },
     );
     // The dialog judges the kind after every edit, as it did before the form
@@ -1961,6 +2133,7 @@ pub fn init(cx: &mut App, kv: Option<Arc<dyn KvStore>>, hooks: HotkeyHooks, mode
         signals: Some(receiver),
         generation: 0,
         message: None,
+        pending_command: None,
         pending_hide: false,
         revision: 0,
         pending_usage: None,
@@ -2985,7 +3158,10 @@ fn report_launch_failure(cx: &mut App, name: &str, error: &LaunchError) {
 }
 
 /// Starts the item in `slot` of the current group (§12.2).
-/// Starts the item in `slot` the way the click asked for (§12.2).
+///
+/// A `command` whose trust key is not in the restored set stops here: the window
+/// shows its confirmation dialog instead, and only that dialog's "Run" calls
+/// [`confirm_pending_command`] (§17.2 D.3).
 pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
     let Some(quick_launch) = state(cx) else {
         return;
@@ -3003,19 +3179,52 @@ pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
         "launching the selected item"
     );
     let (item, group_id) = (item.clone(), group.id.clone());
-    let mode = if kind == ClickKind::Admin || item.admin {
+    let mode = launch_mode(&item, kind);
+    let confirmation = command_needs_confirmation(quick_launch, &item);
+    let visible = quick_launch.visible;
+    if let Some((spec, trust_key)) = confirmation {
+        // The dialog lives in the quick-launch window, so a summon from the
+        // Launcher's `@` shows it first (§17.2 D.4).
+        if !visible && let Err(error) = show(cx) {
+            tracing::warn!(target: "quick_launch", "could not show the window: {error}");
+        }
+        if let Some(quick_launch) = state_mut(cx) {
+            quick_launch.message = None;
+            quick_launch.pending_command = Some(PendingCommand {
+                group: group_id,
+                slot,
+                item,
+                spec,
+                trust_key,
+                mode,
+            });
+            quick_launch.touch();
+        }
+        cx.refresh_windows();
+        return;
+    }
+    send_launch(cx, item, group_id, slot, mode);
+}
+
+/// The launch mode one click asks for (§8.1): `Ctrl` or an item marked `admin`.
+fn launch_mode(item: &Item, kind: ClickKind) -> LaunchMode {
+    if kind == ClickKind::Admin || item.admin {
         LaunchMode::Admin
     } else {
         LaunchMode::Normal
-    };
-    let on_running = quick_launch.config.window.on_running;
-    let generation = quick_launch.generation.wrapping_add(1);
+    }
+}
+
+/// Hands one start request to the `quick-launch` thread (§8.1, §8.4).
+fn send_launch(cx: &mut App, item: Item, group: String, slot: u32, mode: LaunchMode) {
     let Some(quick_launch) = state_mut(cx) else {
         return;
     };
+    let on_running = quick_launch.config.window.on_running;
+    let generation = quick_launch.generation.wrapping_add(1);
     quick_launch.generation = generation;
     quick_launch.message = None;
-    quick_launch.pending_usage = Some((group_id, slot));
+    quick_launch.pending_usage = Some((group, slot));
     if let Some(workers) = quick_launch.workers.as_ref() {
         workers.send_launch(StartRequest {
             item: Box::new(item),
@@ -3025,6 +3234,173 @@ pub(crate) fn activate_with(cx: &mut App, slot: u32, kind: ClickKind) {
         });
     }
     cx.refresh_windows();
+}
+
+/// Whether a command dialog is waiting for an answer (§17.2 D.3).
+pub(crate) fn command_waiting(cx: &App) -> bool {
+    state(cx).is_some_and(|quick_launch| quick_launch.pending_command.is_some())
+}
+
+/// What the window's command dialog shows, if one is waiting (§17.2 D.3).
+pub(crate) fn command_confirmation(cx: &App) -> Option<CommandConfirmation> {
+    let quick_launch = state(cx)?;
+    let pending = quick_launch.pending_command.as_ref()?;
+    Some(CommandConfirmation {
+        name: pending.item.name.clone(),
+        shell: pending.spec.shell.as_str(),
+        cwd: pending.item.cwd.clone(),
+        hidden: pending.spec.hidden,
+        script: pending.spec.script.clone(),
+        remembered: quick_launch.kv.is_some(),
+    })
+}
+
+/// "Run": writes the trust key, then starts the pending command (§17.2 D.3).
+///
+/// The key reaches the store before the start request, so a launch that works
+/// once does not ask again even if the process ends right after it.
+pub(crate) fn confirm_pending_command(cx: &mut App) {
+    let Some(pending) = state_mut(cx).and_then(|quick_launch| quick_launch.pending_command.take())
+    else {
+        return;
+    };
+    let kv = {
+        let Some(quick_launch) = state_mut(cx) else {
+            return;
+        };
+        remember_trust_in_memory(quick_launch, &pending.trust_key);
+        quick_launch.touch();
+        quick_launch.kv.clone()
+    };
+    cx.refresh_windows();
+    let PendingCommand {
+        group,
+        slot,
+        item,
+        trust_key,
+        mode,
+        ..
+    } = pending;
+    cx.spawn(async move |cx| {
+        if let Some(kv) = kv {
+            let key_name = format!("{TRUSTED_PREFIX}{trust_key}");
+            let written = cx
+                .background_spawn(async move {
+                    let Ok(key) = KvKey::new(KV_NAMESPACE, &key_name) else {
+                        return false;
+                    };
+                    kv.put(&key, b"true").is_ok()
+                })
+                .await;
+            if !written {
+                tracing::warn!(
+                    target: "quick_launch",
+                    "could not remember a command's trust in the store"
+                );
+            }
+        }
+        cx.update(|cx| send_launch(cx, item, group, slot, mode))
+            .ok();
+    })
+    .detach();
+}
+
+/// "Cancel": forget the pending command, start nothing, report nothing
+/// (§17.2 D.3).
+pub(crate) fn cancel_pending_command(cx: &mut App) {
+    let Some(quick_launch) = state_mut(cx) else {
+        return;
+    };
+    if quick_launch.pending_command.take().is_none() {
+        return;
+    }
+    quick_launch.touch();
+    cx.refresh_windows();
+}
+
+/// Adds one trust key to the in-memory set and, when there is a store, writes it
+/// down (§17.2 D.1, D.5).
+fn remember_trust(cx: &mut App, trust_key: String) {
+    let Some(kv) = state_mut(cx).and_then(|quick_launch| {
+        remember_trust_in_memory(quick_launch, &trust_key);
+        quick_launch.kv.clone()
+    }) else {
+        // A resident process has no store: the set above is the whole record.
+        return;
+    };
+    let key_name = format!("{TRUSTED_PREFIX}{trust_key}");
+    cx.background_spawn(async move {
+        let Ok(key) = KvKey::new(KV_NAMESPACE, &key_name) else {
+            return;
+        };
+        kv.put(&key, b"true").log_err();
+    })
+    .detach();
+}
+
+/// Adds one trust key to the set the foreground consults, without touching the
+/// store: the caller decides whether the key is written.
+fn remember_trust_in_memory(quick_launch: &mut QuickLaunch, trust_key: &str) {
+    quick_launch.restored.trusted.insert(trust_key.to_string());
+}
+
+/// Whether the command at `group`/`slot` is trusted, as the settings form shows
+/// it (§17.2 D.7). `None` when the item is gone or its `extra` is invalid.
+pub(crate) fn command_trust(cx: &App, group: &str, slot: u32) -> Option<bool> {
+    let quick_launch = state(cx)?;
+    let item = quick_launch
+        .config
+        .groups
+        .iter()
+        .find(|candidate| candidate.id == group)?
+        .items
+        .iter()
+        .find(|item| item.slot == slot)?;
+    let spec = command_spec(item).ok()?;
+    let trust_key = command_trust_key(item, &spec);
+    Some(quick_launch.restored.trusted.contains(&trust_key))
+}
+
+/// Removes the trust record of the command at `group`/`slot` (§17.2 D.7).
+///
+/// The foreground set is updated at once; the store is written on a background
+/// task, like every other KV write of this module.
+pub(crate) fn revoke_command_trust(cx: &mut App, group: &str, slot: u32) -> bool {
+    let Some(item) = state(cx)
+        .and_then(|quick_launch| {
+            quick_launch
+                .config
+                .groups
+                .iter()
+                .find(|candidate| candidate.id == group)
+        })
+        .and_then(|candidate| candidate.items.iter().find(|item| item.slot == slot))
+        .cloned()
+    else {
+        return false;
+    };
+    let Ok(spec) = command_spec(&item) else {
+        return false;
+    };
+    let trust_key = command_trust_key(&item, &spec);
+    let kv = {
+        let Some(quick_launch) = state_mut(cx) else {
+            return false;
+        };
+        quick_launch.restored.trusted.remove(&trust_key);
+        quick_launch.kv.clone()
+    };
+    if let Some(kv) = kv {
+        let key_name = format!("{TRUSTED_PREFIX}{trust_key}");
+        cx.background_spawn(async move {
+            let Ok(key) = KvKey::new(KV_NAMESPACE, &key_name) else {
+                return;
+            };
+            kv.delete(&key).log_err();
+        })
+        .detach();
+    }
+    true
 }
 
 /// Switches the group bar to `index` (§12.2).
@@ -4251,6 +4627,7 @@ mod tests {
                     admin: false,
                     icon: String::new(),
                     tags: Vec::new(),
+                    command: None,
                 }
             ));
             assert!(!move_group(cx, 0, 1));
@@ -4322,7 +4699,7 @@ mod tests {
     }
 
     /// §17.1 B: the settings page's form changes the fields the window's dialog
-    /// does not offer, and only lets the four kinds of the form be introduced.
+    /// does not offer, and only lets the kinds of the form be introduced.
     #[gpui::test]
     fn a_settings_page_item_form_covers_the_other_fields(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -4337,6 +4714,7 @@ mod tests {
                 admin: true,
                 icon: "C:\\icone.png".to_string(),
                 tags: vec![" um ".to_string(), String::new(), "dois".to_string()],
+                command: None,
             };
             assert!(update_item(cx, 0, 2, &edit));
             let item = item_at(cx, 0, 2).expect("the item is still there");
@@ -4357,26 +4735,75 @@ mod tests {
             empty.path = String::new();
             assert!(!update_item(cx, 0, 2, &empty));
 
-            // A kind outside the four is kept, never introduced.
-            let mut command = item_at(cx, 0, 2).expect("the item is still there");
-            command.kind = "command".to_string();
-            assert!(put_item(cx, 0, 2, command));
-            let kept = ItemEdit {
-                kind: "command".to_string(),
+            // A command comes with its own fields and no path, and its trust
+            // record is written as it is saved (D5, §17.2 D.6).
+            let command = ItemEdit {
+                kind: KIND_COMMAND.to_string(),
                 name: "Comando".to_string(),
-                path: "cmd.exe".to_string(),
+                path: String::new(),
+                args: String::new(),
+                admin: true,
+                command: Some(CommandEdit {
+                    shell: "cmd".to_string(),
+                    script: "echo ok".to_string(),
+                    hidden: true,
+                    keep_open: false,
+                }),
                 ..edit.clone()
             };
-            assert!(update_item(cx, 0, 2, &kept));
+            assert!(update_item(cx, 0, 2, &command));
+            let item = item_at(cx, 0, 2).expect("the item is still there");
+            assert_eq!(item.kind, KIND_COMMAND);
+            assert_eq!(item.path, None, "a command has no path");
             assert_eq!(
-                item_at(cx, 0, 2).map(|item| item.kind),
-                Some("command".to_string())
+                item.extra.get("shell").and_then(|value| value.as_str()),
+                Some("cmd")
             );
+            assert_eq!(
+                item.extra.get("script").and_then(|value| value.as_str()),
+                Some("echo ok")
+            );
+            assert_eq!(
+                item.extra.get("hidden").and_then(|value| value.as_bool()),
+                Some(true)
+            );
+            assert!(!item.admin, "a command cannot run elevated (D4)");
+            let spec = command_spec(&item).expect("a valid command");
+            let trust = command_trust_key(&item, &spec);
+            assert!(
+                state(cx).is_some_and(|state| state.restored.trusted.contains(&trust)),
+                "saving through the form trusts the new key"
+            );
+
+            let broken = ItemEdit {
+                command: Some(CommandEdit {
+                    shell: "bash".to_string(),
+                    script: String::new(),
+                    hidden: false,
+                    keep_open: false,
+                }),
+                ..command.clone()
+            };
+            assert!(!update_item(cx, 0, 2, &broken));
+
+            // A kind the form cannot build is kept, never introduced.
             let introduced = ItemEdit {
                 kind: "plugin:x".to_string(),
-                ..kept.clone()
+                ..command.clone()
             };
             assert!(!update_item(cx, 0, 2, &introduced));
+
+            // Going back to an ordinary kind drops the command's `extra`.
+            let back = ItemEdit {
+                kind: "app".to_string(),
+                path: "C:\\a.exe".to_string(),
+                command: None,
+                ..edit.clone()
+            };
+            assert!(update_item(cx, 0, 2, &back));
+            let item = item_at(cx, 0, 2).expect("the item is still there");
+            assert_eq!(item.kind, "app");
+            assert!(item.extra.is_empty(), "the command fields go with the kind");
         });
     }
 
@@ -4830,10 +5257,15 @@ mod tests {
                 KvKey::new(KV_NAMESPACE, LAST_GROUP_KEY).unwrap(),
                 b"desenvolvimento".to_vec(),
             ),
-            // A key of another milestone, or one that cannot be read: skipped,
+            // A key of another milestone, or one too short to be a trust key: skipped,
             // not an error.
             (
                 KvKey::new(KV_NAMESPACE, "trusted_00ff").unwrap(),
+                b"true".to_vec(),
+            ),
+            // A trust record this build wrote: the hex part is restored.
+            (
+                KvKey::new(KV_NAMESPACE, "trusted_0123456789abcdef0123456789abcdef").unwrap(),
                 b"true".to_vec(),
             ),
             (
@@ -4848,6 +5280,11 @@ mod tests {
             Some(saved)
         );
         assert_eq!(restored.last_group.as_deref(), Some("desenvolvimento"));
+        assert_eq!(
+            restored.trusted.iter().collect::<Vec<_>>(),
+            vec!["0123456789abcdef0123456789abcdef"],
+            "a key that is not 32 hex characters is not a trust record"
+        );
     }
 
     #[test]
@@ -4934,6 +5371,334 @@ mod tests {
         );
     }
 
+    /// A `command` item with a valid spec, for the confirmation tests (§17.2 D).
+    fn command_item(slot: u32, script: &str) -> Item {
+        let mut item = Item::new(slot, KIND_COMMAND, "Script");
+        item.extra.insert("shell".to_string(), "cmd".into());
+        item.extra.insert("script".to_string(), script.into());
+        item
+    }
+
+    /// §17.2 D.1: the same command always gets the same key, and any field that
+    /// changes what runs changes it too, so a changed script is confirmed again.
+    #[test]
+    fn a_command_trust_key_is_stable_and_follows_every_field() {
+        let item = command_item(0, "echo ok");
+        let spec = command_spec(&item).expect("a valid command");
+        let key = command_trust_key(&item, &spec);
+        assert_eq!(key.len(), TRUST_KEY_HEX_LENGTH);
+        assert!(
+            key.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "lowercase hex, as the KV name rules ask: {key}"
+        );
+        assert!(KvKey::new(KV_NAMESPACE, &format!("{TRUSTED_PREFIX}{key}")).is_ok());
+        assert_eq!(
+            command_trust_key(&item, &command_spec(&item).expect("a valid command")),
+            key,
+            "the same command answers the same key"
+        );
+        for field in [
+            {
+                let mut changed = item.clone();
+                changed
+                    .extra
+                    .insert("script".to_string(), "echo ok!".into());
+                changed
+            },
+            {
+                let mut changed = item.clone();
+                changed.extra.insert("shell".to_string(), "pwsh".into());
+                changed
+            },
+            {
+                let mut changed = item.clone();
+                changed.cwd = Some("C:\\Temp".to_string());
+                changed
+            },
+            {
+                let mut changed = item.clone();
+                changed.extra.insert("hidden".to_string(), true.into());
+                changed
+            },
+            {
+                let mut changed = item.clone();
+                changed.extra.insert("keep_open".to_string(), true.into());
+                changed
+            },
+        ] {
+            let spec = command_spec(&field).expect("a valid command");
+            assert_ne!(
+                command_trust_key(&field, &spec),
+                key,
+                "a changed {field:?} needs its own confirmation"
+            );
+        }
+    }
+
+    /// §17.2 D.2: an untrusted command opens the dialog instead of a start request.
+    ///
+    /// The dialog belongs to the window, so the hidden-window path of D.4 calls
+    /// `show`; a headless test window cannot be made visible, so the state is
+    /// marked visible here and the dialog itself is what the test checks.
+    #[gpui::test]
+    fn an_untrusted_command_opens_the_confirmation_instead_of_launching(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![command_item(0, "echo ok")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let state = state(cx).expect("the state is installed");
+            assert!(state.pending_command.is_some(), "the dialog is waiting");
+            assert_eq!(state.generation, 0, "nothing was sent to the launcher");
+            assert_eq!(state.pending_usage, None, "no launch was counted");
+            let confirmation = command_confirmation(cx).expect("the dialog has content");
+            assert_eq!(confirmation.name, "Script");
+            assert_eq!(confirmation.shell, "cmd");
+            assert_eq!(confirmation.script, "echo ok");
+            assert!(!confirmation.hidden);
+            assert!(
+                !confirmation.remembered,
+                "the sample has no store, so the note is shown"
+            );
+        });
+    }
+
+    /// §17.2 D.3: "Run" writes the key and only then asks the launcher to start
+    /// the command.
+    #[gpui::test]
+    fn confirming_a_command_writes_the_key_and_launches(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        let mut trust_key = String::new();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![command_item(0, "echo ok")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let item = item_at(cx, 0, 0).expect("the item is there");
+            trust_key = command_trust_key(&item, &command_spec(&item).expect("a valid command"));
+            confirm_pending_command(cx);
+            let state = state(cx).expect("the state is installed");
+            assert!(
+                state.pending_command.is_none(),
+                "the dialog closes when Run is clicked"
+            );
+            assert!(
+                state.restored.trusted.contains(&trust_key),
+                "the trust is in memory before the store answers"
+            );
+        });
+        cx.run_until_parked();
+        let key = KvKey::new(KV_NAMESPACE, &format!("{TRUSTED_PREFIX}{trust_key}"))
+            .expect("a valid trust key");
+        assert_eq!(
+            store.get(&key).expect("the test store"),
+            Some(b"true".to_vec()),
+            "the key reaches the store"
+        );
+        let sent =
+            cx.update(|cx| state(cx).map(|state| (state.generation, state.pending_usage.clone())));
+        assert_eq!(
+            sent,
+            Some((1, Some(("general".to_string(), 0)))),
+            "one launch request follows the write"
+        );
+    }
+
+    /// §17.2 D.9: a script edited after its first run is a different command and
+    /// must be confirmed again; the unchanged one runs without asking.
+    #[gpui::test]
+    fn a_changed_script_asks_for_confirmation_again(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![command_item(0, "echo ok")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            confirm_pending_command(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            // The same script is trusted now.
+            activate_with(cx, 0, ClickKind::Plain);
+            assert!(
+                state(cx).is_some_and(|state| state.pending_command.is_none()),
+                "the confirmed script runs without asking"
+            );
+            // A hand edit changes the script behind the state's back.
+            if let Some(state) = state_mut(cx) {
+                if let Some(item) = state.config.groups[0].items.first_mut() {
+                    item.extra.insert("script".to_string(), "echo outro".into());
+                }
+                state.touch();
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            let state = state(cx).expect("the state is installed");
+            assert!(
+                state.pending_command.is_some(),
+                "the changed script asks for confirmation again"
+            );
+        });
+    }
+
+    /// §17.2 D.6 (D5): saving a command through the settings form trusts the key
+    /// it just wrote.
+    #[gpui::test]
+    fn saving_a_command_through_the_form_writes_its_trust_record(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        cx.update(|cx| {
+            install(cx, vec![group_of(0)]);
+            assert!(put_item(cx, 0, 1, Item::new(1, "app", "Antigo")));
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            let edit = ItemEdit {
+                kind: KIND_COMMAND.to_string(),
+                name: "Comando".to_string(),
+                path: String::new(),
+                args: String::new(),
+                cwd: String::new(),
+                admin: false,
+                icon: String::new(),
+                tags: Vec::new(),
+                command: Some(CommandEdit {
+                    shell: "cmd".to_string(),
+                    script: "echo ok".to_string(),
+                    hidden: false,
+                    keep_open: false,
+                }),
+            };
+            assert!(update_item(cx, 0, 1, &edit));
+        });
+        cx.run_until_parked();
+        let key_name = cx.update(|cx| {
+            let item = item_at(cx, 0, 1).expect("the item is there");
+            let spec = command_spec(&item).expect("a valid command");
+            format!("{TRUSTED_PREFIX}{}", command_trust_key(&item, &spec))
+        });
+        let key = KvKey::new(KV_NAMESPACE, &key_name).expect("a valid trust key");
+        assert_eq!(
+            store.get(&key).expect("the test store"),
+            Some(b"true".to_vec())
+        );
+        assert_eq!(cx.update(|cx| command_trust(cx, "general", 1)), Some(true));
+    }
+
+    /// §17.2 D.7: revoking removes the record from memory and from the store.
+    #[gpui::test]
+    fn revoking_a_trust_removes_the_record(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        let item = command_item(0, "echo ok");
+        let spec = command_spec(&item).expect("a valid command");
+        let trust_key = command_trust_key(&item, &spec);
+        let key = KvKey::new(KV_NAMESPACE, &format!("{TRUSTED_PREFIX}{trust_key}"))
+            .expect("a valid trust key");
+        store.put(&key, b"true").expect("the test store");
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![item];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+                state.restored.trusted.insert(trust_key.clone());
+            }
+            assert_eq!(command_trust(cx, "general", 0), Some(true));
+            assert!(revoke_command_trust(cx, "general", 0));
+            assert_eq!(command_trust(cx, "general", 0), Some(false));
+        });
+        cx.run_until_parked();
+        assert_eq!(store.get(&key).expect("the test store"), None);
+    }
+
+    /// §17.2 D.5: without a store the trust is kept in memory and forgotten when
+    /// the process ends.
+    #[gpui::test]
+    fn a_resident_process_keeps_its_trust_in_memory_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut group = group_of(0);
+            group.items = vec![command_item(0, "echo ok")];
+            install(cx, vec![group]);
+            if let Some(state) = state_mut(cx) {
+                state.visible = true;
+                state.mode = Mode::Standalone;
+            }
+            activate_with(cx, 0, ClickKind::Plain);
+            assert!(
+                state(cx).is_some_and(|state| state.pending_command.is_some()),
+                "the first run still asks"
+            );
+            confirm_pending_command(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let installed = state(cx).expect("the state is installed");
+            assert_eq!(installed.mode, Mode::Standalone);
+            assert!(installed.kv.is_none(), "the resident process has no store");
+            assert_eq!(installed.generation, 1, "the command did start");
+            assert!(
+                !command_confirmation(cx).is_some_and(|confirmation| confirmation.remembered),
+                "the dialog would say the trust is not stored"
+            );
+            // Within this process the confirmation holds.
+            activate_with(cx, 0, ClickKind::Plain);
+            let installed = state(cx).expect("the state is installed");
+            assert!(
+                installed.pending_command.is_none(),
+                "the same process runs it without asking again"
+            );
+            assert_eq!(installed.generation, 2);
+        });
+    }
+
+    /// §17.2 D.8: pruning usage records must never delete a trust record.
+    #[gpui::test]
+    fn pruning_usage_leaves_the_trust_records_alone(cx: &mut gpui::TestAppContext) {
+        let store = TestStore::default();
+        let trusted_name = format!("{TRUSTED_PREFIX}0123456789abcdef0123456789abcdef");
+        let kept = KvKey::new(KV_NAMESPACE, "usage_general_0").expect("a valid key");
+        let stale = KvKey::new(KV_NAMESPACE, "usage_general_9").expect("a valid key");
+        let trusted = KvKey::new(KV_NAMESPACE, &trusted_name).expect("a valid key");
+        store.put(&kept, b"a").expect("the test store");
+        store.put(&stale, b"b").expect("the test store");
+        store.put(&trusted, b"true").expect("the test store");
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            if let Some(state) = state_mut(cx) {
+                state.kv = Some(std::sync::Arc::new(store.clone()));
+            }
+            prune_usage(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            store.get(&kept).expect("the test store"),
+            Some(b"a".to_vec()),
+            "a live usage record stays"
+        );
+        assert_eq!(
+            store.get(&stale).expect("the test store"),
+            None,
+            "the stale usage record goes"
+        );
+        assert_eq!(
+            store.get(&trusted).expect("the test store"),
+            Some(b"true".to_vec()),
+            "a trust record is not a usage record and stays"
+        );
+    }
+
     fn sample_state() -> QuickLaunch {
         QuickLaunch {
             config: QuickLaunchConfig {
@@ -4968,6 +5733,7 @@ mod tests {
             signals: None,
             generation: 0,
             message: None,
+            pending_command: None,
             pending_hide: false,
             revision: 0,
             pending_usage: None,

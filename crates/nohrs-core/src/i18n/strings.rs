@@ -2591,4 +2591,47 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Could not list the applications: {error}",
         "No se pudieron listar las aplicaciones: {error}",
     ),
+    (
+        "Executar este comando?",
+        "Run this command?",
+        "¿Ejecutar este comando?",
+    ),
+    (
+        "Este comando roda com as suas permissões. Confira o conteúdo antes de continuar.",
+        "This command runs with your permissions. Check what it does before continuing.",
+        "Este comando se ejecuta con tus permisos. Revisa el contenido antes de continuar.",
+    ),
+    (
+        "Sem armazenamento: a confirmação vale até fechar o programa.",
+        "No storage: the confirmation lasts until the program closes.",
+        "Sin almacenamiento: la confirmación vale hasta cerrar el programa.",
+    ),
+    (
+        "Vai rodar em segundo plano, sem janela visível.",
+        "It will run in the background, with no visible window.",
+        "Se ejecutará en segundo plano, sin ventana visible.",
+    ),
+    ("Executar", "Run", "Ejecutar"),
+    ("Shell", "Shell", "Shell"),
+    ("Script", "Script", "Script"),
+    ("Comando", "Command", "Comando"),
+    (
+        "Executar sem janela",
+        "Run without a window",
+        "Ejecutar sin ventana",
+    ),
+    (
+        "Manter o console aberto",
+        "Keep the console open",
+        "Mantener la consola abierta",
+    ),
+    ("Confiança", "Trust", "Confianza"),
+    ("Confiável", "Trusted", "De confianza"),
+    ("Não confiável", "Not trusted", "No es de confianza"),
+    ("Revogar confiança", "Revoke trust", "Revocar confianza"),
+    (
+        "Não foi possível salvar o comando. Confira o shell e o script.",
+        "Could not save the command. Check the shell and the script.",
+        "No se pudo guardar el comando. Revisa el shell y el script.",
+    ),
 ];

@@ -193,6 +193,17 @@ impl QuickLaunchView {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.to_lowercase();
         let modifiers = event.keystroke.modifiers;
+        // A command waiting for its first-run confirmation owns the window: a
+        // key must not start what is behind the dialog, and Esc dismisses it
+        // rather than hiding the window (§17.2 D.3).
+        if super::command_waiting(cx) {
+            if key == "escape" {
+                super::cancel_pending_command(cx);
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
         let columns = super::state(cx)
             .map(|quick_launch| i64::from(quick_launch.config().window.columns))
             .unwrap_or(8);
@@ -834,6 +845,11 @@ impl Render for QuickLaunchView {
             });
         if let Some(overlay) = editor_overlay(self.editor.as_ref(), &entity) {
             root = root.child(overlay);
+        }
+        if let Some(confirmation) = super::command_confirmation(cx) {
+            // §17.2 D.3: the script may not take more than 60% of the window.
+            let script_height = f32::from(window.bounds().size.height) * 0.6;
+            root = root.child(command_overlay(&confirmation, script_height.max(120.0)));
         }
         root
     }
@@ -1724,6 +1740,127 @@ fn editor_overlay(
             )
             .into_any_element(),
     )
+}
+
+/// The first-run confirmation of a `command` (§17.2 D.3): what will run, as it
+/// was written, before anything starts.
+///
+/// `script_height` is the 60% of the window the script box may take (§17.2 D.3),
+/// computed by the caller from the window being drawn.
+fn command_overlay(confirmation: &super::CommandConfirmation, script_height: f32) -> AnyElement {
+    let cwd = confirmation.cwd.clone().unwrap_or_else(|| "—".to_string());
+    let mut card = div()
+        .w(px(560.0))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p(px(16.0))
+        .rounded(px(10.0))
+        .bg(rgb(theme::bg()))
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .child(div().text_sm().child(nohrs_core::t!("Executar este comando?")))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::muted()))
+                .child(nohrs_core::t!(
+                    "Este comando roda com as suas permissões. Confira o conteúdo antes de continuar."
+                )),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(confirmation.name.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_xs()
+                .text_color(rgb(theme::fg_secondary()))
+                .child(format!(
+                    "{}: {}",
+                    nohrs_core::t!("Shell"),
+                    confirmation.shell
+                ))
+                .child(format!(
+                    "{}: {cwd}",
+                    nohrs_core::t!("Pasta de trabalho")
+                )),
+        );
+    if confirmation.hidden {
+        card = card.child(
+            div()
+                .rounded(px(6.0))
+                .p(px(8.0))
+                .text_xs()
+                .bg(rgb(theme::accent_subtle()))
+                .text_color(rgb(theme::danger()))
+                .child(nohrs_core::t!(
+                    "Vai rodar em segundo plano, sem janela visível."
+                )),
+        );
+    }
+    card = card.child(
+        div()
+            .id("quick-launch-command-script")
+            .max_h(px(script_height))
+            .overflow_y_scroll()
+            .p(px(10.0))
+            .rounded(px(6.0))
+            .bg(rgb(theme::gray_100()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .font_family("Mono")
+            .text_size(px(12.0))
+            .line_height(px(16.0))
+            .text_color(rgb(theme::fg()))
+            .child(confirmation.script.clone()),
+    );
+    if !confirmation.remembered {
+        card = card.child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::warning()))
+                .child(nohrs_core::t!(
+                    "Sem armazenamento: a confirmação vale até fechar o programa."
+                )),
+        );
+    }
+    card = card.child(
+        div()
+            .flex()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("quick-launch-command-cancel")
+                    .label(nohrs_core::t!("Cancelar"))
+                    .on_click(|_, _window, cx| {
+                        super::cancel_pending_command(cx);
+                    }),
+            )
+            .child(
+                Button::new("quick-launch-command-run")
+                    .label(nohrs_core::t!("Executar"))
+                    .on_click(|_, _window, cx| {
+                        super::confirm_pending_command(cx);
+                    }),
+            ),
+    );
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(0x00000080))
+        .child(card)
+        .into_any_element()
 }
 
 /// One input field with its opening text.

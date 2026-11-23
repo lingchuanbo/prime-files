@@ -24,8 +24,8 @@ use nohrs_core::shortcuts::Chord;
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::{t, tf};
 use nohrs_services::launch::{
-    ComApartment, ExpandContext, InstalledApp, KIND_UWP, LaunchMode, LaunchRegistry, LaunchRequest,
-    installed_apps,
+    ComApartment, ExpandContext, InstalledApp, KIND_COMMAND, KIND_UWP, LaunchMode, LaunchRegistry,
+    LaunchRequest, installed_apps,
 };
 use nohrs_ui::theme::theme;
 
@@ -118,6 +118,14 @@ pub(super) enum Action {
     PickApp(usize),
     /// Flip "run as administrator" of the item being edited.
     ToggleAdmin,
+    /// Change the shell of the command being edited.
+    SetShell(&'static str),
+    /// Flip "run without a window" of the command being edited.
+    ToggleHidden,
+    /// Flip "keep the console open" of the command being edited.
+    ToggleKeepOpen,
+    /// Remove the trust record of the command being edited.
+    RevokeTrust,
     /// Write the item form back.
     SaveItem,
     /// Open `quicklaunch.toml` in its own program.
@@ -707,10 +715,12 @@ impl Section {
         }))
     }
 
-    /// The rows of the item form (§17.1 B, §17.2 B): kind, name, path with
-    /// browsing, arguments, working directory with browsing, elevation, icon
-    /// and tags. An `uwp` item names an AppUserModelID instead of a path, picks
-    /// it from the Apps folder, and has no working directory or elevation.
+    /// The rows of the item form (§17.1 B, §17.2 B, §17.2 D): kind, name, the
+    /// fields of the kind with browsing, elevation, icon and tags. An `uwp` item
+    /// names an AppUserModelID instead of a path, picks it from the Apps folder,
+    /// and has no working directory or elevation. A `command` item has no path
+    /// or arguments, shows its shell, script and two flags instead, and carries
+    /// its trust record (§17.2 D.6, D.7).
     fn form_rows(
         &self,
         page: &SettingsPage,
@@ -720,7 +730,7 @@ impl Section {
     ) -> Vec<Row> {
         let kind_control = if matches!(
             form.kind.as_str(),
-            "app" | "folder" | "file" | "url" | KIND_UWP
+            "app" | "folder" | "file" | "url" | KIND_UWP | KIND_COMMAND
         ) {
             let options = [
                 (
@@ -748,15 +758,21 @@ impl Section {
                     form.kind == KIND_UWP,
                     Pick::QuickLaunch(Action::SetKind(KIND_UWP)),
                 ),
+                (
+                    t!("Comando"),
+                    form.kind == KIND_COMMAND,
+                    Pick::QuickLaunch(Action::SetKind(KIND_COMMAND)),
+                ),
             ];
             page.chips_when("quick-launch-item-kind", &options, false, enabled, cx)
         } else {
-            // A kind this milestone cannot build (`command`, `group`, a plugin)
-            // is shown as it is: the form cannot offer it, and changing it would
-            // change what the entry means.
+            // A kind this milestone cannot build (`group`, a plugin) is shown as
+            // it is: the form cannot offer it, and changing it would change what
+            // the entry means.
             status_line(form.kind.clone(), false)
         };
         let uwp = form.kind == KIND_UWP;
+        let command = form.kind == KIND_COMMAND;
         let path_label = if uwp {
             t!("ID do aplicativo")
         } else {
@@ -766,36 +782,100 @@ impl Section {
         let mut rows = vec![
             Row::new(t!("Tipo"), None, kind_control),
             Row::new(t!("Nome"), None, input_row(&form.name, enabled)).wide(),
-            Row::new(
-                path_label,
-                None,
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .w_full()
-                    .child(input_row(&form.path, enabled))
-                    .child(if uwp {
-                        action_button(
-                            "quick-launch-choose-app",
-                            t!("Escolher aplicativo…"),
-                            false,
-                            enabled,
-                            Action::ChooseApp,
-                            cx,
-                        )
-                        .into_any_element()
-                    } else {
-                        browse_button(Field::Path, enabled, cx)
-                    }),
-            )
-            .wide(),
         ];
-        if uwp && self.apps_picker {
-            rows.push(Row::new(t!("Aplicativo"), None, self.apps_picker_row(enabled, cx)).wide());
+        if !command {
+            rows.push(
+                Row::new(
+                    path_label,
+                    None,
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .child(input_row(&form.path, enabled))
+                        .child(if uwp {
+                            action_button(
+                                "quick-launch-choose-app",
+                                t!("Escolher aplicativo…"),
+                                false,
+                                enabled,
+                                Action::ChooseApp,
+                                cx,
+                            )
+                            .into_any_element()
+                        } else {
+                            browse_button(Field::Path, enabled, cx)
+                        }),
+                )
+                .wide(),
+            );
+            if uwp && self.apps_picker {
+                rows.push(
+                    Row::new(t!("Aplicativo"), None, self.apps_picker_row(enabled, cx)).wide(),
+                );
+            }
+            rows.push(Row::new(t!("Argumentos"), None, input_row(&form.args, enabled)).wide());
         }
-        rows.extend([
-            Row::new(t!("Argumentos"), None, input_row(&form.args, enabled)).wide(),
+        if command {
+            let shell_options = [
+                (
+                    "cmd",
+                    form.shell == "cmd",
+                    Pick::QuickLaunch(Action::SetShell("cmd")),
+                ),
+                (
+                    "pwsh",
+                    form.shell == "pwsh",
+                    Pick::QuickLaunch(Action::SetShell("pwsh")),
+                ),
+                (
+                    "powershell",
+                    form.shell == "powershell",
+                    Pick::QuickLaunch(Action::SetShell("powershell")),
+                ),
+                (
+                    "python",
+                    form.shell == "python",
+                    Pick::QuickLaunch(Action::SetShell("python")),
+                ),
+            ];
+            rows.push(Row::new(
+                t!("Shell"),
+                None,
+                page.chips_when(
+                    "quick-launch-command-shell",
+                    &shell_options,
+                    false,
+                    enabled,
+                    cx,
+                ),
+            ));
+            rows.push(Row::new(t!("Script"), None, input_row(&form.script, enabled)).wide());
+            rows.push(Row::new(
+                t!("Executar sem janela"),
+                None,
+                page.switch_pick_when(
+                    "quick-launch-command-hidden",
+                    form.hidden,
+                    Pick::QuickLaunch(Action::ToggleHidden),
+                    enabled,
+                    cx,
+                ),
+            ));
+            rows.push(Row::new(
+                t!("Manter o console aberto"),
+                None,
+                page.switch_pick_when(
+                    "quick-launch-command-keep-open",
+                    form.keep_open,
+                    Pick::QuickLaunch(Action::ToggleKeepOpen),
+                    enabled,
+                    cx,
+                ),
+            ));
+        }
+        rows.push(
             Row::new(
                 t!("Pasta de trabalho"),
                 None,
@@ -808,7 +888,44 @@ impl Section {
                     .child(browse_button(Field::Cwd, cwd_enabled, cx)),
             )
             .wide(),
-            Row::new(
+        );
+        if command {
+            rows.push(
+                Row::hint(
+                    t!("Executar como administrador"),
+                    t!("Comandos não podem ser executados como administrador"),
+                    page.switch_pick_when(
+                        "quick-launch-item-admin",
+                        form.admin,
+                        Pick::QuickLaunch(Action::ToggleAdmin),
+                        false,
+                        cx,
+                    ),
+                )
+                .wide(),
+            );
+            let trust = quick_launch::command_trust(cx, &form.group, form.slot);
+            let mut control = div().flex().items_center().gap_2().child(status_line(
+                if trust == Some(true) {
+                    t!("Confiável")
+                } else {
+                    t!("Não confiável")
+                },
+                false,
+            ));
+            if trust == Some(true) {
+                control = control.child(action_button(
+                    "quick-launch-command-revoke-trust",
+                    t!("Revogar confiança"),
+                    true,
+                    enabled,
+                    Action::RevokeTrust,
+                    cx,
+                ));
+            }
+            rows.push(Row::new(t!("Confiança"), None, control).wide());
+        } else {
+            rows.push(Row::new(
                 t!("Executar como administrador"),
                 None,
                 page.switch_pick_when(
@@ -818,7 +935,9 @@ impl Section {
                     enabled && !uwp,
                     cx,
                 ),
-            ),
+            ));
+        }
+        rows.extend([
             Row::new(t!("Ícone"), None, input_row(&form.icon, enabled)).wide(),
             Row::new(
                 t!("Etiquetas (separadas por vírgula)"),
@@ -984,7 +1103,7 @@ struct Form {
     group: String,
     /// The slot of the item in that group.
     slot: u32,
-    /// The kind shown by the chips; a kind outside the four stays as it was.
+    /// The kind shown by the chips; a kind outside the six stays as it was.
     kind: String,
     /// Whether the item is started elevated.
     admin: bool,
@@ -994,6 +1113,11 @@ struct Form {
     cwd: Entity<InputState>,
     icon: Entity<InputState>,
     tags: Entity<InputState>,
+    /// The `command` fields: the shell, the script and the two flags (§17.2 D).
+    shell: String,
+    script: Entity<InputState>,
+    hidden: bool,
+    keep_open: bool,
 }
 
 /// Which field the file picker under the form fills.
@@ -1061,6 +1185,33 @@ pub(super) fn apply(page: &mut SettingsPage, action: Action, cx: &mut Context<Se
         Action::ToggleAdmin => {
             if let Some(form) = page.quick_launch.form.as_mut() {
                 form.admin = !form.admin;
+            }
+            cx.notify();
+        }
+        Action::SetShell(shell) => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                form.shell = shell.to_string();
+            }
+            cx.notify();
+        }
+        Action::ToggleHidden => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                form.hidden = !form.hidden;
+            }
+            cx.notify();
+        }
+        Action::ToggleKeepOpen => {
+            if let Some(form) = page.quick_launch.form.as_mut() {
+                form.keep_open = !form.keep_open;
+            }
+            cx.notify();
+        }
+        Action::RevokeTrust => {
+            if let Some(form) = page.quick_launch.form.as_ref() {
+                let (group, slot) = (form.group.clone(), form.slot);
+                if quick_launch::revoke_command_trust(cx, &group, slot) {
+                    page.status = None;
+                }
             }
             cx.notify();
         }
@@ -1303,6 +1454,20 @@ pub(super) fn ensure_inputs(
 
 /// The form of one item, filled from the item the file holds now.
 fn form_of(group: &str, item: &Item, window: &mut Window, cx: &mut Context<SettingsPage>) -> Form {
+    // A command's `extra` is read through the same parser the launcher uses, so
+    // a broken entry opens as `cmd` with an empty script and is refused on save.
+    let command = nohrs_core::config::quick_launch::command_spec(item).ok();
+    let script = item
+        .extra
+        .get("script")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let script_input = cx.new(|cx| InputState::new(window, cx).multi_line(true).rows(4));
+    script_input.update(cx, |state, cx| {
+        state.set_placeholder(t!("Script"), window, cx);
+        state.set_value(script, window, cx);
+    });
     Form {
         group: group.to_string(),
         slot: item.slot,
@@ -1334,6 +1499,13 @@ fn form_of(group: &str, item: &Item, window: &mut Window, cx: &mut Context<Setti
             item.icon.as_deref().unwrap_or_default(),
         ),
         tags: field(window, cx, t!("Etiquetas"), &item.tags.join(", ")),
+        shell: command
+            .as_ref()
+            .map_or("cmd", |spec| spec.shell.as_str())
+            .to_string(),
+        script: script_input,
+        hidden: command.as_ref().is_some_and(|spec| spec.hidden),
+        keep_open: command.as_ref().is_some_and(|spec| spec.keep_open),
     }
 }
 
@@ -1517,6 +1689,7 @@ fn save_item(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
         return;
     };
     let slot = form.slot;
+    let kind = form.kind.clone();
     let edit = quick_launch::ItemEdit {
         kind: form.kind.clone(),
         name: form.name.read(cx).value().to_string(),
@@ -1532,10 +1705,21 @@ fn save_item(page: &mut SettingsPage, cx: &mut Context<SettingsPage>) {
             .split(',')
             .map(str::to_string)
             .collect(),
+        command: (kind == KIND_COMMAND).then(|| quick_launch::CommandEdit {
+            shell: form.shell.clone(),
+            script: form.script.read(cx).value().to_string(),
+            hidden: form.hidden,
+            keep_open: form.keep_open,
+        }),
     };
     if quick_launch::update_item(cx, index, slot, &edit) {
         page.status = None;
         cx.refresh_windows();
+    } else if kind == KIND_COMMAND {
+        page.status = Some((
+            t!("Não foi possível salvar o comando. Confira o shell e o script.").to_string(),
+            true,
+        ));
     } else {
         page.status = Some((
             t!("Não foi possível salvar o item. Confira o nome e o caminho.").to_string(),
