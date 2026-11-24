@@ -91,6 +91,10 @@ impl Entry {
 struct Answer {
     image: Option<Arc<RenderImage>>,
     settled: bool,
+    /// True when the image is the icon every file of its class shares: it is not
+    /// this path's own, so it is neither counted in the budget nor dropped when
+    /// its row goes (the other rows use the same texture).
+    shared: bool,
 }
 
 /// What is extracted for a file.
@@ -120,6 +124,19 @@ struct Slot {
     /// (the type's icon). The preview only takes the picture; past the
     /// retries a stand-in stays `Ready`, so `retry_at` cannot tell.
     settled: bool,
+    /// Whether the icon held is the class-shared one (see [`Answer::shared`]).
+    shared: bool,
+}
+
+/// Whether what `slot` holds is this path's own and so counts towards the budget:
+/// every thumbnail, and the icons no class shares (folders, `.exe`, `.lnk`, and
+/// the extensions whose icon differs per file). The class-shared icons stay out:
+/// they live in `Service::class_icons` and are bounded by the extensions met.
+fn counts_towards_budget(slot: &Slot) -> bool {
+    match slot.kind {
+        Kind::Thumbnail => true,
+        Kind::Icon => !slot.shared,
+    }
 }
 
 /// The Shell's picture of a file at one size, for the preview
@@ -214,7 +231,7 @@ impl Thumbnails {
                 // The sprite atlas keeps its own copy of every image it has
                 // drawn; without this each folder visited would stay in GPU
                 // memory.
-                if slot.kind == Kind::Thumbnail
+                if counts_towards_budget(&slot)
                     && let Some(image) = slot.entry.held()
                 {
                     released += image_bytes(image);
@@ -247,7 +264,7 @@ impl Thumbnails {
                     let cancel = matches!(slot.entry, Entry::Loading { .. }) && gone(slot);
                     if cancel {
                         cancelled += 1;
-                        if slot.kind == Kind::Thumbnail
+                        if counts_towards_budget(slot)
                             && let Some(image) = slot.entry.held()
                         {
                             released += image_bytes(image);
@@ -281,7 +298,7 @@ impl Thumbnails {
                     slots
                         .iter()
                         .filter(move |slot| {
-                            slot.kind == Kind::Thumbnail
+                            counts_towards_budget(slot)
                                 && matches!(slot.entry, Entry::Ready(_))
                                 && gone(slot)
                         })
@@ -303,6 +320,8 @@ impl Thumbnails {
                         .position(|slot| slot.kind == kind && slot.size == size)
                         && let Entry::Ready(image) = slots.swap_remove(at).entry
                     {
+                        // Only counted slots are candidates, and those hold this
+                        // path's own texture.
                         released = image_bytes(&image);
                         cx.drop_image(image, None);
                     }
@@ -338,7 +357,7 @@ impl Thumbnails {
             if matches!(slot.entry, Entry::Loading { .. }) {
                 self.loading -= 1;
             }
-            if slot.kind == Kind::Thumbnail
+            if counts_towards_budget(&slot)
                 && let Some(image) = slot.entry.held()
             {
                 self.release_ready(image_bytes(image));
@@ -487,6 +506,7 @@ impl Thumbnails {
                     retry_at: None,
                     retries: 0,
                     settled: false,
+                    shared: false,
                 });
                 self.loading += 1;
             }
@@ -526,9 +546,12 @@ impl Thumbnails {
         self.loading -= 1;
         // A stand-in that comes back empty keeps the one already on screen.
         let image = answer.image.or_else(|| shown.clone());
+        // An icon that every file of its class shares is not this path's own:
+        // it is not counted, and its texture stays for the other rows.
+        let counted = kind == Kind::Thumbnail || (kind == Kind::Icon && !answer.shared);
         let mut released = 0;
         let mut added = 0;
-        if kind == Kind::Thumbnail {
+        if counted {
             if let Some(shown) = &shown {
                 released = image_bytes(shown);
                 if image
@@ -543,6 +566,7 @@ impl Thumbnails {
             }
         }
         slot.settled = answer.settled && image.is_some();
+        slot.shared = answer.shared && image.is_some();
         slot.entry = image.map_or(Entry::Failed, Entry::Ready);
         if !answer.settled && slot.retries < RETRIES {
             slot.retry_at = Some(Instant::now() + retry_delay(slot.retries));
@@ -575,6 +599,7 @@ fn request(
         let answer = reply.recv().await.unwrap_or(Answer {
             image: None,
             settled: false,
+            shared: false,
         });
         this.update(cx, |pane, cx| {
             cache(pane).arrived(&path, kind, size, answer, cx);
@@ -726,7 +751,7 @@ impl Service {
             .cloned()
     }
 
-    fn remember_class_icon(&self, class: &str, size: u32, image: &Arc<RenderImage>) {
+    fn remember_class_icon(&self, class: &str, size: u32, image: &Arc<RenderImage>) -> bool {
         let per_class = self
             .per_class
             .lock()
@@ -735,7 +760,9 @@ impl Service {
             .unwrap_or(false);
         if per_class && let Ok(mut icons) = self.class_icons.lock() {
             icons.insert((class.to_owned(), size), image.clone());
+            return true;
         }
+        false
     }
 
     fn work_fast(&self) {
@@ -748,6 +775,7 @@ impl Service {
                     .try_send(Answer {
                         image: Some(image),
                         settled: true,
+                        shared: true,
                     })
                     .ok();
                 continue;
@@ -760,13 +788,17 @@ impl Service {
                 // The pane may have moved on meanwhile; nothing is waiting then.
                 Some(image) => {
                     let image = Arc::new(image);
-                    if let Some(class) = &job.class {
-                        self.remember_class_icon(class, job.size, &image);
-                    }
+                    // The first extraction of a class becomes the shared icon as
+                    // well, so this row must not count or drop it either.
+                    let shared = job
+                        .class
+                        .as_ref()
+                        .is_some_and(|class| self.remember_class_icon(class, job.size, &image));
                     job.reply
                         .try_send(Answer {
                             image: Some(image),
                             settled: true,
+                            shared,
                         })
                         .ok();
                 }
@@ -776,6 +808,7 @@ impl Service {
                         .try_send(Answer {
                             image: None,
                             settled: false,
+                            shared: false,
                         })
                         .ok();
                 }
@@ -790,12 +823,14 @@ impl Service {
                 Some(image) => Answer {
                     image: Some(Arc::new(image)),
                     settled: true,
+                    shared: false,
                 },
                 // No picture: the type's icon stands in, and the slot asks
                 // again later, in case it was the moment and not the file.
                 None => Answer {
                     image: platform::extract(&job.path, job.size, Mode::Icon).map(Arc::new),
                     settled: false,
+                    shared: false,
                 },
             };
             job.reply.try_send(answer).ok();
@@ -821,6 +856,7 @@ mod tests {
             retry_at: None,
             retries: 0,
             settled: false,
+            shared: false,
         }
     }
 
@@ -838,6 +874,53 @@ mod tests {
             task: Task::ready(()),
             shown: None,
         }
+    }
+
+    #[gpui::test]
+    fn a_paths_own_icon_counts_and_a_shared_one_does_not(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut cache = Thumbnails::default();
+            // A folder's icon (or an .exe's) belongs to that path alone.
+            cache
+                .entries
+                .insert("own".into(), vec![slot(Kind::Icon, 16, loading(), 0)]);
+            cache.loading += 1;
+            cache.arrived(
+                "own",
+                Kind::Icon,
+                16,
+                Answer {
+                    image: Some(image(16)),
+                    settled: true,
+                    shared: false,
+                },
+                cx,
+            );
+            assert_eq!(cache.ready_bytes, 16 * 16 * 4);
+            // One that every .txt shares is not this path's own: it lives in the
+            // service's class map and would be counted once per file otherwise.
+            cache
+                .entries
+                .insert("shared".into(), vec![slot(Kind::Icon, 16, loading(), 0)]);
+            cache.loading += 1;
+            cache.arrived(
+                "shared",
+                Kind::Icon,
+                16,
+                Answer {
+                    image: Some(image(16)),
+                    settled: true,
+                    shared: true,
+                },
+                cx,
+            );
+            assert_eq!(
+                cache.ready_bytes,
+                16 * 16 * 4,
+                "the class-shared icon must not count"
+            );
+            assert!(cache.entries["shared"][0].shared);
+        });
     }
 
     #[gpui::test]
@@ -862,6 +945,7 @@ mod tests {
                         Answer {
                             image: Some(image(64)),
                             settled: true,
+                            shared: false,
                         },
                         cx,
                     );
@@ -907,11 +991,11 @@ mod tests {
                 cache.ready_bytes += 64 * 64 * 4;
                 cache.loading += 1;
             }
-            // Icons are shared by a whole extension and tiny: never evicted.
-            cache.entries.insert(
-                "icon".into(),
-                vec![slot(Kind::Icon, 16, Entry::Ready(image(16)), 0)],
-            );
+            // Icons shared by a whole extension are not this path's own: never
+            // counted, never evicted.
+            let mut class_icon = slot(Kind::Icon, 16, Entry::Ready(image(16)), 0);
+            class_icon.shared = true;
+            cache.entries.insert("icon".into(), vec![class_icon]);
 
             cache.begin_frame(cx);
 
@@ -953,7 +1037,17 @@ mod tests {
             assert!(matches!(cache.picture_of("foto.webp", 1024, None), Picture::Waiting(None)));
 
             let icon = image(64);
-            cache.arrived("foto.webp", Kind::Thumbnail, 1024, Answer { image: Some(icon.clone()), settled: false }, cx);
+            cache.arrived(
+                "foto.webp",
+                Kind::Thumbnail,
+                1024,
+                Answer {
+                    image: Some(icon.clone()),
+                    settled: false,
+                    shared: false,
+                },
+                cx,
+            );
             assert!(matches!(cache.picture_of("foto.webp", 1024, Some(icon.clone())), Picture::Unavailable));
             let slot = &mut cache.entries.get_mut("foto.webp").unwrap()[0];
             slot.retry_at = None;
@@ -966,7 +1060,17 @@ mod tests {
             let photo = image(64);
             cache.entries.insert("foto.jpg".into(), vec![slot_of(Kind::Thumbnail, 1024, loading())]);
             cache.loading += 1;
-            cache.arrived("foto.jpg", Kind::Thumbnail, 1024, Answer { image: Some(photo.clone()), settled: true }, cx);
+            cache.arrived(
+                "foto.jpg",
+                Kind::Thumbnail,
+                1024,
+                Answer {
+                    image: Some(photo.clone()),
+                    settled: true,
+                    shared: false,
+                },
+                cx,
+            );
             assert!(matches!(cache.picture_of("foto.jpg", 1024, None), Picture::Shown(shown) if Arc::ptr_eq(&shown, &photo)));
 
             // While a bigger size is made, a smaller picture of the same file
@@ -1006,6 +1110,7 @@ mod tests {
                 Answer {
                     image: Some(cone.clone()),
                     settled: false,
+                    shared: false,
                 },
                 cx,
             );
@@ -1037,6 +1142,7 @@ mod tests {
                 Answer {
                     image: Some(frame.clone()),
                     settled: true,
+                    shared: false,
                 },
                 cx,
             );
@@ -1058,6 +1164,7 @@ mod tests {
                 Answer {
                     image: Some(cone),
                     settled: false,
+                    shared: false,
                 },
                 cx,
             );

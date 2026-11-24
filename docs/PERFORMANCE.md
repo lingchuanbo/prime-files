@@ -903,3 +903,28 @@ miniaturas do Windows: depois da primeira rodada o sistema tem as miniaturas na
 mão, a grade enche mais rápido e a memória sobe (a tabela do O0, medida com o cache
 frio, dá 499,7/454,0 MB). Por isso as comparações de O3 foram feitas em sequência, no
 mesmo dia, alternando as duas builds.
+
+#### O4: ícones por caminho entram no orçamento
+
+Os ícones que não são de classe (pastas, `.exe`, `.lnk`, `.url`, e as extensões cujo
+ícone difere por arquivo) passam a contar no mesmo orçamento de 512 MB e a ser
+evictados como as miniaturas, pela mesma ordem (fora da tela há mais tempo primeiro).
+Os ícones de classe — os que o `Service::class_icons` guarda por extensão e tamanho —
+não contam e não são soltos: a textura é a mesma para todas as linhas daquele tipo.
+Para isso o `Answer`/`Slot` passaram a dizer se a imagem é a compartilhada, e a
+evicção só chama `drop_image` no que é daquele caminho. Dois testes cobrem: um ícone
+próprio soma e um de classe não, e a evicção nunca toca no de classe.
+
+| Cenário 6 (rolagem de 90 s) | Antes | Depois |
+|---|---:|---:|
+| variação de memória na rolagem (≈8.600 pastas) | +36,4 MB | +33,9 … +40,0 MB |
+| por 1.000 pastas | +4,2 MB | +3,9 … +4,7 MB |
+
+A inclinação não muda, e o motivo está na própria medição: uma pasta na lista usa um
+ícone de 16 px (1 KB), 8.600 delas dariam ~9 MB, dentro do ruído; e a rolagem rápida
+cancela os pedidos que saíram da tela antes de chegarem, então a maior parte nunca
+chega a ser guardada. Os ~36 MB que sobem na janela de 90 s não são do cache de
+ícones: são da listagem em si (as linhas que vão sendo materializadas), que é o
+assunto de O7. O O4 garante o teto — um diretório de 100.000 subpastas rolado até o
+fim não soma 400 MB de ícones como o plano §1.3 temia —, mas o ganho nesta janela de
+medição é abaixo do que o instrumento resolve.
