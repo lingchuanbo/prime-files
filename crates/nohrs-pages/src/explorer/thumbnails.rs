@@ -249,6 +249,13 @@ impl Thumbnails {
         self.entries.retain(|_, slots| !slots.is_empty());
         self.loading = self.loading.saturating_sub(cancelled);
         self.release_ready(released);
+        // Read by the memory harness: what a tab let go, and what every cache
+        // holds together afterwards.
+        tracing::info!(
+            released,
+            held = READY_BYTES.load(Ordering::Relaxed),
+            "a background tab trimmed its thumbnails"
+        );
     }
 
     /// Releases everything this cache holds, textures included (R2 of the memory
@@ -272,6 +279,11 @@ impl Thumbnails {
         }
         self.loading = 0;
         self.release_ready(released);
+        tracing::info!(
+            released,
+            held = READY_BYTES.load(Ordering::Relaxed),
+            "a closed tab released its thumbnails"
+        );
     }
 
     /// Forgets everything held for another directory. Dropping a `Loading`

@@ -499,6 +499,48 @@ function Invoke-Scenario {
                 }
             }
 
+            'tabs_switch' {
+                # R1 of the first memory review: two tabs each scroll the album,
+                # then the first one comes back. What it held while in the
+                # background is in the app's log (`trimmed its thumbnails`) and the
+                # private memory in the samples.
+                $process = Start-App -ExePath $runInfo.Exe -Arguments ('"' + $Photos10k + '"')
+                $process = Wait-Window -ExePath $runInfo.Exe
+                Focus-App -Process $process
+                Click-App -Process $process -FractionX 0.6 -FractionY 0.7
+                for ($i = 0; $i -lt 15; $i++) { Send-Keys -Keys '^=' -DelayMs 90 }
+                Start-Sleep -Seconds 1
+                Save-Screenshot -Process $process -Path ((Join-Path $RunsDir ("{0}-{1}-one.png" -f $Name, $Run)))
+                Send-Keys -Keys '^t' -DelayMs 900
+                Open-Path -ExePath $runInfo.Exe -Path $Photos10k
+                Start-Sleep -Seconds 1
+                Click-App -Process $process -FractionX 0.6 -FractionY 0.7
+                for ($i = 0; $i -lt 15; $i++) { Send-Keys -Keys '^=' -DelayMs 90 }
+                Start-Sleep -Seconds 1
+                Save-Screenshot -Process $process -Path ((Join-Path $RunsDir ("{0}-{1}-two.png" -f $Name, $Run)))
+                $scrolled = 0
+                $switched = $false
+                $switchSeconds = 0.0
+                while ($watch.Elapsed.TotalSeconds -lt 75 -and -not $process.HasExited) {
+                    $sample = Get-Sample -Process $process -Seconds $watch.Elapsed.TotalSeconds
+                    $samples.Add($sample)
+                    if ($watch.Elapsed.TotalSeconds -gt 8 -and $scrolled -lt 1600) {
+                        Scroll-App -Process $process -Notches 20 -DelayMs 3
+                        $scrolled += 20
+                    } elseif (-not $switched -and $watch.Elapsed.TotalSeconds -gt 30) {
+                        # Back to the first tab: the second one should keep one screen.
+                        Click-App -Process $process -FractionX 0.25 -FractionY 0.6
+                        Send-Keys -Keys '^+{TAB}' -DelayMs 400
+                        Click-App -Process $process -FractionX 0.6 -FractionY 0.7
+                        $switched = $true
+                        $switchSeconds = $watch.Elapsed.TotalSeconds
+                        Write-Output ("  switched back at {0:N1} s, private {1:N1} MB" -f $switchSeconds, $sample.private_mb)
+                    }
+                    Start-Sleep -Milliseconds 900
+                }
+                Save-Screenshot -Process $process -Path ((Join-Path $RunsDir ("{0}-{1}-back.png" -f $Name, $Run)))
+            }
+
             'dualpane' {
                 # Two tabs, each with its own thumbnails cache: the pane chords do
                 # not dispatch from a synthetic key press, and a tab owns the same
@@ -648,7 +690,7 @@ if (-not (Test-Path (Join-Path $ProfileDir 'userdata'))) {
 }
 
 $scenarios = if ($All) {
-    @('cold', 'index', 'index_stale', 'bigfolder', 'photos', 'dualpane', 'folders', 'background', 'openclose')
+    @('cold', 'index', 'index_stale', 'bigfolder', 'photos', 'dualpane', 'tabs_switch', 'folders', 'background', 'openclose')
 } elseif ($Scenario) {
     @($Scenario)
 } else {
