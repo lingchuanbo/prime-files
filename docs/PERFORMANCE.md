@@ -956,3 +956,58 @@ writer para no teto e reclama uma vez, um log sem teto continua escrevendo, e a
 limpeza apaga do mais antigo para o mais novo, sem tocar em arquivo que não é do
 appender. O schema, o template e `docs/config.md` têm as duas chaves; `docs/logging.md`
 diz o que elas fazem.
+
+---
+
+#### 第 1 轮复查（R1–R4、O11、UI 补审）
+
+**R1：后台标签页只留最后一帧。** `Thumbnails::trim_to_last_frame` 释放最后一帧没画过的
+全部（计入预算的连纹理一起 `drop_image`，还在等待的请求取消）。`PaneItem` 新增
+`trim_background`，`PaneGroup` 在两种情况下调用：`set_active_tab` 选走另一个标签页时被
+切走的那个，以及 `add_tab` 新标签页盖住的那个。
+
+场景 `tabs_switch`（两个标签页各滚动一遍相册，然后切回第一个；3 次，`runtime_log` 打开）：
+
+| 次 | 切回时释放 | 释放后共享总量 | 进程峰值 / 稳定私有 |
+|---|---:|---:|---:|
+| 1 | 151.891.968 B | 2.359.296 B | 476,4 / 451,2 MB |
+| 2 | 146.386.944 B | 2.359.296 B | 459,9 / 439,8 MB |
+| 3 | 151.891.968 B | 2.359.296 B | 479,8 / 454,6 MB |
+
+切回第一个标签页时，离开的那个把 **~150 MB** 交还共享预算，自己只留一屏（2,4 MB）；
+没有 R1 时这 150 MB 会一直占着。日志里每次运行有 3 行 trim（新标签页盖住旧的 2 次 +
+切回 1 次），第一次释放 0，因为第一个标签页那时还没有任何就绪的缩略图（都在生成中，
+被取消）。
+
+**R2：关闭标签页前释放纹理。** `Thumbnails::release_all` 把计入预算的纹理全部
+`drop_image` 并清零账本；`PaneItem::release_holdings` 在 `close_tab` 和 `remove_pane`
+（关整个窗格、关最后一个标签页）里、entity 被丢弃之前调用。测试：缓存里有缩略图、自有
+图标、类共享图标各一，释放后 entries 清空、`ready_bytes` 为 0，类共享图标不计入。
+
+**R3：关掉 runtime_log 也清理旧日志。** 清理移到 `init_logging_with_file` 开头，无论
+`enabled` 与否都跑；目录不存在就跳过（不会为了清理而创建）。测试：`enabled: false` 时
+旧文件照样被删；目录不存在时什么都不创建。
+
+**R4：上限按文件算。** `CappedWriter` 用当天日志文件的现有大小作为起始计数，一天内重启
+N 次不会再写出 N × 50 MB。测试：已有 8/10 字节时只再接受 2 字节；文件大小按当天文件名
+从磁盘读，没有文件时为 0。
+
+**O11：迁移不再复制缓存和日志。** `prepare_storage` 只复制配置文件、`data` 和 `state`
+（跳过 `logs`）；`migrate_logs` 变成 `migrate_panic_log`，只迁移 `panic.log`。三个测试：
+state 复制跳过 logs、只迁移 panic.log、两个方向都不把 cache 列为目标。
+
+**重跑的三个场景（同一台机，3 次中位数）：**
+
+| 场景 | 上一轮 | 本轮 |
+|---|---:|---:|
+| 2b. 加载并重建 | 1.031,2 / 579,8 MB | **991,6 / 535,9 MB** |
+| 4. 10.000 张照片 | 1.389,4 / 1.183,8 MB | **482,1 / 438,5 MB** |
+| 5. 两个标签页各滚动 | 1.027,3 / 943,9 MB | **400,7 / 382,1 MB**（原始 396,4–407,6 / 379,4–388,4） |
+
+场景 4 和 5 比上一轮低了约 2,6 倍，而这轮改的 R1、R2、O11 都不在"单标签页滚动"的路径
+上。截图显示这一轮网格滚到了最大（250 px 格），相册在 60 秒里就绪的缩略图远少于上一轮
+（上一轮那 1,2 GB 是缓存被塞满到 512 MB 上限的样子），而且 Windows 缩略图缓存的热度在
+整机文件缓存被大索引遍历冲掉之后也会掉下来。结论：这两个场景的绝对值跨会话不可比，
+本轮没有把它当作 R1/R2 的效果；要让它可比，下一轮应把网格缩放固定下来（例如由 harness
+断言或由配置指定），而不是靠 15 次合成 `Ctrl+=`。
+
