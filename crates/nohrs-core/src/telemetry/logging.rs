@@ -138,9 +138,8 @@ pub fn init_logging_with_file(config: &FileLogConfig) -> LogGuard {
     // R3 of the memory review: the history is trimmed whether or not this run
     // writes a log file, otherwise a user with the runtime log off never gets rid
     // of it. A missing directory is skipped, never created just to be cleaned.
-    if let Some(max_total) = config.max_total_bytes {
-        trim_log_directory(&config.directory, max_total);
-    }
+    // R5: the old `state/logs` directory counts too.
+    trim_log_history(config, &legacy_log_directory(), &mut notes);
     let (file_layer, guard) = match config.enabled {
         false => (None, None),
         true => match open_file_layer(config) {
@@ -268,14 +267,59 @@ pub fn is_log_file_name(name: &str) -> bool {
         .is_some_and(|date| time::Date::parse(date, FILE_DATE_FORMAT).is_ok())
 }
 
-/// Deletes the oldest log files until the directory holds at most `max_total`
-/// bytes. `nohrs.log.<yyyy-mm-dd>` sorts by name into date order, so the oldest go
-/// first; files this appender did not write are left alone.
-fn trim_log_directory(directory: &Path, max_total: u64) {
+/// Where the runtime log lived before it moved to [`paths::log_dir`].
+///
+/// Nothing writes here any more, but a profile upgraded from an older version can
+/// still hold its history: on the machine this was measured on, 752 MB of it.
+fn legacy_log_directory() -> PathBuf {
+    paths::state_dir().join("logs")
+}
+
+/// Deletes the oldest log files of both directories until together they hold at most
+/// `max_total` bytes.
+///
+/// R5 of the memory review: the trim only looked at the current directory, so the
+/// 752 MB in the old `state/logs` was never touched. `nohrs.log.<yyyy-mm-dd>` sorts
+/// by name into date order, and the oldest of the two directories go first. Files
+/// this appender did not write are left alone, `panic.log` in either directory
+/// included; if the current directory has no `panic.log` and the old one does, it is
+/// carried over -- the one part of that directory worth keeping.
+fn trim_log_history(config: &FileLogConfig, legacy: &Path, notes: &mut Vec<String>) {
+    let Some(max_total) = config.max_total_bytes else {
+        return;
+    };
+    let current = &config.directory;
+    let mut files: Vec<(String, u64, PathBuf)> = Vec::new();
+    collect_log_files(current, &mut files);
+    if legacy != current {
+        collect_log_files(legacy, &mut files);
+        if legacy.join("panic.log").is_file()
+            && let Err(error) = crate::config::storage::copy_panic_log(legacy, current)
+        {
+            notes.push(format!(
+                "could not carry {} over to {}: {error}",
+                legacy.display(),
+                current.display()
+            ));
+        }
+    }
+    let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    for (name, size, directory) in files {
+        if total <= max_total {
+            break;
+        }
+        if std::fs::remove_file(directory.join(&name)).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+/// The appender's own files in `directory`, with their sizes.
+fn collect_log_files(directory: &Path, files: &mut Vec<(String, u64, PathBuf)>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
-    let mut files: Vec<(String, u64)> = Vec::new();
     for entry in entries.flatten() {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
@@ -287,17 +331,7 @@ fn trim_log_directory(directory: &Path, max_total: u64) {
             continue;
         };
         if metadata.is_file() {
-            files.push((name, metadata.len()));
-        }
-    }
-    let mut total: u64 = files.iter().map(|(_, size)| *size).sum();
-    files.sort_by(|left, right| left.0.cmp(&right.0));
-    for (name, size) in files {
-        if total <= max_total {
-            break;
-        }
-        if std::fs::remove_file(directory.join(&name)).is_ok() {
-            total = total.saturating_sub(size);
+            files.push((name, metadata.len(), directory.to_path_buf()));
         }
     }
 }
@@ -646,52 +680,104 @@ mod tests {
     use super::*;
     #[test]
     fn the_startup_trim_deletes_the_oldest_files_until_the_total_fits() {
+        // The old directory holds the oldest day: trimming the two together has to
+        // reach it, which trimming only the current directory could not.
         let directory = tempfile::tempdir().unwrap();
-        for (name, size) in [
-            ("nohrs.log.2026-01-01", 100),
-            ("nohrs.log.2026-01-02", 100),
-            ("nohrs.log.2026-01-03", 100),
+        let legacy = tempfile::tempdir().unwrap();
+        for (target, name, size) in [
+            (&legacy, "nohrs.log.2026-01-01", 100),
+            (&directory, "nohrs.log.2026-01-02", 100),
+            (&directory, "nohrs.log.2026-01-03", 100),
             // Not this appender's file: never touched.
-            ("someone-elses.log", 100),
+            (&directory, "someone-elses.log", 100),
         ] {
-            std::fs::write(directory.path().join(name), vec![b'x'; size]).unwrap();
+            std::fs::write(target.path().join(name), vec![b'x'; size]).unwrap();
         }
+        // The old directory also has the crash record, and the current one does not.
+        std::fs::write(legacy.path().join("panic.log"), b"crash").unwrap();
 
-        trim_log_directory(directory.path(), 250);
+        let mut notes = Vec::new();
+        trim_log_history(
+            &log_config(directory.path(), 250),
+            legacy.path(),
+            &mut notes,
+        );
 
         assert!(
-            !directory.path().join("nohrs.log.2026-01-01").exists(),
-            "the oldest file goes first"
+            !legacy.path().join("nohrs.log.2026-01-01").exists(),
+            "the oldest file of the two directories goes first"
         );
         assert!(directory.path().join("nohrs.log.2026-01-02").exists());
         assert!(directory.path().join("nohrs.log.2026-01-03").exists());
         assert!(directory.path().join("someone-elses.log").exists());
+        assert!(legacy.path().join("panic.log").exists());
+        assert_eq!(
+            std::fs::read(directory.path().join("panic.log")).unwrap(),
+            b"crash",
+            "the crash record is carried over"
+        );
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn a_panic_log_already_in_the_current_directory_is_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("panic.log"), b"current").unwrap();
+        std::fs::write(legacy.path().join("panic.log"), b"old").unwrap();
+
+        let mut notes = Vec::new();
+        trim_log_history(
+            &log_config(directory.path(), 100),
+            legacy.path(),
+            &mut notes,
+        );
+
+        assert_eq!(
+            std::fs::read(directory.path().join("panic.log")).unwrap(),
+            b"current"
+        );
+        assert!(notes.is_empty());
+    }
+
+    fn log_config(directory: &Path, max_total: u64) -> FileLogConfig {
+        FileLogConfig {
+            enabled: false,
+            directory: directory.to_path_buf(),
+            filter: "info".to_string(),
+            max_files: Some(2),
+            max_file_bytes: None,
+            max_total_bytes: Some(max_total),
+        }
     }
 
     #[test]
     fn the_history_is_trimmed_even_when_the_runtime_log_is_off() {
         let directory = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
         for (name, size) in [("nohrs.log.2026-01-01", 100), ("nohrs.log.2026-01-02", 100)] {
             std::fs::write(directory.path().join(name), vec![b'x'; size]).unwrap();
         }
-        let _guard = init_logging_with_file(&FileLogConfig {
-            enabled: false,
-            directory: directory.path().to_path_buf(),
-            filter: "info".to_string(),
-            max_files: Some(2),
-            max_file_bytes: None,
-            max_total_bytes: Some(150),
-        });
+        let mut notes = Vec::new();
+        trim_log_history(
+            &log_config(directory.path(), 150),
+            legacy.path(),
+            &mut notes,
+        );
         assert!(!directory.path().join("nohrs.log.2026-01-01").exists());
         assert!(directory.path().join("nohrs.log.2026-01-02").exists());
+        assert!(notes.is_empty());
     }
 
     #[test]
     fn trimming_a_directory_that_does_not_exist_creates_nothing() {
         let parent = tempfile::tempdir().unwrap();
-        let missing = parent.path().join("not-there");
-        trim_log_directory(&missing, 100);
-        assert!(!missing.exists());
+        let current = parent.path().join("not-there");
+        let legacy = parent.path().join("not-there-either");
+        let mut notes = Vec::new();
+        trim_log_history(&log_config(&current, 100), &legacy, &mut notes);
+        assert!(!current.exists());
+        assert!(notes.is_empty());
     }
 
     #[test]

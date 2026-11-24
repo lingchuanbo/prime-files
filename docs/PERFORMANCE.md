@@ -951,10 +951,14 @@ descartados e um aviso único sai no stderr (não pelo `tracing`, que voltaria a
 escrever no mesmo writer); na abertura, os arquivos mais antigos são apagados até o
 diretório caber no total. O contador reinicia quando a data muda, porque é aí que o
 appender abre o arquivo do dia seguinte. Com 50 MB, o dia 15/11 (549 MB) teria parado
-em 50 MB; e a pasta (752 MB hoje) volta a 200 MB na próxima abertura. Testes: o
+em 50 MB; e os 752 MB que esta máquina guarda voltam a 200 MB na próxima abertura.
+A limpeza conta as duas pastas: a de hoje (`userdata\logs`) e a antiga
+(`userdata\state\logs`), onde estava a maior parte desses 752 MB -- a primeira
+versão só olhava a de hoje e nunca a alcançaria (R5 da 2ª revisão). Testes: o
 writer para no teto e reclama uma vez, um log sem teto continua escrevendo, e a
-limpeza apaga do mais antigo para o mais novo, sem tocar em arquivo que não é do
-appender. O schema, o template e `docs/config.md` têm as duas chaves; `docs/logging.md`
+limpeza apaga do mais antigo para o mais novo nas duas pastas, sem tocar em arquivo
+que não é do appender; `panic.log` nunca é apagado, e se só a pasta antiga tiver um,
+ele é copiado para a de hoje. O schema, o template e `docs/config.md` têm as duas chaves; `docs/logging.md`
 diz o que elas fazem.
 
 ---

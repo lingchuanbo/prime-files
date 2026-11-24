@@ -97,7 +97,7 @@ fn migrate_panic_log(portable: bool) -> io::Result<()> {
     copy_panic_log(&other_log_directory(portable), &paths::log_dir())
 }
 
-fn copy_panic_log(source: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn copy_panic_log(source: &Path, target: &Path) -> io::Result<()> {
     fs::create_dir_all(target)?;
     let from = source.join("panic.log");
     let to = target.join("panic.log");
