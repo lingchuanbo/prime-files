@@ -70,6 +70,10 @@ pub trait PaneItem: Render + Focusable + 'static {
     /// its pane, or a new tab covers it), so it can let go of what only its screen
     /// needed. Defaults to ignoring it.
     fn trim_background(&mut self, _cx: &mut App) {}
+
+    /// Called before this tab's entity is dropped, so it can release what a `Drop`
+    /// cannot (textures need a `cx`). Defaults to ignoring it.
+    fn release_holdings(&mut self, _cx: &mut App) {}
 }
 
 /// Width of the column of vertical tabs as a fresh window opens.
@@ -114,6 +118,11 @@ pub enum GroupDrag {
 /// Lets `tab` go of what only its screen needed, when it stops being visible.
 fn trim_background<T: PaneItem>(tab: &Entity<T>, cx: &mut App) {
     tab.update(cx, |item, cx| item.trim_background(cx));
+}
+
+/// Lets `tab` release everything it holds, before its entity is dropped.
+fn release_holdings<T: PaneItem>(tab: &Entity<T>, cx: &mut App) {
+    tab.update(cx, |item, cx| item.release_holdings(cx));
 }
 
 /// Builds a fresh tab entity. Separate from [`PaneItem`] because construction
@@ -545,6 +554,11 @@ impl<T: PaneItem> PaneGroup<T> {
             self.active = self.panes.len() - 1;
         }
         self.focus_active(window, cx);
+        // Closing a whole pane goes through here: release every tab it held
+        // before the entities are dropped (R2 of the memory review).
+        for tab in &removed.tabs {
+            release_holdings(tab, cx);
+        }
         let ids: Vec<_> = removed.tabs.iter().map(|tab| tab.entity_id()).collect();
         for id in &ids {
             self.tab_metadata.remove(id);
@@ -601,7 +615,11 @@ impl<T: PaneItem> PaneGroup<T> {
                 } else if tab_index < pane.active_tab {
                     pane.active_tab -= 1;
                 }
-                removed.entity_id()
+                let id = removed.entity_id();
+                // Before the entity goes: it is the last moment a `cx` exists to
+                // release the textures (R2 of the memory review).
+                release_holdings(&removed, cx);
+                id
             };
             self.tab_metadata.remove(&removed_id);
             if pane_index == self.active {

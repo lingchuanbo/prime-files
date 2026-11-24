@@ -251,6 +251,29 @@ impl Thumbnails {
         self.release_ready(released);
     }
 
+    /// Releases everything this cache holds, textures included (R2 of the memory
+    /// review).
+    ///
+    /// Called before a closed tab's entity is dropped: [`Drop`] gives the bytes back
+    /// to the ledger but has no `cx`, so it cannot drop the copies the sprite atlas
+    /// keeps for every image ever drawn. Class-shared icons are left alone: other
+    /// rows draw from the same texture.
+    pub fn release_all(&mut self, cx: &mut App) {
+        let mut released = 0;
+        for (_, slots) in self.entries.drain() {
+            for slot in slots {
+                if counts_towards_budget(&slot)
+                    && let Some(image) = slot.entry.held()
+                {
+                    released += image_bytes(image);
+                    cx.drop_image(image.clone(), None);
+                }
+            }
+        }
+        self.loading = 0;
+        self.release_ready(released);
+    }
+
     /// Forgets everything held for another directory. Dropping a `Loading`
     /// entry drops its task, which closes the reply channel, so a worker that
     /// has not reached the job yet skips it rather than decoding for nobody.
@@ -954,6 +977,42 @@ mod tests {
                 "the class-shared icon must not count"
             );
             assert!(cache.entries["shared"][0].shared);
+        });
+    }
+
+    #[gpui::test]
+    fn closing_a_tab_releases_everything_it_held(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut cache = Thumbnails::default();
+            for (path, kind, shared) in [
+                ("photo", Kind::Thumbnail, false),
+                ("folder", Kind::Icon, false),
+                ("txt", Kind::Icon, true),
+            ] {
+                cache
+                    .entries
+                    .insert(path.into(), vec![slot(kind, 64, loading(), 0)]);
+                cache.loading += 1;
+                cache.arrived(
+                    path,
+                    kind,
+                    64,
+                    Answer {
+                        image: Some(image(64)),
+                        settled: true,
+                        shared,
+                    },
+                    cx,
+                );
+            }
+            // The two of its own count; the class icon does not.
+            assert_eq!(cache.ready_bytes, 2 * 64 * 64 * 4);
+
+            cache.release_all(cx);
+
+            assert!(cache.entries.is_empty());
+            assert_eq!(cache.ready_bytes, 0);
+            assert_eq!(cache.loading, 0);
         });
     }
 
