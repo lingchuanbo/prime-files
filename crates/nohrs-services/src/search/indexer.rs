@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use pinyin::ToPinyin;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use tantivy::TantivyDocument;
 use tantivy::schema::{FAST, Field, STORED, STRING, Schema, TEXT, Term, Value};
 use tantivy::{Index, IndexWriter}; // Import trait for add_text etc? No, TantivyDocument implements it.
@@ -36,8 +36,16 @@ pub struct IndexManager {
     index: Index,
     index_path: PathBuf,
     content_root: PathBuf,
-    writer: Arc<Mutex<IndexWriter>>,
+    /// Created on the first write. An `IndexWriter` commits its memory arena up
+    /// front, and most runs never index anything: the GUI that opens for a
+    /// moment should not carry the arena for a writer it never uses.
+    writer: Mutex<Option<IndexWriter>>,
 }
+
+/// Memory the index writer may hold while a batch is being built. The name
+/// index's documents are tiny; this is a cap, not a reservation, and it only
+/// costs anything once something is actually written.
+const WRITER_MEMORY_BUDGET: usize = 20_000_000;
 
 impl IndexManager {
     /// Opens (or creates) the default index under `~/.nohrs/index` rooted at `~/Documents`.
@@ -88,14 +96,26 @@ impl IndexManager {
             Index::create_in_dir(&index_path, schema)?
         };
 
-        let writer = index.writer(50_000_000)?;
-
         Ok(Self {
             index,
             index_path,
             content_root,
-            writer: Arc::new(Mutex::new(writer)),
+            writer: Mutex::new(None),
         })
+    }
+
+    /// The index writer, created on first use. The lock is held for the whole
+    /// batch (as it was with the writer built in the constructor), and the
+    /// guard hands out the writer itself.
+    fn writer(&self) -> Result<std::sync::MutexGuard<'_, Option<IndexWriter>>> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Poisoned lock: {}", e))?;
+        if writer.is_none() {
+            *writer = Some(self.index.writer(WRITER_MEMORY_BUDGET)?);
+        }
+        Ok(writer)
     }
 
     fn create_schema() -> Schema {
@@ -134,10 +154,11 @@ impl IndexManager {
         skip_all
     )]
     pub fn index_home(&self, mut progress_tx: Option<postage::watch::Sender<f32>>) -> Result<()> {
-        let mut writer_guard = self
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Poisoned lock: {}", e))?;
+        let mut writer_guard = self.writer()?;
+        // Created by `writer()` above; the guard keeps it alive for the batch.
+        let writer = writer_guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the index writer was not created"))?;
         let schema = self.index.schema();
         let path_field = schema
             .get_field("path")
@@ -188,7 +209,7 @@ impl IndexManager {
                     if path.is_file() {
                         if let Err(e) = self.index_single_file(
                             path,
-                            &mut writer_guard,
+                            writer,
                             path_field,
                             filename_field,
                             filename_pinyin_field,
@@ -201,7 +222,7 @@ impl IndexManager {
                     } else if path.is_dir()
                         && let Err(e) = self.index_single_directory(
                             path,
-                            &mut writer_guard,
+                            writer,
                             path_field,
                             filename_field,
                             filename_pinyin_field,
@@ -230,7 +251,7 @@ impl IndexManager {
             *tx.borrow_mut() = 1.0; // Done
         }
 
-        writer_guard.commit()?;
+        writer.commit()?;
         Ok(())
     }
 
@@ -330,17 +351,18 @@ impl IndexManager {
     /// Removes the document for `path` from the index and commits.
     #[tracing::instrument(target = "nohrs::op", name = "index.remove", level = "debug", skip_all, fields(path = %path.display()))]
     pub fn remove_file(&self, path: &Path) -> Result<()> {
-        let mut writer_guard = self
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Poisoned lock: {}", e))?;
+        let mut writer_guard = self.writer()?;
+        // Created by `writer()` above; the guard keeps it alive for the batch.
+        let writer = writer_guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the index writer was not created"))?;
         let schema = self.index.schema();
         let path_field = schema.get_field("path").context("Schema error")?;
 
         // Remove document with matching path
         let path_str = path.to_string_lossy();
-        writer_guard.delete_term(Term::from_field_text(path_field, &path_str));
-        writer_guard.commit()?;
+        writer.delete_term(Term::from_field_text(path_field, &path_str));
+        writer.commit()?;
 
         Ok(())
     }
@@ -369,10 +391,11 @@ impl IndexManager {
     /// a batch left with nothing to index commits nothing.
     #[tracing::instrument(target = "nohrs::op", name = "index.process_changes", level = "debug", skip_all, fields(paths = paths.len()))]
     pub fn process_changes(&self, paths: &[PathBuf]) -> Result<()> {
-        let mut writer_guard = self
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Poisoned lock: {}", e))?;
+        let mut writer_guard = self.writer()?;
+        // Created by `writer()` above; the guard keeps it alive for the batch.
+        let writer = writer_guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the index writer was not created"))?;
         let schema = self.index.schema();
         let path_field = schema.get_field("path").context("Schema error")?;
         let filename_field = schema.get_field("filename").context("Schema error")?;
@@ -396,7 +419,7 @@ impl IndexManager {
             if path.exists() {
                 if let Err(e) = self.index_single_file(
                     path,
-                    &mut writer_guard,
+                    writer,
                     path_field,
                     filename_field,
                     filename_pinyin_field,
@@ -408,11 +431,11 @@ impl IndexManager {
                 }
             } else {
                 let path_str = path.to_string_lossy();
-                writer_guard.delete_term(Term::from_field_text(path_field, &path_str));
+                writer.delete_term(Term::from_field_text(path_field, &path_str));
             }
         }
 
-        if let Err(e) = writer_guard.commit() {
+        if let Err(e) = writer.commit() {
             tracing::error!("Failed to commit index updates: {}", e);
             return Err(e.into());
         }

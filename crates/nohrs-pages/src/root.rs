@@ -708,30 +708,47 @@ impl RootView {
         }
     }
 
+    // Keeps the footer's indexing indicator up to date while the indexer works.
+    //
+    // The progress only moves while the indexer runs, and the channel reports
+    // 1.0 the rest of the time. The old code polled it on every frame (an
+    // `on_next_frame` reschedule) and notified on every poll, so the window
+    // repainted at 60 fps for as long as it was open — a core's worth of CPU
+    // and constant allocation churn for an indicator that was hidden. Waiting on
+    // the channel instead costs nothing while the value does not move.
+    //
+    // The index itself is opened by the first search, so until then there is
+    // nothing to watch: the task waits for the service to exist, then parks on
+    // its progress channel.
     fn start_progress_loop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Without a search service there is no indexing progress to poll, so avoid
-        // rescheduling a per-frame no-op forever.
-        if self.search_service.is_none() {
+        // Without a search service there is no indexing progress to watch.
+        let Some(service) = self.search_service.as_ref() else {
             return;
-        }
-
-        if let Some(progress) = self.check_progress_update() {
-            self.indexing_progress = Some(progress);
+        };
+        let mut progress = service.progress_subscription();
+        // What the indicator shows now, without waiting for the next change.
+        let current = *progress.borrow();
+        if self.indexing_progress != Some(current) {
+            self.indexing_progress = Some(current);
             cx.notify();
         }
-
-        // Poll every frame (simple and effective for this case)
-        cx.on_next_frame(window, |view: &mut RootView, window, cx| {
-            view.start_progress_loop(window, cx);
-        });
-    }
-
-    fn check_progress_update(&self) -> Option<f32> {
-        let service = self.search_service.as_ref()?;
-        let rx = service.progress_subscription();
-        // Just read current value
-        let val = *rx.borrow();
-        Some(val)
+        // Waiting on the channel costs nothing while the value does not move; the
+        // task sleeps until the indexer publishes, and ends when the indexer's
+        // sender is dropped.
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(value) =
+                nohrs_services::search::SearchService::wait_for_progress(&mut progress).await
+            {
+                this.update_in(cx, |view, _window, cx| {
+                    if view.indexing_progress != Some(value) {
+                        view.indexing_progress = Some(value);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 }
 

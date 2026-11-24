@@ -72,4 +72,16 @@ impl SearchService {
     pub fn progress_subscription(&self) -> postage::watch::Receiver<f32> {
         self.engine.progress_subscription()
     }
+
+    /// Waits for the indexer to publish a new progress value; `None` when the
+    /// indexer is gone. A task awaiting this sleeps until the value changes, so
+    /// watching the indicator costs nothing while nothing is being indexed (the
+    /// caller used to poll it every frame, which kept the window repainting at
+    /// 60 fps for as long as it was open).
+    pub async fn wait_for_progress(
+        receiver: &mut postage::watch::Receiver<f32>,
+    ) -> Option<f32> {
+        use postage::stream::Stream as _;
+        receiver.recv().await
+    }
 }
