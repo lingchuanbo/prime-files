@@ -1,4 +1,4 @@
-# LumaFiles 内存与缩略图优化方案 v1.3
+# LumaFiles 内存与缩略图优化方案 v1.4
 
 > 日期：2026-11-23
 > 起点：`main` @ `4c3d372`（clippy 基线清理合入后以合入点为准）
@@ -264,3 +264,39 @@ Q1–Q3 已确定，执行方按上面的值实现；Q4 等 O0 的结果出来�
 
 ### 7.6 顺序
 R1 → R2 → R3 → R4 → 小问题 → O11 → 重跑场景 2b、4、5 和门槛命令 → 回报。O6、O7 等这一轮通过后再开始（O7 先交方案）。
+
+
+---
+
+## 8. 第 2 轮复查（复查方，2026-11-24，`perf/memory` @ b7489ac）
+
+逐个看了 43fbd18…b7489ac 共 11 个提交的 diff。
+
+### 8.1 通过
+| 项 | 结论 |
+|---|---|
+| R1 | ✅ `trim_to_last_frame` 只保留最后一帧画过的；`set_active_tab` 切走的标签页、`add_tab` 盖住的标签页都会调用。实测切回时，离开的标签页交还 146–152 MB，只留约 2.4 MB |
+| R2 | ✅ **接受执行方的偏离**：`outcome.removed` 只有 `EntityId`，到 `page.rs` 时已经没法 `update`。释放放在 `PaneGroup` 里、entity 被丢弃之前（`close_tab` 的多标签分支和 `remove_pane`），这是唯一还拿得到 `cx` 的位置，做法正确 |
+| R3 | ✅ 不管 `enabled` 是什么都会清理；目录不存在就跳过 |
+| R4 | ✅ 用当天文件的现有大小作为初值；只在大于 0 时把日期钉在今天，逻辑对 |
+| 小问题 | ✅ 乱码那行已删；`arrived()` 拆成 `counted_before` 和 `counted_after` |
+| O11 | ✅ 不再复制 `cache`；复制 `state` 时跳过 `logs/`；只迁移 `panic.log`。`data` 和配置文件不变，`batch-rename.json` 仍会复制，测试覆盖了这三点 |
+| UI 补审 3 处 | ✅ |
+| 插桩 | ✅ 只写 info 日志，只在打开 `runtime_log` 时才落到文件 |
+
+### 8.2 必须修改
+**R5：752 MB 的旧日志在另一个目录，清理不到。** 复查方查看了磁盘：便携模式下现在的日志目录是 `userdata\logs`（只有 11-23、11-24 两个小文件），而那 752 MB 在 **`userdata\state\logs`**，是以前版本写日志的位置（最后一次写入是 11-17，里面还有一份 11-14 的 `panic.log`）。R3 只清理 `log_dir()`，所以执行方回报中“下次启动会降到 200 MB”的说法**不成立**。
+- 修法：启动时清理日志，如果 `state_dir()/logs` 存在、并且和 `log_dir()` 不是同一个目录，就把两个目录里的 `nohrs.log.*` **合在一起按日期排序**，从最旧的开始删，直到合计不超过 `log_max_total_mb`。两个目录里的 `panic.log` 都不碰。
+- 另外，如果 `log_dir()` 里没有 `panic.log` 而旧目录里有，就复制过去（沿用 `copy_panic_log`）。
+- 加一个测试：两个目录各放几个文件，验证按合计大小从最旧的开始删。
+- 改正 `PERFORMANCE.md` §10 里“下次启动降到 200 MB”的说法。`docs/logging.md` 补一句：旧版本的 `state/logs` 计入同一个总量。
+
+### 8.3 小问题（顺手改）
+- `arrived()`：回答为空、退回到原来的 `shown` 时，`slot.shared` 应该**沿用旧值**，而不是取 `answer.shared`（空回答的 `shared` 总是 false）。否则一个共用图标在这种情况下会被当成自己的图标计入预算，以后还可能被 `drop_image`。目前共用图标都是 `settled` 的、不会进入重试，所以碰不到这种情况，但写法应该是 `let shared_after = if answer.image.is_some() { answer.shared } else { slot.shared };`，`counted_after` 和 `slot.shared` 都用它。
+- R3 的测试 `the_history_is_trimmed_even_when_the_runtime_log_is_off` 在测试进程里调用了 `init_logging_with_file`，会安装全局 subscriber 和 panic hook（指向一个马上被删掉的临时目录），可能影响同一进程里的其他测试。改为把清理抽成一个函数（例如 `trim_log_history(config)`），测试直接调这个函数。
+
+### 8.4 测量口径
+场景 4、5 这一轮比上一轮低了约 2.6 倍，执行方的解释（网格缩放和 Windows 缩略图缓存的热度不同）可以接受，**这两个数字不算作 R1、R2 的收益**。下一轮（O6）开始前：测量脚本改为**通过配置文件固定网格缩放**，不再靠合成 15 次 `Ctrl+=`；然后重测场景 4、5，作为 O6 的新基线，并在 §10 里注明之前的数字跨会话不可比。
+
+### 8.5 合入
+R5 和 8.3 两处改完、门槛命令通过后，**`perf/memory` 可以合入 main**（O0–O5、O11、R1–R5，加 UI 补审的 3 处）。O6、O7 从合入后的 main 开新分支 `perf/memory-2` 继续做。
