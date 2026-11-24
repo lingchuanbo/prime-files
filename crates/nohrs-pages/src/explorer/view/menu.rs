@@ -49,7 +49,15 @@ pub fn render(
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|page, _, _, cx| page.close_menu(cx)),
+                cx.listener(|page, event: &MouseDownEvent, window, cx| {
+                    page.close_menu(cx);
+                    // A right double click goes up one level, wherever it
+                    // lands: the first press opened this menu, and the second
+                    // closes it and backs out of the folder.
+                    if event.click_count >= 2 {
+                        page.go_up(window, cx);
+                    }
+                }),
             )
             .into_any_element(),
     );

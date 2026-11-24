@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AppContext, ClipboardItem, Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle,
-    point, px,
+    AppContext, ClipboardItem, Entity, Modifiers, MouseButton, MouseDownEvent, TestAppContext,
+    VisualTestContext, WindowHandle, point, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::resizable::ResizableState;
@@ -3954,6 +3954,161 @@ async fn the_space_map_measures_the_folder_and_draws_its_tiles(cx: &mut TestAppC
             // Escape takes it down, back to the listing.
             pane.close_space_map(cx);
             assert!(!pane.space_map_open(), "the map closes again");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn expanded_directories_last_only_for_the_folder_they_were_turned_on_for(
+    cx: &mut TestAppContext,
+) {
+    let root = tempfile::tempdir().expect("temp root");
+    let child = root.path().join("child");
+    std::fs::create_dir(&child).expect("child folder");
+    std::fs::write(root.path().join("root.txt"), "root").expect("root file");
+    std::fs::write(child.join("child.txt"), "child").expect("child file");
+    let root_path = root.path().to_string_lossy().into_owned();
+    let child_path = child.to_string_lossy().into_owned();
+
+    let window = new_explorer(cx);
+    cx.run_until_parked();
+    window
+        .update(cx, |page, window, cx| {
+            page.change_dir(root_path.clone(), window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Expanding the listing replaces every folder with the files below it.
+    window
+        .update(cx, |page, _window, cx| {
+            page.directory_expanded = true;
+            page.reload(cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .read_with(cx, |page, _cx| {
+            assert!(page.directory_expanded);
+            let names: Vec<&str> = page
+                .filtered_entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, ["child.txt", "root.txt"], "{names:?}");
+        })
+        .unwrap();
+
+    // Opening a folder (from the tree or the sidebar: the expanded listing has
+    // no folder rows of its own) leaves the expanded view behind.
+    window
+        .update(cx, |page, window, cx| {
+            page.change_dir(child_path.clone(), window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .read_with(cx, |page, _cx| {
+            assert!(
+                !page.directory_expanded,
+                "leaving the folder ends the expanded view"
+            );
+        })
+        .unwrap();
+
+    // Up from there shows the parent's folders again, not their files.
+    window
+        .update(cx, |page, window, cx| page.go_up(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .read_with(cx, |page, _cx| {
+            assert_eq!(page.cwd, root_path);
+            assert!(!page.directory_expanded);
+            assert!(
+                page.filtered_entries.iter().any(|entry| entry.kind == "dir"),
+                "the parent lists its folders again"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn middle_click_opens_the_folder_in_a_new_tab(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().expect("temp root");
+    let folder = root.path().join("pasta");
+    std::fs::create_dir(&folder).expect("folder");
+    let folder_path = folder.to_string_lossy().into_owned();
+
+    let window = new_explorer_page(cx);
+    cx.run_until_parked();
+    let before = window
+        .read_with(cx, |page, cx| page.pane_cwd(0, cx))
+        .unwrap();
+    let entry = FileEntryDto {
+        name: "pasta".into(),
+        path: folder_path.clone(),
+        kind: "dir".into(),
+        size: 0,
+        modified: 0,
+    };
+    window
+        .update(cx, |page, window, cx| {
+            page.test_open_entry_in_new_tab(0, &entry, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .read_with(cx, |page, cx| {
+            assert_eq!(page.tab_count(0), 2, "the folder gets a tab of its own");
+            assert_eq!(page.active_tab(0), 1, "and is the one on screen");
+            assert_eq!(page.pane_cwd(0, cx).as_deref(), Some(folder_path.as_str()));
+            assert_eq!(
+                page.tab_cwd(0, 0, cx),
+                before,
+                "the tab it came from stays where it was"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn right_double_click_goes_up_a_folder(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().expect("temp root");
+    let child = root.path().join("child");
+    std::fs::create_dir(&child).expect("child folder");
+    let root_path = root.path().to_string_lossy().into_owned();
+    let child_path = child.to_string_lossy().into_owned();
+
+    let window = new_explorer(cx);
+    cx.run_until_parked();
+    window
+        .update(cx, |page, window, cx| {
+            page.change_dir(child_path, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // The first right press opens the folder's menu; the second one lands on
+    // the menu's window-wide backdrop, which closes it and goes up.
+    window
+        .update(cx, |page, window, cx| {
+            page.open_context_menu(None, false, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_event(MouseDownEvent {
+        position: point(px(4.0), px(4.0)),
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.run_until_parked();
+    window
+        .read_with(cx, |page, _cx| {
+            assert_eq!(page.cwd, root_path, "the right double click backs out");
         })
         .unwrap();
 }

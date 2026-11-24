@@ -74,6 +74,7 @@ pub fn render(
     let total_width = page.total_table_width();
     let item_for_preview = item.clone();
     let item_for_activate = item.clone();
+    let item_for_new_tab = item.clone();
 
     // Check if query matches filename (for highlighting)
     let query_lower = page.search_query.to_lowercase();
@@ -170,6 +171,15 @@ pub fn render(
                 // the folder's menu.
                 cx.stop_propagation();
                 this.open_context_menu(Some(ix), event.modifiers.shift, window, cx);
+            }),
+        )
+        // Middle click on a folder opens it in a new tab, as in a browser; the
+        // tab on screen stays where it is.
+        .on_mouse_down(
+            gpui::MouseButton::Middle,
+            cx.listener(move |this, _event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.open_entry_in_new_tab(&item_for_new_tab, window, cx);
             }),
         )
         .child(

@@ -501,6 +501,11 @@ impl ExplorerPane {
         if path == self.cwd {
             return;
         }
+        // The expanded listing — every subdirectory's files in one level — is a
+        // view of the folder it was turned on in. Leaving that folder ends it,
+        // so going up shows the parent's folders again instead of flattening
+        // them too.
+        self.directory_expanded = false;
         self.cancel_rename(window, cx);
         self.close_search(window, cx);
         self.clear_name_filter();
@@ -549,6 +554,9 @@ impl ExplorerPane {
         self.search_results = None;
         self.search_query.clear();
         self.clear_name_filter();
+        // The expanded listing belongs to the folder it was turned on in; a
+        // mirrored navigation leaves it behind, as `change_dir` does.
+        self.directory_expanded = false;
         self.tree.reset();
         self.push_history(path.clone());
         self.cwd = path;
@@ -561,6 +569,7 @@ impl ExplorerPane {
             self.history_index -= 1;
             if let Some(p) = self.history.get(self.history_index).cloned() {
                 self.cwd = p;
+                self.directory_expanded = false;
                 super::recent::RecentFolders::push(&self.cwd, cx);
                 self.cancel_rename(window, cx);
                 self.close_search(window, cx);
@@ -597,6 +606,7 @@ impl ExplorerPane {
             self.history_index += 1;
             if let Some(p) = self.history.get(self.history_index).cloned() {
                 self.cwd = p;
+                self.directory_expanded = false;
                 super::recent::RecentFolders::push(&self.cwd, cx);
                 self.cancel_rename(window, cx);
                 self.close_search(window, cx);
@@ -605,6 +615,20 @@ impl ExplorerPane {
                 cx.emit(PaneEvent::Navigated(self.cwd.clone()));
                 cx.notify();
             }
+        }
+    }
+
+    /// Middle click on a folder: opens it in a new tab and leaves the tab on
+    /// screen where it is (Explorer opens a new window for the same gesture).
+    /// Files have nothing to open in a tab, so they are left alone.
+    pub(crate) fn open_entry_in_new_tab(
+        &mut self,
+        item: &FileEntryDto,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if item.kind == "dir" {
+            cx.emit(PaneEvent::OpenFolderInNewTab(item.path.clone()));
         }
     }
 

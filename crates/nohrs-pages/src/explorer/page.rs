@@ -3117,6 +3117,21 @@ impl ExplorerPage {
         self.group.tab_count(pane_index)
     }
 
+    /// The middle-click gesture on a row, as the row's handler runs it.
+    pub(crate) fn test_open_entry_in_new_tab(
+        &mut self,
+        pane_index: usize,
+        entry: &nohrs_services::fs::listing::FileEntryDto,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.group.tab(pane_index, self.group.active_tab(pane_index)) else {
+            return;
+        };
+        let entry = entry.clone();
+        pane.update(cx, |pane, cx| pane.open_entry_in_new_tab(&entry, window, cx));
+    }
+
     /// Active tab index of `pane_index`.
     pub(crate) fn active_tab(&self, pane_index: usize) -> usize {
         self.group.active_tab(pane_index)
