@@ -859,3 +859,47 @@ O ganho é o buffer do arquivo inteiro, que existia só durante a carga: o pico 
 é o próprio valor estável. Não é o 1/4 de GB estimado no plano — o buffer era
 liberado depressa, como a diferença de 83 MB entre pico e estável do O0 já dizia —,
 mas passa do limite de 50 MB combinado para manter a mudança.
+
+#### O3: um orçamento de miniaturas para o processo inteiro
+
+Cada `Thumbnails` tinha o próprio teto de 192 MB. Agora há um só, de **512 MB**,
+para todos — cada painel, cada aba, a barra lateral — num contador compartilhado
+(`READY_BYTES`): um cache que encontra o orçamento estourado solta o que tem fora da
+tela, do mais antigo para o mais novo; se não houver o que soltar, espera o próximo
+quadro ou a vez de outro cache (não há LRU global, como o plano pede). O teto por
+cache virou campo só para os testes (produção fica sem limite próprio), e o `Drop`
+devolve os bytes de um cache fechado ao contador, senão o orçamento ficaria gasto
+para sempre. O evento deixa uma linha de log com o total antes e depois.
+
+| Cenário | Antes (pico / estável) | Depois (pico / estável) | Δ estável |
+|---|---:|---:|---:|
+| 4. 10.000 fotos a 256 px | 1.018,3 / 912,4 MB | 1.391,4 / 1.185,4 MB | +273,0 MB |
+| 5. duas abas com fotos | 862,1 / 796,5 MB | 1.044,6 / 963,5 MB | +167,0 MB |
+
+O número sobe, e é o que o plano já previa: um painel sozinho pode agora usar até
+512 MB (antes parava em 192 MB), então rolar um álbum grande recarrega menos; e as
+duas abas dividem os mesmos 512 MB em vez de 192 MB cada. O que muda é o **teto**: o
+total de miniaturas não passa de 512 MB mais a miniatura que estiver chegando.
+
+**Prova.** Numa rodada do cenário 4 com `runtime_log = true`, o log do app tem uma
+linha do evento:
+
+```
+{"level":"INFO","message":"the shared thumbnail budget evicted",
+ "before":537968640,"after":402259968,"cap":536870912,
+ "target":"nohrs_pages::explorer::thumbnails"}
+```
+
+537.968.640 bytes são os 512 MiB do teto mais a miniatura que chegou naquele quadro;
+depois da evicção o total fica em 402.259.968 (três quartos do orçamento, para o
+próximo quadro não evictar de novo). No cenário 5, com as duas abas, não houve
+nenhuma linha dessas: o total compartilhado ficou abaixo de 512 MB durante toda a
+rodada (a linha só aparece quando o teto passa). E há um teste com dois caches contra
+um orçamento pequeno, `the_shared_budget_caps_every_cache_together`, que mostra os
+dois dividindo o mesmo contador.
+
+**Ressalva de método.** Os números absolutos do cenário 4 dependem do cache de
+miniaturas do Windows: depois da primeira rodada o sistema tem as miniaturas na
+mão, a grade enche mais rápido e a memória sobe (a tabela do O0, medida com o cache
+frio, dá 499,7/454,0 MB). Por isso as comparações de O3 foram feitas em sequência, no
+mesmo dia, alternando as duas builds.

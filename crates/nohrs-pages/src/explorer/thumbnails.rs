@@ -4,6 +4,7 @@
 
 use gpui::{App, Context, RenderImage, Task};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,33 @@ const SLOW_WORKERS: usize = 4;
 /// tile: at the 256 px bucket that is 2.6 GB. A screen of the largest tiles
 /// is about 100 of them, 26 MB, so this holds several screens of scrolling
 /// back and forth before anything is read again.
-const READY_BYTES_CAP: usize = 192 * 1024 * 1024;
+/// The bytes of `Ready` thumbnails the whole process may hold (plan §2 O3).
+///
+/// One budget for every pane, every tab and the sidebar, instead of one per
+/// `Thumbnails`: two windows can no longer add up to several times one pane's
+/// worth. The figure is BoBO's (2026-11-23).
+const SHARED_READY_BYTES_CAP: usize = 512 * 1024 * 1024;
+
+/// What every [`Thumbnails`] in the process holds together, in bytes.
+///
+/// Bumped and lowered by the same paths that keep `Thumbnails::ready_bytes`, so a
+/// cache that finds the budget over knows how much there is without walking the
+/// other caches. Tests that set `ready_bytes` by hand do not touch it, so the
+/// per-cache `cap` tests keep meaning what they did.
+static READY_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Lowers the shared ledger by `bytes`, never below zero: the tests set
+/// `ready_bytes` by hand, and those bytes were never added.
+fn release_shared(bytes: usize) {
+    let mut held = READY_BYTES.load(Ordering::Relaxed);
+    loop {
+        let next = held.saturating_sub(bytes);
+        match READY_BYTES.compare_exchange_weak(held, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(current) => held = current,
+        }
+    }
+}
 
 /// How many times an answer that is not the real picture is asked for again,
 /// and how long the first wait is; each wait is four times the one before
@@ -122,8 +149,14 @@ pub struct Thumbnails {
     ready_bytes: usize,
     /// How many slots are `Loading`, so a frame with none skips the sweep.
     loading: usize,
-    /// [`READY_BYTES_CAP`]; a field so tests can reach it with small images.
+    /// The cache's own ceiling, in bytes: unbounded in production, where the
+    /// shared budget is the limit, and small in the tests that reach it with
+    /// 64×64 pixels.
     cap: usize,
+    /// The ceiling the whole process shares, in bytes; production uses
+    /// [`SHARED_READY_BYTES_CAP`], and a test lowers it to watch two caches
+    /// compete for one budget.
+    shared_cap: usize,
 }
 
 impl Default for Thumbnails {
@@ -134,12 +167,39 @@ impl Default for Thumbnails {
             frame: 0,
             ready_bytes: 0,
             loading: 0,
-            cap: READY_BYTES_CAP,
+            cap: usize::MAX,
+            shared_cap: SHARED_READY_BYTES_CAP,
         }
     }
 }
 
+impl Drop for Thumbnails {
+    fn drop(&mut self) {
+        // A cache going away (a tab closed, a window closed) has nobody left to
+        // release its bytes: without this the shared budget would stay spent for
+        // the rest of the process. The images themselves are dropped with the
+        // entries; the GPU atlas copies are the pane's business, as before.
+        release_shared(self.ready_bytes);
+        self.ready_bytes = 0;
+    }
+}
+
 impl Thumbnails {
+    /// Adds `bytes` of a newly held thumbnail to this cache and to the shared
+    /// ledger.
+    fn add_ready(&mut self, bytes: usize) {
+        self.ready_bytes = self.ready_bytes.saturating_add(bytes);
+        READY_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Lets `bytes` of held thumbnails go, in this cache and in the ledger. The
+    /// ledger is clamped at zero: tests that set `ready_bytes` by hand never put
+    /// those bytes in it.
+    fn release_ready(&mut self, bytes: usize) {
+        self.ready_bytes = self.ready_bytes.saturating_sub(bytes);
+        release_shared(bytes);
+    }
+
     /// Forgets everything held for another directory. Dropping a `Loading`
     /// entry drops its task, which closes the reply channel, so a worker that
     /// has not reached the job yet skips it rather than decoding for nobody.
@@ -148,16 +208,21 @@ impl Thumbnails {
             return;
         }
         self.directory = directory.to_string();
+        let mut released = 0;
         for (_, slots) in self.entries.drain() {
             for slot in slots {
                 // The sprite atlas keeps its own copy of every image it has
                 // drawn; without this each folder visited would stay in GPU
                 // memory.
-                if let Some(image) = slot.entry.held() {
+                if slot.kind == Kind::Thumbnail
+                    && let Some(image) = slot.entry.held()
+                {
+                    released += image_bytes(image);
                     cx.drop_image(image.clone(), None);
                 }
             }
         }
+        self.release_ready(released);
         self.ready_bytes = 0;
         self.loading = 0;
     }
@@ -167,7 +232,7 @@ impl Thumbnails {
     /// waiting for a worker it is cancelled, so scrolling fast through a
     /// folder of videos does not leave the slow workers generating, for
     /// seconds each, tiles that went by (OTIMIZACAO.md §5.3). And once the
-    /// thumbnails held pass [`READY_BYTES_CAP`], the ones off screen longest
+    /// thumbnails held pass [`SHARED_READY_BYTES_CAP`], the ones off screen longest
     /// go, down to three quarters of it so the next tile does not evict again.
     pub fn begin_frame(&mut self, cx: &mut App) {
         self.frame += 1;
@@ -193,11 +258,22 @@ impl Thumbnails {
                 });
             }
             self.loading -= cancelled;
-            self.ready_bytes -= released;
+            self.release_ready(released);
             self.entries.retain(|_, slots| !slots.is_empty());
         }
 
-        if self.ready_bytes > self.cap {
+        // Two ceilings: the cache's own (only the tests set it) and the budget
+        // the whole process shares (§2 O3). Over the shared one, each cache lets
+        // go of what it has off screen, oldest first; a cache with nothing off
+        // screen waits for the next frame or for another cache's eviction, which
+        // is the "if still over, next frame" the plan asks for instead of a
+        // cross-cache LRU.
+        let own_target = self.cap / 4 * 3;
+        let shared_target = self.shared_cap / 4 * 3;
+        let over_own = self.ready_bytes > self.cap;
+        let over_shared = READY_BYTES.load(Ordering::Relaxed) > self.shared_cap;
+        if over_own || over_shared {
+            let held_before = READY_BYTES.load(Ordering::Relaxed);
             let mut candidates: Vec<(u64, String, Kind, u32)> = self
                 .entries
                 .iter()
@@ -214,23 +290,36 @@ impl Thumbnails {
                 .collect();
             candidates.sort_unstable_by_key(|candidate| candidate.0);
             for (_, path, kind, size) in candidates {
-                if self.ready_bytes <= self.cap / 4 * 3 {
+                if self.ready_bytes <= own_target
+                    && READY_BYTES.load(Ordering::Relaxed) <= shared_target
+                {
                     break;
                 }
-                let Some(slots) = self.entries.get_mut(&path) else {
-                    continue;
-                };
-                if let Some(at) = slots
-                    .iter()
-                    .position(|slot| slot.kind == kind && slot.size == size)
-                    && let Entry::Ready(image) = slots.swap_remove(at).entry
-                {
-                    self.ready_bytes -= image_bytes(&image);
-                    cx.drop_image(image, None);
+                let mut released = 0;
+                let mut empty = false;
+                if let Some(slots) = self.entries.get_mut(&path) {
+                    if let Some(at) = slots
+                        .iter()
+                        .position(|slot| slot.kind == kind && slot.size == size)
+                        && let Entry::Ready(image) = slots.swap_remove(at).entry
+                    {
+                        released = image_bytes(&image);
+                        cx.drop_image(image, None);
+                    }
+                    empty = slots.is_empty();
                 }
-                if slots.is_empty() {
+                self.release_ready(released);
+                if empty {
                     self.entries.remove(&path);
                 }
+            }
+            if over_shared {
+                tracing::info!(
+                    before = held_before,
+                    after = READY_BYTES.load(Ordering::Relaxed),
+                    cap = self.shared_cap,
+                    "the shared thumbnail budget evicted"
+                );
             }
         }
     }
@@ -252,7 +341,7 @@ impl Thumbnails {
             if slot.kind == Kind::Thumbnail
                 && let Some(image) = slot.entry.held()
             {
-                self.ready_bytes -= image_bytes(image);
+                self.release_ready(image_bytes(image));
                 cx.drop_image(image.clone(), None);
             }
         }
@@ -437,9 +526,11 @@ impl Thumbnails {
         self.loading -= 1;
         // A stand-in that comes back empty keeps the one already on screen.
         let image = answer.image.or_else(|| shown.clone());
+        let mut released = 0;
+        let mut added = 0;
         if kind == Kind::Thumbnail {
             if let Some(shown) = &shown {
-                self.ready_bytes -= image_bytes(shown);
+                released = image_bytes(shown);
                 if image
                     .as_ref()
                     .is_none_or(|image| !Arc::ptr_eq(image, shown))
@@ -448,7 +539,7 @@ impl Thumbnails {
                 }
             }
             if let Some(image) = &image {
-                self.ready_bytes += image_bytes(image);
+                added = image_bytes(image);
             }
         }
         slot.settled = answer.settled && image.is_some();
@@ -457,6 +548,8 @@ impl Thumbnails {
             slot.retry_at = Some(Instant::now() + retry_delay(slot.retries));
             slot.retries += 1;
         }
+        self.release_ready(released);
+        self.add_ready(added);
     }
 }
 
@@ -731,6 +824,15 @@ mod tests {
         }
     }
 
+    /// A cache with its two ceilings set by the test. `Thumbnails` has a `Drop`,
+    /// so a struct update cannot move one out of `Default::default()`.
+    fn cache_with_caps(cap: usize, shared_cap: usize) -> Thumbnails {
+        let mut cache = Thumbnails::default();
+        cache.cap = cap;
+        cache.shared_cap = shared_cap;
+        cache
+    }
+
     fn loading() -> Entry {
         Entry::Loading {
             task: Task::ready(()),
@@ -739,15 +841,59 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_shared_budget_caps_every_cache_together(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            // Two caches of 48 KB each against one 64 KB budget: together they are
+            // over, and neither is over on its own.
+            let shared = 64 * 1024;
+            let mut first = cache_with_caps(usize::MAX, shared);
+            let mut second = cache_with_caps(usize::MAX, shared);
+            for (cache, name) in [(&mut first, "first"), (&mut second, "second")] {
+                for index in 0..3 {
+                    let path = format!("{name}-{index}");
+                    cache
+                        .entries
+                        .insert(path.clone(), vec![slot(Kind::Thumbnail, 64, loading(), 0)]);
+                    cache.loading += 1;
+                    cache.arrived(
+                        &path,
+                        Kind::Thumbnail,
+                        64,
+                        Answer {
+                            image: Some(image(64)),
+                            settled: true,
+                        },
+                        cx,
+                    );
+                }
+            }
+            let together =
+                |first: &Thumbnails, second: &Thumbnails| first.ready_bytes + second.ready_bytes;
+            assert_eq!(together(&first, &second), 6 * 64 * 64 * 4);
+            // What was added above is what the frame before this one did not ask
+            // for, which is what makes it evictable.
+            first.frame = 10;
+            second.frame = 10;
+
+            // Each frame lets go of what its own cache has off screen until the
+            // shared figure is back under three quarters of the budget.
+            first.begin_frame(cx);
+            second.begin_frame(cx);
+            assert!(
+                together(&first, &second) <= shared,
+                "the two caches still hold {} bytes against a shared budget of {shared}",
+                together(&first, &second)
+            );
+        });
+    }
+
+    #[gpui::test]
     fn what_left_the_screen_is_cancelled_and_the_oldest_thumbnails_go_past_the_cap(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            let mut cache = Thumbnails {
-                cap: 3 * 64 * 64 * 4,
-                frame: 10,
-                ..Default::default()
-            };
+            let mut cache = cache_with_caps(3 * 64 * 64 * 4, SHARED_READY_BYTES_CAP);
+            cache.frame = 10;
             // Seen in the frame that just ended, the one before it, and long
             // ago.
             for (path, seen) in [("now", 10), ("before", 9), ("old", 2), ("older", 1)] {
