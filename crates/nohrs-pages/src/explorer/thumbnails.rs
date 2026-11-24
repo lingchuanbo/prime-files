@@ -217,6 +217,40 @@ impl Thumbnails {
         release_shared(bytes);
     }
 
+    /// Releases everything the last frame did not draw, keeping what the tab was
+    /// showing (R1 of the memory review).
+    ///
+    /// A tab that is not in front never calls [`Self::begin_frame`], so without
+    /// this its thumbnails stayed in the shared budget for good and the tab in
+    /// front paid for them, evicting its own off-screen tiles every time it scrolled
+    /// past them. A background tab now holds one screen, which is what makes it
+    /// come back at once.
+    pub fn trim_to_last_frame(&mut self, cx: &mut App) {
+        let frame = self.frame;
+        let mut released = 0;
+        let mut cancelled = 0;
+        for slots in self.entries.values_mut() {
+            slots.retain(|slot| {
+                if slot.last_seen == frame {
+                    return true;
+                }
+                if matches!(slot.entry, Entry::Loading { .. }) {
+                    cancelled += 1;
+                }
+                if counts_towards_budget(slot)
+                    && let Some(image) = slot.entry.held()
+                {
+                    released += image_bytes(image);
+                    cx.drop_image(image.clone(), None);
+                }
+                false
+            });
+        }
+        self.entries.retain(|_, slots| !slots.is_empty());
+        self.loading = self.loading.saturating_sub(cancelled);
+        self.release_ready(released);
+    }
+
     /// Forgets everything held for another directory. Dropping a `Loading`
     /// entry drops its task, which closes the reply channel, so a worker that
     /// has not reached the job yet skips it rather than decoding for nobody.
@@ -920,6 +954,44 @@ mod tests {
                 "the class-shared icon must not count"
             );
             assert!(cache.entries["shared"][0].shared);
+        });
+    }
+
+    #[gpui::test]
+    fn a_tab_going_background_keeps_only_what_its_last_frame_drew(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut cache = Thumbnails::default();
+            cache.frame = 10;
+            // One tile drawn in the last frame, one the frame before, and one still
+            // loading that the scroll left behind.
+            for (path, seen, entry) in [
+                ("now", 10, loading()),
+                ("before", 9, loading()),
+                ("scrolled", 2, loading()),
+            ] {
+                cache
+                    .entries
+                    .insert(path.into(), vec![slot(Kind::Thumbnail, 64, entry, seen)]);
+                cache.loading += 1;
+                cache.arrived(
+                    path,
+                    Kind::Thumbnail,
+                    64,
+                    Answer {
+                        image: Some(image(64)),
+                        settled: true,
+                        shared: false,
+                    },
+                    cx,
+                );
+            }
+
+            cache.trim_to_last_frame(cx);
+
+            assert_eq!(cache.entries.len(), 1, "only the last frame's tile stays");
+            assert!(cache.entries.contains_key("now"));
+            assert_eq!(cache.ready_bytes, 64 * 64 * 4);
+            assert_eq!(cache.loading, 0, "the pending tile was cancelled");
         });
     }
 

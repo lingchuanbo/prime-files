@@ -65,6 +65,11 @@ pub trait PaneItem: Render + Focusable + 'static {
         Self: Sized,
     {
     }
+
+    /// Called when this tab stops being the visible one (another tab is chosen in
+    /// its pane, or a new tab covers it), so it can let go of what only its screen
+    /// needed. Defaults to ignoring it.
+    fn trim_background(&mut self, _cx: &mut App) {}
 }
 
 /// Width of the column of vertical tabs as a fresh window opens.
@@ -104,6 +109,11 @@ pub enum GroupDrag {
         /// it rather than narrowing it.
         from_right: bool,
     },
+}
+
+/// Lets `tab` go of what only its screen needed, when it stops being visible.
+fn trim_background<T: PaneItem>(tab: &Entity<T>, cx: &mut App) {
+    tab.update(cx, |item, cx| item.trim_background(cx));
 }
 
 /// Builds a fresh tab entity. Separate from [`PaneItem`] because construction
@@ -555,10 +565,14 @@ impl<T: PaneItem> PaneGroup<T> {
         if pane_index >= self.panes.len() {
             return None;
         }
-        let tab = (self.build_pane)(window, cx);
         let pane = &mut self.panes[pane_index];
+        let covered = pane.tabs.get(pane.active_tab).cloned();
+        let tab = (self.build_pane)(window, cx);
         pane.tabs.push(tab.clone());
         pane.active_tab = pane.tabs.len() - 1;
+        if let Some(covered) = covered {
+            trim_background(&covered, cx);
+        }
         Some(tab)
     }
 
@@ -623,9 +637,14 @@ impl<T: PaneItem> PaneGroup<T> {
             _ => return false,
         }
         let changed = self.active != pane_index || self.panes[pane_index].active_tab != tab_index;
+        let outgoing = (self.panes[pane_index].active_tab != tab_index)
+            .then(|| self.panes[pane_index].tabs[self.panes[pane_index].active_tab].clone());
         self.panes[pane_index].active_tab = tab_index;
         self.active = pane_index;
         self.focus_active(window, cx);
+        if let Some(outgoing) = outgoing {
+            trim_background(&outgoing, cx);
+        }
         changed
     }
 
