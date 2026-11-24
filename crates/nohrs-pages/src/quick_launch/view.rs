@@ -1108,9 +1108,12 @@ const LIST_COLUMN_MIN_WIDTH: f32 = 260.0;
 const LIST_GAP: f32 = 8.0;
 
 /// The icon edge a cell gets: the configured size, kept small enough that the
-/// name's line still fits under it.
+/// name's line still fits under it. `.min().max()` rather than `clamp`, which
+/// panics when the cell shrinks below the icon's floor and the bounds cross.
 fn grid_icon_size(configured: u16, cell_size: f32) -> f32 {
-    f32::from(configured).clamp(16.0, cell_size - NAME_LINE_HEIGHT - 12.0)
+    f32::from(configured)
+        .min(cell_size - NAME_LINE_HEIGHT - 12.0)
+        .max(16.0)
 }
 
 /// The icon edge a list row gets: a row is 44 tall, so the configured size is
@@ -2530,6 +2533,15 @@ fn input_with(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// A cell too small for the configured icon shrinks to the 16 px floor instead
+    /// of panicking when the two bounds cross (`clamp` would).
+    #[test]
+    fn a_tiny_cell_never_takes_the_icon_below_its_floor() {
+        assert_eq!(grid_icon_size(64, 20.0), 16.0);
+        assert_eq!(grid_icon_size(64, 100.0), 64.0);
+        assert_eq!(grid_icon_size(128, 100.0), 100.0 - NAME_LINE_HEIGHT - 12.0);
+    }
 
     /// The list shows one more column for every minimum-width column the window
     /// has room for, and never more than its cap.

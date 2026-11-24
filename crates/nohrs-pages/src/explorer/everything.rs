@@ -202,6 +202,23 @@ impl Segment {
             .unwrap_or("")
     }
 
+    /// Releases the spare capacity a finished table outgrew.
+    ///
+    /// The walk and the pinyin pass grow their vectors by pushing, so a finished
+    /// segment can hold twice its data in capacity; a loaded one grows its pinyin
+    /// and `non_ascii` the same way. Once a segment is finished it is never pushed
+    /// into again (the same table is searched from), so the surplus can go. It is
+    /// deliberately not called while a walk is still filling a segment: shrinking
+    /// there would copy the whole table every few pushes.
+    fn shrink(&mut self) {
+        self.names.shrink_to_fit();
+        self.lower.shrink_to_fit();
+        self.pinyin.shrink_to_fit();
+        self.entries.shrink_to_fit();
+        self.non_ascii.shrink_to_fit();
+        self.paths.shrink_to_fit();
+    }
+
     fn path(&self, index: u32) -> String {
         if let Some(path) = self.paths.get(index as usize) {
             return path.clone();
@@ -1324,14 +1341,18 @@ fn build(
                 tracing::warn!("could not save the everything index so far: {error}");
             }
         };
-        let segment = Arc::new(walk_drive(
+        let mut segment = walk_drive(
             &drive,
             table,
             progress.clone(),
             WALKERS,
             platform::list,
             &mut checkpoint,
-        ));
+        );
+        // O2b: the partition just finished, so its surplus goes now, while the
+        // walk of the next drive and the old index are still in memory too.
+        segment.shrink();
+        let segment = Arc::new(segment);
         tracing::info!(
             drive = %drive,
             entries = segment.entries.len(),
@@ -3454,92 +3475,136 @@ fn save_segments(built: SystemTime, segments: &[&Segment], path: &Path) -> std::
 const ENTRY_BYTES_V2: usize = 17;
 const ENTRY_BYTES: usize = 29;
 
-fn number(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(
-        bytes.get(at..at.checked_add(8)?)?.try_into().ok()?,
-    ))
-}
-
 // The snapshot is loaded from a background task (see `ensure`, which spawns it).
+//
+// The file is read through a `BufReader` instead of into one buffer first: it is
+// 261 MB on this machine, and the buffer doubled the peak for as long as the
+// segments were being copied out of it. Each length is checked against what is
+// left of the file before it is allocated, so a corrupt header cannot ask for
+// gigabytes, and the file has to end exactly where the last segment does.
 #[allow(clippy::disallowed_methods)]
 fn load(path: &Path) -> Option<Index> {
-    let bytes = std::fs::read(path).ok()?;
-    let entry_bytes = match bytes.get(..8)? {
+    let file = std::fs::File::open(path).ok()?;
+    let mut remaining = file.metadata().ok()?.len();
+    let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
+
+    let magic = take(&mut reader, &mut remaining, 8)?;
+    let entry_bytes = match magic.as_slice() {
         magic if magic == FILE_MAGIC => ENTRY_BYTES,
         magic if magic == FILE_MAGIC_V2 => ENTRY_BYTES_V2,
         _ => return None,
     };
-    let built = SystemTime::UNIX_EPOCH + Duration::from_secs(number(&bytes, 8)?);
-    let count = usize::try_from(number(&bytes, 16)?).ok()?;
-    let mut at = 24usize;
+    let built =
+        SystemTime::UNIX_EPOCH + Duration::from_secs(read_number(&mut reader, &mut remaining)?);
+    let count = usize::try_from(read_number(&mut reader, &mut remaining)?).ok()?;
     let mut segments = Vec::new();
     for _ in 0..count {
-        let (segment, next) = load_segment(&bytes, at, entry_bytes == ENTRY_BYTES)?;
-        segments.push(Arc::new(segment));
-        at = next;
+        segments.push(Arc::new(load_segment(
+            &mut reader,
+            &mut remaining,
+            entry_bytes == ENTRY_BYTES,
+        )?));
     }
-    (at == bytes.len()).then_some(Index { segments, built })
+    // A byte after the last segment means the file is not what this version wrote.
+    if remaining != 0 {
+        return None;
+    }
+    Some(Index { segments, built })
 }
 
-// The segment starting at `at`, and where the next one starts.
-fn load_segment(bytes: &[u8], at: usize, current: bool) -> Option<(Segment, usize)> {
+/// `len` bytes from `reader`, or `None` when the file has fewer left.
+fn take(reader: &mut impl std::io::Read, remaining: &mut u64, len: usize) -> Option<Vec<u8>> {
+    let len = u64::try_from(len).ok()?;
+    if len > *remaining {
+        return None;
+    }
+    *remaining -= len;
+    let mut bytes = vec![0u8; usize::try_from(len).ok()?];
+    reader.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// One little-endian u64, or `None` when the file has fewer than eight bytes left.
+fn read_number(reader: &mut impl std::io::Read, remaining: &mut u64) -> Option<u64> {
+    let bytes = take(reader, remaining, 8)?;
+    Some(u64::from_le_bytes(bytes.try_into().ok()?))
+}
+
+// The segment that follows in `reader`. Its entries are decoded a chunk at a
+// time: an entry is 29 bytes and the table has millions, so the chunk buffer is
+// the only copy besides the entries themselves.
+fn load_segment(
+    reader: &mut impl std::io::Read,
+    remaining: &mut u64,
+    current: bool,
+) -> Option<Segment> {
     let entry_bytes = if current { ENTRY_BYTES } else { ENTRY_BYTES_V2 };
-    let count = usize::try_from(number(bytes, at)?).ok()?;
-    let names_len = usize::try_from(number(bytes, at + 8)?).ok()?;
-    let lower_len = usize::try_from(number(bytes, at + 16)?).ok()?;
+    let count = usize::try_from(read_number(reader, remaining)?).ok()?;
+    let names_len = usize::try_from(read_number(reader, remaining)?).ok()?;
+    let lower_len = usize::try_from(read_number(reader, remaining)?).ok()?;
     // A table from before 0.3.2 was only ever saved whole.
-    let (complete, header) = if current {
-        (number(bytes, at + 24)? != 0, 32)
+    let complete = if current {
+        read_number(reader, remaining)? != 0
     } else {
-        (true, 24)
+        true
     };
-    let entries_start = at.checked_add(header)?;
-    let entries_end = entries_start.checked_add(count.checked_mul(entry_bytes)?)?;
-    let names_end = entries_end.checked_add(names_len)?;
-    let lower_end = names_end.checked_add(lower_len)?;
+    let entries_bytes = count.checked_mul(entry_bytes)?;
+    let entries_bytes = u64::try_from(entries_bytes).ok()?;
+    if entries_bytes > *remaining {
+        return None;
+    }
     let mut entries = Vec::with_capacity(count);
-    for (position, raw) in bytes
-        .get(entries_start..entries_end)?
-        .chunks_exact(entry_bytes)
-        .enumerate()
-    {
-        let word = |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
-        let half = |at: usize| u16::from_le_bytes([raw[at], raw[at + 1]]);
-        let (size, modified, flags) = if entry_bytes == ENTRY_BYTES {
-            (
-                u64::from_le_bytes(raw[16..24].try_into().ok()?),
-                word(24),
-                raw[28] & DIR,
-            )
-        } else {
-            (UNKNOWN_SIZE, 0, if raw[16] != 0 { DIR } else { 0 })
-        };
-        let entry = Entry {
-            size: if flags & DIR != 0 { 0 } else { size },
-            mask: 0,
-            parent: word(0),
-            name: word(4),
-            lower: word(8),
-            pinyin: 0,
-            modified,
-            name_len: half(12),
-            lower_len: half(14),
-            pinyin_len: 0,
-            flags,
-        };
-        // Every slice the table hands out must land inside its strings, and
-        // a parent comes before its children (the noise flag below is
-        // passed down in one sweep).
-        if entry.name as usize + entry.name_len as usize > names_len
-            || entry.lower as usize + entry.lower_len as usize > lower_len
-            || (entry.parent != NO_PARENT && entry.parent as usize >= position)
-        {
+    let mut loaded = 0u64;
+    // 4,096 entries at a time: a small buffer that keeps the read sequential.
+    let chunk_entries = 4096usize;
+    while loaded < entries_bytes {
+        let this_many = (entries_bytes - loaded).min((chunk_entries * entry_bytes) as u64);
+        let chunk = take(reader, remaining, usize::try_from(this_many).ok()?)?;
+        for raw in chunk.chunks_exact(entry_bytes) {
+            let word =
+                |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+            let half = |at: usize| u16::from_le_bytes([raw[at], raw[at + 1]]);
+            let (size, modified, flags) = if entry_bytes == ENTRY_BYTES {
+                (
+                    u64::from_le_bytes(raw[16..24].try_into().ok()?),
+                    word(24),
+                    raw[28] & DIR,
+                )
+            } else {
+                (UNKNOWN_SIZE, 0, if raw[16] != 0 { DIR } else { 0 })
+            };
+            let position = entries.len();
+            let entry = Entry {
+                size: if flags & DIR != 0 { 0 } else { size },
+                mask: 0,
+                parent: word(0),
+                name: word(4),
+                lower: word(8),
+                pinyin: 0,
+                modified,
+                name_len: half(12),
+                lower_len: half(14),
+                pinyin_len: 0,
+                flags,
+            };
+            // Every slice the table hands out must land inside its strings, and
+            // a parent comes before its children (the noise flag below is
+            // passed down in one sweep).
+            if entry.name as usize + entry.name_len as usize > names_len
+                || entry.lower as usize + entry.lower_len as usize > lower_len
+                || (entry.parent != NO_PARENT && entry.parent as usize >= position)
+            {
+                return None;
+            }
+            entries.push(entry);
+        }
+        loaded += this_many;
+        if this_many == 0 {
             return None;
         }
-        entries.push(entry);
     }
-    let names = String::from_utf8(bytes.get(entries_end..names_end)?.to_vec()).ok()?;
-    let lower = String::from_utf8(bytes.get(names_end..lower_end)?.to_vec()).ok()?;
+    let names = String::from_utf8(take(reader, remaining, names_len)?).ok()?;
+    let lower = String::from_utf8(take(reader, remaining, lower_len)?).ok()?;
     let mut segment = Segment {
         names,
         lower,
@@ -3595,7 +3660,9 @@ fn load_segment(bytes: &[u8], at: usize, current: bool) -> Option<(Segment, usiz
             }
         }
     }
-    Some((segment, lower_end))
+    // O2: the pinyin pass may have doubled the strings it appends to.
+    segment.shrink();
+    Some(segment)
 }
 
 // ---------------------------------------------------------------------------
@@ -5154,6 +5221,12 @@ mod tests {
         // A cut file is refused instead of read wrong.
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
+        assert!(load(&path).is_none());
+        // So is a file with one byte after the last segment: the reader has to
+        // end exactly where the table says it does.
+        let mut longer = bytes.clone();
+        longer.push(0);
+        std::fs::write(&path, &longer).unwrap();
         assert!(load(&path).is_none());
     }
 

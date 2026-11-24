@@ -70,6 +70,13 @@ pub struct FileLogConfig {
     pub filter: String,
     /// How many rotated files to keep. `None` keeps everything.
     pub max_files: Option<usize>,
+    /// Stop writing a day's file after this many bytes: the records overflow, one
+    /// warning goes to stderr, and the file stays where it stopped. `None` writes
+    /// without a limit.
+    pub max_file_bytes: Option<u64>,
+    /// At startup, delete the oldest log files until the directory holds at most
+    /// this many bytes. `None` leaves the history alone.
+    pub max_total_bytes: Option<u64>,
 }
 
 impl Default for FileLogConfig {
@@ -79,6 +86,8 @@ impl Default for FileLogConfig {
             directory: paths::log_dir(),
             filter: default_file_filter(),
             max_files: Some(7),
+            max_file_bytes: None,
+            max_total_bytes: None,
         }
     }
 }
@@ -126,6 +135,11 @@ pub fn init_logging_with_file(config: &FileLogConfig) -> LogGuard {
     // the file sink would vanish with no diagnostic at all. They are emitted
     // below, once stderr is installed.
     let mut notes = Vec::new();
+    // R3 of the memory review: the history is trimmed whether or not this run
+    // writes a log file, otherwise a user with the runtime log off never gets rid
+    // of it. A missing directory is skipped, never created just to be cleaned.
+    // R5: the old `state/logs` directory counts too.
+    trim_log_history(config, &legacy_log_directory(), &mut notes);
     let (file_layer, guard) = match config.enabled {
         false => (None, None),
         true => match open_file_layer(config) {
@@ -253,6 +267,147 @@ pub fn is_log_file_name(name: &str) -> bool {
         .is_some_and(|date| time::Date::parse(date, FILE_DATE_FORMAT).is_ok())
 }
 
+/// Where the runtime log lived before it moved to [`paths::log_dir`].
+///
+/// Nothing writes here any more, but a profile upgraded from an older version can
+/// still hold its history: on the machine this was measured on, 752 MB of it.
+fn legacy_log_directory() -> PathBuf {
+    paths::state_dir().join("logs")
+}
+
+/// Deletes the oldest log files of both directories until together they hold at most
+/// `max_total` bytes.
+///
+/// R5 of the memory review: the trim only looked at the current directory, so the
+/// 752 MB in the old `state/logs` was never touched. `nohrs.log.<yyyy-mm-dd>` sorts
+/// by name into date order, and the oldest of the two directories go first. Files
+/// this appender did not write are left alone, `panic.log` in either directory
+/// included; if the current directory has no `panic.log` and the old one does, it is
+/// carried over -- the one part of that directory worth keeping.
+fn trim_log_history(config: &FileLogConfig, legacy: &Path, notes: &mut Vec<String>) {
+    let Some(max_total) = config.max_total_bytes else {
+        return;
+    };
+    let current = &config.directory;
+    let mut files: Vec<(String, u64, PathBuf)> = Vec::new();
+    collect_log_files(current, &mut files);
+    if legacy != current {
+        collect_log_files(legacy, &mut files);
+        if legacy.join("panic.log").is_file()
+            && let Err(error) = crate::config::storage::copy_panic_log(legacy, current)
+        {
+            notes.push(format!(
+                "could not carry {} over to {}: {error}",
+                legacy.display(),
+                current.display()
+            ));
+        }
+    }
+    let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    for (name, size, directory) in files {
+        if total <= max_total {
+            break;
+        }
+        if std::fs::remove_file(directory.join(&name)).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+/// The appender's own files in `directory`, with their sizes.
+fn collect_log_files(directory: &Path, files: &mut Vec<(String, u64, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !is_log_file_name(&name) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_file() {
+            files.push((name, metadata.len(), directory.to_path_buf()));
+        }
+    }
+}
+
+/// Stops a day's log file at a byte cap.
+///
+/// `tracing_appender` rotates by day and has no size limit, and a loop that logs on
+/// every frame filled 549 MB in one day (2026-11-15). Past the cap the records are
+/// dropped and one warning goes to stderr — through `tracing` it would loop back
+/// into this same writer. The count resets when the date changes, because that is
+/// when the appender opens a new file.
+struct CappedWriter<W> {
+    inner: W,
+    day: Option<time::Date>,
+    written: u64,
+    cap: Option<u64>,
+    warned: bool,
+}
+
+impl<W> CappedWriter<W> {
+    /// `written` is what the day's file already holds: a process that starts again
+    /// on the same day continues that count rather than giving the file a fresh cap.
+    fn new(inner: W, cap: Option<u64>, written: u64) -> Self {
+        let day = (written > 0).then(|| time::OffsetDateTime::now_utc().date());
+        Self {
+            inner,
+            day,
+            written,
+            cap,
+            warned: false,
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for CappedWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let Some(cap) = self.cap else {
+            return self.inner.write(buffer);
+        };
+        let today = time::OffsetDateTime::now_utc().date();
+        if self.day != Some(today) {
+            self.day = Some(today);
+            self.written = 0;
+            self.warned = false;
+        }
+        if self.written >= cap {
+            if !self.warned {
+                self.warned = true;
+                eprintln!(
+                    "nohrs: the log file reached its {} MB limit; records are dropped until tomorrow",
+                    cap / (1024 * 1024)
+                );
+            }
+            // Reported as written: a short write would make `write_all` spin.
+            return Ok(buffer.len());
+        }
+        let room =
+            usize::try_from((cap - self.written).min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let written = self.inner.write(&buffer[..room])?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// What today's file already holds, so a restarted process counts it against the
+/// day's cap instead of starting from zero (R4 of the memory review).
+fn current_log_file_size(directory: &Path) -> u64 {
+    current_log_file_name()
+        .and_then(|name| std::fs::metadata(directory.join(name)).ok())
+        .map_or(0, |metadata| metadata.len())
+}
+
 /// The stderr filter: `RUST_LOG` if set, `info` otherwise.
 fn stderr_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
@@ -300,6 +455,11 @@ where
         )
     });
     let appender = OwnerOnly::wrap(appender, directory.clone());
+    let appender = CappedWriter::new(
+        appender,
+        config.max_file_bytes,
+        current_log_file_size(directory),
+    );
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
     let filter = EnvFilter::try_new(&config.filter)
@@ -518,6 +678,146 @@ fn restrict_log_files(_directory: &Path) -> std::io::Result<()> {
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_startup_trim_deletes_the_oldest_files_until_the_total_fits() {
+        // The old directory holds the oldest day: trimming the two together has to
+        // reach it, which trimming only the current directory could not.
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        for (target, name, size) in [
+            (&legacy, "nohrs.log.2026-01-01", 100),
+            (&directory, "nohrs.log.2026-01-02", 100),
+            (&directory, "nohrs.log.2026-01-03", 100),
+            // Not this appender's file: never touched.
+            (&directory, "someone-elses.log", 100),
+        ] {
+            std::fs::write(target.path().join(name), vec![b'x'; size]).unwrap();
+        }
+        // The old directory also has the crash record, and the current one does not.
+        std::fs::write(legacy.path().join("panic.log"), b"crash").unwrap();
+
+        let mut notes = Vec::new();
+        trim_log_history(
+            &log_config(directory.path(), 250),
+            legacy.path(),
+            &mut notes,
+        );
+
+        assert!(
+            !legacy.path().join("nohrs.log.2026-01-01").exists(),
+            "the oldest file of the two directories goes first"
+        );
+        assert!(directory.path().join("nohrs.log.2026-01-02").exists());
+        assert!(directory.path().join("nohrs.log.2026-01-03").exists());
+        assert!(directory.path().join("someone-elses.log").exists());
+        assert!(legacy.path().join("panic.log").exists());
+        assert_eq!(
+            std::fs::read(directory.path().join("panic.log")).unwrap(),
+            b"crash",
+            "the crash record is carried over"
+        );
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn a_panic_log_already_in_the_current_directory_is_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("panic.log"), b"current").unwrap();
+        std::fs::write(legacy.path().join("panic.log"), b"old").unwrap();
+
+        let mut notes = Vec::new();
+        trim_log_history(
+            &log_config(directory.path(), 100),
+            legacy.path(),
+            &mut notes,
+        );
+
+        assert_eq!(
+            std::fs::read(directory.path().join("panic.log")).unwrap(),
+            b"current"
+        );
+        assert!(notes.is_empty());
+    }
+
+    fn log_config(directory: &Path, max_total: u64) -> FileLogConfig {
+        FileLogConfig {
+            enabled: false,
+            directory: directory.to_path_buf(),
+            filter: "info".to_string(),
+            max_files: Some(2),
+            max_file_bytes: None,
+            max_total_bytes: Some(max_total),
+        }
+    }
+
+    #[test]
+    fn the_history_is_trimmed_even_when_the_runtime_log_is_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        for (name, size) in [("nohrs.log.2026-01-01", 100), ("nohrs.log.2026-01-02", 100)] {
+            std::fs::write(directory.path().join(name), vec![b'x'; size]).unwrap();
+        }
+        let mut notes = Vec::new();
+        trim_log_history(
+            &log_config(directory.path(), 150),
+            legacy.path(),
+            &mut notes,
+        );
+        assert!(!directory.path().join("nohrs.log.2026-01-01").exists());
+        assert!(directory.path().join("nohrs.log.2026-01-02").exists());
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn trimming_a_directory_that_does_not_exist_creates_nothing() {
+        let parent = tempfile::tempdir().unwrap();
+        let current = parent.path().join("not-there");
+        let legacy = parent.path().join("not-there-either");
+        let mut notes = Vec::new();
+        trim_log_history(&log_config(&current, 100), &legacy, &mut notes);
+        assert!(!current.exists());
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn the_writer_stops_at_its_size_cap_and_says_so_once() {
+        let mut writer = CappedWriter::new(Vec::new(), Some(10), 0);
+        std::io::Write::write_all(&mut writer, b"0123456789abc").unwrap();
+        assert_eq!(writer.inner.len(), 10, "only the room left is written");
+        // Everything past the cap is dropped without an error: a short write would
+        // make `write_all` spin on a full file.
+        std::io::Write::write_all(&mut writer, b"more").unwrap();
+        assert_eq!(writer.inner.len(), 10);
+        assert!(writer.warned);
+    }
+
+    #[test]
+    fn a_restarted_process_counts_what_the_day_already_wrote() {
+        let mut writer = CappedWriter::new(Vec::new(), Some(10), 8);
+        std::io::Write::write_all(&mut writer, b"abc").unwrap();
+        assert_eq!(writer.inner, b"ab", "only the room left in the day's cap");
+    }
+
+    #[test]
+    fn the_day_file_size_is_read_from_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = current_log_file_name().expect("today has a name");
+        assert!(is_log_file_name(&name), "{name} should be a log file name");
+        std::fs::write(directory.path().join(&name), vec![b'x'; 12]).unwrap();
+        assert_eq!(current_log_file_size(directory.path()), 12);
+        assert_eq!(
+            current_log_file_size(&directory.path().join("not-there")),
+            0
+        );
+    }
+
+    #[test]
+    fn a_log_without_a_cap_keeps_writing() {
+        let mut writer = CappedWriter::new(Vec::new(), None, 0);
+        std::io::Write::write_all(&mut writer, b"anything").unwrap();
+        assert_eq!(writer.inner, b"anything");
+    }
 
     #[test]
     fn init_logging_is_idempotent() {
@@ -605,6 +905,8 @@ mod tests {
             directory: target.clone(),
             filter: "info".to_string(),
             max_files: Some(2),
+            max_file_bytes: None,
+            max_total_bytes: None,
         };
 
         // Built directly rather than through `init_logging_with_file`, because

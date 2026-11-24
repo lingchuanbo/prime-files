@@ -541,6 +541,14 @@ impl crate::pane_group::PaneItem for ExplorerPane {
         self.split_available = available;
     }
 
+    fn trim_background(&mut self, cx: &mut gpui::App) {
+        self.thumbnails.trim_to_last_frame(cx);
+    }
+
+    fn release_holdings(&mut self, cx: &mut gpui::App) {
+        self.thumbnails.release_all(cx);
+    }
+
     fn set_multi_pane(&mut self, multi: bool) {
         self.multi_pane = multi;
         if multi {

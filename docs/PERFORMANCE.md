@@ -645,7 +645,8 @@ testado em FAT32/exFAT nem no Google Drive (`I:`).
 **Sintoma.** Nenhum relatado; passada pedida pela revisão
 `docs/prime-files-优化方案.md` §2, que manda caçar 	hread::sleep rodando na
 thread da interface. Dos 30 sleep do código de produção, quase todos estão em
-thread própria e dormir ali é legítimo: a vigia do eveal e da barra do
+thread própria e dormir ali é legítimo: a vigia do 
+eveal e da barra do
 `dialog_jump`, a caixa de diálogo de arquivo (thread `nohrs-file-dialogs`), o
 `foreground` (thread criada só para isso), o processo de arquivamento, o
 `media` e o laço de mensagens da `shell_windows`. Dois não estavam:
@@ -694,3 +695,323 @@ build `release` do dia a dia não mudou. Medições em `docs/size.md`.
 **Cobertura.** 431 testes de `nohrs-pages` (`--test-threads=1`) e 95 de
 `nohrs-core` verdes depois das mudanças; `cargo build --workspace` sem
 aviso novo.
+
+---
+
+### 10. Memória (24/11/2026)
+
+**Sintoma.** Nenhum relatado: esta é a medida de partida do item O0 de
+[`LumaFiles-内存与缩略图优化方案.md`](./LumaFiles-内存与缩略图优化方案.md) (v1.1).
+Antes de mexer no consumo — índice de nomes, miniaturas, listas — o número de
+partida, medido com o mesmo instrumento que cada item seguinte vai usar.
+
+**Método.** `scripts/measure-memory.ps1` sobe `LumaFiles.exe` (release,
+hard link do build) com um perfil portátil próprio: `userdata` ao lado do
+executável e `[storage] portable_mode = true`, então nada do perfil real
+(configuração, estado, histórico, logs) é lido nem escrito. O script amostra a
+cada segundo `PrivateMemorySize64`, `WorkingSet64`, handles e objetos GDI/USER,
+roda cada cenário três vezes e a tabela traz a mediana das três. Os CSV de cada
+rodada ficam em `target\tmp\perf\runs`, fora do repositório. As pastas de teste
+são geradas pelo mesmo script em `target\tmp\perf\data`: 100.000 arquivos de
+256 B, 10.000 fotos de 800x600 e 100.000 subpastas.
+
+No cenário 2 o instantâneo real do índice (261 MB, dois segmentos, ~3,7 milhões
+de nomes) foi copiado para o perfil, com apenas o carimbo `built` (bytes 8..16)
+atualizado para agora: o instantâneo da máquina tinha dois dias e o app o refaz
+depois de seis horas, e o que o item O1 muda é o caminho de *carga*. Com o
+carimbo antigo a mesma rodada mede carga **e** reconstrução: pico de 1.174 MB e
+estável de 744 MB, registrado aqui para não ser confundido com o número de cima.
+
+| Cenário | Pico privado | Estável privado | Pico working set | Handles | GDI | USER |
+|---|---:|---:|---:|---:|---:|---:|
+| 1. Início a frio, 30 s parado | 175.9 MB | 134.9 MB | 115.9 MB | 1158 | 55 | 50 |
+| 2. Índice próprio: carga do instantâneo de 261 MB | 588.8 MB | 505.9 MB | 542.9 MB | 1217 | 55 | 52 |
+| 3. Pasta de 100.000 arquivos + 5 letras no filtro | 269.0 MB | 242.2 MB | 211.6 MB | 1227 | 55 | 58 |
+| 4. 10.000 fotos, grade a 256 px, rolagem até o fim | 499.7 MB | 454.0 MB | 316.0 MB | 1167 | 55 | 51 |
+| 5. Duas abas com a mesma pasta de fotos, rolagem nas duas | 881.9 MB | 826.6 MB | 376.0 MB | 1245 | 55 | 53 |
+| 6. 100.000 subpastas na lista, rolagem contínua | 275.0 MB | 273.2 MB | 231.0 MB | 1097 | 55 | 51 |
+| 7. Janela fechada, processo residente, 10 min | 221.9 MB | 148.4 MB | 115.5 MB | 1160 | 55 | 51 |
+| 8. Abrir e fechar a pasta grande 10 vezes | 327.6 MB | 173.0 MB | 213.5 MB | 1168 | 55 | 50 |
+
+O cenário **2b** (carregar o instantâneo com o carimbo *original*, que faz o app
+refazer o índice em seguida) foi acrescentado depois do O0, com o mesmo instrumento
+e o mesmo perfil: base de **1.094,4 MB de pico e 757,7 MB estáveis** (mediana de três
+rodadas). É o estado em que a maioria dos usuários está, porque o instantâneo passa
+de seis horas.
+
+**O que os números dizem.** A base ociosa é 134.9 MB (cenário 1, estável).
+O índice próprio soma 371.0 MB ao estável e 453.9 MB ao pico (cenário 2: 505.9 MB
+estável) — a tabela e as strings que o plano estimou em ~350 MB, medidas.
+
+A pasta de 100.000 arquivos com filtro (cenário 3) chega a 269.0 MB de pico; a de
+100.000 subpastas na lista (cenário 6) fica em ~275 MB com ~8.600 subpastas roladas
+em 90 s — é o ícone por caminho que O4 passa a contar no orçamento.
+
+As fotos a 256 px (cenário 4) são o maior consumidor isolado: 499.7 MB de pico e
+454.0 MB estável, ~320 MB acima da base — mais do que os 192 MB que o teto por
+painel conta, porque ele conta só as miniaturas `Ready` e não o que a GPU, o cache
+do Shell e as decodificações em voo seguram enquanto a rolagem corre. As duas abas do cenário 5 mantêm dois caches assim ao mesmo tempo
+(881.9 MB de pico), que é exatamente o que o orçamento global de O3 tem de limitar.
+
+O cenário 7 (10 min de janela fechada, processo residente) fecha em 148.4 MB
+estável, e o 8 (dez idas e voltas numa pasta grande) em 173.0 MB: comparados com
+a base ociosa, os dois mostram se fica memória para trás.
+
+#### Notas de método (o que não é o app)
+
+O cenário 5 foi executado com **duas abas** e não com dois painéis: os atalhos de
+painel (`Ctrl+\`, `Ctrl+Shift+→`, `Ctrl+→`) não disparam a partir de teclado
+sintético — só `Ctrl+T`, `Ctrl+W`, `Ctrl+=` e `Ctrl+-` disparam —, mas cada aba
+tem o próprio cache de miniaturas, que é o que o orçamento global de O3 cobre.
+O cenário 6 rolou ~8.600 das 100.000 subpastas em 90 s (a captura final mostra
+`folder_008600`); rolar as 100.000 levaria ~17 min, então as comparações usam o
+mesmo tempo de rolagem, não a pasta inteira.
+
+Um perfil portátil novo também recebe, na primeira execução, uma cópia do índice
+de nomes do perfil anterior (258 MB em `cache\everything.idx`); ela acontece em
+todas as rodadas por igual e não aparece na memória privada, só no disco. O
+cenário 2 substitui esse arquivo pelo instantâneo do teste antes de medir.
+
+Os logs reais desta máquina ficam em `target\release\userdata\state\logs`
+(752,4 MB em sete arquivos); a mesma coleção está no perfil não portátil,
+`~\.local\state\nohrs\logs`, que é a origem da cópia de migração. O app
+copia o perfil anterior para um perfil portátil novo na primeira execução, e
+essa cópia acontecia dentro da janela de amostragem de cada rodada. Para o
+baseline ser do app e não da cópia, os logs foram movidos para
+`~\.local\state\nohrs-logs.baseline-off` durante as medições e devolvidos
+depois.
+
+#### O5: por que 549 MB de log num dia
+
+`nohrs.log.2026-11-15` tem 2.532.006 linhas, e **2.531.269** delas são a mesma
+mensagem:
+
+```
+{"level":"ERROR","message":"could not find asset at path \"icons/menu.svg\"",
+ "log.file":"third_party\\gpui\\src\\elements\\svg.rs","log.line":121,"target":""}
+```
+
+É um ícone de menu pedido a cada quadro: o elemento SVG registra um ERROR por
+desenho porque `icons/menu.svg` não existe nos assets. O mesmo vale para 14/11
+(579.744 de 581.085 linhas) e, em menor escala, para 13/11 e 16/11. O log cresce
+com o tempo em que a janela fica aberta, não com o uso. O item O5 tem duas
+partes: pôr o asset que falta (ou parar de desenhá-lo) e limitar o arquivo; a
+primeira é a que apaga o loop.
+
+| Dia | Tamanho | Linhas ERROR |
+|---|---:|---:|
+| 2026-11-13 | 48,3 MB | não medido |
+| 2026-11-14 | 126,3 MB | 579.884 |
+| 2026-11-15 | 549,5 MB | 2.531.388 |
+| 2026-11-16 | 64,4 MB | não medido |
+| 2026-11-17 | 48 KB | — |
+
+No total, `target\release\userdata\state\logs` guarda 752,4 MB em sete arquivos
+(e o perfil não portátil, `~\.local\state\nohrs\logs`, tem a mesma coleção).
+
+---
+
+#### O2 + O2b: capacidade sobrando e reconstrução por partição
+
+`Segment::shrink` solta o que a tabela cresceu além do tamanho: `names`, `lower`,
+`pinyin`, `entries`, `non_ascii` e `paths`. Ele é chamado quando uma partição fica
+pronta — o fim da caminhada de um disco (que é o mesmo caminho do primeiro índice e
+da reconstrução, então o O2b sai no mesmo ponto: cada partição é encolhida assim que
+termina, enquanto a próxima ainda está sendo lida e o índice antigo continua
+servindo as buscas) e o fim da passagem de pinyin de uma partição carregada.
+
+| Cenário | Antes (pico / estável) | Depois (pico / estável) | Δ estável |
+|---|---:|---:|---:|
+| 2. carga do instantâneo fresco | 615,4 / 531,8 MB | 615,6 / 530,2 MB | −1,6 MB |
+| 2b. carga e reconstrução | **1.094,4 / 757,7 MB** | **1.031,2 / 579,8 MB** | **−177,9 MB** |
+
+A carga não muda: o `Vec<Entry>` já nasce com a capacidade exata e as duas strings
+vêm de um `String::from_utf8` do tamanho certo, então o `shrink` ali não tem o que
+soltar (a passagem de pinyin cresce pouco). O ganho está na reconstrução, que era o
+estado comum: **−63 MB de pico e −178 MB estáveis**, porque a tabela nova é
+encolhida partição a partição enquanto ela cresce, em vez de guardar até o fim a
+capacidade que o `push` reservou.
+
+Os números "antes" desta tabela foram refeitos na mesma máquina, com o mesmo
+instrumento e minutos antes do "depois" (o código do O2 guardado com `git stash` e
+devolvido em seguida), porque a tabela do O0 foi medida com um binário anterior ao
+O5a; comparar com ela ficaria com a diferença de duas builds. O cenário 2 agora
+recebe o instantâneo com o carimbo `built` ajustado a cada rodada (o arquivo
+`target\tmp\perf\index-fresh.idx` envelhece), senão ele mede reconstrução em vez de
+carga.
+
+#### O1: carga em fluxo
+
+`load` passou a ler o arquivo por um `BufReader`: cabeçalho, contagem de segmentos e,
+por segmento, os comprimentos, as entradas em blocos de 4.096 e as duas strings
+direto no tamanho declarado, em vez de `std::fs::read` do arquivo inteiro (261 MB)
+seguido de cópia de cada segmento. Todo comprimento é conferido contra o que resta
+do arquivo antes de ser alocado, e o arquivo tem de terminar exatamente onde o
+último segmento termina — um byte a mais devolve `None` (teste novo).
+
+| Cenário 2 (carga do instantâneo fresco) | Antes | Depois | Δ |
+|---|---:|---:|---:|
+| pico privado | 615,6 MB | **529,2 MB** | **−86,4 MB** |
+| estável privado | 530,2 MB | 529,0 MB | −1,2 MB |
+| pico de working set | 545,5 MB | 458,5 MB | −87,0 MB |
+
+O ganho é o buffer do arquivo inteiro, que existia só durante a carga: o pico agora
+é o próprio valor estável. Não é o 1/4 de GB estimado no plano — o buffer era
+liberado depressa, como a diferença de 83 MB entre pico e estável do O0 já dizia —,
+mas passa do limite de 50 MB combinado para manter a mudança.
+
+#### O3: um orçamento de miniaturas para o processo inteiro
+
+Cada `Thumbnails` tinha o próprio teto de 192 MB. Agora há um só, de **512 MB**,
+para todos — cada painel, cada aba, a barra lateral — num contador compartilhado
+(`READY_BYTES`): um cache que encontra o orçamento estourado solta o que tem fora da
+tela, do mais antigo para o mais novo; se não houver o que soltar, espera o próximo
+quadro ou a vez de outro cache (não há LRU global, como o plano pede). O teto por
+cache virou campo só para os testes (produção fica sem limite próprio), e o `Drop`
+devolve os bytes de um cache fechado ao contador, senão o orçamento ficaria gasto
+para sempre. O evento deixa uma linha de log com o total antes e depois.
+
+| Cenário | Antes (pico / estável) | Depois (pico / estável) | Δ estável |
+|---|---:|---:|---:|
+| 4. 10.000 fotos a 256 px | 1.018,3 / 912,4 MB | 1.391,4 / 1.185,4 MB | +273,0 MB |
+| 5. duas abas com fotos | 862,1 / 796,5 MB | 1.044,6 / 963,5 MB | +167,0 MB |
+
+O número sobe, e é o que o plano já previa: um painel sozinho pode agora usar até
+512 MB (antes parava em 192 MB), então rolar um álbum grande recarrega menos; e as
+duas abas dividem os mesmos 512 MB em vez de 192 MB cada. O que muda é o **teto**: o
+total de miniaturas não passa de 512 MB mais a miniatura que estiver chegando.
+
+**Prova.** Numa rodada do cenário 4 com `runtime_log = true`, o log do app tem uma
+linha do evento:
+
+```
+{"level":"INFO","message":"the shared thumbnail budget evicted",
+ "before":537968640,"after":402259968,"cap":536870912,
+ "target":"nohrs_pages::explorer::thumbnails"}
+```
+
+537.968.640 bytes são os 512 MiB do teto mais a miniatura que chegou naquele quadro;
+depois da evicção o total fica em 402.259.968 (três quartos do orçamento, para o
+próximo quadro não evictar de novo). No cenário 5, com as duas abas, não houve
+nenhuma linha dessas: o total compartilhado ficou abaixo de 512 MB durante toda a
+rodada (a linha só aparece quando o teto passa). E há um teste com dois caches contra
+um orçamento pequeno, `the_shared_budget_caps_every_cache_together`, que mostra os
+dois dividindo o mesmo contador.
+
+**Ressalva de método.** Os números absolutos do cenário 4 dependem do cache de
+miniaturas do Windows: depois da primeira rodada o sistema tem as miniaturas na
+mão, a grade enche mais rápido e a memória sobe (a tabela do O0, medida com o cache
+frio, dá 499,7/454,0 MB). Por isso as comparações de O3 foram feitas em sequência, no
+mesmo dia, alternando as duas builds.
+
+#### O4: ícones por caminho entram no orçamento
+
+Os ícones que não são de classe (pastas, `.exe`, `.lnk`, `.url`, e as extensões cujo
+ícone difere por arquivo) passam a contar no mesmo orçamento de 512 MB e a ser
+evictados como as miniaturas, pela mesma ordem (fora da tela há mais tempo primeiro).
+Os ícones de classe — os que o `Service::class_icons` guarda por extensão e tamanho —
+não contam e não são soltos: a textura é a mesma para todas as linhas daquele tipo.
+Para isso o `Answer`/`Slot` passaram a dizer se a imagem é a compartilhada, e a
+evicção só chama `drop_image` no que é daquele caminho. Dois testes cobrem: um ícone
+próprio soma e um de classe não, e a evicção nunca toca no de classe.
+
+| Cenário 6 (rolagem de 90 s) | Antes | Depois |
+|---|---:|---:|
+| variação de memória na rolagem (≈8.600 pastas) | +36,4 MB | +33,9 … +40,0 MB |
+| por 1.000 pastas | +4,2 MB | +3,9 … +4,7 MB |
+
+A inclinação não muda, e o motivo está na própria medição: uma pasta na lista usa um
+ícone de 16 px (1 KB), 8.600 delas dariam ~9 MB, dentro do ruído; e a rolagem rápida
+cancela os pedidos que saíram da tela antes de chegarem, então a maior parte nunca
+chega a ser guardada. Os ~36 MB que sobem na janela de 90 s não são do cache de
+ícones: são da listagem em si (as linhas que vão sendo materializadas), que é o
+assunto de O7. O O4 garante o teto — um diretório de 100.000 subpastas rolado até o
+fim não soma 400 MB de ícones como o plano §1.3 temia —, mas o ganho nesta janela de
+medição é abaixo do que o instrumento resolve.
+
+#### O5a: os dois ícones que faltavam
+
+`menu.svg` (o botão de recolher da barra vertical de abas) e `globe.svg` (o ícone
+provisório de um item de URL) não estavam no pacote de assets. Um asset ausente não
+é erro de compilação: o elemento SVG registra um ERROR a cada desenho, e foi assim
+que um dia rendeu 2.531.269 linhas e 549 MB. Os dois vieram do Lucide, como o resto
+do pacote e sob a mesma `LUCIDE-LICENSE.txt`, e um teste novo
+(`crates/nohrs-ui/tests/icons.rs`) varre `crates/` por `IconName::X` e por literais
+`"icons/*.svg"`, converte cada variante para o nome do arquivo como o
+gpui-component faz (`ALargeSmall` → `a-large-small`, `Redo2` → `redo-2`, com
+`GitHub` → `github.svg` de exceção) e falha listando os que não estão no pacote. O
+teste foi conferido ao contrário: tirando `globe.svg` do diretório ele falha com
+`icons/globe.svg (IconName::Globe at crates\nohrs-pages\src\quick_launch\view.rs)`.
+
+#### O5b: um teto para o log
+
+`[diagnostics] log_max_file_mb` (padrão 50) e `log_max_total_mb` (padrão 200) são
+aplicados ao sink de arquivo: passado o teto de um dia, os registros daquele dia são
+descartados e um aviso único sai no stderr (não pelo `tracing`, que voltaria a
+escrever no mesmo writer); na abertura, os arquivos mais antigos são apagados até o
+diretório caber no total. O contador reinicia quando a data muda, porque é aí que o
+appender abre o arquivo do dia seguinte. Com 50 MB, o dia 15/11 (549 MB) teria parado
+em 50 MB; e os 752 MB que esta máquina guarda voltam a 200 MB na próxima abertura.
+A limpeza conta as duas pastas: a de hoje (`userdata\logs`) e a antiga
+(`userdata\state\logs`), onde estava a maior parte desses 752 MB -- a primeira
+versão só olhava a de hoje e nunca a alcançaria (R5 da 2ª revisão). Testes: o
+writer para no teto e reclama uma vez, um log sem teto continua escrevendo, e a
+limpeza apaga do mais antigo para o mais novo nas duas pastas, sem tocar em arquivo
+que não é do appender; `panic.log` nunca é apagado, e se só a pasta antiga tiver um,
+ele é copiado para a de hoje. O schema, o template e `docs/config.md` têm as duas chaves; `docs/logging.md`
+diz o que elas fazem.
+
+---
+
+#### 第 1 轮复查（R1–R4、O11、UI 补审）
+
+**R1：后台标签页只留最后一帧。** `Thumbnails::trim_to_last_frame` 释放最后一帧没画过的
+全部（计入预算的连纹理一起 `drop_image`，还在等待的请求取消）。`PaneItem` 新增
+`trim_background`，`PaneGroup` 在两种情况下调用：`set_active_tab` 选走另一个标签页时被
+切走的那个，以及 `add_tab` 新标签页盖住的那个。
+
+场景 `tabs_switch`（两个标签页各滚动一遍相册，然后切回第一个；3 次，`runtime_log` 打开）：
+
+| 次 | 切回时释放 | 释放后共享总量 | 进程峰值 / 稳定私有 |
+|---|---:|---:|---:|
+| 1 | 151.891.968 B | 2.359.296 B | 476,4 / 451,2 MB |
+| 2 | 146.386.944 B | 2.359.296 B | 459,9 / 439,8 MB |
+| 3 | 151.891.968 B | 2.359.296 B | 479,8 / 454,6 MB |
+
+切回第一个标签页时，离开的那个把 **~150 MB** 交还共享预算，自己只留一屏（2,4 MB）；
+没有 R1 时这 150 MB 会一直占着。日志里每次运行有 3 行 trim（新标签页盖住旧的 2 次 +
+切回 1 次），第一次释放 0，因为第一个标签页那时还没有任何就绪的缩略图（都在生成中，
+被取消）。
+
+**R2：关闭标签页前释放纹理。** `Thumbnails::release_all` 把计入预算的纹理全部
+`drop_image` 并清零账本；`PaneItem::release_holdings` 在 `close_tab` 和 `remove_pane`
+（关整个窗格、关最后一个标签页）里、entity 被丢弃之前调用。测试：缓存里有缩略图、自有
+图标、类共享图标各一，释放后 entries 清空、`ready_bytes` 为 0，类共享图标不计入。
+
+**R3：关掉 runtime_log 也清理旧日志。** 清理移到 `init_logging_with_file` 开头，无论
+`enabled` 与否都跑；目录不存在就跳过（不会为了清理而创建）。测试：`enabled: false` 时
+旧文件照样被删；目录不存在时什么都不创建。
+
+**R4：上限按文件算。** `CappedWriter` 用当天日志文件的现有大小作为起始计数，一天内重启
+N 次不会再写出 N × 50 MB。测试：已有 8/10 字节时只再接受 2 字节；文件大小按当天文件名
+从磁盘读，没有文件时为 0。
+
+**O11：迁移不再复制缓存和日志。** `prepare_storage` 只复制配置文件、`data` 和 `state`
+（跳过 `logs`）；`migrate_logs` 变成 `migrate_panic_log`，只迁移 `panic.log`。三个测试：
+state 复制跳过 logs、只迁移 panic.log、两个方向都不把 cache 列为目标。
+
+**重跑的三个场景（同一台机，3 次中位数）：**
+
+| 场景 | 上一轮 | 本轮 |
+|---|---:|---:|
+| 2b. 加载并重建 | 1.031,2 / 579,8 MB | **991,6 / 535,9 MB** |
+| 4. 10.000 张照片 | 1.389,4 / 1.183,8 MB | **482,1 / 438,5 MB** |
+| 5. 两个标签页各滚动 | 1.027,3 / 943,9 MB | **400,7 / 382,1 MB**（原始 396,4–407,6 / 379,4–388,4） |
+
+场景 4 和 5 比上一轮低了约 2,6 倍，而这轮改的 R1、R2、O11 都不在"单标签页滚动"的路径
+上。截图显示这一轮网格滚到了最大（250 px 格），相册在 60 秒里就绪的缩略图远少于上一轮
+（上一轮那 1,2 GB 是缓存被塞满到 512 MB 上限的样子），而且 Windows 缩略图缓存的热度在
+整机文件缓存被大索引遍历冲掉之后也会掉下来。结论：这两个场景的绝对值跨会话不可比，
+本轮没有把它当作 R1/R2 的效果；要让它可比，下一轮应把网格缩放固定下来（例如由 harness
+断言或由配置指定），而不是靠 15 次合成 `Ctrl+=`。
+

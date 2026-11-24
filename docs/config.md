@@ -28,7 +28,7 @@ XDG 環境変数 `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` / `$XDG_CACHE_HOME` を�
 
 The main `config.toml` keeps general, explorer, and layout settings. Appearance and color settings are stored in `appearance.toml`; indexing and search settings are stored in `search.toml`. Missing split files are normal. At load time, values in the split files override matching categories from `config.toml`, so existing installations remain compatible.
 
-Settings > About > Storage can enable portable mode on Windows. The portable profile is also detected from `userdata/config.toml` when moved to a computer without the original system config. With it enabled, all application-owned files are under `userdata` beside the executable: configuration files at the root, persistent databases in `data`, Everything index/cache in `cache`, batch-rename session state in `state`, rolling/panic logs in `logs`, and IPC endpoint files in `runtime`. On first launch after switching profiles, missing files are copied from the previous profile before stores are opened; existing destination files are never overwritten. This does not relocate user files, Windows Quick Access data, or third-party application settings such as Listary preferences.
+Settings > About > Storage can enable portable mode on Windows. The portable profile is also detected from `userdata/config.toml` when moved to a computer without the original system config. With it enabled, all application-owned files are under `userdata` beside the executable: configuration files at the root, persistent databases in `data`, Everything index/cache in `cache`, batch-rename session state in `state`, rolling/panic logs in `logs`, and IPC endpoint files in `runtime`. On first launch after switching profiles, missing files are copied from the previous profile before stores are opened; existing destination files are never overwritten. What is copied is the configuration files, `data` and `state` except `state/logs`; the `cache` (the Everything index and the extracted quick-launch icons) and the log history are not, since both are rebuilt from nothing in the new profile, and only `panic.log` is carried over as the crash record worth keeping. This does not relocate user files, Windows Quick Access data, or third-party application settings such as Listary preferences.
 ## 2. P1 最小スキーマ
 
 ```toml
@@ -87,6 +87,11 @@ backend = "auto"  # "tantivy" | "ripgrep" | "auto"
 [launcher]
 hotkey = "Cmd+Shift+Space"
 position_remember = true
+
+[diagnostics]
+runtime_log = false       # GUI の実行ログをファイルに書く (再起動が必要)
+log_max_file_mb = 50      # 1 日ぶんのファイルはここで止める (MB)
+log_max_total_mb = 200    # 起動時にこの合計を超える古いファイルから消す (MB)
 
 [diagnostics.store]
 # パフォーマンス解析用のストア操作ログ。デフォルト全 off (本番では無音)。

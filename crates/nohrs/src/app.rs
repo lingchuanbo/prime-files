@@ -50,6 +50,18 @@ impl NohrsApp {
         }
         let _log_guard = init_logging_with_file(&FileLogConfig {
             enabled: config.diagnostics.runtime_log,
+            max_file_bytes: Some(
+                config
+                    .diagnostics
+                    .log_max_file_mb
+                    .saturating_mul(1024 * 1024),
+            ),
+            max_total_bytes: Some(
+                config
+                    .diagnostics
+                    .log_max_total_mb
+                    .saturating_mul(1024 * 1024),
+            ),
             ..FileLogConfig::default()
         });
         if let Err(error) = config_creation {
