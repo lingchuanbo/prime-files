@@ -196,3 +196,22 @@ R4 修好（S1、S2 一起改），并且 E 节 4 项重测全部通过，之后
 
 ## M4 结论
 **验收通过，可以合入 main。** 第 2 轮 E 节的 4 项重测全部通过；第 4 项附带提出的跳转条需求转到 M4.1 处理。
+
+
+---
+
+## 补审：Quick Launch UI 合并（`d9fe342`，`feature/quick-launch-ui` 的 8 个提交，复查方 2026-11-24）
+
+按 BoBO 的决定，在内存优化第 1 轮回报时一起补审。看的是 8 个提交合在一起的总改动（10 个文件）。
+
+**改了什么**：网格的列数和行数改为按窗口大小和 `cell_size` 自动计算，格子会拉伸到填满窗口，间距 5 px；列表的列数也按窗口宽度自动计算（最多 8 列）；设置页去掉了“列数”“列表列数”，新增“显示格子”（`show_cells`，默认开）；去掉了 96 px 图标档；默认改为 `cell_size = 100`、`icon_size = 64`；鼠标悬停时图标放大 1.2 倍（120 ms 动画）；打开窗口、切换分组时不再自动选中第一个条目；弹出窗口加了可拖动调整大小的边框（`WS_THICKFRAME`）。
+
+**结论：没有发现 bug，可以保留。** 核对过的点：
+- schema JSON 合法；新增的翻译键 `Mostrar células` 在 `strings.rs`、`extra.rs` 里都有；旧文件中的 `columns`、`list_columns` 仍然能解析（因为 `deny_unknown_fields`，这两个字段必须保留，现在只是不再使用），`icon_size = 96` 会被吸附到 64。
+- 悬停动画结束后就不再请求新帧，不会在空闲时一直占用 CPU 或 GPU。
+- `grid_icon_size` 用的是 `f32::clamp(16, cell_height − 30)`，`cell_height` 小于 46 时会 panic。不过窗口最小尺寸是 360×300，减去标题栏等界面元素后，格子高度至少约 59，所以目前不会触发。
+
+**顺手修（随内存优化下一轮一起提交）**：
+1. `grid_icon_size` 改成 `.min(上限).max(16.0)`，即使窗口最小尺寸的保证将来失效，也不会 panic。
+2. `settings/quick_launch.rs` 的 `enum Action` 里，删掉 `Columns`、`ListColumns` 后留下了两行孤立的文档注释（“A new grid column count.”、“A new list column count.”），现在会被挂到下一个变体上，删掉这两行。
+3. 规格 `QuickDock-技术实现方案与边界约定.md` 补一条 v2.9 记录：§12.1 网格和列表的列数改为自动计算；§12.2 打开窗口和切换分组时不再自动选中条目，只有在过滤框打字时才选中第一个匹配项。
