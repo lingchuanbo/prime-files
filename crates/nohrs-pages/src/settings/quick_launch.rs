@@ -65,14 +65,10 @@ pub(super) enum NewGroupKind {
 pub(super) enum Action {
     /// A new layout for the grid.
     View(View),
-    /// A new grid column count.
-
     /// A new grid cell edge.
     CellSize(u16),
     /// A new icon edge.
     IconSize(u16),
-    /// A new list column count.
-
     /// Hide the window when it loses focus, or stop hiding it.
     AutoHide(bool),
     /// Hide the window after a launch, or keep it.
