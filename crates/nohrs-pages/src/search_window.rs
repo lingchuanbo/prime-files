@@ -1526,14 +1526,9 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn format_modified(seconds: u32) -> String {
-    time::OffsetDateTime::from_unix_timestamp(i64::from(seconds))
-        .ok()
-        .and_then(|value| {
-            value
-                .format(&time::format_description::well_known::Rfc3339)
-                .ok()
-        })
-        .unwrap_or_else(|| "—".to_string())
+    // Same clock as the explorer's 修改时间 column: the index stores seconds
+    // since the Unix epoch, which is UTC.
+    nohrs_ui::components::file_list::format_date(&u64::from(seconds))
 }
 
 #[derive(Default)]

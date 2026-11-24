@@ -218,16 +218,28 @@ pub fn human_bytes(size: u64) -> String {
     }
 }
 
-/// Format a Unix timestamp (seconds) as a `year/month/day hour:minute` date, or `-` if invalid.
+/// Format a Unix timestamp (seconds) as a `year/month/day hour:minute` date on
+/// this machine's clock, or `-` if invalid.
+///
+/// The listing stores seconds since the Unix epoch, which is UTC; Windows'
+/// file properties dialog prints the local clock. Converting here is what
+/// makes the two agree — without it the column is the UTC wall time, eight
+/// hours behind in China.
 pub fn format_date(timestamp: &u64) -> String {
     use time::OffsetDateTime;
     use time::macros::format_description;
 
     let format = format_description!("[year]/[month]/[day] [hour]:[minute]");
-    match OffsetDateTime::from_unix_timestamp(*timestamp as i64) {
-        Ok(datetime) => datetime.format(&format).unwrap_or_else(|_| "-".to_string()),
-        Err(_) => "-".to_string(),
-    }
+    let Ok(datetime) = OffsetDateTime::from_unix_timestamp(*timestamp as i64) else {
+        return "-".to_string();
+    };
+    // `time` refuses the local offset on some platforms (multi-threaded Unix
+    // processes); there the UTC clock is used rather than no date at all.
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    datetime
+        .to_offset(offset)
+        .format(&format)
+        .unwrap_or_else(|_| "-".to_string())
 }
 
 /// Derive a human-readable type label from an entry's name and kind (e.g. `Folder`, `PNG`, `Link`).
@@ -321,13 +333,29 @@ mod tests {
     }
 
     #[test]
-    fn format_date_is_stable_for_the_epoch() {
-        assert_eq!(format_date(&0), "1970/01/01 00:00");
+    fn format_date_shows_the_local_clock() {
+        // The epoch is 1970/01/01 00:00 UTC; the column prints it on the
+        // machine's clock, so the expectation is built the same way.
+        assert_eq!(format_date(&0), expected_local(0));
     }
 
     #[test]
     fn format_date_shows_minutes_without_seconds() {
-        assert_eq!(format_date(&3661), "1970/01/01 01:01");
+        assert_eq!(format_date(&3661), expected_local(3661));
+    }
+
+    // `format_date`'s output for a timestamp, written out independently so the
+    // tests state the local time rather than the UTC one.
+    fn expected_local(timestamp: i64) -> String {
+        use time::OffsetDateTime;
+        use time::macros::format_description;
+
+        let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+        OffsetDateTime::from_unix_timestamp(timestamp)
+            .expect("timestamp")
+            .to_offset(offset)
+            .format(&format_description!("[year]/[month]/[day] [hour]:[minute]"))
+            .expect("format")
     }
 
     proptest! {
