@@ -500,10 +500,11 @@ function Invoke-Scenario {
             }
 
             'tabs_switch' {
-                # R1 of the first memory review: two tabs each scroll the album,
-                # then the first one comes back. What it held while in the
-                # background is in the app's log (`trimmed its thumbnails`) and the
-                # private memory in the samples.
+                # R1 of the first memory review: each of two tabs scrolls the album,
+                # then the first one comes back. Its neighbour should keep one screen
+                # in the shared budget (the app logs what a trim releases and what is
+                # left), and the private memory in the samples says what the switch
+                # costs or gives back.
                 $process = Start-App -ExePath $runInfo.Exe -Arguments ('"' + $Photos10k + '"')
                 $process = Wait-Window -ExePath $runInfo.Exe
                 Focus-App -Process $process
@@ -511,30 +512,45 @@ function Invoke-Scenario {
                 for ($i = 0; $i -lt 15; $i++) { Send-Keys -Keys '^=' -DelayMs 90 }
                 Start-Sleep -Seconds 1
                 Save-Screenshot -Process $process -Path ((Join-Path $RunsDir ("{0}-{1}-one.png" -f $Name, $Run)))
-                Send-Keys -Keys '^t' -DelayMs 900
-                Open-Path -ExePath $runInfo.Exe -Path $Photos10k
-                Start-Sleep -Seconds 1
-                Click-App -Process $process -FractionX 0.6 -FractionY 0.7
-                for ($i = 0; $i -lt 15; $i++) { Send-Keys -Keys '^=' -DelayMs 90 }
-                Start-Sleep -Seconds 1
-                Save-Screenshot -Process $process -Path ((Join-Path $RunsDir ("{0}-{1}-two.png" -f $Name, $Run)))
                 $scrolled = 0
+                $opened = $false
+                $scrolledOther = 0
                 $switched = $false
-                $switchSeconds = 0.0
-                while ($watch.Elapsed.TotalSeconds -lt 75 -and -not $process.HasExited) {
+                $switchPrivate = 0.0
+                while ($watch.Elapsed.TotalSeconds -lt 95 -and -not $process.HasExited) {
                     $sample = Get-Sample -Process $process -Seconds $watch.Elapsed.TotalSeconds
                     $samples.Add($sample)
-                    if ($watch.Elapsed.TotalSeconds -gt 8 -and $scrolled -lt 1600) {
-                        Scroll-App -Process $process -Notches 20 -DelayMs 3
-                        $scrolled += 20
-                    } elseif (-not $switched -and $watch.Elapsed.TotalSeconds -gt 30) {
-                        # Back to the first tab: the second one should keep one screen.
-                        Click-App -Process $process -FractionX 0.25 -FractionY 0.6
-                        Send-Keys -Keys '^+{TAB}' -DelayMs 400
-                        Click-App -Process $process -FractionX 0.6 -FractionY 0.7
-                        $switched = $true
-                        $switchSeconds = $watch.Elapsed.TotalSeconds
-                        Write-Output ("  switched back at {0:N1} s, private {1:N1} MB" -f $switchSeconds, $sample.private_mb)
+                    $elapsed = $watch.Elapsed.TotalSeconds
+                    if (-not $opened) {
+                        # First tab: scroll the album.
+                        if ($elapsed -gt 8 -and $scrolled -lt 1200) {
+                            Scroll-App -Process $process -Notches 20 -DelayMs 3
+                            $scrolled += 20
+                        } elseif ($elapsed -gt 30) {
+                            Save-Screenshot -Process $process -Path ((Join-Path $RunsDir ("{0}-{1}-one-scrolled.png" -f $Name, $Run)))
+                            Send-Keys -Keys '^t' -DelayMs 900
+                            Open-Path -ExePath $runInfo.Exe -Path $Photos10k
+                            Start-Sleep -Seconds 1
+                            Click-App -Process $process -FractionX 0.6 -FractionY 0.7
+                            for ($i = 0; $i -lt 15; $i++) { Send-Keys -Keys '^=' -DelayMs 90 }
+                            Start-Sleep -Seconds 1
+                            $opened = $true
+                        }
+                    } elseif (-not $switched) {
+                        # Second tab: scroll the album too.
+                        if ($elapsed -gt 40 -and $scrolledOther -lt 1200) {
+                            Scroll-App -Process $process -Notches 20 -DelayMs 3
+                            $scrolledOther += 20
+                        } elseif ($elapsed -gt 65) {
+                            Save-Screenshot -Process $process -Path ((Join-Path $RunsDir ("{0}-{1}-two-scrolled.png" -f $Name, $Run)))
+                            # Back to the first tab: the one leaving keeps one screen.
+                            Click-App -Process $process -FractionX 0.25 -FractionY 0.6
+                            Send-Keys -Keys '^+{TAB}' -DelayMs 400
+                            Click-App -Process $process -FractionX 0.6 -FractionY 0.7
+                            $switchPrivate = $sample.private_mb
+                            $switched = $true
+                            Write-Output ("  switched back at {0:N1} s, private {1:N1} MB" -f $elapsed, $sample.private_mb)
+                        }
                     }
                     Start-Sleep -Milliseconds 900
                 }
