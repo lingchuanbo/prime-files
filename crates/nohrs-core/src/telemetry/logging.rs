@@ -318,11 +318,14 @@ struct CappedWriter<W> {
 }
 
 impl<W> CappedWriter<W> {
-    fn new(inner: W, cap: Option<u64>) -> Self {
+    /// `written` is what the day's file already holds: a process that starts again
+    /// on the same day continues that count rather than giving the file a fresh cap.
+    fn new(inner: W, cap: Option<u64>, written: u64) -> Self {
+        let day = (written > 0).then(|| time::OffsetDateTime::now_utc().date());
         Self {
             inner,
-            day: None,
-            written: 0,
+            day,
+            written,
             cap,
             warned: false,
         }
@@ -361,6 +364,14 @@ impl<W: std::io::Write> std::io::Write for CappedWriter<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
+}
+
+/// What today's file already holds, so a restarted process counts it against the
+/// day's cap instead of starting from zero (R4 of the memory review).
+fn current_log_file_size(directory: &Path) -> u64 {
+    current_log_file_name()
+        .and_then(|name| std::fs::metadata(directory.join(name)).ok())
+        .map_or(0, |metadata| metadata.len())
 }
 
 /// The stderr filter: `RUST_LOG` if set, `info` otherwise.
@@ -410,7 +421,11 @@ where
         )
     });
     let appender = OwnerOnly::wrap(appender, directory.clone());
-    let appender = CappedWriter::new(appender, config.max_file_bytes);
+    let appender = CappedWriter::new(
+        appender,
+        config.max_file_bytes,
+        current_log_file_size(directory),
+    );
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
     let filter = EnvFilter::try_new(&config.filter)
@@ -681,7 +696,7 @@ mod tests {
 
     #[test]
     fn the_writer_stops_at_its_size_cap_and_says_so_once() {
-        let mut writer = CappedWriter::new(Vec::new(), Some(10));
+        let mut writer = CappedWriter::new(Vec::new(), Some(10), 0);
         std::io::Write::write_all(&mut writer, b"0123456789abc").unwrap();
         assert_eq!(writer.inner.len(), 10, "only the room left is written");
         // Everything past the cap is dropped without an error: a short write would
@@ -692,8 +707,28 @@ mod tests {
     }
 
     #[test]
+    fn a_restarted_process_counts_what_the_day_already_wrote() {
+        let mut writer = CappedWriter::new(Vec::new(), Some(10), 8);
+        std::io::Write::write_all(&mut writer, b"abc").unwrap();
+        assert_eq!(writer.inner, b"ab", "only the room left in the day's cap");
+    }
+
+    #[test]
+    fn the_day_file_size_is_read_from_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = current_log_file_name().expect("today has a name");
+        assert!(is_log_file_name(&name), "{name} should be a log file name");
+        std::fs::write(directory.path().join(&name), vec![b'x'; 12]).unwrap();
+        assert_eq!(current_log_file_size(directory.path()), 12);
+        assert_eq!(
+            current_log_file_size(&directory.path().join("not-there")),
+            0
+        );
+    }
+
+    #[test]
     fn a_log_without_a_cap_keeps_writing() {
-        let mut writer = CappedWriter::new(Vec::new(), None);
+        let mut writer = CappedWriter::new(Vec::new(), None, 0);
         std::io::Write::write_all(&mut writer, b"anything").unwrap();
         assert_eq!(writer.inner, b"anything");
     }
