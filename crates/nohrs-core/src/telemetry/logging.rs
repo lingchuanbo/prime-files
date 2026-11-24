@@ -135,6 +135,12 @@ pub fn init_logging_with_file(config: &FileLogConfig) -> LogGuard {
     // the file sink would vanish with no diagnostic at all. They are emitted
     // below, once stderr is installed.
     let mut notes = Vec::new();
+    // R3 of the memory review: the history is trimmed whether or not this run
+    // writes a log file, otherwise a user with the runtime log off never gets rid
+    // of it. A missing directory is skipped, never created just to be cleaned.
+    if let Some(max_total) = config.max_total_bytes {
+        trim_log_directory(&config.directory, max_total);
+    }
     let (file_layer, guard) = match config.enabled {
         false => (None, None),
         true => match open_file_layer(config) {
@@ -378,9 +384,6 @@ where
     let directory = &config.directory;
     create_log_dir(directory)
         .map_err(|error| format!("could not prepare {}: {error}", directory.display()))?;
-    if let Some(max_total) = config.max_total_bytes {
-        trim_log_directory(directory, max_total);
-    }
 
     let mut builder = rolling::Builder::new()
         .rotation(rolling::Rotation::DAILY)
@@ -648,6 +651,32 @@ mod tests {
         assert!(directory.path().join("nohrs.log.2026-01-02").exists());
         assert!(directory.path().join("nohrs.log.2026-01-03").exists());
         assert!(directory.path().join("someone-elses.log").exists());
+    }
+
+    #[test]
+    fn the_history_is_trimmed_even_when_the_runtime_log_is_off() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, size) in [("nohrs.log.2026-01-01", 100), ("nohrs.log.2026-01-02", 100)] {
+            std::fs::write(directory.path().join(name), vec![b'x'; size]).unwrap();
+        }
+        let _guard = init_logging_with_file(&FileLogConfig {
+            enabled: false,
+            directory: directory.path().to_path_buf(),
+            filter: "info".to_string(),
+            max_files: Some(2),
+            max_file_bytes: None,
+            max_total_bytes: Some(150),
+        });
+        assert!(!directory.path().join("nohrs.log.2026-01-01").exists());
+        assert!(directory.path().join("nohrs.log.2026-01-02").exists());
+    }
+
+    #[test]
+    fn trimming_a_directory_that_does_not_exist_creates_nothing() {
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("not-there");
+        trim_log_directory(&missing, 100);
+        assert!(!missing.exists());
     }
 
     #[test]
