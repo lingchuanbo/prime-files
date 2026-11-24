@@ -614,13 +614,24 @@ impl Thumbnails {
         };
         self.loading -= 1;
         // A stand-in that comes back empty keeps the one already on screen.
+        // Whether the answer brought an image of its own, before the fallback takes
+        // it: an empty one keeps the old image's source (see `shared_after` below).
+        let answered_with_image = answer.image.is_some();
         let image = answer.image.or_else(|| shown.clone());
         // An icon that every file of its class shares is not this path's own: it is
         // not counted, and its texture stays for the other rows. What is released is
         // the image that was held, so its source is `slot.shared`; what is added is
         // the answer's.
         let counted_before = kind == Kind::Thumbnail || (kind == Kind::Icon && !slot.shared);
-        let counted_after = kind == Kind::Thumbnail || (kind == Kind::Icon && !answer.shared);
+        // An answer with no image keeps the one already on screen, so it keeps that
+        // image's source too: a shared icon must not become this path's own just
+        // because the retry came back empty.
+        let shared_after = if answered_with_image {
+            answer.shared
+        } else {
+            slot.shared
+        };
+        let counted_after = kind == Kind::Thumbnail || (kind == Kind::Icon && !shared_after);
         let mut released = 0;
         let mut added = 0;
         if counted_before && let Some(shown) = &shown {
@@ -636,7 +647,7 @@ impl Thumbnails {
             added = image_bytes(image);
         }
         slot.settled = answer.settled && image.is_some();
-        slot.shared = answer.shared && image.is_some();
+        slot.shared = shared_after && image.is_some();
         slot.entry = image.map_or(Entry::Failed, Entry::Ready);
         if !answer.settled && slot.retries < RETRIES {
             slot.retry_at = Some(Instant::now() + retry_delay(slot.retries));
@@ -990,6 +1001,41 @@ mod tests {
                 "the class-shared icon must not count"
             );
             assert!(cache.entries["shared"][0].shared);
+        });
+    }
+
+    #[gpui::test]
+    fn an_empty_answer_keeps_a_shared_icon_shared(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut cache = Thumbnails::default();
+            let icon = image(64);
+            let mut slot = slot(Kind::Icon, 64, Entry::Ready(icon.clone()), 0);
+            slot.shared = true;
+            cache.entries.insert("txt".into(), vec![slot]);
+            // The slot asks again; the shared icon is what is on screen meanwhile.
+            cache.entries.get_mut("txt").unwrap()[0].entry = Entry::Loading {
+                task: Task::ready(()),
+                shown: Some(icon.clone()),
+            };
+            cache.loading = 1;
+
+            cache.arrived(
+                "txt",
+                Kind::Icon,
+                64,
+                Answer {
+                    image: None,
+                    settled: false,
+                    shared: false,
+                },
+                cx,
+            );
+
+            assert!(
+                cache.entries["txt"][0].shared,
+                "the fallback image is still the class icon"
+            );
+            assert_eq!(cache.ready_bytes, 0, "and it is still not this path's own");
         });
     }
 
