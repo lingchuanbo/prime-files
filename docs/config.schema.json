@@ -118,8 +118,20 @@
       "type": "object"
     },
     "Diagnostics": {
-      "description": "Diagnostics / performance-logging settings (see `docs/persistence.md` 搂5).",
+      "description": "Diagnostics / performance-logging settings (see `docs/persistence.md` 搂5).\nDiagnostics / performance-logging settings (see `docs/persistence.md` §5).",
       "properties": {
+        "log_max_file_mb": {
+          "default": 50,
+          "description": "Stop writing a day's log file after this many megabytes. The records are\ndropped, with one warning on stderr; the day's file stays as it is.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "log_max_total_mb": {
+          "default": 200,
+          "description": "At startup, delete the oldest log files until the log directory holds at\nmost this many megabytes.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "runtime_log": {
           "default": false,
           "description": "Write GUI runtime logs to files; disabled by default, requires restart.",
@@ -1025,6 +1037,8 @@
     "diagnostics": {
       "$ref": "#/$defs/Diagnostics",
       "default": {
+        "log_max_file_mb": 50,
+        "log_max_total_mb": 200,
         "runtime_log": false,
         "store": {
           "log_all_queries": false,

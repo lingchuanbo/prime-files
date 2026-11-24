@@ -88,6 +88,11 @@ backend = "auto"  # "tantivy" | "ripgrep" | "auto"
 hotkey = "Cmd+Shift+Space"
 position_remember = true
 
+[diagnostics]
+runtime_log = false       # GUI の実行ログをファイルに書く (再起動が必要)
+log_max_file_mb = 50      # 1 日ぶんのファイルはここで止める (MB)
+log_max_total_mb = 200    # 起動時にこの合計を超える古いファイルから消す (MB)
+
 [diagnostics.store]
 # パフォーマンス解析用のストア操作ログ。デフォルト全 off (本番では無音)。
 # 出力は tracing 経由 (target = "nohrs_store::sql" / "nohrs_store::redb")、RUST_LOG で絞り込み可。

@@ -126,6 +126,8 @@ expression: parsed
         },
         diagnostics: Diagnostics {
             runtime_log: false,
+            log_max_file_mb: 50,
+            log_max_total_mb: 200,
             store: DiagnosticsStore {
                 log_all_queries: false,
                 slow_query_ms: 0,

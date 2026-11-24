@@ -70,6 +70,13 @@ pub struct FileLogConfig {
     pub filter: String,
     /// How many rotated files to keep. `None` keeps everything.
     pub max_files: Option<usize>,
+    /// Stop writing a day's file after this many bytes: the records overflow, one
+    /// warning goes to stderr, and the file stays where it stopped. `None` writes
+    /// without a limit.
+    pub max_file_bytes: Option<u64>,
+    /// At startup, delete the oldest log files until the directory holds at most
+    /// this many bytes. `None` leaves the history alone.
+    pub max_total_bytes: Option<u64>,
 }
 
 impl Default for FileLogConfig {
@@ -79,6 +86,8 @@ impl Default for FileLogConfig {
             directory: paths::log_dir(),
             filter: default_file_filter(),
             max_files: Some(7),
+            max_file_bytes: None,
+            max_total_bytes: None,
         }
     }
 }
@@ -253,6 +262,101 @@ pub fn is_log_file_name(name: &str) -> bool {
         .is_some_and(|date| time::Date::parse(date, FILE_DATE_FORMAT).is_ok())
 }
 
+/// Deletes the oldest log files until the directory holds at most `max_total`
+/// bytes. `nohrs.log.<yyyy-mm-dd>` sorts by name into date order, so the oldest go
+/// first; files this appender did not write are left alone.
+fn trim_log_directory(directory: &Path, max_total: u64) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let mut files: Vec<(String, u64)> = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !is_log_file_name(&name) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_file() {
+            files.push((name, metadata.len()));
+        }
+    }
+    let mut total: u64 = files.iter().map(|(_, size)| *size).sum();
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    for (name, size) in files {
+        if total <= max_total {
+            break;
+        }
+        if std::fs::remove_file(directory.join(&name)).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+/// Stops a day's log file at a byte cap.
+///
+/// `tracing_appender` rotates by day and has no size limit, and a loop that logs on
+/// every frame filled 549 MB in one day (2026-11-15). Past the cap the records are
+/// dropped and one warning goes to stderr — through `tracing` it would loop back
+/// into this same writer. The count resets when the date changes, because that is
+/// when the appender opens a new file.
+struct CappedWriter<W> {
+    inner: W,
+    day: Option<time::Date>,
+    written: u64,
+    cap: Option<u64>,
+    warned: bool,
+}
+
+impl<W> CappedWriter<W> {
+    fn new(inner: W, cap: Option<u64>) -> Self {
+        Self {
+            inner,
+            day: None,
+            written: 0,
+            cap,
+            warned: false,
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for CappedWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let Some(cap) = self.cap else {
+            return self.inner.write(buffer);
+        };
+        let today = time::OffsetDateTime::now_utc().date();
+        if self.day != Some(today) {
+            self.day = Some(today);
+            self.written = 0;
+            self.warned = false;
+        }
+        if self.written >= cap {
+            if !self.warned {
+                self.warned = true;
+                eprintln!(
+                    "nohrs: the log file reached its {} MB limit; records are dropped until tomorrow",
+                    cap / (1024 * 1024)
+                );
+            }
+            // Reported as written: a short write would make `write_all` spin.
+            return Ok(buffer.len());
+        }
+        let room =
+            usize::try_from((cap - self.written).min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let written = self.inner.write(&buffer[..room])?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// The stderr filter: `RUST_LOG` if set, `info` otherwise.
 fn stderr_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
@@ -274,6 +378,9 @@ where
     let directory = &config.directory;
     create_log_dir(directory)
         .map_err(|error| format!("could not prepare {}: {error}", directory.display()))?;
+    if let Some(max_total) = config.max_total_bytes {
+        trim_log_directory(directory, max_total);
+    }
 
     let mut builder = rolling::Builder::new()
         .rotation(rolling::Rotation::DAILY)
@@ -300,6 +407,7 @@ where
         )
     });
     let appender = OwnerOnly::wrap(appender, directory.clone());
+    let appender = CappedWriter::new(appender, config.max_file_bytes);
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
     let filter = EnvFilter::try_new(&config.filter)
@@ -518,6 +626,48 @@ fn restrict_log_files(_directory: &Path) -> std::io::Result<()> {
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_startup_trim_deletes_the_oldest_files_until_the_total_fits() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, size) in [
+            ("nohrs.log.2026-01-01", 100),
+            ("nohrs.log.2026-01-02", 100),
+            ("nohrs.log.2026-01-03", 100),
+            // Not this appender's file: never touched.
+            ("someone-elses.log", 100),
+        ] {
+            std::fs::write(directory.path().join(name), vec![b'x'; size]).unwrap();
+        }
+
+        trim_log_directory(directory.path(), 250);
+
+        assert!(
+            !directory.path().join("nohrs.log.2026-01-01").exists(),
+            "the oldest file goes first"
+        );
+        assert!(directory.path().join("nohrs.log.2026-01-02").exists());
+        assert!(directory.path().join("nohrs.log.2026-01-03").exists());
+        assert!(directory.path().join("someone-elses.log").exists());
+    }
+
+    #[test]
+    fn the_writer_stops_at_its_size_cap_and_says_so_once() {
+        let mut writer = CappedWriter::new(Vec::new(), Some(10));
+        std::io::Write::write_all(&mut writer, b"0123456789abc").unwrap();
+        assert_eq!(writer.inner.len(), 10, "only the room left is written");
+        // Everything past the cap is dropped without an error: a short write would
+        // make `write_all` spin on a full file.
+        std::io::Write::write_all(&mut writer, b"more").unwrap();
+        assert_eq!(writer.inner.len(), 10);
+        assert!(writer.warned);
+    }
+
+    #[test]
+    fn a_log_without_a_cap_keeps_writing() {
+        let mut writer = CappedWriter::new(Vec::new(), None);
+        std::io::Write::write_all(&mut writer, b"anything").unwrap();
+        assert_eq!(writer.inner, b"anything");
+    }
 
     #[test]
     fn init_logging_is_idempotent() {
@@ -605,6 +755,8 @@ mod tests {
             directory: target.clone(),
             filter: "info".to_string(),
             max_files: Some(2),
+            max_file_bytes: None,
+            max_total_bytes: None,
         };
 
         // Built directly rather than through `init_logging_with_file`, because

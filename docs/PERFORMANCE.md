@@ -928,3 +928,31 @@ chega a ser guardada. Os ~36 MB que sobem na janela de 90 s não são do cache d
 assunto de O7. O O4 garante o teto — um diretório de 100.000 subpastas rolado até o
 fim não soma 400 MB de ícones como o plano §1.3 temia —, mas o ganho nesta janela de
 medição é abaixo do que o instrumento resolve.
+
+#### O5a: os dois ícones que faltavam
+
+`menu.svg` (o botão de recolher da barra vertical de abas) e `globe.svg` (o ícone
+provisório de um item de URL) não estavam no pacote de assets. Um asset ausente não
+é erro de compilação: o elemento SVG registra um ERROR a cada desenho, e foi assim
+que um dia rendeu 2.531.269 linhas e 549 MB. Os dois vieram do Lucide, como o resto
+do pacote e sob a mesma `LUCIDE-LICENSE.txt`, e um teste novo
+(`crates/nohrs-ui/tests/icons.rs`) varre `crates/` por `IconName::X` e por literais
+`"icons/*.svg"`, converte cada variante para o nome do arquivo como o
+gpui-component faz (`ALargeSmall` → `a-large-small`, `Redo2` → `redo-2`, com
+`GitHub` → `github.svg` de exceção) e falha listando os que não estão no pacote. O
+teste foi conferido ao contrário: tirando `globe.svg` do diretório ele falha com
+`icons/globe.svg (IconName::Globe at crates\nohrs-pages\src\quick_launch\view.rs)`.
+
+#### O5b: um teto para o log
+
+`[diagnostics] log_max_file_mb` (padrão 50) e `log_max_total_mb` (padrão 200) são
+aplicados ao sink de arquivo: passado o teto de um dia, os registros daquele dia são
+descartados e um aviso único sai no stderr (não pelo `tracing`, que voltaria a
+escrever no mesmo writer); na abertura, os arquivos mais antigos são apagados até o
+diretório caber no total. O contador reinicia quando a data muda, porque é aí que o
+appender abre o arquivo do dia seguinte. Com 50 MB, o dia 15/11 (549 MB) teria parado
+em 50 MB; e a pasta (752 MB hoje) volta a 200 MB na próxima abertura. Testes: o
+writer para no teto e reclama uma vez, um log sem teto continua escrevendo, e a
+limpeza apaga do mais antigo para o mais novo, sem tocar em arquivo que não é do
+appender. O schema, o template e `docs/config.md` têm as duas chaves; `docs/logging.md`
+diz o que elas fazem.

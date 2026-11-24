@@ -1182,13 +1182,31 @@ impl Default for Launcher {
 }
 
 /// Diagnostics / performance-logging settings (see `docs/persistence.md` 搂5).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Diagnostics / performance-logging settings (see `docs/persistence.md` §5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Diagnostics {
     /// Write GUI runtime logs to files; disabled by default, requires restart.
     pub runtime_log: bool,
+    /// Stop writing a day's log file after this many megabytes. The records are
+    /// dropped, with one warning on stderr; the day's file stays as it is.
+    pub log_max_file_mb: u64,
+    /// At startup, delete the oldest log files until the log directory holds at
+    /// most this many megabytes.
+    pub log_max_total_mb: u64,
     /// Performance logging for the persistence layer (`nohrs-store`).
     pub store: DiagnosticsStore,
+}
+
+impl Default for Diagnostics {
+    fn default() -> Self {
+        Self {
+            runtime_log: false,
+            log_max_file_mb: 50,
+            log_max_total_mb: 200,
+            store: DiagnosticsStore::default(),
+        }
+    }
 }
 
 /// Performance logging for the SQLite / redb store. All off by default, so a
@@ -1661,6 +1679,8 @@ impl Config {
              # Output via tracing (RUST_LOG), see docs/persistence.md 搂5.\n\
              [diagnostics]\n\
              runtime_log = false\n\
+             log_max_file_mb = 50   # stop writing a day's file past this many megabytes\n\
+             log_max_total_mb = 200 # at startup delete the oldest files past this total\n\
              \n\
              [diagnostics.store]\n\
              log_all_queries = false   # log every SQL query at debug\n\
@@ -2586,6 +2606,28 @@ fn read_diagnostics(
             ))),
         }
     }
+    if let Some(value) = table.get("log_max_file_mb") {
+        match value.as_integer() {
+            Some(megabytes) => {
+                diag.log_max_file_mb = u64::try_from(megabytes.clamp(1, 10_240)).unwrap_or(50)
+            }
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid diagnostics.log_max_file_mb {value}; using {}",
+                diag.log_max_file_mb
+            ))),
+        }
+    }
+    if let Some(value) = table.get("log_max_total_mb") {
+        match value.as_integer() {
+            Some(megabytes) => {
+                diag.log_max_total_mb = u64::try_from(megabytes.clamp(1, 102_400)).unwrap_or(200)
+            }
+            None => diagnostics.push(Diagnostic::warn(format!(
+                "invalid diagnostics.log_max_total_mb {value}; using {}",
+                diag.log_max_total_mb
+            ))),
+        }
+    }
     if let Some(value) = table.get("store") {
         match value.as_table() {
             Some(store) => read_diagnostics_store(store, &mut diag.store, diagnostics),
@@ -2596,7 +2638,12 @@ fn read_diagnostics(
     }
     warn_unknown_keys(
         table,
-        &["runtime_log", "store"],
+        &[
+            "runtime_log",
+            "log_max_file_mb",
+            "log_max_total_mb",
+            "store",
+        ],
         "diagnostics.",
         diagnostics,
     );
