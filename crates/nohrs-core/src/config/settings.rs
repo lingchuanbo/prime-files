@@ -1181,7 +1181,6 @@ impl Default for Launcher {
     }
 }
 
-/// Diagnostics / performance-logging settings (see `docs/persistence.md` 搂5).
 /// Diagnostics / performance-logging settings (see `docs/persistence.md` §5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]

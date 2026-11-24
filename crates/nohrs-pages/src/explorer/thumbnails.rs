@@ -603,24 +603,25 @@ impl Thumbnails {
         self.loading -= 1;
         // A stand-in that comes back empty keeps the one already on screen.
         let image = answer.image.or_else(|| shown.clone());
-        // An icon that every file of its class shares is not this path's own:
-        // it is not counted, and its texture stays for the other rows.
-        let counted = kind == Kind::Thumbnail || (kind == Kind::Icon && !answer.shared);
+        // An icon that every file of its class shares is not this path's own: it is
+        // not counted, and its texture stays for the other rows. What is released is
+        // the image that was held, so its source is `slot.shared`; what is added is
+        // the answer's.
+        let counted_before = kind == Kind::Thumbnail || (kind == Kind::Icon && !slot.shared);
+        let counted_after = kind == Kind::Thumbnail || (kind == Kind::Icon && !answer.shared);
         let mut released = 0;
         let mut added = 0;
-        if counted {
-            if let Some(shown) = &shown {
-                released = image_bytes(shown);
-                if image
-                    .as_ref()
-                    .is_none_or(|image| !Arc::ptr_eq(image, shown))
-                {
-                    cx.drop_image(shown.clone(), None);
-                }
+        if counted_before && let Some(shown) = &shown {
+            released = image_bytes(shown);
+            if image
+                .as_ref()
+                .is_none_or(|image| !Arc::ptr_eq(image, shown))
+            {
+                cx.drop_image(shown.clone(), None);
             }
-            if let Some(image) = &image {
-                added = image_bytes(image);
-            }
+        }
+        if counted_after && let Some(image) = &image {
+            added = image_bytes(image);
         }
         slot.settled = answer.settled && image.is_some();
         slot.shared = answer.shared && image.is_some();

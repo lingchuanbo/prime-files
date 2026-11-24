@@ -118,7 +118,7 @@
       "type": "object"
     },
     "Diagnostics": {
-      "description": "Diagnostics / performance-logging settings (see `docs/persistence.md` 搂5).\nDiagnostics / performance-logging settings (see `docs/persistence.md` §5).",
+      "description": "Diagnostics / performance-logging settings (see `docs/persistence.md` §5).",
       "properties": {
         "log_max_file_mb": {
           "default": 50,
