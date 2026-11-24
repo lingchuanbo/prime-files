@@ -84,6 +84,10 @@ struct Editor {
     name: Entity<InputState>,
     path: Entity<InputState>,
     args: Entity<InputState>,
+    /// The folder the program starts in; empty keeps the executable's own.
+    cwd: Entity<InputState>,
+    /// A custom icon path, `.ico`/`.png`; empty uses the program's own.
+    icon: Entity<InputState>,
     /// "Run as administrator", toggled by the checkbox and read on confirm.
     admin: Rc<Cell<bool>>,
     /// A `group` item only offers its name here; everything else is edited in
@@ -340,8 +344,28 @@ impl QuickLaunchView {
             return;
         };
         let name = input_with(window, cx, &item.name);
-        let path = input_with(window, cx, item.path.as_deref().unwrap_or_default());
+        // The placeholders are example values: the launcher expands `%VAR%`
+        // and `{luma}`/`{config}`/`{portable}` in the path, the working folder
+        // and the icon (§7), so a path written with them is not a surprise.
+        let path = input_with_placeholder(
+            window,
+            cx,
+            item.path.as_deref().unwrap_or_default(),
+            "%ProgramFiles%\\App.exe",
+        );
         let args = input_with(window, cx, item.args.as_deref().unwrap_or_default());
+        let cwd = input_with_placeholder(
+            window,
+            cx,
+            item.cwd.as_deref().unwrap_or_default(),
+            "%USERPROFILE%",
+        );
+        let icon = input_with_placeholder(
+            window,
+            cx,
+            item.icon.as_deref().unwrap_or_default(),
+            "%ProgramFiles%\\App\\app.ico",
+        );
         let group_item = item.action_kind() == ActionKind::Group;
         self.editor = Some(Editor {
             group,
@@ -349,6 +373,8 @@ impl QuickLaunchView {
             name: name.clone(),
             path,
             args,
+            cwd,
+            icon,
             admin: Rc::new(Cell::new(item.admin)),
             group_item,
         });
@@ -373,8 +399,20 @@ impl QuickLaunchView {
         }
         let path = editor.path.read(cx).value().to_string();
         let args = editor.args.read(cx).value().to_string();
+        let cwd = editor.cwd.read(cx).value().to_string();
+        let icon = editor.icon.read(cx).value().to_string();
         let admin = editor.admin.get();
-        super::edit_item(cx, editor.group, editor.slot, &name, &path, &args, admin);
+        super::edit_item_fields(
+            cx,
+            editor.group,
+            editor.slot,
+            &name,
+            &path,
+            &args,
+            Some(&cwd),
+            Some(&icon),
+            admin,
+        );
         cx.notify();
     }
 
@@ -1608,6 +1646,8 @@ fn empty_cell(
 ) -> AnyElement {
     let handle = entity.clone();
     let folder_handle = entity.clone();
+    let drop_handle = entity.clone();
+    let item_handle = entity.clone();
     div()
         .id(("quick-launch-empty", slot))
         .w(px(cell_width))
@@ -1618,6 +1658,34 @@ fn empty_cell(
         .cursor_pointer()
         .when(show_cells, |this| {
             this.hover(|style| style.bg(rgb(theme::bg_hover())))
+        })
+        // A file or folder dropped on the empty cell lands in it, instead of
+        // in the group's first free slot as the container's own handler does.
+        .drag_over::<gpui::ExternalPaths>(|style, _, _, _| {
+            style
+                .bg(rgb(theme::accent_subtle()))
+                .border_1()
+                .border_color(rgb(theme::accent()))
+        })
+        .on_drop(move |paths: &gpui::ExternalPaths, _window, cx| {
+            let paths = paths.paths().to_vec();
+            drop_handle
+                .update(cx, |view, cx| view.drop_paths(group, slot, &paths, cx))
+                .log_err();
+        })
+        // An item dragged onto an empty cell moves there (it swaps when the
+        // cell already holds one; `swap_slots` moves it when it does not).
+        .drag_over::<ItemDrag>(|style, _, _, _| {
+            style
+                .bg(rgb(theme::accent_subtle()))
+                .border_1()
+                .border_color(rgb(theme::accent()))
+        })
+        .on_drop(move |drag: &ItemDrag, _window, cx| {
+            let drag = drag.clone();
+            item_handle
+                .update(cx, |view, cx| view.drop_item(&drag, group, slot, cx))
+                .log_err();
         })
         .context_menu(move |menu, _window, cx| {
             let handle = handle.clone();
@@ -2065,7 +2133,31 @@ fn field(label: &'static str, input: &Entity<InputState>) -> AnyElement {
         .into_any_element()
 }
 
-/// The editor card: the four fields of §12.3 and its two buttons.
+/// One labelled line of the editor: the label in a fixed column, the field
+/// beside it, the way Windows' shortcut properties dialog lays its fields out.
+fn labeled_field(label: &'static str, input: &Entity<InputState>) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .w(px(96.0))
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(rgb(theme::muted()))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(Input::new(input)),
+        )
+        .into_any_element()
+}
+
+/// The editor card: the fields of §12.3 and its two buttons.
 ///
 /// It is drawn inside the window instead of through `window.open_dialog` because
 /// "浏览…" has to put the picked path into an input field after an async platform
@@ -2078,6 +2170,8 @@ fn editor_overlay(
     let name = editor.name.clone();
     let path = editor.path.clone();
     let args = editor.args.clone();
+    let cwd = editor.cwd.clone();
+    let icon = editor.icon.clone();
     let admin = editor.admin.clone();
     let admin_value = admin.get();
     let browse = entity.clone();
@@ -2104,17 +2198,25 @@ fn editor_overlay(
             .flex()
             .flex_col()
             .gap_2()
-            .child(field(nohrs_core::t!("Nome"), &name))
+            .child(labeled_field(nohrs_core::t!("Nome"), &name))
             .child(
                 div()
                     .flex()
-                    .items_end()
+                    .items_center()
                     .gap_2()
+                    .child(
+                        div()
+                            .w(px(96.0))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(rgb(theme::muted()))
+                            .child(nohrs_core::t!("Caminho")),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .child(field(nohrs_core::t!("Caminho"), &path)),
+                            .child(Input::new(&path)),
                     )
                     .child(
                         Button::new("quick-launch-browse")
@@ -2128,15 +2230,35 @@ fn editor_overlay(
                             }),
                     ),
             )
-            .child(field(nohrs_core::t!("Argumentos"), &args))
+            .child(labeled_field(nohrs_core::t!("Argumentos"), &args))
+            .child(labeled_field(nohrs_core::t!("Pasta de trabalho"), &cwd))
+            .child(labeled_field(nohrs_core::t!("Ícone"), &icon))
             .child(
-                Checkbox::new("quick-launch-admin")
-                    .label(nohrs_core::t!("Executar como administrador"))
-                    .checked(admin_value)
-                    .on_click(move |checked, _window, cx| {
-                        admin.set(*checked);
-                        cx.refresh_windows();
-                    }),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(96.0)).flex_shrink_0())
+                    .child(
+                        Checkbox::new("quick-launch-admin")
+                            .label(nohrs_core::t!("Executar como administrador"))
+                            .checked(admin_value)
+                            .on_click(move |checked, _window, cx| {
+                                admin.set(*checked);
+                                cx.refresh_windows();
+                            }),
+                    ),
+            )
+            .child(
+                // The variables the launcher expands (§7), said where they are
+                // typed rather than only in the manual.
+                div()
+                    .pl(px(104.0))
+                    .text_xs()
+                    .text_color(rgb(theme::muted()))
+                    .child(
+                        "路径、参数、工作文件夹和图标支持 %环境变量%（如 %ProgramFiles%）以及 {luma}、{config}、{portable}",
+                    ),
             )
     };
     Some(
@@ -2526,7 +2648,21 @@ fn input_with(
     cx: &mut Context<QuickLaunchView>,
     text: &str,
 ) -> Entity<InputState> {
-    cx.new(|cx| InputState::new(window, cx).default_value(text.to_string()))
+    input_with_placeholder(window, cx, text, "")
+}
+
+/// A field of the editor with the example `placeholder` it shows while empty.
+fn input_with_placeholder(
+    window: &mut Window,
+    cx: &mut Context<QuickLaunchView>,
+    text: &str,
+    placeholder: &str,
+) -> Entity<InputState> {
+    let placeholder = placeholder.to_string();
+    cx.new(|cx| {
+        let input = InputState::new(window, cx).placeholder(placeholder);
+        input.default_value(text.to_string())
+    })
 }
 
 #[cfg(test)]

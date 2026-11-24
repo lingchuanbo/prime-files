@@ -2361,6 +2361,11 @@ pub(crate) fn update_item(cx: &mut App, group: usize, slot: u32, edit: &ItemEdit
 
 /// Applies the four fields the window's edit dialog offers (§12.3): name, path,
 /// arguments and "run as administrator".
+/// Edits an item from a form that only carries name, path, arguments and the
+/// administrator flag; the working folder and icon keep what the item has.
+///
+/// Kept for the tests, which act on an item without the window's dialog.
+#[cfg(test)]
 pub(crate) fn edit_item(
     cx: &mut App,
     group: usize,
@@ -2370,11 +2375,28 @@ pub(crate) fn edit_item(
     args: &str,
     admin: bool,
 ) -> bool {
+    edit_item_fields(cx, group, slot, name, path, args, None, None, admin)
+}
+
+/// Edits every field the window's dialog offers. `cwd`/`icon` of `None` keep
+/// what the item already has; `Some("")` clears it, which is what the dialog
+/// sends when the user emptied the field.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn edit_item_fields(
+    cx: &mut App,
+    group: usize,
+    slot: u32,
+    name: &str,
+    path: &str,
+    args: &str,
+    cwd: Option<&str>,
+    icon: Option<&str>,
+    admin: bool,
+) -> bool {
     if !group_editable(cx, group) {
         return false;
     }
-    // The dialog does not offer the other fields, so they keep what the item
-    // already has; a missing item is refused by `update_item` too.
+    // A missing item is refused by `update_item` too.
     let Some(item) = item_at(cx, group, slot) else {
         return false;
     };
@@ -2389,9 +2411,13 @@ pub(crate) fn edit_item(
             name: name.to_string(),
             path: path.to_string(),
             args: args.to_string(),
-            cwd: item.cwd.unwrap_or_default(),
+            cwd: cwd
+                .map(str::to_string)
+                .unwrap_or_else(|| item.cwd.clone().unwrap_or_default()),
             admin,
-            icon: item.icon.unwrap_or_default(),
+            icon: icon
+                .map(str::to_string)
+                .unwrap_or_else(|| item.icon.clone().unwrap_or_default()),
             tags: item.tags,
             command: None,
             group_items: None,
@@ -8473,6 +8499,87 @@ mod tests {
             assert_eq!(
                 group_notice(cx, 0),
                 Some(nohrs_core::t!("Indisponível no modo residente"))
+            );
+        });
+    }
+
+    /// The edit dialog's working folder and icon are written, and emptying a
+    /// field clears it; the four-field form leaves both as they were.
+    #[gpui::test]
+    fn an_edited_item_takes_and_clears_the_working_folder_and_icon(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd_text = directory.path().to_string_lossy().to_string();
+        let program = "C:\\Windows\\System32\\cmd.exe".to_string();
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert!(edit_item_fields(
+                cx,
+                0,
+                0,
+                "A",
+                &program,
+                "",
+                Some(&cwd_text),
+                Some("C:\\icone.png"),
+                false
+            ));
+            let item = item_at(cx, 0, 0).expect("the item");
+            assert_eq!(item.cwd.as_deref(), Some(cwd_text.as_str()));
+            assert_eq!(item.icon.as_deref(), Some("C:\\icone.png"));
+
+            // The four-field form has no fields for them, so they keep their values.
+            assert!(edit_item(cx, 0, 0, "B", &program, "", false));
+            let item = item_at(cx, 0, 0).expect("the item");
+            assert_eq!(item.name, "B");
+            assert_eq!(item.cwd.as_deref(), Some(cwd_text.as_str()));
+            assert_eq!(item.icon.as_deref(), Some("C:\\icone.png"));
+
+            // Emptying them clears them.
+            assert!(edit_item_fields(cx, 0, 0, "B", &program, "", Some(""), Some(""), false));
+            let item = item_at(cx, 0, 0).expect("the item");
+            assert_eq!(item.cwd, None);
+            assert_eq!(item.icon, None);
+        });
+    }
+
+    /// A path written with a system variable is stored verbatim (not made
+    /// absolute), and the launcher's expander resolves it.
+    #[gpui::test]
+    fn an_item_path_may_name_a_system_environment_variable(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(1)]);
+            assert!(edit_item(cx, 0, 0, "Temp", "%TEMP%", "", false));
+            let item = item_at(cx, 0, 0).expect("the item");
+            assert_eq!(item.path.as_deref(), Some("%TEMP%"));
+            // The launcher expands it where it runs (§7).
+            let context = ExpandContext::current();
+            let expanded =
+                nohrs_services::launch::expand("%TEMP%", &context).expect("the variable expands");
+            assert_eq!(expanded, std::env::temp_dir());
+        });
+    }
+
+    /// A drop on an empty cell moves the item there instead of swapping it with
+    /// nothing (the tile's own drop handler swaps only when the cell is taken).
+    #[gpui::test]
+    fn an_item_dropped_on_an_empty_cell_moves_there(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            install(cx, vec![group_of(2)]);
+            // Slot 2 is free, so the move is a plain retag.
+            assert!(swap_slots(cx, 0, 0, 2));
+            assert_eq!(item_at(cx, 0, 0).map(|item| item.slot), None);
+            assert_eq!(item_at(cx, 0, 2).map(|item| item.slot), Some(2));
+            // A taken cell still swaps.
+            assert!(swap_slots(cx, 0, 2, 1));
+            assert_eq!(
+                item_at(cx, 0, 2).map(|item| item.name),
+                Some("Item 1".to_string())
+            );
+            assert_eq!(
+                item_at(cx, 0, 1).map(|item| item.name),
+                Some("Item 0".to_string())
             );
         });
     }
