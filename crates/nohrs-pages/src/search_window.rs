@@ -215,9 +215,8 @@ impl crate::drawn_menu::MenuHost for SearchWindow {
     }
 
     fn set_menu(&mut self, menu: Option<crate::drawn_menu::Menu>) {
-        if menu.is_none() {
-            self.menu_index = None;
-        }
+        // The result the menu acts on outlives the menu: it is closed before
+        // `choose` runs, and that is where the index is read.
         self.menu = menu;
     }
 

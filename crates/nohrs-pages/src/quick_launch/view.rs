@@ -114,9 +114,9 @@ impl crate::drawn_menu::MenuHost for QuickLaunchView {
     }
 
     fn set_menu(&mut self, menu: Option<crate::drawn_menu::Menu>) {
-        if menu.is_none() {
-            self.menu_scope = None;
-        }
+        // What the menu was opened for outlives the menu itself: the menu is
+        // closed before `choose` runs, and reading the scope there is the only
+        // way a row of a group or an item can know which one it acts on.
         self.menu = menu;
     }
 
@@ -324,6 +324,21 @@ impl QuickLaunchView {
                 cx.notify();
             }
             cx.stop_propagation();
+            return;
+        }
+        // The group name being typed in the bar and the item editor's fields
+        // own the keys while they are open. Letting them fall through to the
+        // filter as well is what made a new group look like it could not be
+        // typed into: every character went to the filter and the field stayed
+        // empty. Returning without stopping propagation leaves the key to the
+        // focused field.
+        if self.renaming.is_some() || self.editor.is_some() {
+            if key == "escape" {
+                self.renaming = None;
+                self.editor = None;
+                cx.notify();
+                cx.stop_propagation();
+            }
             return;
         }
         let (view, cell_size) = super::state(cx)
@@ -613,6 +628,11 @@ impl QuickLaunchView {
             input,
             _subscription: subscription,
         });
+        // The menu that asked for this was closed in the same update, and the
+        // field mounts on the next frame: focus it now so a key already on its
+        // way is not read by the window's own filter, and again after the frame
+        // in case this focus was dropped together with the menu.
+        focus.update(cx, |state, cx| state.focus(window, cx));
         window.defer(cx, move |window, cx| {
             focus.update(cx, |state, cx| state.focus(window, cx));
         });

@@ -90,7 +90,9 @@ pub(crate) trait MenuHost: Render + Sized + 'static {
     fn set_menu(&mut self, menu: Option<Menu>);
 
     /// Runs the action the row with `id` stands for. The menu has been closed
-    /// by the time this is called.
+    /// by the time this is called; what it was opened for is the view's to keep
+    /// until here, since a row carries only its id (a group index or a slot
+    /// would not fit one menu row).
     fn choose(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>);
 }
 
