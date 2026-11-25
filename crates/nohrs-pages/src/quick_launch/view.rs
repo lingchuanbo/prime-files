@@ -19,17 +19,17 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FocusHandle, ImageSource, IntoElement, KeyDownEvent, Render, RenderImage, SharedString,
-    Subscription, Task, UniformListScrollHandle, WeakEntity, Window, WindowControlArea, div,
-    ease_out_quint, img, px, rgb, uniform_list,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, ClipboardItem, Context, Div,
+    Entity, FocusHandle, ImageSource, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    Pixels, Point, Render, RenderImage, SharedString, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window, WindowControlArea, div, ease_out_quint, img, px, rgb, uniform_list,
 };
 use gpui_component::{
     Icon, IconName, WindowExt as _,
     button::{Button, ButtonRounded, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::{Input, InputEvent, InputState},
-    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
+
 };
 use nohrs_core::config::quick_launch::{ActionKind, Item, MAX_SLOT, View};
 use nohrs_core::telemetry::LogErr;
@@ -51,6 +51,15 @@ const LIST_ROW_HEIGHT: f32 = 44.0;
 
 /// Height of the footer that carries a failure (§8.5).
 const FOOTER_HEIGHT: f32 = 28.0;
+
+/// Geometry of the drawn menu: one row, the rule between groups of rows, the
+/// panel's padding, and the gap kept from the window's edges.
+const MENU_ROW: f32 = 30.0;
+const MENU_RULE: f32 = 9.0;
+const MENU_PADDING: f32 = 4.0;
+const MENU_MARGIN: f32 = 6.0;
+const MENU_MIN_WIDTH: f32 = 200.0;
+const MENU_MAX_WIDTH: f32 = 380.0;
 
 /// The quick-launch window's root view.
 pub(crate) struct QuickLaunchView {
@@ -74,7 +83,87 @@ pub(crate) struct QuickLaunchView {
     editor: Option<Editor>,
     /// The group whose name is being edited in place, if any (§12.3).
     renaming: Option<Rename>,
+    /// The menu a right click (or the title bar's "⋯") opened, if any.
+    ///
+    /// Drawn here rather than with `gpui_component`'s popup menu: in this
+    /// window that menu's shadow is composited as a near-black cloud in the
+    /// light theme (the same menu is drawn correctly in the main window), and a
+    /// menu of three rows is not worth a rendering fix in the dependency.
+    menu: Option<OpenMenu>,
     _activation: Subscription,
+}
+
+/// One row of the drawn menu.
+#[derive(Clone)]
+struct MenuRow {
+    label: SharedString,
+    /// A disabled row is shown greyed and does nothing when clicked.
+    disabled: bool,
+    /// A rule above this row, separating it from the entries before it.
+    rule: bool,
+    /// The rows of the submenu this row opens; empty for an entry.
+    children: Vec<MenuRow>,
+    /// What an entry runs when clicked; `None` for a row that opens a submenu.
+    command: Option<Command>,
+}
+
+impl MenuRow {
+    fn command(label: impl Into<SharedString>, enabled: bool, command: Command) -> Self {
+        Self {
+            label: label.into(),
+            disabled: !enabled,
+            rule: false,
+            children: Vec::new(),
+            command: Some(command),
+        }
+    }
+
+    fn submenu(label: impl Into<SharedString>, children: Vec<MenuRow>) -> Self {
+        Self {
+            label: label.into(),
+            disabled: false,
+            rule: false,
+            children,
+            command: None,
+        }
+    }
+
+    fn rule() -> Self {
+        Self {
+            label: SharedString::default(),
+            disabled: true,
+            rule: true,
+            children: Vec::new(),
+            command: None,
+        }
+    }
+}
+
+/// What a menu row runs (§12.2, §12.3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Command {
+    NewGroup,
+    RenameGroup(usize),
+    DeleteGroup(usize),
+    NewItem { group: usize, slot: u32 },
+    NewItemFolder { group: usize, slot: u32 },
+    RunAsAdmin(u32),
+    Reveal(u32),
+    Edit { group: usize, slot: u32 },
+    CopyPath(u32),
+    MoveTo { group: usize, slot: u32, target: usize },
+    DeleteItem { group: usize, slot: u32 },
+    ShowWindow,
+    Quit,
+}
+
+/// The drawn menu: where it opened and what it holds.
+#[derive(Clone)]
+struct OpenMenu {
+    position: Point<Pixels>,
+    rows: Vec<MenuRow>,
+    /// The rows whose submenu is open, outermost first.
+    open: Vec<usize>,
 }
 
 /// The four fields the edit dialog offers (§12.3).
@@ -169,12 +258,18 @@ impl QuickLaunchView {
             ever_hovered: HashSet::new(),
             editor: None,
             renaming: None,
+            menu: None,
             _activation: subscription,
         }
     }
 
     /// Schedules the hide that follows losing the focus (§11).
     fn activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A menu does not survive the window losing the focus: its rows act on
+        // the state behind it, which the user is no longer looking at.
+        if !window.is_window_active() && self.menu.is_some() {
+            self.close_menu(cx);
+        }
         let Some(quick_launch) = super::state(cx) else {
             return;
         };
@@ -210,6 +305,15 @@ impl QuickLaunchView {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.to_lowercase();
         let modifiers = event.keystroke.modifiers;
+        // The drawn menu takes the keyboard while it is open: Esc closes it and
+        // nothing else behind it runs (§12.2).
+        if self.menu.is_some() {
+            if key == "escape" {
+                self.close_menu(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         // A command waiting for its first-run confirmation owns the window: a
         // key must not start what is behind the dialog, and Esc dismisses it
         // rather than hiding the window (§17.2 D.3).
@@ -708,6 +812,134 @@ impl QuickLaunchView {
         super::move_item_to_group(cx, drag.group, drag.slot, group);
         cx.notify();
     }
+
+    /// Opens `rows` at `position`, over the window (§12.2).
+    fn open_menu(&mut self, position: Point<Pixels>, rows: Vec<MenuRow>, cx: &mut Context<Self>) {
+        if rows.is_empty() {
+            return;
+        }
+        self.menu = Some(OpenMenu {
+            position,
+            rows,
+            open: Vec::new(),
+        });
+        cx.notify();
+    }
+
+    /// Opens the submenu of the row at `level`/`index`, closing any level that
+    /// was open below it.
+    fn open_submenu(&mut self, level: usize, index: usize, cx: &mut Context<Self>) {
+        let Some(menu) = self.menu.as_mut() else {
+            return;
+        };
+        if menu.open.get(level).copied() == Some(index) {
+            return;
+        }
+        menu.open.truncate(level);
+        menu.open.push(index);
+        cx.notify();
+    }
+
+    /// Closes the levels of `level` and below, if any are open.
+    fn close_submenus(&mut self, level: usize, cx: &mut Context<Self>) {
+        let Some(menu) = self.menu.as_mut() else {
+            return;
+        };
+        if menu.open.len() <= level {
+            return;
+        }
+        menu.open.truncate(level);
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Runs what a menu row asked for, closing the menu first (§12.2, §12.3).
+    fn run_menu_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        match command {
+            Command::NewGroup => self.add_group(window, cx),
+            Command::RenameGroup(index) => self.start_rename(index, window, cx),
+            Command::DeleteGroup(index) => self.delete_group(index, window, cx),
+            Command::NewItem { group, slot } => {
+                self.new_item_at(group, slot, super::PathWant::Either, window, cx);
+            }
+            Command::NewItemFolder { group, slot } => {
+                self.new_item_at(group, slot, super::PathWant::Folders, window, cx);
+            }
+            Command::RunAsAdmin(slot) => self.clicked(slot, super::ClickKind::Admin, cx),
+            Command::Reveal(slot) => {
+                super::reveal_item(cx, slot);
+                super::hide(cx);
+            }
+            Command::Edit { group, slot } => self.edit_item(group, slot, window, cx),
+            Command::CopyPath(slot) => {
+                if let Some(text) = super::copy_text(cx, slot) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            Command::MoveTo {
+                group,
+                slot,
+                target,
+            } => self.drop_item_on_group(&ItemDrag { group, slot }, target, cx),
+            Command::DeleteItem { group, slot } => self.delete_item(group, slot, cx),
+            Command::ShowWindow => crate::tray::request_show(),
+            Command::Quit => crate::tray::request_quit(),
+        }
+        cx.notify();
+    }
+
+    /// Draws the open menu, if any, over the window.
+    fn render_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.menu.clone()?;
+        let viewport = window.viewport_size();
+        let (viewport_width, viewport_height) =
+            (f32::from(viewport.width), f32::from(viewport.height));
+        let mut layers = vec![menu_backdrop(cx, viewport_width, viewport_height)];
+        let mut rows = menu.rows.as_slice();
+        let mut x = f32::from(menu.position.x).max(MENU_MARGIN);
+        let mut y = f32::from(menu.position.y).max(MENU_MARGIN);
+        let mut level = 0;
+        loop {
+            let width = menu_width(rows);
+            let height = menu_height(rows);
+            let panel_x = x.min((viewport_width - width - MENU_MARGIN).max(MENU_MARGIN));
+            let panel_y = y.min((viewport_height - height - MENU_MARGIN).max(MENU_MARGIN));
+            let open = menu.open.get(level).copied();
+            layers.push(menu_panel(
+                level, rows, open, panel_x, panel_y, width, height, cx,
+            ));
+            let Some(open) = open else {
+                break;
+            };
+            let Some(children) = rows.get(open).map(|row| row.children.as_slice()) else {
+                break;
+            };
+            if children.is_empty() {
+                break;
+            }
+            // The submenu opens beside the row that holds it, kept on screen.
+            x = panel_x + width - 2.0;
+            y = panel_y + MENU_PADDING + menu_offset(rows, open);
+            rows = children;
+            level += 1;
+        }
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(viewport_width))
+                .h(px(viewport_height))
+                .children(layers)
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for QuickLaunchView {
@@ -1001,6 +1233,11 @@ impl Render for QuickLaunchView {
             // happens next.
             root = root.child(already_running_overlay(&prompt));
         }
+        // The menu goes over everything else: it is what a click on a row is
+        // meant to reach, and its backdrop must cover the window.
+        if let Some(menu) = self.render_menu(window, cx) {
+            root = root.child(menu);
+        }
         root
     }
 }
@@ -1047,22 +1284,25 @@ impl QuickLaunchView {
                             .icon(Icon::new(IconName::Ellipsis).size_4())
                             .rounded(ButtonRounded::Large)
                             .with_variant(ButtonVariant::Ghost)
-                            .dropdown_menu(|menu, _window, _cx| {
-                                menu.min_w(px(220.0))
-                                    .item(
-                                        PopupMenuItem::new(nohrs_core::t!("Mostrar janela"))
-                                            .on_click(|_, _window, _cx| {
-                                                crate::tray::request_show();
-                                            }),
-                                    )
-                                    .separator()
-                                    .item(
-                                        PopupMenuItem::new(nohrs_core::t!("Sair do LumaFiles"))
-                                            .on_click(|_, _window, _cx| {
-                                                crate::tray::request_quit();
-                                            }),
-                                    )
-                            }),
+                            .on_click(cx.listener(|view, event: &ClickEvent, _window, cx| {
+                                view.open_menu(
+                                    event.position(),
+                                    vec![
+                                        MenuRow::command(
+                                            nohrs_core::t!("Mostrar janela"),
+                                            true,
+                                            Command::ShowWindow,
+                                        ),
+                                        MenuRow::rule(),
+                                        MenuRow::command(
+                                            nohrs_core::t!("Sair do LumaFiles"),
+                                            true,
+                                            Command::Quit,
+                                        ),
+                                    ],
+                                    cx,
+                                );
+                            })),
                     ),
             )
             .into_any_element()
@@ -1372,7 +1612,6 @@ fn render_group_bar(
             continue;
         }
         let entity = cx.entity().downgrade();
-        let menu_entity = entity.clone();
         let entity_drop = entity.clone();
         bar = bar.child(
             div()
@@ -1406,38 +1645,17 @@ fn render_group_bar(
                             .log_err();
                     }
                 })
-                .context_menu(move |menu, _window, _cx| {
-                    let add = menu_entity.clone();
-                    let rename = menu_entity.clone();
-                    let delete = menu_entity.clone();
-                    menu.item(
-                        PopupMenuItem::new(nohrs_core::t!("Novo grupo"))
-                            .disabled(!editable)
-                            .on_click(move |_, window, cx| {
-                                add.update(cx, |view, cx| view.add_group(window, cx))
-                                    .log_err();
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(nohrs_core::t!("Renomear"))
-                            .disabled(!editable)
-                            .on_click(move |_, window, cx| {
-                                rename
-                                    .update(cx, |view, cx| view.start_rename(index, window, cx))
-                                    .log_err();
-                            }),
-                    )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new(nohrs_core::t!("Excluir"))
-                            .disabled(!editable || last_group)
-                            .on_click(move |_, window, cx| {
-                                delete
-                                    .update(cx, |view, cx| view.delete_group(index, window, cx))
-                                    .log_err();
-                            }),
-                    )
-                })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        view.open_menu(
+                            event.position,
+                            group_menu_rows(index, editable, last_group),
+                            cx,
+                        );
+                    }),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -1644,8 +1862,6 @@ fn empty_cell(
     show_cells: bool,
     entity: &WeakEntity<QuickLaunchView>,
 ) -> AnyElement {
-    let handle = entity.clone();
-    let folder_handle = entity.clone();
     let drop_handle = entity.clone();
     let item_handle = entity.clone();
     div()
@@ -1687,167 +1903,305 @@ fn empty_cell(
                 .update(cx, |view, cx| view.drop_item(&drag, group, slot, cx))
                 .log_err();
         })
-        .context_menu(move |menu, _window, cx| {
-            let handle = handle.clone();
-            let folder_handle = folder_handle.clone();
-            let menu = menu.item(
-                PopupMenuItem::new(nohrs_core::t!("Novo item"))
-                    .disabled(!group_editable)
-                    .on_click(move |_, window, cx| {
-                        handle
-                            .update(cx, |view, cx| {
-                                view.new_item_at(group, slot, super::PathWant::Either, window, cx)
-                            })
-                            .log_err();
-                    }),
-            );
-            // §17.2 R2: where the dialog can only pick one of the two, folders get
-            // an entry of their own.
-            if super::folder_entry_offered(cx.can_select_mixed_files_and_dirs()) {
-                menu.item(
-                    PopupMenuItem::new(nohrs_core::t!("Novo item de pasta"))
-                        .disabled(!group_editable)
-                        .on_click(move |_, window, cx| {
-                            folder_handle
-                                .update(cx, |view, cx| {
-                                    view.new_item_at(
-                                        group,
-                                        slot,
-                                        super::PathWant::Folders,
-                                        window,
-                                        cx,
-                                    )
-                                })
-                                .log_err();
-                        }),
-                )
-            } else {
-                menu
+        .on_mouse_down(MouseButton::Right, {
+            let handle = entity.clone();
+            move |event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                let mixed = cx.can_select_mixed_files_and_dirs();
+                handle
+                    .update(cx, |view, cx| {
+                        view.open_menu(
+                            event.position,
+                            cell_menu_rows(group, slot, group_editable, mixed),
+                            cx,
+                        );
+                    })
+                    .log_err();
             }
         })
         .into_any_element()
 }
 
-/// The menu of one item (§12.2, M2 rows).
+/// The backdrop that closes the menu on a click anywhere else.
+fn menu_backdrop(
+    cx: &mut Context<QuickLaunchView>,
+    width: f32,
+    height: f32,
+) -> AnyElement {
+    div()
+        .id("quick-launch-menu-backdrop")
+        .absolute()
+        .top_0()
+        .left_0()
+        .w(px(width))
+        .h(px(height))
+        .occlude()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.close_menu(cx)),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.close_menu(cx)),
+        )
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.close_menu(cx)),
+        )
+        .into_any_element()
+}
+
+/// One level of the menu. It has no shadow: the popup menu this replaced drew
+/// one that the quick-launch window composites as a near-black cloud in the
+/// light theme, and a border reads the same in both themes.
 #[allow(clippy::too_many_arguments)]
-fn item_menu(
-    menu: PopupMenu,
+fn menu_panel(
+    level: usize,
+    rows: &[MenuRow],
+    open: Option<usize>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    cx: &mut Context<QuickLaunchView>,
+) -> AnyElement {
+    div()
+        .id(("quick-launch-menu", level))
+        .absolute()
+        .left(px(x))
+        .top(px(y))
+        .w(px(width))
+        .h(px(height))
+        .p(px(MENU_PADDING))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(theme::border()))
+        .bg(rgb(theme::bg_secondary()))
+        .occlude()
+        .children(
+            rows.iter()
+                .enumerate()
+                .map(|(index, row)| menu_row_element(row, level, index, open == Some(index), cx)),
+        )
+        .into_any_element()
+}
+
+/// One row of a menu level.
+fn menu_row_element(
+    row: &MenuRow,
+    level: usize,
+    index: usize,
+    open: bool,
+    cx: &mut Context<QuickLaunchView>,
+) -> AnyElement {
+    if row.rule {
+        return div()
+            .h(px(MENU_RULE))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .px(px(6.0))
+            .child(div().w_full().h(px(1.0)).bg(rgb(theme::border())))
+            .into_any_element();
+    }
+    let text_color = if row.disabled {
+        theme::muted()
+    } else {
+        theme::fg()
+    };
+    let mut element = div()
+        .id(("quick-launch-menu-row", level * 1000 + index))
+        .h(px(MENU_ROW))
+        .flex_shrink_0()
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded(px(5.0))
+        .text_sm()
+        .text_color(rgb(text_color));
+    if row.children.is_empty() {
+        if let Some(command) = row.command.filter(|_| !row.disabled) {
+            element = element
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::bg_hover())))
+                .on_hover(cx.listener(move |view, hovered, _window, cx| {
+                    if *hovered {
+                        view.close_submenus(level, cx);
+                    }
+                }))
+                .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                    view.run_menu_command(command, window, cx);
+                }));
+        }
+        element.child(row.label.clone()).into_any_element()
+    } else {
+        element
+            .when(open, |this| this.bg(rgb(theme::bg_hover())))
+            .cursor_pointer()
+            .on_hover(cx.listener(move |view, hovered, _window, cx| {
+                if *hovered {
+                    view.open_submenu(level, index, cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(row.label.clone()),
+            )
+            .child(Icon::new(IconName::ChevronRight).size_3())
+            .into_any_element()
+    }
+}
+
+/// The width the widest row of `rows` needs. CJK characters are counted wider
+/// than Latin ones, so a Chinese entry is not clipped.
+fn menu_width(rows: &[MenuRow]) -> f32 {
+    let mut widest = 0.0_f32;
+    for row in rows.iter().filter(|row| !row.rule) {
+        let mut width = 0.0_f32;
+        for character in row.label.chars() {
+            width += if character.is_ascii() { 7.5 } else { 13.5 };
+        }
+        if !row.children.is_empty() {
+            width += 20.0;
+        }
+        widest = widest.max(width);
+    }
+    (widest + 28.0).clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH)
+}
+
+fn menu_height(rows: &[MenuRow]) -> f32 {
+    MENU_PADDING * 2.0
+        + rows
+            .iter()
+            .map(|row| if row.rule { MENU_RULE } else { MENU_ROW })
+            .sum::<f32>()
+}
+
+/// How far down a level the row at `index` starts.
+fn menu_offset(rows: &[MenuRow], index: usize) -> f32 {
+    rows.iter()
+        .take(index)
+        .map(|row| if row.rule { MENU_RULE } else { MENU_ROW })
+        .sum()
+}
+
+/// The rows of the menu a group's right click opens (§12.3).
+fn group_menu_rows(index: usize, editable: bool, last_group: bool) -> Vec<MenuRow> {
+    vec![
+        MenuRow::command(nohrs_core::t!("Novo grupo"), editable, Command::NewGroup),
+        MenuRow::command(
+            nohrs_core::t!("Renomear"),
+            editable,
+            Command::RenameGroup(index),
+        ),
+        MenuRow::rule(),
+        MenuRow::command(
+            nohrs_core::t!("Excluir"),
+            editable && !last_group,
+            Command::DeleteGroup(index),
+        ),
+    ]
+}
+
+/// The rows of the menu an empty cell opens (§12.3, §17.2 R2).
+fn cell_menu_rows(
+    group: usize,
+    slot: u32,
+    group_editable: bool,
+    mixed_selection: bool,
+) -> Vec<MenuRow> {
+    let mut rows = vec![MenuRow::command(
+        nohrs_core::t!("Novo item"),
+        group_editable,
+        Command::NewItem { group, slot },
+    )];
+    // §17.2 R2: where the dialog can only pick one of the two, folders get an
+    // entry of their own.
+    if super::folder_entry_offered(mixed_selection) {
+        rows.push(MenuRow::command(
+            nohrs_core::t!("Novo item de pasta"),
+            group_editable,
+            Command::NewItemFolder { group, slot },
+        ));
+    }
+    rows
+}
+
+/// The rows of the menu one item opens (§12.2, M2 rows).
+fn item_menu_rows(
+    cx: &App,
     group: usize,
     slot: u32,
     editable: bool,
     group_editable: bool,
-    entity: &WeakEntity<QuickLaunchView>,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let admin = entity.clone();
-    let reveal = entity.clone();
-    let edit = entity.clone();
-    let copy = entity.clone();
-    let delete = entity.clone();
-    let menu = menu
-        .item(
-            PopupMenuItem::new(nohrs_core::t!("Executar como administrador"))
-                .disabled(!editable)
-                .on_click(move |_, _window, cx| {
-                    admin
-                        .update(cx, |view, cx| {
-                            view.clicked(slot, super::ClickKind::Admin, cx);
-                        })
-                        .log_err();
-                }),
-        )
-        .item(
-            PopupMenuItem::new(nohrs_core::t!("Abrir localização")).on_click(
-                move |_, _window, cx| {
-                    reveal
-                        .update(cx, |_view, cx| {
-                            super::reveal_item(cx, slot);
-                            super::hide(cx);
-                        })
-                        .log_err();
-                },
-            ),
-        )
-        .separator()
-        .item(
-            PopupMenuItem::new(nohrs_core::t!("Editar"))
-                .disabled(!group_editable)
-                .on_click(move |_, window, cx| {
-                    edit.update(cx, |view, cx| view.edit_item(group, slot, window, cx))
-                        .log_err();
-                }),
-        )
-        .item(
-            PopupMenuItem::new(nohrs_core::t!("Copiar caminho")).on_click(move |_, _window, cx| {
-                copy.update(cx, |_view, cx| {
-                    if let Some(text) = super::copy_text(cx, slot) {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    }
-                })
-                .log_err();
-            }),
-        );
-
-    // "Move to group ▸" lists every other group; with a single group there is
+) -> Vec<MenuRow> {
+    let mut rows = vec![
+        MenuRow::command(
+            nohrs_core::t!("Executar como administrador"),
+            editable,
+            Command::RunAsAdmin(slot),
+        ),
+        MenuRow::command(
+            nohrs_core::t!("Abrir localização"),
+            true,
+            Command::Reveal(slot),
+        ),
+        MenuRow::rule(),
+        MenuRow::command(
+            nohrs_core::t!("Editar"),
+            group_editable,
+            Command::Edit { group, slot },
+        ),
+        MenuRow::command(
+            nohrs_core::t!("Copiar caminho"),
+            true,
+            Command::CopyPath(slot),
+        ),
+    ];
+    // "Mover para ▸" lists every other group; with a single group there is
     // nowhere to move to and the entry is left out (§12.2).
-    let groups: Vec<(usize, String, bool)> = super::state(cx)
-        .map(|state| {
-            state
-                .config()
-                .groups
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != group)
-                .map(|(index, group)| {
-                    // G.5: neither a copy nor a generated entry may be moved
-                    // into or out of a dynamic group.
-                    (
-                        index,
-                        group.name.clone(),
-                        group_editable && super::group_editable(cx, index),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let menu = if groups.is_empty() {
-        menu
-    } else {
-        let for_submenu = entity.clone();
-        let submenu = PopupMenu::build(window, cx, move |submenu, _window, _cx| {
-            let mut submenu = submenu;
-            for (index, name, target_editable) in groups {
-                let handle = for_submenu.clone();
-                submenu = submenu.item(
-                    PopupMenuItem::new(name)
-                        .disabled(!target_editable)
-                        .on_click(move |_, _window, cx| {
-                            handle
-                                .update(cx, |view, cx| {
-                                    view.drop_item_on_group(&ItemDrag { group, slot }, index, cx);
-                                })
-                                .log_err();
-                        }),
-                );
-            }
-            submenu
-        });
-        menu.item(PopupMenuItem::submenu(
-            nohrs_core::t!("Mover para"),
-            submenu,
-        ))
-    };
-
-    menu.separator().item(
-        PopupMenuItem::new(nohrs_core::t!("Excluir"))
-            .disabled(!group_editable)
-            .on_click(move |_, _window, cx| {
-                delete
-                    .update(cx, |view, cx| view.delete_item(group, slot, cx))
-                    .log_err();
-            }),
-    )
+    if let Some(state) = super::state(cx) {
+        let targets: Vec<MenuRow> = state
+            .config()
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != group)
+            .map(|(index, target)| {
+                // G.5: neither a copy nor a generated entry may be moved into
+                // or out of a dynamic group.
+                MenuRow::command(
+                    SharedString::from(target.name.clone()),
+                    group_editable && super::group_editable(cx, index),
+                    Command::MoveTo {
+                        group,
+                        slot,
+                        target: index,
+                    },
+                )
+            })
+            .collect();
+        if !targets.is_empty() {
+            rows.push(MenuRow::submenu(
+                nohrs_core::t!("Mover para"),
+                targets,
+            ));
+        }
+    }
+    rows.push(MenuRow::rule());
+    rows.push(MenuRow::command(
+        nohrs_core::t!("Excluir"),
+        group_editable,
+        Command::DeleteItem { group, slot },
+    ));
+    rows
 }
 
 /// One grid tile.
@@ -1939,17 +2293,20 @@ fn tile(
                     .log_err();
             }
         })
-        .context_menu(move |menu, window, cx| {
-            item_menu(
-                menu,
-                group,
-                slot,
-                editable,
-                group_editable,
-                &menu_handle,
-                window,
-                cx,
-            )
+        .on_mouse_down(MouseButton::Right, {
+            let handle = menu_handle.clone();
+            move |event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                handle
+                    .update(cx, |view, cx| {
+                        view.open_menu(
+                            event.position,
+                            item_menu_rows(cx, group, slot, editable, group_editable),
+                            cx,
+                        );
+                    })
+                    .log_err();
+            }
         })
         .child(icon)
         .child(
@@ -2062,17 +2419,20 @@ fn row_of(
                     .log_err();
             }
         })
-        .context_menu(move |menu, window, cx| {
-            item_menu(
-                menu,
-                group,
-                slot,
-                editable,
-                group_editable,
-                &menu_handle,
-                window,
-                cx,
-            )
+        .on_mouse_down(MouseButton::Right, {
+            let handle = menu_handle.clone();
+            move |event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                handle
+                    .update(cx, |view, cx| {
+                        view.open_menu(
+                            event.position,
+                            item_menu_rows(cx, group, slot, editable, group_editable),
+                            cx,
+                        );
+                    })
+                    .log_err();
+            }
         })
         .child(icon)
         .child(
@@ -2800,5 +3160,64 @@ mod tests {
     fn the_sizes_of_the_bar_and_the_rows_are_the_ones_the_specification_names() {
         assert_eq!(GROUP_BAR_WIDTH, 120.0);
         assert_eq!(TITLE_BAR_HEIGHT, 36.0);
+    }
+    /// A group menu's delete is refused for the last group, and every row of a
+    /// read-only file is disabled (§12.3).
+    #[test]
+    fn the_group_menu_disables_what_the_file_cannot_do() {
+        let rows = group_menu_rows(2, false, false);
+        assert!(rows.iter().all(|row| row.rule || row.disabled));
+        let rows = group_menu_rows(2, true, true);
+        let delete = rows
+            .iter()
+            .find(|row| row.command == Some(Command::DeleteGroup(2)))
+            .expect("the delete row");
+        assert!(delete.disabled, "the last group cannot be removed");
+        let rows = group_menu_rows(0, true, false);
+        let delete = rows
+            .iter()
+            .find(|row| row.command == Some(Command::DeleteGroup(0)))
+            .expect("the delete row");
+        assert!(!delete.disabled);
+    }
+
+    /// The empty cell's menu offers the folder entry only where the picker
+    /// cannot take both (§17.2 R2).
+    #[test]
+    fn the_empty_cell_menu_follows_the_picker() {
+        let rows = cell_menu_rows(1, 4, true, true);
+        assert_eq!(rows.len(), 1, "a mixed picker needs one entry");
+        assert_eq!(
+            rows[0].command,
+            Some(Command::NewItem { group: 1, slot: 4 })
+        );
+        let rows = cell_menu_rows(1, 4, false, false);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.disabled));
+        assert_eq!(
+            rows[1].command,
+            Some(Command::NewItemFolder { group: 1, slot: 4 })
+        );
+    }
+
+    /// The menu's width follows its widest row, Chinese included, and its
+    /// height adds a row or a rule per entry.
+    #[test]
+    fn the_menu_is_sized_by_its_widest_row() {
+        let short = vec![MenuRow::command("Open", true, Command::Reveal(0))];
+        let long = vec![MenuRow::command(
+            "以管理员身份运行并打开所在位置",
+            true,
+            Command::Reveal(0),
+        )];
+        assert!(menu_width(&long) > menu_width(&short));
+        assert!(menu_width(&short) >= MENU_MIN_WIDTH);
+        let rows = vec![
+            MenuRow::command("A", true, Command::Reveal(0)),
+            MenuRow::rule(),
+            MenuRow::command("B", true, Command::Reveal(1)),
+        ];
+        assert_eq!(menu_height(&rows), MENU_PADDING * 2.0 + MENU_ROW * 2.0 + MENU_RULE);
+        assert_eq!(menu_offset(&rows, 2), MENU_ROW + MENU_RULE);
     }
 }
