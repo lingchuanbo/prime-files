@@ -43,6 +43,7 @@ use nohrs_core::config::IndexSource;
 use nohrs_core::telemetry::LogErr;
 use nohrs_core::{t, tf};
 use nohrs_services::fs::listing::FileEntryDto;
+use regex::{Regex, RegexBuilder};
 
 use super::ExplorerPane;
 use super::quick_search::DeepSearch;
@@ -54,6 +55,7 @@ mod workers;
 
 #[cfg(test)]
 #[path = "everything/search_tests.rs"]
+#[allow(clippy::expect_used)]
 mod search_tests;
 
 /// A saved table older than this is walked again when the mode opens. A
@@ -291,6 +293,53 @@ enum Term {
     Path(String),
     /// A wildcard pattern over the whole name (`*.wav`).
     Pattern(Vec<char>),
+    /// A `regex:` expression, from Everything's own syntax.
+    Regex(RegexTerm),
+}
+
+/// One `regex:` term: the expression compiled once per query, what it is
+/// matched against, and the longest plain text it cannot do without — cheap
+/// enough to test before the engine runs, and the word the indexer service
+/// can scan for when the query has no name term.
+#[derive(Debug, Clone)]
+struct RegexTerm {
+    /// The expression as typed, for handing to Everything unchanged.
+    raw: String,
+    regex: Regex,
+    /// The expression covers the whole path (it had a separator), not a name.
+    path: bool,
+    needle: Option<String>,
+}
+
+impl RegexTerm {
+    fn new(raw: &str) -> Option<Self> {
+        let regex = RegexBuilder::new(raw).case_insensitive(true).build().ok()?;
+        Some(Self {
+            raw: raw.to_string(),
+            regex,
+            path: regex_names_a_path(raw),
+            needle: regex_literal(raw),
+        })
+    }
+
+    /// `path` must be given for a path expression; `None` there means the
+    /// caller has no path to judge and the term cannot match.
+    fn is_match(&self, name: &str, path: Option<&str>) -> bool {
+        let target = if self.path {
+            match path {
+                Some(path) => path,
+                None => return false,
+            }
+        } else {
+            name
+        };
+        if let Some(needle) = &self.needle
+            && !target.contains(needle.as_str())
+        {
+            return false;
+        }
+        self.regex.is_match(target)
+    }
 }
 
 struct Token {
@@ -342,6 +391,9 @@ enum Filter {
     Scope(String),
     // `em:sfx`: under a folder whose name starts so, anywhere.
     Folder(String),
+    // `regex:<expression>`: the name, or the whole path when the expression
+    // has a separator, must match it.
+    Regex(RegexTerm),
 }
 
 enum Parsed {
@@ -409,8 +461,22 @@ fn category(value: &str) -> Parsed {
     ))
 }
 
-fn parse_filter(key: &str, value: &str, cwd: &str, now: time::OffsetDateTime) -> Parsed {
+fn parse_filter(
+    key: &str,
+    value: &str,
+    original: &str,
+    cwd: &str,
+    now: time::OffsetDateTime,
+) -> Parsed {
     let parsed = match key {
+        "regex" | "regexp" | "rex" => {
+            // The expression keeps its case (a class like [A-Z] means what it
+            // says); the engine is told to ignore case like Everything's.
+            if original.trim().is_empty() {
+                return Parsed::Incomplete;
+            }
+            RegexTerm::new(original).map(Filter::Regex)
+        }
         "ext" | "extensão" | "extensao" => {
             let exts: Vec<String> = value
                 .split([',', ';', '|'])
@@ -757,9 +823,11 @@ impl Query {
         for token in tokenize(text) {
             let lower = token.text.to_lowercase();
             if !token.literal
-                && let Some((key, value)) = lower.split_once(':')
+                && let Some((key, original)) = token.text.split_once(':')
             {
-                match parse_filter(key, value, cwd, now) {
+                let key = key.to_lowercase();
+                let value = original.to_lowercase();
+                match parse_filter(&key, &value, original, cwd, now) {
                     Parsed::Filter(filter) => {
                         any = true;
                         query.filters.push(format!(
@@ -778,6 +846,10 @@ impl Query {
                                 query.excluded.push(Term::Path(folder));
                             }
                             (Filter::Folder(folder), false) => query.terms.push(Term::Path(folder)),
+                            (Filter::Regex(regex), false) => query.terms.push(Term::Regex(regex)),
+                            (Filter::Regex(regex), true) => {
+                                query.excluded.push(Term::Regex(regex));
+                            }
                         }
                         continue;
                     }
@@ -786,10 +858,18 @@ impl Query {
                 }
             }
             any = true;
+            // A quoted term keeps its text; a path is one whether quoted or
+            // not, so `"D:\My Files"` and `D:\Downloads\139` both cover paths.
             let term = if !token.literal && (lower.contains('*') || lower.contains('?')) {
                 Term::Pattern(lower.chars().collect())
-            } else if !token.literal && (lower.contains('\\') || lower.contains('/')) {
-                Term::Path(lower.replace('/', "\\"))
+            } else if lower.contains('\\') || lower.contains('/') {
+                let path = lower.replace('/', "\\");
+                let path = path.trim_end_matches('\\');
+                if path.is_empty() {
+                    Term::Name(lower)
+                } else {
+                    Term::Path(path.to_string())
+                }
             } else {
                 Term::Name(lower)
             };
@@ -828,13 +908,18 @@ impl Query {
                 .terms
                 .iter()
                 .chain(&query.excluded)
-                .any(|term| matches!(term, Term::Path(_)));
+                .any(|term| match term {
+                    Term::Path(_) => true,
+                    Term::Regex(regex) => regex.path,
+                    _ => false,
+                });
         Some(query)
     }
 
     /// The plain name terms, which is what the service's own scan can match:
-    /// the rest of the query — extensions, sizes, dates, paths, wildcards —
-    /// needs the whole path and metadata, and is applied here to its hits.
+    /// the rest of the query — extensions, sizes, dates, paths, wildcards,
+    /// regexes — needs the whole path and metadata, and is applied here to its
+    /// hits.
     fn name_terms(&self) -> Vec<String> {
         self.terms
             .iter()
@@ -843,6 +928,72 @@ impl Query {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The one plain text the service's name scan can look for when there is no
+    /// name term: a necessary condition of every hit, so what it answers is a
+    /// superset the full query then narrows. `None` when every term is
+    /// wildcards, an expression with no fixed text, or a path with no usable
+    /// tail.
+    fn scan_needle(&self) -> Option<String> {
+        let mut best: Option<String> = None;
+        for term in &self.terms {
+            let candidate = match term {
+                Term::Pattern(pattern) => wildcard_literal(pattern),
+                Term::Regex(regex) if !regex.path => regex.needle.clone(),
+                _ => None,
+            };
+            best = longer_needle(best, candidate);
+        }
+        best.or_else(|| self.path_needle())
+    }
+
+    /// The last name a path term ends with, when the service can scan for it:
+    /// the typed folder or file itself, as a fallback for a path no folder on
+    /// disk matches.
+    fn path_needle(&self) -> Option<String> {
+        self.terms.iter().find_map(|term| match term {
+            Term::Path(path) => path
+                .rsplit('\\')
+                .find(|part| !part.is_empty())
+                .and_then(useful_needle),
+            _ => None,
+        })
+    }
+
+    /// The deepest folder the typed paths point into that exists on disk: the
+    /// service can list that tree instead of scanning every name. `None` for a
+    /// path that is relative, or whose drive root alone was found.
+    fn path_scope(&self) -> Option<String> {
+        let mut best: Option<String> = None;
+        for term in &self.terms {
+            let Term::Path(path) = term else {
+                continue;
+            };
+            if !is_absolute_path(path) {
+                continue;
+            }
+            let mut candidate = path.as_str();
+            loop {
+                if std::path::Path::new(candidate).is_dir() {
+                    if best
+                        .as_ref()
+                        .is_none_or(|best| candidate.len() > best.len())
+                    {
+                        best = Some(candidate.to_string());
+                    }
+                    break;
+                }
+                let Some(at) = candidate.rfind('\\') else {
+                    break;
+                };
+                if at <= 2 {
+                    break;
+                }
+                candidate = &candidate[..at];
+            }
+        }
+        best
     }
 
     /// Where a hit of the service's scan stands: `None` when one of the
@@ -899,6 +1050,9 @@ impl Query {
             }
             Term::Pattern(pattern) => wildcard(pattern, &name),
             Term::Path(_) => true,
+            // An expression over the whole path is judged once the path is
+            // built, further down.
+            Term::Regex(regex) => regex.path || regex.is_match(&name, None),
         });
         if !names_match {
             return None;
@@ -907,6 +1061,7 @@ impl Query {
             Term::Name(part) => name.contains(part.as_str()),
             Term::Pattern(pattern) => wildcard(pattern, &name),
             Term::Path(_) => false,
+            Term::Regex(regex) => !regex.path && regex.is_match(&name, None),
         }) {
             return None;
         }
@@ -922,12 +1077,14 @@ impl Query {
             }
             if !self.terms.iter().all(|term| match term {
                 Term::Path(part) => lowered.contains(part.as_str()),
+                Term::Regex(regex) => !regex.path || regex.is_match(&name, Some(&lowered)),
                 _ => true,
             }) {
                 return None;
             }
             if self.excluded.iter().any(|term| match term {
                 Term::Path(part) => lowered.contains(part.as_str()),
+                Term::Regex(regex) => regex.path && regex.is_match(&name, Some(&lowered)),
                 _ => false,
             }) {
                 return None;
@@ -1013,6 +1170,9 @@ impl Query {
             }
             Term::Pattern(pattern) => wildcard(pattern, name),
             Term::Path(_) => true,
+            // An expression over the whole path is judged once the path is
+            // built, further down.
+            Term::Regex(regex) => regex.path || regex.is_match(name, None),
         });
         if !names_match {
             return None;
@@ -1021,6 +1181,7 @@ impl Query {
             Term::Name(part) => name.contains(part.as_str()),
             Term::Pattern(pattern) => wildcard(pattern, name),
             Term::Path(_) => false,
+            Term::Regex(regex) => !regex.path && regex.is_match(name, None),
         });
         if excluded_by_name {
             return None;
@@ -1037,10 +1198,12 @@ impl Query {
             }
             let paths_match = self.terms.iter().all(|term| match term {
                 Term::Path(part) => path.contains(part.as_str()),
+                Term::Regex(regex) => !regex.path || regex.is_match(name, Some(&path)),
                 _ => true,
             });
             let excluded_by_path = self.excluded.iter().any(|term| match term {
                 Term::Path(part) => path.contains(part.as_str()),
+                Term::Regex(regex) => regex.path && regex.is_match(name, Some(&path)),
                 _ => false,
             });
             if !paths_match || excluded_by_path {
@@ -1112,6 +1275,112 @@ fn wildcard(pattern: &[char], name: &str) -> bool {
     pattern
         .get(p..)
         .is_some_and(|rest| rest.iter().all(|&c| c == '*'))
+}
+
+/// Whether a regular expression covers a whole path rather than a name: it
+/// holds a real separator. A backslash that begins an escape (`\d`, `\.`) is
+/// part of the expression, not one.
+fn regex_names_a_path(raw: &str) -> bool {
+    let mut characters = raw.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '/' => return true,
+            '\\' => match characters.next() {
+                Some('\\') | Some('/') => return true,
+                // Any other escape is the expression's own.
+                Some(_) => {}
+                None => {}
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The longest run of plain text a wildcard pattern requires: `*` and `?`
+/// stand for other characters, so every literal run must appear as it is.
+fn wildcard_literal(pattern: &[char]) -> Option<String> {
+    let text: String = pattern.iter().collect();
+    longest_run(&text, false)
+}
+
+/// The longest run of plain text a regex requires, or `None` when the
+/// expression is too clever to read cheaply — an alternation, a group, a
+/// character class or a counted repeat. The needle only has to be a necessary
+/// condition of a match, never a wrong one.
+fn regex_literal(raw: &str) -> Option<String> {
+    if raw.contains(['|', '(', ')', '[', ']', '{', '}']) {
+        return None;
+    }
+    longest_run(raw, true)
+}
+
+/// The longest run of plain characters in `text`, lowered, when it is long
+/// enough to narrow a scan. `regex` reads escapes and quantifiers; a pattern
+/// has only `*` and `?`, which both stand for other characters.
+fn longest_run(text: &str, regex: bool) -> Option<String> {
+    let mut best = String::new();
+    let mut current = String::new();
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        let literal = if character == '\\' {
+            match characters.next() {
+                // A class escape (\d, \w, \b): no plain text to take.
+                Some(next) if next.is_alphanumeric() => None,
+                // An escaped metacharacter is that character itself.
+                Some(next) => Some(next),
+                None => None,
+            }
+        } else if (regex && matches!(character, '.' | '*' | '+' | '?' | '^' | '$' | '|'))
+            || (!regex && matches!(character, '*' | '?'))
+        {
+            None
+        } else {
+            Some(character)
+        };
+        match literal {
+            Some(character) => current.push(character),
+            None => {
+                let run = std::mem::take(&mut current);
+                // `x*` and `x?` may take nothing of `x`; the run before them is
+                // not guaranteed. (`x+` still holds one, so it is kept.)
+                let optional = regex && matches!(character, '*' | '?');
+                if !optional && run.chars().count() > best.chars().count() {
+                    best = run;
+                }
+            }
+        }
+    }
+    if current.chars().count() > best.chars().count() {
+        best = current;
+    }
+    useful_needle(&best.to_lowercase())
+}
+
+/// Whether a plain text is worth handing to a scan: two characters keep the
+/// answer set bounded, and a single Han character is already specific.
+fn useful_needle(text: &str) -> Option<String> {
+    let characters = text.chars().count();
+    (characters >= 2 || (characters == 1 && !text.is_ascii())).then(|| text.to_string())
+}
+
+fn longer_needle(best: Option<String>, candidate: Option<String>) -> Option<String> {
+    match (best, candidate) {
+        (Some(best), Some(candidate)) => {
+            if candidate.len() > best.len() {
+                Some(candidate)
+            } else {
+                Some(best)
+            }
+        }
+        (best, None) => best,
+        (None, candidate) => candidate,
+    }
+}
+
+/// `C:\...` or `\\server\...`; a relative term names no folder to list.
+fn is_absolute_path(path: &str) -> bool {
+    path.as_bytes().get(1) == Some(&b':') || path.starts_with("\\\\")
 }
 
 // ---------------------------------------------------------------------------
@@ -1684,6 +1953,37 @@ pub(crate) mod mft {
         }
     }
 
+    /// Every entry the service holds under `folder`, as whole paths with the
+    /// size and date of each: what a search scoped to a typed path narrows.
+    /// `None` when the service cannot list the folder (see [`subtree`]).
+    pub(crate) fn subtree_rows(folder: &str) -> Option<Vec<(String, bool, u64, u32)>> {
+        // The deepest the protocol carries; the service clamps it itself.
+        let tree = subtree(folder, MOST_SUBTREE_LEVELS)?;
+        let mut paths: Vec<String> = Vec::with_capacity(tree.len());
+        let mut rows = Vec::with_capacity(tree.len());
+        for node in tree {
+            let path = match node.parent {
+                nohrs_indexer::protocol::NO_PARENT => folder.to_string(),
+                parent => match paths.get(parent as usize) {
+                    Some(parent) if !parent.is_empty() => format!("{parent}\\{}", node.name),
+                    // The format says a parent comes before its children; a
+                    // name it never gave keeps the indexes lined up anyway.
+                    _ => String::new(),
+                },
+            };
+            paths.push(path.clone());
+            if path.is_empty() {
+                continue;
+            }
+            rows.push((path, node.dir, node.size, node.modified));
+        }
+        Some(rows)
+    }
+
+    /// A folder tree is asked for this deep; the service clamps it to the
+    /// protocol's own limit.
+    const MOST_SUBTREE_LEVELS: u16 = 16;
+
     /// Whether the running service knows the subtree request. Asked once and
     /// remembered: it changes when the service is reinstalled, and the app is
     /// restarted then any way. A service that does not answer yet says nothing
@@ -1949,7 +2249,7 @@ pub(crate) mod remote {
         }
     }
 
-    /// The names holding every one of `terms`, up to `limit` of them.
+    /// The names `query` asks Everything for, up to `limit` of them.
     ///
     /// A name written in Han characters is also matched by its pinyin initials
     /// ("wjj" for 文件夹), and Everything only does that when it is told to —
@@ -1957,20 +2257,26 @@ pub(crate) mod remote {
     /// nothing, it is asked again with the pinyin modifier this Everything
     /// understands; the hits of both are merged.
     #[cfg(windows)]
-    pub(crate) fn search(
-        terms: &[String],
+    pub(super) fn search(
+        query: &super::Query,
         limit: u32,
         cancel: &Arc<AtomicBool>,
         pinyin: Option<&'static str>,
         full_pinyin: Option<&'static str>,
     ) -> Result<Vec<Hit>, Error> {
-        let mut hits = search_via(terms, limit, cancel, None)?;
+        let Some(text) = search_text(query, None) else {
+            return Ok(Vec::new());
+        };
+        let mut hits = search_via(&text, limit, cancel)?;
         let try_pinyin = hits.len() < super::PINYIN_BELOW;
         for modifier in [pinyin, full_pinyin].into_iter().flatten() {
             if !try_pinyin || cancel.load(Ordering::Relaxed) {
                 break;
             }
-            match search_via(terms, limit, cancel, Some(modifier)) {
+            let Some(text) = search_text(query, Some(modifier)) else {
+                break;
+            };
+            match search_via(&text, limit, cancel) {
                 Ok(more) => hits.extend(more),
                 Err(error) => tracing::debug!("Everything could not search by pinyin: {error:?}"),
             }
@@ -1979,15 +2285,10 @@ pub(crate) mod remote {
     }
 
     #[cfg(windows)]
-    fn search_via(
-        terms: &[String],
-        limit: u32,
-        cancel: &Arc<AtomicBool>,
-        modifier: Option<&str>,
-    ) -> Result<Vec<Hit>, Error> {
-        match dll::search(terms, limit, cancel.as_ref(), modifier) {
+    fn search_via(search: &[u16], limit: u32, cancel: &Arc<AtomicBool>) -> Result<Vec<Hit>, Error> {
+        match dll::search(search, limit, cancel.as_ref()) {
             Ok(hits) => Ok(hits),
-            Err(dll_error) => match ipc::search(terms, limit, cancel, modifier) {
+            Err(dll_error) => match ipc::search(search, limit, cancel) {
                 Ok(hits) => Ok(hits),
                 Err(ipc::Failure::Failed(error)) => Err(error),
                 Err(ipc::Failure::Unavailable) => Err(dll_error),
@@ -2001,8 +2302,8 @@ pub(crate) mod remote {
     }
 
     #[cfg(not(windows))]
-    pub(crate) fn search(
-        _terms: &[String],
+    pub(super) fn search(
+        _query: &super::Query,
         _limit: u32,
         _cancel: &Arc<AtomicBool>,
         _pinyin: Option<&'static str>,
@@ -2036,28 +2337,59 @@ pub(crate) mod remote {
         (major == 1 && minor >= 5 && build >= 1387).then_some("pinyin:")
     }
 
-    /// The search Everything is asked for plain name terms: each in quotes,
-    /// which keeps its own operators (a `|`, a `!`, a `:` and its wildcards)
-    /// out of the way, joined by spaces so a hit must hold all of them — what
-    /// the local scan does. `modifier`, when given, is put in front of each
-    /// term so it matches pinyin initials too. A `"` cannot appear in a
-    /// Windows name, and the tokenizer already drops the ones typed.
-    /// Terminated for the wide APIs.
+    /// The query Everything is asked, built from the same parsed query the
+    /// local scan uses: name terms are quoted (which keeps Everything's own
+    /// operators out of the way), wildcard patterns are sent as they are, a
+    /// path term becomes Everything's `path:` function and a `regex:` term its
+    /// `regex:` one. `modifier`, when given, is put in front of each name term
+    /// so it matches pinyin initials too. `None` when nothing in the query can
+    /// be sent — only exclusions, or an expression over whole paths.
     #[cfg(windows)]
-    pub(super) fn search_text(terms: &[String], modifier: Option<&str>) -> Vec<u16> {
+    pub(super) fn search_text(query: &super::Query, modifier: Option<&str>) -> Option<Vec<u16>> {
         let mut text = String::new();
-        for term in terms {
+        for term in &query.terms {
+            let part = match term {
+                super::Term::Name(name) => {
+                    let mut part = String::new();
+                    if let Some(modifier) = modifier {
+                        part.push_str(modifier);
+                    }
+                    part.push('"');
+                    part.extend(name.chars().filter(|character| *character != '"'));
+                    part.push('"');
+                    part
+                }
+                super::Term::Pattern(pattern) => pattern.iter().collect(),
+                super::Term::Path(path) => format!(
+                    "path:\"{}\"",
+                    path.chars()
+                        .filter(|character| *character != '"')
+                        .collect::<String>()
+                ),
+                super::Term::Regex(regex) if !regex.path => format!(
+                    "regex:\"{}\"",
+                    regex
+                        .raw
+                        .chars()
+                        .filter(|character| *character != '"')
+                        .collect::<String>()
+                ),
+                // Everything has no expression over the whole path; the local
+                // filter still applies this one to its hits.
+                super::Term::Regex(_) => continue,
+            };
+            if part.is_empty() {
+                continue;
+            }
             if !text.is_empty() {
                 text.push(' ');
             }
-            if let Some(modifier) = modifier {
-                text.push_str(modifier);
-            }
-            text.push('"');
-            text.extend(term.chars().filter(|character| *character != '"'));
-            text.push('"');
+            text.push_str(&part);
         }
-        text.encode_utf16().chain(std::iter::once(0)).collect()
+        if text.is_empty() {
+            return None;
+        }
+        Some(text.encode_utf16().chain(std::iter::once(0)).collect())
     }
 
     /// FILETIME (100 ns from 1601) to whole seconds since 1970.
@@ -2179,7 +2511,7 @@ pub(crate) mod remote {
 
         use nohrs_core::telemetry::LogErr as _;
 
-        use super::{Error, Hit, Info, discover, filetime_seconds, search_text};
+        use super::{Error, Hit, Info, discover, filetime_seconds};
 
         /// Everything's `WM_COPYDATA` ids: the query, and the flags the reply
         /// is parsed by.
@@ -2473,7 +2805,7 @@ pub(crate) mod remote {
             }
             // An empty search matches every name, one of which comes back; the
             // count of all of them is what the page shows.
-            let reply = ask(search_text(&[], None), 1, None)?;
+            let reply = ask(vec![0], 1, None)?;
             let list = list(&reply).ok_or(Failure::Failed(Error::Busy))?;
             if list.totitems == 0 {
                 return Err(Failure::Failed(Error::NotReady));
@@ -2491,10 +2823,9 @@ pub(crate) mod remote {
         }
 
         pub(super) fn search(
-            terms: &[String],
+            search: &[u16],
             limit: u32,
             cancel: &Arc<AtomicBool>,
-            modifier: Option<&str>,
         ) -> Result<Vec<Hit>, Failure> {
             if cancel.load(Ordering::Relaxed) {
                 return Ok(Vec::new());
@@ -2502,7 +2833,7 @@ pub(crate) mod remote {
             if discover::window().is_none() {
                 return Err(Failure::Unavailable);
             }
-            let reply = ask(search_text(terms, modifier), limit, Some(cancel.clone()))?;
+            let reply = ask(search.to_vec(), limit, Some(cancel.clone()))?;
             let list = list(&reply).ok_or(Failure::Failed(Error::Busy))?;
             let count = list.items.len() / 8;
             let mut hits = Vec::with_capacity(count.min(1024));
@@ -2681,7 +3012,7 @@ pub(crate) mod remote {
         use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
         use windows::core::{BOOL, PCSTR, PCWSTR};
 
-        use super::{Error, Hit, Info, discover, filetime_seconds, search_text};
+        use super::{Error, Hit, Info, discover, filetime_seconds};
 
         /// Everything's SDK has a single search in the DLL — the string, the
         /// request flags and the results — so no two calls may overlap. A
@@ -2950,17 +3281,15 @@ pub(crate) mod remote {
         /// The names holding every one of `terms`, up to `limit` of them.
         /// `cancel` is read between hits: a newer keystroke stops this one.
         pub(super) fn search(
-            terms: &[String],
+            search: &[u16],
             limit: u32,
             cancel: &AtomicBool,
-            modifier: Option<&str>,
         ) -> Result<Vec<Hit>, Error> {
             let api = api().ok_or(Error::Missing)?;
             if cancel.load(Ordering::Relaxed) {
                 return Ok(Vec::new());
             }
             let _session = SDK.enter().ok_or(Error::Busy)?;
-            let search = search_text(terms, modifier);
             // SAFETY: as in `probe`; the search string outlives the call.
             unsafe {
                 reset(api);
@@ -3124,27 +3453,45 @@ pub(crate) mod remote {
     }
 
     #[cfg(all(test, windows))]
+    #[allow(clippy::expect_used)]
     mod tests {
         use super::*;
 
-        fn text(terms: &[&str], modifier: Option<&str>) -> String {
-            let terms: Vec<String> = terms.iter().map(|term| (*term).to_string()).collect();
-            let units = search_text(&terms, modifier);
+        fn text(request: &str, modifier: Option<&str>) -> String {
+            let query = super::super::Query::parse(request, "").expect("a query");
+            let units = super::search_text(&query, modifier).expect("a query to send");
             String::from_utf16_lossy(&units[..units.len() - 1])
         }
 
         #[test]
         fn the_terms_are_quoted_and_joined_so_all_must_match() {
-            assert_eq!(text(&["bonk", "wav"], None), "\"bonk\" \"wav\"");
-            assert_eq!(text(&["c++", "a|b"], None), "\"c++\" \"a|b\"");
-            assert_eq!(text(&["quo\"te"], None), "\"quote\"");
+            assert_eq!(text("bonk wav", None), "\"bonk\" \"wav\"");
+            assert_eq!(text("c++ a|b", None), "\"c++\" \"a|b\"");
+            assert_eq!(text("quo\"te", None), "\"quote\"");
         }
 
         #[test]
         fn a_pinyin_modifier_goes_before_each_quoted_term() {
             assert_eq!(
-                text(&["wjj", "bg"], Some("pinyin-jian:")),
+                text("wjj bg", Some("pinyin-jian:")),
                 "pinyin-jian:\"wjj\" pinyin-jian:\"bg\""
+            );
+        }
+
+        #[test]
+        fn paths_wildcards_and_regexes_keep_their_own_syntax() {
+            assert_eq!(
+                text(r"D:\Downloads\139麒麟坐骑 webp", None),
+                "path:\"d:\\downloads\\139麒麟坐骑\" \"webp\""
+            );
+            assert_eq!(text("*.webp", None), "*.webp");
+            assert_eq!(text("regex:^IMG_\\d+", None), "regex:\"^IMG_\\d+\"");
+            // Only exclusions, or an expression over paths alone: nothing that
+            // can narrow Everything's own scan.
+            assert_eq!(
+                super::super::Query::parse(r"-bonk regex:c:\\temp\\\d+", "")
+                    .and_then(|query| super::search_text(&query, None)),
+                None
             );
         }
 
@@ -3176,8 +3523,8 @@ pub(crate) mod remote {
             };
             assert!(info.entries > 0, "Everything indexed no names");
             let cancel = Arc::new(AtomicBool::new(false));
-            let hits =
-                search(&["notepad".to_string()], 100, &cancel, None, None).expect("a search");
+            let query = super::super::Query::parse("notepad", "").expect("a query");
+            let hits = search(&query, 100, &cancel, None, None).expect("a search");
             assert!(!hits.is_empty(), "no hits for notepad");
             for hit in &hits {
                 let name = hit
@@ -3204,8 +3551,9 @@ pub(crate) mod remote {
                 eprintln!("this Everything has no pinyin search; nothing to check");
                 return;
             };
+            let han_query = super::super::Query::parse("文件", "").expect("a query");
             let han = search(
-                &["文件".to_string()],
+                &han_query,
                 200,
                 &Arc::new(AtomicBool::new(false)),
                 None,
@@ -3225,8 +3573,9 @@ pub(crate) mod remote {
             let Some(initials) = crate::explorer::pinyin::initials(&name) else {
                 return;
             };
+            let initials_query = super::super::Query::parse(&initials, "").expect("a query");
             let by_initials = search(
-                std::slice::from_ref(&initials),
+                &initials_query,
                 200,
                 &Arc::new(AtomicBool::new(false)),
                 Some(modifier),
@@ -4401,28 +4750,55 @@ pub(crate) fn auto_note(external: Option<&Result<remote::Info, remote::Error>>) 
     }
 }
 
+/// One hit another program answered with: whole path, folder, size, date.
+type HitRow = (String, bool, u64, u32);
+
+/// The service's hits for `query`, or `None` when its name scan cannot answer
+/// what was typed at all — an expression with no fixed text, say. The full
+/// query is applied to whatever comes back, so a name needle or a listed
+/// folder is enough to start from.
+fn service_candidates(query: &Query, limit: u32) -> Result<Option<Vec<HitRow>>, String> {
+    // A typed folder that exists is listed instead of searched: the service
+    // answers with that tree, which the query then narrows — complete inside
+    // the folder, where a scan of every name on the drives would not be.
+    if let Some(scope) = query.path_scope()
+        && let Some(rows) = mft::subtree_rows(&scope)
+    {
+        return Ok(Some(rows));
+    }
+    let needles = query.name_terms();
+    let needles = if needles.is_empty() {
+        match query.scan_needle() {
+            Some(needle) => vec![needle],
+            None => return Ok(None),
+        }
+    } else {
+        needles
+    };
+    let hits = mft::search(&needles, limit).map_err(|error| error.to_string())?;
+    Ok(Some(
+        hits.into_iter()
+            .map(|hit| (hit.path, hit.dir, hit.size, hit.modified))
+            .collect(),
+    ))
+}
+
 /// The service's hits for `query`, filtered and ordered the way the local
 /// scan orders its own: the service matched the name terms, and the rest of
-/// the query (extensions, sizes, dates, paths, wildcards) is applied here,
-/// to a few thousand rows rather than to fourteen million.
-fn service_targets(query: &Query, cancel: &AtomicBool) -> Vec<(String, String, bool, u64)> {
-    let terms = query.name_terms();
-    if terms.is_empty() || cancel.load(Ordering::Relaxed) {
-        return Vec::new();
+/// the query (extensions, sizes, dates, paths, wildcards, regexes) is applied
+/// here, to a few thousand rows rather than to fourteen million.
+fn service_targets(query: &Query, cancel: &AtomicBool) -> Option<Vec<(String, String, bool, u64)>> {
+    if cancel.load(Ordering::Relaxed) {
+        return Some(Vec::new());
     }
-    let hits = match mft::search(&terms, SERVICE_HITS) {
-        Ok(hits) => hits,
+    match service_candidates(query, SERVICE_HITS) {
+        Ok(Some(hits)) => Some(targets_from_hits(query, cancel, hits)),
+        Ok(None) => None,
         Err(error) => {
             tracing::debug!("the service could not search: {error}");
-            return Vec::new();
+            None
         }
-    };
-    targets_from_hits(
-        query,
-        cancel,
-        hits.into_iter()
-            .map(|hit| (hit.path, hit.dir, hit.size, hit.modified)),
-    )
+    }
 }
 
 /// Everything's hits for `query`, filtered and ordered as the service's are.
@@ -4437,11 +4813,10 @@ fn external_targets(
     pinyin: Option<&'static str>,
     full_pinyin: Option<&'static str>,
 ) -> Vec<(String, String, bool, u64)> {
-    let terms = query.name_terms();
-    if terms.is_empty() || cancel.load(Ordering::Relaxed) {
+    if cancel.load(Ordering::Relaxed) {
         return Vec::new();
     }
-    match remote::search(&terms, SERVICE_HITS, cancel, pinyin, full_pinyin) {
+    match remote::search(query, SERVICE_HITS, cancel, pinyin, full_pinyin) {
         Ok(hits) => targets_from_hits(
             query,
             cancel,
@@ -4457,15 +4832,14 @@ fn external_targets(
 }
 
 /// The hits a search answered by another program (the indexer service, or
-/// Everything) to the targets a pane lists. As `gather` sorts: the match
-/// class and recency first, then the shorter name — a hit whose name is the
-/// query itself outranks one with it buried.
-fn targets_from_hits(
+/// Everything), ordered the way a pane lists them and keeping each hit's own
+/// size and date: what the standalone search window shows.
+fn filtered_hits(
     query: &Query,
     cancel: &AtomicBool,
-    hits: impl IntoIterator<Item = (String, bool, u64, u32)>,
-) -> Vec<(String, String, bool, u64)> {
-    let mut scored: Vec<(u32, usize, String, String, bool, u64)> = hits
+    hits: impl IntoIterator<Item = HitRow>,
+) -> Vec<HitRow> {
+    let mut scored: Vec<(u32, usize, String, String, bool, u64, u32)> = hits
         .into_iter()
         .filter(|_| !cancel.load(Ordering::Relaxed))
         .filter_map(|(path, dir, size, modified)| {
@@ -4475,7 +4849,7 @@ fn targets_from_hits(
                 .unwrap_or(path.as_str())
                 .to_string();
             let score = query.score(&name, &path, dir, size, modified)?;
-            Some((score, name.chars().count(), name, path, dir, size))
+            Some((score, name.chars().count(), name, path, dir, size, modified))
         })
         .collect();
     scored.sort_by(|left, right| (left.0, left.1, &left.3).cmp(&(right.0, right.1, &right.3)));
@@ -4483,10 +4857,32 @@ fn targets_from_hits(
     let mut shown = std::collections::HashSet::new();
     scored
         .into_iter()
-        .filter_map(|(_, _, name, path, dir, size)| {
+        .filter_map(|(_, _, _, path, dir, size, modified)| {
             shown
                 .insert(path.to_lowercase())
-                .then_some((name, path, dir, size))
+                .then_some((path, dir, size, modified))
+        })
+        .collect()
+}
+
+/// The hits a search answered by another program (the indexer service, or
+/// Everything) to the targets a pane lists. As `gather` sorts: the match
+/// class and recency first, then the shorter name — a hit whose name is the
+/// query itself outranks one with it buried.
+fn targets_from_hits(
+    query: &Query,
+    cancel: &AtomicBool,
+    hits: impl IntoIterator<Item = (String, bool, u64, u32)>,
+) -> Vec<(String, String, bool, u64)> {
+    filtered_hits(query, cancel, hits)
+        .into_iter()
+        .map(|(path, dir, size, _)| {
+            let name = path
+                .rsplit('\\')
+                .next()
+                .unwrap_or(path.as_str())
+                .to_string();
+            (name, path, dir, size)
         })
         .collect()
 }
@@ -4615,27 +5011,18 @@ impl WholeComputerSearch {
         let Some(query) = Query::parse(text, "") else {
             return Ok(Vec::new());
         };
-        let terms = query.name_terms();
-        if terms.is_empty() {
-            return Ok(Vec::new());
-        }
         let limit = limit.min(MAX_RESULTS);
         if self.source == Source::Everything {
             #[cfg(windows)]
             {
                 let cancel = Arc::new(AtomicBool::new(false));
-                let mut pass = self.filters.pass();
-                return match remote::search(&terms, limit as u32, &cancel, None, None) {
-                    Ok(hits) => Ok(hits
-                        .into_iter()
-                        .filter(|hit| pass.accepts(&hit.path, hit.dir))
-                        .map(|hit| WholeComputerHit {
-                            path: hit.path,
-                            is_dir: hit.dir,
-                            size: hit.size,
-                            modified: hit.modified,
-                        })
-                        .collect()),
+                return match remote::search(&query, SERVICE_HITS, &cancel, None, None) {
+                    Ok(hits) => Ok(self.window_hits(
+                        &query,
+                        hits.into_iter()
+                            .map(|hit| (hit.path, hit.dir, hit.size, hit.modified)),
+                        limit,
+                    )),
                     Err(error) => Err(WholeComputerError::Failed(format!(
                         "Everything 索引暂不可用：{error:?}"
                     ))),
@@ -4650,19 +5037,14 @@ impl WholeComputerSearch {
         // preferred, but a service that stops answering must not empty the
         // window when this process still holds the table.
         if self.service {
-            match mft::search(&terms, limit as u32) {
-                Ok(hits) => {
-                    let mut pass = self.filters.pass();
-                    return Ok(hits
-                        .into_iter()
-                        .filter(|hit| pass.accepts(&hit.path, hit.dir))
-                        .map(|hit| WholeComputerHit {
-                            path: hit.path,
-                            is_dir: hit.dir,
-                            size: hit.size,
-                            modified: hit.modified,
-                        })
-                        .collect());
+            match service_candidates(&query, SERVICE_HITS) {
+                Ok(Some(hits)) => return Ok(self.window_hits(&query, hits, limit)),
+                // Nothing the service can scan for: only this process's own
+                // table can answer, when it has one.
+                Ok(None) => {
+                    if self.index.is_none() && self.walking.is_none() {
+                        return Ok(Vec::new());
+                    }
                 }
                 Err(error) => {
                     if self.index.is_none() && self.walking.is_none() {
@@ -4675,6 +5057,29 @@ impl WholeComputerSearch {
             return Err(WholeComputerError::NotReady);
         }
         Ok(self.local_hits(&query, limit))
+    }
+
+    /// Another program's hits, narrowed by the query and by `[indexing]`, cut
+    /// to `limit` the way the window lists them.
+    fn window_hits(
+        &self,
+        query: &Query,
+        hits: impl IntoIterator<Item = (String, bool, u64, u32)>,
+        limit: usize,
+    ) -> Vec<WholeComputerHit> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut pass = self.filters.pass();
+        filtered_hits(query, &cancel, hits)
+            .into_iter()
+            .filter(|(path, is_dir, _, _)| pass.accepts(path, *is_dir))
+            .take(limit)
+            .map(|(path, is_dir, size, modified)| WholeComputerHit {
+                path,
+                is_dir,
+                size,
+                modified,
+            })
+            .collect()
     }
 
     /// Searches this process's own table, ranking and deduplicating the way
@@ -5198,18 +5603,9 @@ impl ExplorerPane {
                 let took = took.clone();
                 move || {
                     let started = Instant::now();
-                    let targets = if by_everything {
-                        external_targets(
-                            &parsed_for_thread,
-                            &cancel,
-                            &external_error_for_thread,
-                            pinyin,
-                            full_pinyin,
-                        )
-                    } else if by_service {
-                        service_targets(&parsed_for_thread, &cancel)
-                    } else {
-                        // The names here know no folder sizes: a folder shows none.
+                    // This process's own table, for the walk index and as the
+                    // fallback of a service that cannot scan for the query.
+                    let local = || {
                         gather(
                             index_for_thread.as_deref(),
                             walking_for_thread.as_deref(),
@@ -5219,7 +5615,23 @@ impl ExplorerPane {
                         )
                         .into_iter()
                         .map(|(name, path, dir)| (name, path, dir, 0))
-                        .collect()
+                        .collect::<Vec<_>>()
+                    };
+                    let targets = if by_everything {
+                        external_targets(
+                            &parsed_for_thread,
+                            &cancel,
+                            &external_error_for_thread,
+                            pinyin,
+                            full_pinyin,
+                        )
+                    } else if by_service {
+                        // `None`: the service cannot scan for this query (an
+                        // expression with no fixed text, say), and a table
+                        // held here may still answer it.
+                        service_targets(&parsed_for_thread, &cancel).unwrap_or_else(local)
+                    } else {
+                        local()
                     };
                     let elapsed = started.elapsed().as_millis() as u64;
                     took.store(elapsed.max(1), Ordering::Relaxed);

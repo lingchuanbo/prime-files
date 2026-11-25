@@ -137,6 +137,11 @@ impl Segment {
             .iter()
             .filter_map(|term| match term {
                 Term::Name(name) if name.len() >= 3 => Some(name.as_str()),
+                // An expression's fixed text narrows the scan just as a name
+                // term does: every match holds it.
+                Term::Regex(regex) if !regex.path => {
+                    regex.needle.as_deref().filter(|needle| needle.len() >= 3)
+                }
                 _ => None,
             })
             .map(|name| {

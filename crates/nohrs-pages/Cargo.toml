@@ -40,6 +40,8 @@ async-channel = "2"
 raw-window-handle = "0.6"
 # The M2 filter of the quick launch (§12.2).
 nucleo-matcher = "0.3"
+# `regex:` in the whole-computer search (Everything's own regex syntax).
+regex = "1"
 # The updater: comparing release versions and checking the downloaded
 # installer against SHA256SUMS.txt. Both already in the tree.
 semver = "1"

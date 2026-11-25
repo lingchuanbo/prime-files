@@ -2844,4 +2844,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "A file or folder name; a folder leaves with everything inside it. Separate several with semicolons, like .git; .svn; temp; *.tmp.",
         "Un nombre de archivo o carpeta; la carpeta sale con todo lo que contiene. Separe varios con punto y coma, como .git; .svn; temp; *.tmp.",
     ),
+    (
+        "Clique na lupa da barra de baixo ou aperte Ctrl+Shift+F em qualquer programa e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, um termo com \\ procura no caminho e regex:expressão usa uma expressão regular.",
+        "Click the magnifier on the bottom bar or press Ctrl+Shift+F in any program and type any part of the name. Several terms filter together, * and ? work, a term with \\ searches the path, and regex:expression uses a regular expression.",
+        "Haga clic en la lupa de la barra inferior o pulse Ctrl+Shift+F en cualquier programa y escriba cualquier parte del nombre. Varios términos filtran juntos, * y ? funcionan, un término con \\ busca en la ruta y regex:expresión usa una expresión regular.",
+    ),
 ];

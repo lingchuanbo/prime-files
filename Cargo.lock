@@ -4511,6 +4511,7 @@ dependencies = [
  "nucleo-matcher",
  "pinyin",
  "raw-window-handle",
+ "regex",
  "semver",
  "serde",
  "serde_json",

@@ -2719,7 +2719,7 @@ impl SettingsPage {
                 Row::hint(
                     t!("Buscar em todo o computador"),
                     t!(
-                        "Clique na lupa da barra de baixo ou aperte Ctrl+Shift+F em qualquer programa e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho."
+                        "Clique na lupa da barra de baixo ou aperte Ctrl+Shift+F em qualquer programa e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, um termo com \\ procura no caminho e regex:expressão usa uma expressão regular."
                     ),
                     div(),
                 ),

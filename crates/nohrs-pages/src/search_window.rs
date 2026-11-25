@@ -271,7 +271,13 @@ impl SearchWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>, trash_ledger: Ledger) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx));
         input.update(cx, |state, cx| {
-            state.set_placeholder("搜索文件和文件夹…", window, cx);
+            // The syntax is Everything's: `regex:` for an expression and a
+            // typed `D:\...` for a folder's tree.
+            state.set_placeholder(
+                "搜索文件和文件夹…（regex: 正则，或输入 D:\\ 路径）",
+                window,
+                cx,
+            );
         });
         let subscription = cx.subscribe(&input, |this, state, event: &InputEvent, cx| {
             if !matches!(event, InputEvent::Change) {

@@ -133,6 +133,8 @@ globs = ["*.iso", "*.mov"]
 
 `regex:` は**構文として存在しない**。Tantivy の regex は `QueryParser::allow_regexes()` を呼んだ上で `field:/pattern/` と書く必要があるが、`IndexManager::search` はどちらも行っていない。root バックエンド (Spotlight / ripgrep) にもこの演算子は無い。`RegexQuery` をライブラリが持つことと、それがクエリ構文として露出していることは別である。
 
+> **別系統**: Everything 風のファイル名検索 (`crates/nohrs-pages/src/explorer/everything.rs`) は独自のクエリパーサを持ち、`regex:` と型付き `D:\パス` に対応する (docs/search-index-settings.md 参照)。本節の「未対応」は全文検索バックエンド (Tantivy / Spotlight / ripgrep) の話であり、ファイル名検索には当てはまらない。
+
 ---
 
 ## 6. 増分更新

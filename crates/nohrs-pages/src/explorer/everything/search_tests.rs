@@ -486,3 +486,139 @@ fn the_attribute_check_asks_nothing_when_it_is_off() {
     assert!(pass.accepts_with("C:\\a\\b.txt", false, &mut lookup));
     assert_eq!(asked.get(), 0);
 }
+
+#[test]
+fn a_quoted_path_stays_one_term_and_keeps_its_spaces() {
+    let query = Query::parse(r#""D:\My Files\139 麒麟""#, "").expect("a query");
+    match query.terms.as_slice() {
+        [Term::Path(path)] => assert_eq!(path, "d:\\my files\\139 麒麟"),
+        other => panic!("expected one path term, got {other:?}"),
+    }
+    assert!(query.needs_path);
+}
+
+#[test]
+fn a_path_with_a_trailing_separator_looks_for_its_contents() {
+    let query = Query::parse(
+        r"E:\Project\Xiyou2026\【游戏特效】\搬运\20261102\整理\ webp",
+        "",
+    )
+    .expect("a query");
+    assert_eq!(query.name_terms(), ["webp"]);
+    assert!(query.needs_path);
+    let folder = r"E:\Project\Xiyou2026\【游戏特效】\搬运\20261102\整理";
+    assert!(
+        query
+            .score("a.webp", &format!("{folder}\\a.webp"), false, 10, 0)
+            .is_some()
+    );
+    // The folder itself matches a path term of its own (without a name term
+    // to satisfy).
+    let path_only = Query::parse(r"E:\Project\Xiyou2026\【游戏特效】\搬运\20261102\整理\", "")
+        .expect("a path query");
+    assert!(path_only.score("整理", folder, true, 0, 0).is_some());
+    // A name term still has to hold: the folder's own name is not "webp".
+    assert!(query.score("整理", folder, true, 0, 0).is_none());
+    assert!(
+        query
+            .score("b.webp", r"E:\Project\其他\b.webp", false, 10, 0)
+            .is_none()
+    );
+}
+
+#[test]
+fn a_regex_matches_the_name_without_regard_to_case() {
+    let query = Query::parse(r"regex:^IMG_\d+", "").expect("a query");
+    assert!(query.name_terms().is_empty());
+    assert!(
+        query
+            .score("IMG_1234.jpg", r"c:\x\IMG_1234.jpg", false, 5, 0)
+            .is_some()
+    );
+    assert!(
+        query
+            .score("holiday.jpg", r"c:\x\holiday.jpg", false, 5, 0)
+            .is_none()
+    );
+    // A name term and an expression must both hold, as with any two terms.
+    let both = Query::parse(r"webp regex:^IMG_", "").expect("a query");
+    assert!(
+        both.score("IMG_7.webp", r"c:\x\IMG_7.webp", false, 5, 0)
+            .is_some()
+    );
+    assert!(
+        both.score("IMG_7.png", r"c:\x\IMG_7.png", false, 5, 0)
+            .is_none()
+    );
+}
+
+#[test]
+fn a_regex_with_a_separator_matches_the_whole_path() {
+    let query = Query::parse(r"regex:c:\\temp\\\d+", "").expect("a query");
+    assert!(query.needs_path);
+    assert!(query.score("42", r"C:\temp\42", false, 0, 0).is_some());
+    assert!(
+        query
+            .score("a.txt", r"C:\temp\a.txt", false, 0, 0)
+            .is_none()
+    );
+    assert!(query.score("42", r"D:\temp\42", false, 0, 0).is_none());
+}
+
+#[test]
+fn an_excluded_regex_takes_its_hits_out() {
+    let query = Query::parse(r"-regex:^IMG_", "").expect("a query");
+    assert!(
+        query
+            .score("IMG_1.jpg", r"c:\x\IMG_1.jpg", false, 0, 0)
+            .is_none()
+    );
+    assert!(
+        query
+            .score("photo.jpg", r"c:\x\photo.jpg", false, 0, 0)
+            .is_some()
+    );
+}
+
+#[test]
+fn an_invalid_regex_leaves_nothing_to_search() {
+    assert!(Query::parse(r"regex:(unclosed", "").is_none());
+}
+
+#[test]
+fn a_regex_needle_is_only_text_the_expression_requires() {
+    assert_eq!(regex_literal(r"^IMG_\d+"), Some("img_".to_string()));
+    assert_eq!(regex_literal(r".*\.webp$"), Some(".webp".to_string()));
+    // A class, a repeat count, a group or an alternation can change what is
+    // required, so none is guessed at.
+    assert_eq!(regex_literal(r"^\d{4}$"), None);
+    assert_eq!(regex_literal(r"^(IMG|VID)_"), None);
+    assert_eq!(regex_literal(r"[abc]def"), None);
+    // `x*` and `x?` may take nothing of the run before them.
+    assert_eq!(regex_literal(r"^abc*"), None);
+    // Too short to narrow anything.
+    assert_eq!(regex_literal(r"^a$"), None);
+}
+
+#[test]
+fn a_wildcard_needle_is_the_longest_literal_run() {
+    let of = |pattern: &str| wildcard_literal(&pattern.chars().collect::<Vec<_>>());
+    assert_eq!(of("*.webp"), Some(".webp".to_string()));
+    assert_eq!(of("*139*"), Some("139".to_string()));
+    assert_eq!(of("ab?cd"), Some("ab".to_string()));
+    assert_eq!(of("*"), None);
+}
+
+#[test]
+fn a_path_scope_is_the_deepest_folder_that_exists() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let folder = root.path().join("139 麒麟").join("整理");
+    std::fs::create_dir_all(&folder).expect("the folders");
+    let typed = format!("{}\\not-there", folder.display());
+    let query = Query::parse(&format!("\"{typed}\""), "").expect("a query");
+    let scope = query.path_scope().expect("the existing prefix");
+    assert_eq!(
+        scope.to_lowercase(),
+        folder.to_string_lossy().to_lowercase()
+    );
+}

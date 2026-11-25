@@ -8811,4 +8811,15 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "文件名或文件夹名；文件夹会连同里面的一切一起排除。多个用分号分隔，例如 .git; .svn; temp; *.tmp。",
         ],
     ),
+    (
+        "Clique na lupa da barra de baixo ou aperte Ctrl+Shift+F em qualquer programa e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, um termo com \\ procura no caminho e regex:expressão usa uma expressão regular.",
+        [
+            "Cliquez sur la loupe de la barre du bas ou appuyez sur Ctrl+Shift+F dans n'importe quel programme et tapez une partie du nom. Plusieurs termes filtrent ensemble, * et ? fonctionnent, un terme avec \\ cherche dans le chemin et regex:expression utilise une expression régulière.",
+            "Klicken Sie auf die Lupe in der unteren Leiste oder drücken Sie Ctrl+Shift+F in einem beliebigen Programm und tippen Sie einen Teil des Namens. Mehrere Begriffe filtern zusammen, * und ? funktionieren, ein Begriff mit \\ durchsucht den Pfad und regex:Ausdruck nutzt einen regulären Ausdruck.",
+            "Fai clic sulla lente nella barra in basso o premi Ctrl+Shift+F in qualsiasi programma e digita una parte del nome. Più termini filtrano insieme, * e ? funzionano, un termine con \\ cerca nel percorso e regex:espressione usa un'espressione regolare.",
+            "Щёлкните лупу на нижней панели или нажмите Ctrl+Shift+F в любой программе и введите часть имени. Несколько слов фильтруют вместе, * и ? работают, слово с \\ ищет в пути, а regex:выражение использует регулярное выражение.",
+            "下部バーの虫めがねをクリックするか、任意のプログラムで Ctrl+Shift+F を押して、名前の一部を入力します。複数の語は同時に絞り込み、* と ? が使え、\\ を含む語はパスを検索し、regex:式 は正規表現を使います。",
+            "点底部栏的放大镜，或在任何程序里按 Ctrl+Shift+F，输入名字的任意部分。多个词一起筛选，支持 * 和 ?，含 \\ 的词搜索路径，regex:表达式 使用正则表达式。",
+        ],
+    ),
 ];
