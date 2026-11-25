@@ -284,14 +284,39 @@ fn install_quick_launch_action(app: &mut App) {
     });
 }
 
+/// The standalone search's chord: registered with the OS, so the window opens
+/// from any application the way the quick launch's chord does. A chord this
+/// program already owns is refused by `register`, and the in-app binding below
+/// keeps the window reachable from a LumaFiles window.
+const SEARCH_WINDOW_HOTKEY: &str = "ctrl+shift+f";
+
 fn install_standalone_search_key(app: &mut App) {
-    // The launcher already owns Ctrl+Shift+Space as its OS-level shortcut.
+    // The in-app binding is the fallback: where the OS refuses the chord
+    // (another program owns it) the window still opens from this program.
     app.bind_keys([KeyBinding::new("ctrl-shift-f", OpenStandaloneSearch, None)]);
     app.on_action(|_: &OpenStandaloneSearch, cx: &mut App| {
-        if let Err(error) = nohrs_pages::search_window::toggle(cx) {
-            tracing::error!("failed to toggle standalone search window: {error}");
-        }
+        toggle_standalone_search(cx);
     });
+    match nohrs_launcher::parse_hotkey(SEARCH_WINDOW_HOTKEY) {
+        Ok(chord) => {
+            if let Err(error) = nohrs_launcher::register(app, chord, toggle_standalone_search) {
+                tracing::warn!(
+                    "could not register {SEARCH_WINDOW_HOTKEY} globally; the search window opens \
+                     only from a LumaFiles window: {error:#}"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!("could not read {SEARCH_WINDOW_HOTKEY}: {error:#}");
+        }
+    }
+}
+
+/// Opens or closes the standalone search window (what its chord runs).
+fn toggle_standalone_search(cx: &mut App) {
+    if let Err(error) = nohrs_pages::search_window::toggle(cx) {
+        tracing::error!("failed to toggle standalone search window: {error}");
+    }
 }
 
 /// The quick launch's own chord, as the window's state asks for it (§10).
