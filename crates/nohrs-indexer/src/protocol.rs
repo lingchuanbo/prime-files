@@ -118,43 +118,91 @@ const LONGEST_PATH: usize = 32_768;
 const MOST_ENTRIES: u64 = 200_000_000;
 
 /// One volume's names, in tree order.
+///
+/// A drive holds millions of names and the service keeps this for all of
+/// them between requests, so what one name costs is the point: 32 bytes of
+/// [`Entry`] plus its text in each of the buffers, and the name text itself is
+/// shared with the table it came from rather than copied again.
 #[derive(Default)]
 pub struct Volume {
     /// "C:".
     pub root: String,
-    names: String,
+    /// Where the names live. A volume built from a drive's table shares the
+    /// table's own buffer, so a snapshot costs no second copy of every name;
+    /// one built entry by entry appends to its own.
+    names: std::sync::Arc<String>,
     // The names lowercased, apart: a search compares against these, so it is
     // a plain substring test rather than a fold per byte.
     lower: String,
     pinyin: String,
     entries: Vec<Entry>,
-    /// Entries whose names may have pinyin initials, in table order.
-    non_ascii: Vec<u32>,
+    /// Entries whose names have pinyin, in table order.
+    pinyin_entries: Vec<Pinyin>,
 }
 
+/// The span the first entry has: the drive's own name, which lives in
+/// [`Volume::root`] and is not a name read from a table.
+const ROOT_NAME: u32 = u32::MAX;
+
+/// What one name costs beyond its text: a parent, two spans into the buffers
+/// below, a size, a date and a flag, packed into 32 bytes because a busy
+/// drive has ten million of them.
 #[derive(Clone, Copy)]
 struct Entry {
     parent: u32,
     start: u32,
-    len: u16,
     lower_start: u32,
+    len: u16,
     lower_len: u16,
-    pinyin_start: u32,
-    pinyin_len: u16,
     dir: bool,
     size: u64,
     modified: u32,
 }
 
+/// A name with pinyin and where its pinyin sits in the volume's buffer. Kept
+/// out of [`Entry`] because only names with Han characters have any, where
+/// six bytes of span in every entry would be paid by the other millions.
+#[derive(Clone, Copy)]
+struct Pinyin {
+    entry: u32,
+    start: u32,
+    len: u16,
+}
+
 impl Volume {
     /// A volume whose first entry, the root, is named `root`.
     pub fn new(root: &str) -> Self {
-        let mut volume = Self {
+        Self {
             root: root.to_string(),
             ..Self::default()
-        };
-        volume.push(NO_PARENT, root, true, 0, 0);
-        volume
+        }
+        .with_root()
+    }
+
+    /// A volume whose names are `names` itself: a table's buffer, so that
+    /// building a snapshot off a drive does not copy every name a second time.
+    pub(crate) fn sharing(root: &str, names: std::sync::Arc<String>) -> Self {
+        Self {
+            root: root.to_string(),
+            names,
+            ..Self::default()
+        }
+        .with_root()
+    }
+
+    // The drive's own entry, whose name is the volume's and not a table's.
+    fn with_root(mut self) -> Self {
+        self.entries.push(Entry {
+            parent: NO_PARENT,
+            start: ROOT_NAME,
+            len: clip(&self.root) as u16,
+            lower_start: 0,
+            lower_len: 0,
+            dir: true,
+            size: 0,
+            modified: 0,
+        });
+        self
     }
 
     /// Adds an entry under `parent` (an index this returned before) and
@@ -162,28 +210,108 @@ impl Volume {
     pub fn push(&mut self, parent: u32, name: &str, dir: bool, size: u64, modified: u32) -> u32 {
         let end = clip(name);
         let name = &name[..end];
-        let lower = name.to_lowercase();
-        let full_pinyin = pinyin::full(&lower).unwrap_or_default();
+        let start = self.names.len() as u32;
+        let len = name.len() as u16;
+        std::sync::Arc::make_mut(&mut self.names).push_str(name);
+        self.insert(parent, start, len, dir, size, modified)
+    }
+
+    /// Adds an entry whose name is already in the volume's buffer at `start`,
+    /// `len` bytes long: one read from a table the volume shares.
+    pub(crate) fn push_shared(
+        &mut self,
+        parent: u32,
+        start: u32,
+        len: u16,
+        dir: bool,
+        size: u64,
+        modified: u32,
+    ) -> u32 {
+        self.insert(parent, start, len, dir, size, modified)
+    }
+
+    fn insert(
+        &mut self,
+        parent: u32,
+        start: u32,
+        len: u16,
+        dir: bool,
+        size: u64,
+        modified: u32,
+    ) -> u32 {
+        let lower = {
+            let name = self
+                .names
+                .get(start as usize..start as usize + len as usize)
+                .unwrap_or("");
+            name.to_lowercase()
+        };
         let lower_end = clip(&lower);
+        let full_pinyin = pinyin::full(&lower);
+        let entry = self.entries.len() as u32;
+        let lower_start = self.lower.len() as u32;
+        // Where its pinyin starts, whether it has any or not.
+        let pinyin_start = self.pinyin.len() as u32;
         self.entries.push(Entry {
             parent,
-            start: self.names.len() as u32,
-            len: name.len() as u16,
-            lower_start: self.lower.len() as u32,
+            start,
+            len,
+            lower_start,
             lower_len: lower_end as u16,
-            pinyin_start: self.pinyin.len() as u32,
-            pinyin_len: full_pinyin.len() as u16,
             dir,
             size,
             modified,
         });
-        self.names.push_str(name);
         self.lower.push_str(&lower[..lower_end]);
-        self.pinyin.push_str(&full_pinyin);
-        if !name.is_ascii() {
-            self.non_ascii.push((self.entries.len() - 1) as u32);
+        if let Some(full_pinyin) = &full_pinyin {
+            self.pinyin_entries.push(Pinyin {
+                entry,
+                start: pinyin_start,
+                len: full_pinyin.len() as u16,
+            });
+            self.pinyin.push_str(full_pinyin);
         }
-        (self.entries.len() - 1) as u32
+        entry
+    }
+
+    /// Reserves room for `entries` entries and `name_bytes` of name text. A
+    /// volume sharing a table's buffer is already that size, and reserving
+    /// there would copy the buffer it is meant to share.
+    pub(crate) fn reserve(&mut self, entries: usize, name_bytes: usize) {
+        self.entries.reserve(entries);
+        // Lowercasing changes a name's byte length for only a handful of
+        // letters, so the name's own length is the right size here too.
+        self.lower.reserve(name_bytes);
+        if let Some(names) = std::sync::Arc::get_mut(&mut self.names) {
+            names.reserve(name_bytes);
+        }
+    }
+
+    /// Gives back whatever the build did not fill. The name text is left
+    /// alone: it belongs to the table when the volume shares it, and the
+    /// table trims its own.
+    pub(crate) fn shrink(&mut self) {
+        self.entries.shrink_to_fit();
+        self.lower.shrink_to_fit();
+        self.pinyin.shrink_to_fit();
+        self.pinyin_entries.shrink_to_fit();
+    }
+
+    /// What each buffer holds against what it uses, so a test can hold a
+    /// build to reserving its room instead of growing into twice of it.
+    #[cfg(test)]
+    pub(crate) fn room(&self) -> [(usize, usize); 2] {
+        [
+            (self.entries.capacity(), self.entries.len()),
+            (self.lower.capacity(), self.lower.len()),
+        ]
+    }
+
+    /// Whether this volume's names are `names` itself rather than a copy of
+    /// them, so a test can hold a snapshot to sharing its table's buffer.
+    #[cfg(test)]
+    pub(crate) fn shares_names(&self, names: &std::sync::Arc<String>) -> bool {
+        std::sync::Arc::ptr_eq(&self.names, names)
     }
 
     /// Fills every folder's size with what it holds, the folders inside it
@@ -222,6 +350,9 @@ impl Volume {
     }
 
     fn name_of(&self, entry: &Entry) -> &str {
+        if entry.start == ROOT_NAME {
+            return self.root.get(..entry.len as usize).unwrap_or("");
+        }
         self.names
             .get(entry.start as usize..entry.start as usize + entry.len as usize)
             .unwrap_or("")
@@ -233,12 +364,9 @@ impl Volume {
             .unwrap_or("")
     }
 
-    fn pinyin_of(&self, entry: &Entry) -> &str {
+    fn pinyin_of(&self, pinyin: &Pinyin) -> &str {
         self.pinyin
-            .get(
-                entry.pinyin_start as usize
-                    ..entry.pinyin_start as usize + entry.pinyin_len as usize,
-            )
+            .get(pinyin.start as usize..pinyin.start as usize + pinyin.len as usize)
             .unwrap_or("")
     }
 
@@ -427,6 +555,13 @@ fn clip(text: &str) -> usize {
     end
 }
 
+/// How many bytes of `text` a volume keeps for a name, so that a caller about
+/// to add millions of them can reserve exactly that instead of letting the
+/// buffers double as they grow.
+pub(crate) fn stored_name_len(text: &str) -> usize {
+    clip(text)
+}
+
 /// Receives a snapshot as it is read.
 pub trait Sink {
     /// A volume starts; its entries follow.
@@ -466,10 +601,7 @@ fn write_volumes<'a>(
         out.write_all(volume.root.as_bytes())?;
         out.write_all(&(volume.entries.len() as u64).to_le_bytes())?;
         for entry in &volume.entries {
-            let name = volume
-                .names
-                .get(entry.start as usize..entry.start as usize + entry.len as usize)
-                .unwrap_or("");
+            let name = volume.name_of(entry);
             out.write_all(&entry.parent.to_le_bytes())?;
             out.write_all(&entry.size.to_le_bytes())?;
             out.write_all(&entry.modified.to_le_bytes())?;
@@ -874,6 +1006,14 @@ mod tests {
             self.0
                 .push(format!("{parent} {name} {dir} {size} {modified}"));
         }
+    }
+
+    #[test]
+    fn a_name_costs_32_bytes_of_entry_and_12_of_pinyin() {
+        // The service keeps one entry per name on every drive for its whole
+        // run, so a field that widens one is paid ten million times over.
+        assert_eq!(32, std::mem::size_of::<Entry>());
+        assert_eq!(12, std::mem::size_of::<Pinyin>());
     }
 
     #[test]

@@ -58,7 +58,7 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
             "/DAppVersion=${{ steps.version.outputs.version }}" `
             "/DExeSource=..\target\dist\LumaFiles.exe" `
-            "/DIndexerSource=..\target\dist\prime-files-indexer.exe" `
+            "/DIndexerSource=..\target\dist\luma-files-indexer.exe" `
             installer\prime-files.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
           Get-FileHash dist\*.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |

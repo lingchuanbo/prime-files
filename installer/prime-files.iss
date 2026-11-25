@@ -1,7 +1,7 @@
 ; LumaFiles installer (Inno Setup 6).
 ;
 ; Built by .github/workflows/release.yml:
-;   ISCC /DAppVersion=0.1.0 /DExeSource=..\target\dist\LumaFiles.exe /DIndexerSource=..\target\dist\prime-files-indexer.exe installer\prime-files.iss
+;   ISCC /DAppVersion=0.1.0 /DExeSource=..\target\dist\LumaFiles.exe /DIndexerSource=..\target\dist\luma-files-indexer.exe installer\prime-files.iss
 ;
 ; Installs for the current user only (no administrator to install), the way
 ; per-user app installers do; only the dependencies that need it ask for
@@ -23,7 +23,7 @@
   #define ExeSource "..\target\dist\LumaFiles.exe"
 #endif
 #ifndef IndexerSource
-  #define IndexerSource "..\target\dist\prime-files-indexer.exe"
+  #define IndexerSource "..\target\dist\luma-files-indexer.exe"
 #endif
 ; Everything's SDK DLLs (Everything32/64/ARM/ARM64.dll). The program loads the
 ; one for its architecture from {app}\dll when the person chooses to reuse the
@@ -131,7 +131,7 @@ Filename: "{app}\{#AppExe}"; Flags: nowait; Check: Relaunch
 [UninstallRun]
 ; The service is machine-wide: removing it asks for elevation, and only when
 ; it was installed.
-Filename: "{app}\prime-files-indexer.exe"; Parameters: "--uninstall"; Verb: "runas"; Flags: shellexec waituntilterminated runhidden; Check: IndexerInstalled; RunOnceId: "RemoveIndexer"
+Filename: "{app}\luma-files-indexer.exe"; Parameters: "--uninstall"; Verb: "runas"; Flags: shellexec waituntilterminated runhidden; Check: IndexerInstalled; RunOnceId: "RemoveIndexer"
 
 [Code]
 var

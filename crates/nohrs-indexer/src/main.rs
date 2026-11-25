@@ -1,4 +1,4 @@
-//! `prime-files-indexer.exe`.
+//! `luma-files-indexer.exe`.
 //!
 //! ```text
 //! --service --allow <SID>              run as the service (the SCM starts this)
@@ -25,6 +25,16 @@ fn main() -> std::process::ExitCode {
             .map(|pair| pair[1].clone())
     };
     let allow = value("--allow").filter(|sid| is_sid(sid));
+    // The elevated run has no console anyone reads, and the app that started
+    // it can only read the report file. Say it started before anything else:
+    // a report still holding this line means the run died before it could say
+    // why, and no report at all means it never got this far.
+    #[allow(clippy::disallowed_methods)]
+    if let Some(path) = value("--report")
+        && let Err(error) = std::fs::write(&path, "the elevated run started but wrote no result\n")
+    {
+        eprintln!("could not write {path}: {error}");
+    }
     // The elevated runs have no console the person sees: what went wrong is
     // written where the app that asked can read it.
     let report = |result: std::io::Result<()>| -> ExitCode {
@@ -206,9 +216,16 @@ fn main() -> std::process::ExitCode {
             report(result)
         }
         _ => {
-            eprintln!(
-                "prime-files-indexer: see the comment at the top of main.rs for the commands"
-            );
+            // A command line this build does not know must not look like a
+            // crash to the app that asked: leave the same kind of report.
+            let message = "see the comment at the top of main.rs for the commands";
+            eprintln!("luma-files-indexer: {message}");
+            #[allow(clippy::disallowed_methods)]
+            if let Some(path) = value("--report")
+                && let Err(error) = std::fs::write(&path, message)
+            {
+                eprintln!("could not write {path}: {error}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -216,5 +233,5 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("prime-files-indexer runs on Windows only");
+    eprintln!("luma-files-indexer runs on Windows only");
 }

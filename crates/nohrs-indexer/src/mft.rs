@@ -13,12 +13,19 @@
 //! add up is skipped, not read wrong.
 
 /// The root folder's record.
-pub const ROOT: u64 = 5;
+pub const ROOT: u32 = 5;
 // Records below this are the file system's own ($MFT, $LogFile, $Extend…).
-const FIRST_USER_RECORD: u64 = 24;
+const FIRST_USER_RECORD: u32 = 24;
 const RECORD_NUMBER: u64 = 0x0000_FFFF_FFFF_FFFF;
 // 100 ns ticks from 1601 to 1970.
 const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+
+/// The record number in a file reference. NTFS holds at most 4 294 967 295
+/// records on a volume, so the number always fits 32 bits and the rest of the
+/// reference is the sequence number; `None` is a corrupt reference.
+pub(crate) fn record_of(reference: u64) -> Option<u32> {
+    u32::try_from(reference & RECORD_NUMBER).ok()
+}
 
 const STANDARD_INFORMATION: u32 = 0x10;
 const ATTRIBUTE_LIST: u32 = 0x20;
@@ -46,12 +53,16 @@ pub struct Info {
 }
 
 /// One name of a record: a file with hard links has several.
+///
+/// The numbers are the low 32 bits of the file references NTFS stores, which
+/// is all a volume's record numbers ever are. 16 bytes instead of 24 is a
+/// hundred megabytes on a drive with ten million names.
 #[derive(Clone, Copy)]
 pub struct Name {
     /// The record named.
-    pub record: u64,
+    pub record: u32,
     /// The record of the folder it is in.
-    pub parent: u64,
+    pub parent: u32,
     start: u32,
     len: u16,
 }
@@ -63,14 +74,16 @@ pub struct Table {
     pub records: Vec<Info>,
     /// In the order read.
     pub names: Vec<Name>,
-    text: String,
-    extended: std::collections::HashSet<u64>,
-    extensions: std::collections::HashMap<u64, u64>,
+    /// Every name's text, in the order read. A snapshot built off this table
+    /// shares this buffer rather than copying the names out of it.
+    text: std::sync::Arc<String>,
+    extended: std::collections::HashSet<u32>,
+    extensions: std::collections::HashMap<u32, u32>,
 }
 
 impl Table {
-    fn info(&mut self, record: u64) -> Option<&mut Info> {
-        let record = usize::try_from(record).ok()?;
+    fn info(&mut self, record: u32) -> Option<&mut Info> {
+        let record = record as usize;
         // A record number far past the table read is a corrupt reference.
         if record >= self.records.len() {
             if record > self.records.len() + 1_000_000 {
@@ -155,7 +168,7 @@ fn resident_value(attribute: &[u8]) -> Option<&[u8]> {
 
 /// Reads record `number` into `table`. `record` is the raw record, fixed up
 /// here; one that is not a live file record is left out.
-pub fn parse_record(table: &mut Table, number: u64, record: &mut [u8]) {
+pub fn parse_record(table: &mut Table, number: u32, record: &mut [u8]) {
     if record.get(..4) != Some(b"FILE") || !apply_fixups(record) {
         return;
     }
@@ -168,7 +181,14 @@ pub fn parse_record(table: &mut Table, number: u64, record: &mut [u8]) {
     let base = u64_at(record, 0x20).unwrap_or(0) & RECORD_NUMBER;
     // An extension record carries attributes of its base record that did
     // not fit there.
-    let owner = if base == 0 { number } else { base };
+    let owner = if base == 0 {
+        number
+    } else {
+        let Some(owner) = record_of(base) else {
+            return;
+        };
+        owner
+    };
     if base != 0 {
         table.extended.insert(owner);
         table.extended.insert(number);
@@ -231,7 +251,7 @@ pub fn parse_record(table: &mut Table, number: u64, record: &mut [u8]) {
     }
 }
 
-fn add_name(table: &mut Table, record: u64, value: &[u8]) {
+fn add_name(table: &mut Table, record: u32, value: &[u8]) {
     let (Some(parent), Some(&length), Some(&namespace)) =
         (u64_at(value, 0), value.get(0x40), value.get(0x41))
     else {
@@ -240,17 +260,27 @@ fn add_name(table: &mut Table, record: u64, value: &[u8]) {
     if namespace == DOS_NAMESPACE {
         return;
     }
+    let Some(parent) = record_of(parent) else {
+        return;
+    };
     let Some(units) = value.get(0x42..0x42 + length as usize * 2) else {
         return;
     };
-    let (pairs, _) = units.as_chunks::<2>();
-    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
-    let name = String::from_utf16_lossy(&units);
+    // NTFS names are at most 255 UTF-16 units, and a longer one is not a
+    // name. The buffer keeps the conversion off the heap, once per name read.
+    let mut buffer = [0u16; 256];
+    let Some(slots) = buffer.get_mut(..units.len() / 2) else {
+        return;
+    };
+    for (slot, pair) in slots.iter_mut().zip(units.as_chunks::<2>().0) {
+        *slot = u16::from_le_bytes(*pair);
+    }
+    let name = String::from_utf16_lossy(slots);
     let start = table.text.len() as u32;
-    table.text.push_str(&name);
+    std::sync::Arc::make_mut(&mut table.text).push_str(&name);
     table.names.push(Name {
         record,
-        parent: parent & RECORD_NUMBER,
+        parent,
         start,
         len: name.len() as u16,
     });
@@ -360,7 +390,9 @@ pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volu
     {
         return crate::protocol::Volume::new(root);
     }
-    // Children by folder, without a vector per folder: count, then fill.
+    // Children by folder, without a vector per folder: count, then fill. The
+    // names and their bytes are counted here too, so the volume can be given
+    // exactly the room it needs instead of growing by doubling.
     let mut first = vec![0u32; count + 1];
     let live = |name: &Name| {
         name.record >= FIRST_USER_RECORD
@@ -373,8 +405,12 @@ pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volu
                 .get(name.parent as usize)
                 .is_some_and(|info| info.in_use && info.dir)
     };
+    let mut entries = 0usize;
+    let mut name_bytes = 0usize;
     for name in table.names.iter().filter(|name| live(name)) {
         first[name.parent as usize] += 1;
+        entries += 1;
+        name_bytes += crate::protocol::stored_name_len(table.name(name));
     }
     let mut running = 0u32;
     for slot in first.iter_mut() {
@@ -391,8 +427,12 @@ pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volu
             *slot += 1;
         }
     }
+    // The fill counts are spent; on a big drive that is another table-sized
+    // vector to hand back before the tree itself is built.
+    drop(next);
 
-    let mut volume = crate::protocol::Volume::new(root);
+    let mut volume = crate::protocol::Volume::sharing(root, std::sync::Arc::clone(&table.text));
+    volume.reserve(entries, name_bytes);
     let mut visited = vec![false; count];
     // (record, its index in the volume, how many of `policy.profiles` its
     // path has matched so far, if it is on that path).
@@ -409,9 +449,10 @@ pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volu
                 continue;
             };
             let text = table.name(name);
-            let child_index = volume.push(
+            let child_index = volume.push_shared(
                 index,
-                text,
+                name.start,
+                name.len,
                 info.dir,
                 if info.dir { 0 } else { info.size },
                 info.modified,
@@ -430,6 +471,7 @@ pub fn tree(table: &Table, root: &str, policy: &Policy) -> crate::protocol::Volu
             queue.push_back((name.record, child_index, matched));
         }
     }
+    volume.shrink();
     volume
 }
 
@@ -506,8 +548,19 @@ mod volume {
             )));
         }
 
+        // NTFS numbers a volume's records in 32 bits, so a table longer than
+        // that is refused rather than indexed with wrapped numbers.
+        let Ok(records) = u32::try_from(valid / record_size as u64) else {
+            return Err(io::Error::other(format!(
+                "{root}: the $MFT is too large to index"
+            )));
+        };
+
         let mut table = Table::default();
-        table.records.reserve((valid / record_size as u64) as usize);
+        table.records.reserve(records as usize);
+        // One name a record is the usual case; hard links add more, which the
+        // buffers take as they come before being trimmed at the end.
+        table.names.reserve(records as usize);
         let mut buffer = vec![0u8; CHUNK as usize];
         let mut done = 0u64;
         'runs: for (lcn, clusters) in runs {
@@ -535,13 +588,19 @@ mod volume {
                 }
                 for (index, record) in chunk.chunks_exact_mut(record_size).enumerate() {
                     let number = done / record_size as u64 + index as u64;
-                    parse_record(&mut table, number, record);
+                    // Within `records`, which the geometry above held to 32 bits.
+                    parse_record(&mut table, number as u32, record);
                 }
                 done += length;
                 remaining -= length;
                 offset = offset.map(|at| at + length);
             }
         }
+        // The table is kept for the service's whole run, so it gives back the
+        // room it grew through; the text buffer doubles as names are added.
+        table.records.shrink_to_fit();
+        table.names.shrink_to_fit();
+        std::sync::Arc::make_mut(&mut table.text).shrink_to_fit();
         Ok(table)
     }
 }
@@ -552,6 +611,85 @@ pub(crate) mod tests {
     use super::*;
 
     const RECORD: usize = 1024;
+
+    #[test]
+    fn a_record_costs_16_bytes_of_info_and_16_of_name() {
+        // The table is kept for the service's whole run, one of each per file
+        // the drive holds.
+        assert_eq!(16, std::mem::size_of::<Info>());
+        assert_eq!(16, std::mem::size_of::<Name>());
+    }
+
+    #[test]
+    fn a_file_reference_gives_its_number_and_never_a_wrapped_one() {
+        assert_eq!(Some(31), record_of(31 | (3 << 48)));
+        assert_eq!(Some(u32::MAX), record_of(u64::from(u32::MAX)));
+        // Past the most records NTFS puts on one volume: not a record here.
+        assert_eq!(None, record_of(0x1_0000_0000));
+        assert_eq!(None, record_of(RECORD_NUMBER));
+    }
+
+    #[test]
+    fn an_extension_record_past_what_a_table_numbers_is_left_out() {
+        let mut table = Table::default();
+        let mut extension = Record::new(IN_USE, 0x1_0000_0000)
+            .name(31, "nowhere.txt", 3)
+            .finish();
+        parse_record(&mut table, 60, &mut extension);
+        assert!(table.names.is_empty());
+        assert!(table.extensions.is_empty());
+    }
+
+    #[test]
+    fn a_tree_shares_the_tables_names_instead_of_copying_them() {
+        // A snapshot off a drive must not hold a second copy of every name:
+        // it reads them out of the table's own buffer.
+        let table = sample();
+        let policy = Policy {
+            profiles: Vec::new(),
+            allowed: Vec::new(),
+        };
+        let volume = tree(&table, "C:", &policy);
+        assert!(volume.shares_names(&table.text));
+    }
+
+    #[test]
+    fn a_tree_reserves_the_room_it_needs_instead_of_doubling_it() {
+        // Two thousand names under one folder: enough that growing by
+        // doubling would show, small enough to build in a test.
+        let mut records = vec![
+            (
+                ROOT,
+                Record::new(IN_USE | DIRECTORY, 0)
+                    .name(ROOT, ".", 3)
+                    .finish(),
+            ),
+            (
+                30,
+                Record::new(IN_USE | DIRECTORY, 0)
+                    .name(ROOT, "Users", 3)
+                    .finish(),
+            ),
+        ];
+        for index in 0..2_000u32 {
+            let name = format!("file-{index:05}.txt");
+            records.push((
+                31 + index,
+                Record::new(IN_USE, 0).name(30, &name, 1).finish(),
+            ));
+        }
+        let table = table_of(records);
+        let policy = Policy {
+            profiles: Vec::new(),
+            allowed: Vec::new(),
+        };
+        let volume = tree(&table, "C:", &policy);
+        assert_eq!(2_002, volume.len());
+        for (capacity, len) in volume.room() {
+            assert!(capacity >= len, "reserved {capacity} for {len}");
+            assert!(capacity < len + 64, "left {capacity} for {len}");
+        }
+    }
 
     // A record as NTFS lays it out, update sequence included.
     pub(crate) struct Record {
@@ -613,10 +751,10 @@ pub(crate) mod tests {
             self.attribute(STANDARD_INFORMATION, true, &[], &value)
         }
 
-        pub(crate) fn name(self, parent: u64, name: &str, namespace: u8) -> Self {
+        pub(crate) fn name(self, parent: u32, name: &str, namespace: u8) -> Self {
             let units: Vec<u16> = name.encode_utf16().collect();
             let mut value = vec![0u8; 0x42 + units.len() * 2];
-            value[..8].copy_from_slice(&(parent | 0x0001_0000_0000_0000).to_le_bytes());
+            value[..8].copy_from_slice(&(u64::from(parent) | 0x0001_0000_0000_0000).to_le_bytes());
             value[0x40] = units.len() as u8;
             value[0x41] = namespace;
             for (index, unit) in units.iter().enumerate() {
@@ -667,7 +805,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn table_of(records: Vec<(u64, Vec<u8>)>) -> Table {
+    pub(crate) fn table_of(records: Vec<(u32, Vec<u8>)>) -> Table {
         let mut table = Table::default();
         for (number, mut record) in records {
             parse_record(&mut table, number, &mut record);

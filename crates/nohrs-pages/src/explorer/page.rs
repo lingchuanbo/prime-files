@@ -3125,11 +3125,16 @@ impl ExplorerPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane) = self.group.tab(pane_index, self.group.active_tab(pane_index)) else {
+        let Some(pane) = self
+            .group
+            .tab(pane_index, self.group.active_tab(pane_index))
+        else {
             return;
         };
         let entry = entry.clone();
-        pane.update(cx, |pane, cx| pane.open_entry_in_new_tab(&entry, window, cx));
+        pane.update(cx, |pane, cx| {
+            pane.open_entry_in_new_tab(&entry, window, cx)
+        });
     }
 
     /// Active tab index of `pane_index`.

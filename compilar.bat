@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 rem Compila os dois programas que o LumaFiles usa:
 rem   LumaFiles.exe           - o explorador
-rem   prime-files-indexer.exe - o servico de indexacao (busca instantanea)
+rem   luma-files-indexer.exe - o servico de indexacao (busca instantanea)
 rem
 rem   compilar.bat        -> perfil release, o do dia a dia (recompila rapido)
 rem   compilar.bat dist   -> perfil dist, o que o instalador empacota
@@ -84,7 +84,7 @@ if /i "%PROFILE%"=="dist" (
 
 echo.
 echo Programas em %OUT%:
-for %%F in ("%OUT%\LumaFiles.exe" "%OUT%\prime-files-indexer.exe") do (
+for %%F in ("%OUT%\LumaFiles.exe" "%OUT%\luma-files-indexer.exe") do (
   if exist "%%~F" (
     echo   %%~nxF  -  %%~zF bytes
   ) else (

@@ -46,11 +46,11 @@ impl Volume {
 
     fn matching_pinyin(&self, terms: &[String], limit: usize, matched: &mut Vec<usize>) {
         let mut seen: std::collections::HashSet<usize> = matched.iter().copied().collect();
-        for &position in &self.non_ascii {
+        for pinyin in &self.pinyin_entries {
             if matched.len() >= limit {
                 break;
             }
-            let position = position as usize;
+            let position = pinyin.entry as usize;
             if seen.contains(&position) {
                 continue;
             }
@@ -61,11 +61,9 @@ impl Volume {
             if terms.iter().all(|term| name.contains(term.as_str())) {
                 continue;
             }
+            let full = self.pinyin_of(pinyin);
             let Some(initials) = super::pinyin::initials(name) else {
-                if terms
-                    .iter()
-                    .all(|term| self.pinyin_of(entry).contains(term.as_str()))
-                {
+                if terms.iter().all(|term| full.contains(term.as_str())) {
                     seen.insert(position);
                     matched.push(position);
                 }
@@ -74,7 +72,7 @@ impl Volume {
             if terms.iter().all(|term| {
                 name.contains(term.as_str())
                     || initials.contains(term.as_str())
-                    || self.pinyin_of(entry).contains(term.as_str())
+                    || full.contains(term.as_str())
             }) {
                 seen.insert(position);
                 matched.push(position);

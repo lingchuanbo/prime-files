@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClickEvent, ClipboardItem, Context, Div,
-    Entity, FocusHandle, ImageSource, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, RenderImage, SharedString, Subscription, Task, UniformListScrollHandle,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, ClipboardItem, Context, Div, Entity,
+    FocusHandle, ImageSource, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
+    Point, Render, RenderImage, SharedString, Subscription, Task, UniformListScrollHandle,
     WeakEntity, Window, WindowControlArea, div, ease_out_quint, img, px, rgb, uniform_list,
 };
 use gpui_component::{
@@ -29,7 +29,6 @@ use gpui_component::{
     button::{Button, ButtonRounded, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::{Input, InputEvent, InputState},
-
 };
 use nohrs_core::config::quick_launch::{ActionKind, Item, MAX_SLOT, View};
 use nohrs_core::telemetry::LogErr;
@@ -168,7 +167,6 @@ impl crate::drawn_menu::MenuHost for QuickLaunchView {
     }
 }
 
-
 /// The four fields the edit dialog offers (§12.3).
 struct Editor {
     group: usize,
@@ -272,7 +270,6 @@ impl QuickLaunchView {
         // A menu does not survive the window losing the focus: its rows act on
         // the state behind it, which the user is no longer looking at.
         crate::drawn_menu::window_deactivated(self, window, cx);
-
 
         let Some(quick_launch) = super::state(cx) else {
             return;
@@ -827,7 +824,6 @@ impl QuickLaunchView {
         self.menu_scope = Some(scope);
         crate::drawn_menu::open_at(self, position, rows, cx);
     }
-
 }
 
 impl Render for QuickLaunchView {
@@ -1814,7 +1810,11 @@ fn empty_cell(
 }
 
 /// The rows of the menu a group's right click opens (§12.3).
-fn group_menu_rows(index: usize, editable: bool, last_group: bool) -> Vec<crate::drawn_menu::MenuRow> {
+fn group_menu_rows(
+    index: usize,
+    editable: bool,
+    last_group: bool,
+) -> Vec<crate::drawn_menu::MenuRow> {
     let _ = index;
     vec![
         crate::drawn_menu::MenuRow::entry(nohrs_core::t!("Novo grupo"), editable, NEW_GROUP),
@@ -1829,10 +1829,7 @@ fn group_menu_rows(index: usize, editable: bool, last_group: bool) -> Vec<crate:
 }
 
 /// The rows of the menu an empty cell opens (§12.3, §17.2 R2).
-fn cell_menu_rows(
-    group_editable: bool,
-    mixed_selection: bool,
-) -> Vec<crate::drawn_menu::MenuRow> {
+fn cell_menu_rows(group_editable: bool, mixed_selection: bool) -> Vec<crate::drawn_menu::MenuRow> {
     let mut rows = vec![crate::drawn_menu::MenuRow::entry(
         nohrs_core::t!("Novo item"),
         group_editable,
@@ -2209,12 +2206,7 @@ fn labeled_field(label: &'static str, input: &Entity<InputState>) -> AnyElement 
                 .text_color(rgb(theme::muted()))
                 .child(label),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .child(Input::new(input)),
-        )
+        .child(div().flex_1().min_w(px(0.0)).child(Input::new(input)))
         .into_any_element()
 }
 

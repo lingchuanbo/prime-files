@@ -14,8 +14,6 @@ actions!(
     ]
 );
 
-/// A reusable 2-way split/tab container shared across pages.
-mod drawn_menu;
 pub mod compact;
 /// Making Nohrs the folder handler of the Windows user.
 pub mod default_explorer;
@@ -23,6 +21,8 @@ pub mod default_explorer;
 pub(crate) mod dialog_jump;
 /// Panels docked to any side: the shared gestures and drawing.
 pub(crate) mod dock;
+/// A reusable 2-way split/tab container shared across pages.
+mod drawn_menu;
 /// The file explorer page and its supporting state and views.
 pub mod explorer;
 /// The in-process way another window asks the Explorer to show a path.

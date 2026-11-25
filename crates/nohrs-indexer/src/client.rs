@@ -70,6 +70,17 @@ pub fn status() -> Status {
 }
 
 fn connect() -> io::Result<File> {
+    connect_within(30_000)
+}
+
+/// As [`connect`], for a caller that only needs to know whether the service is
+/// there: a probe that waits half a minute looks to the person exactly like a
+/// frozen window.
+fn connect_soon() -> io::Result<File> {
+    connect_within(1_000)
+}
+
+fn connect_within(wait: u32) -> io::Result<File> {
     const ERROR_FILE_NOT_FOUND: i32 = 2;
     const ERROR_PIPE_BUSY: i32 = 231;
     const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
@@ -82,7 +93,7 @@ fn connect() -> io::Result<File> {
         {
             // Another request is being answered: wait for the pipe, then try again.
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                if !unsafe { WaitNamedPipeW(&name, 30_000) }.as_bool() {
+                if !unsafe { WaitNamedPipeW(&name, wait) }.as_bool() {
                     return Err(error);
                 }
             }
@@ -106,7 +117,7 @@ fn connect() -> io::Result<File> {
 /// The version the running service speaks: its wire version and the requests
 /// it knows ([`protocol::HELLO_VERSION`]).
 pub fn hello() -> io::Result<u32> {
-    let mut pipe = connect()?;
+    let mut pipe = connect_soon()?;
     pipe.write_all(protocol::HELLO)?;
     let answer = read_answer(&mut pipe)?;
     answer
@@ -163,7 +174,7 @@ pub fn index_status() -> io::Result<protocol::IndexStatus> {
             "the indexer does not support status queries",
         ));
     }
-    let mut pipe = connect()?;
+    let mut pipe = connect_soon()?;
     pipe.write_all(protocol::STATUS)?;
     protocol::read_index_status(&mut BufReader::with_capacity(128, pipe))
 }
@@ -260,7 +271,8 @@ pub fn run_elevated(
     arguments: &str,
     report: &std::path::Path,
 ) -> io::Result<Option<(u32, String)>> {
-    let program = HSTRING::from(shipped_indexer()?.as_os_str());
+    let shipped = shipped_indexer()?;
+    let program = HSTRING::from(shipped.as_os_str());
     let parameters = HSTRING::from(format!("{arguments} --report \"{}\"", report.display()));
     let verb = HSTRING::from("runas");
     let mut info = SHELLEXECUTEINFOW {
@@ -290,5 +302,18 @@ pub fn run_elevated(
     // UI thread.
     #[allow(clippy::disallowed_methods)]
     let message = std::fs::read_to_string(report).unwrap_or_default();
-    Ok(Some((code, message.trim().to_string())))
+    let message = message.trim().to_string();
+    if code != 0 && message.is_empty() {
+        // Nobody reads an elevated program's console: with no report either,
+        // the caller can only show a number. Say what was run, so a run that
+        // died can be told apart from a launch that never happened.
+        return Ok(Some((
+            code,
+            format!(
+                "the elevated run left no report (exit {code}); it ran {} {arguments}",
+                shipped.display()
+            ),
+        )));
+    }
+    Ok(Some((code, message)))
 }

@@ -58,6 +58,10 @@ static ALLOWED: OnceLock<String> = OnceLock::new();
 static STATUS: AtomicIsize = AtomicIsize::new(0);
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static INDEX: OnceLock<Arc<index::Index>> = OnceLock::new();
+/// How many answers may be in flight at once; each has its own thread.
+const MOST_CLIENTS: u32 = 16;
+// One line at a time: answers run on their own threads now.
+static LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Runs as the service the Service Control Manager started, answering the
 /// user `allowed_sid` (validated by the caller).
@@ -199,15 +203,29 @@ fn serve() {
         bInheritHandle: false.into(),
     };
     let name = HSTRING::from(PIPE_NAME);
+    // The shape every instance is created with. One client that connects and
+    // then stops reading — an app closed mid-answer, a search that went away —
+    // would otherwise hold the only instance forever, and every later request
+    // (the app asking whether the service is there at all) would be refused
+    // for no reason the caller can see.
+    let open = PIPE_ACCESS_DUPLEX;
+    let mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+    let mut first = true;
     while !STOPPING.load(Ordering::SeqCst) {
         // The first instance only: if another program already took the name,
-        // creating fails instead of joining it.
+        // creating fails instead of joining it. Later instances are more of
+        // the same pipe, so they must not carry that flag.
+        let access = if first {
+            open | FILE_FLAG_FIRST_PIPE_INSTANCE
+        } else {
+            open
+        };
         let pipe = unsafe {
             CreateNamedPipeW(
                 &name,
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
+                access,
+                mode,
+                MOST_CLIENTS,
                 1 << 20,
                 4096,
                 0,
@@ -221,17 +239,30 @@ fn serve() {
             std::thread::sleep(std::time::Duration::from_secs(2));
             continue;
         }
+        // Only once the name is ours may the next instance be a plain one.
+        first = false;
         let connected = unsafe { ConnectNamedPipe(pipe, None) }.is_ok()
             || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
         let file = unsafe { File::from_raw_handle(pipe.0) };
-        if connected
-            && !STOPPING.load(Ordering::SeqCst)
-            && let Err(error) = answer(&file)
-        {
-            log(&format!("request failed: {error}"));
+        if !connected || STOPPING.load(Ordering::SeqCst) {
+            unsafe { DisconnectNamedPipe(HANDLE(file.as_raw_handle())) }.ok();
+            continue;
         }
-        if let Err(error) = unsafe { DisconnectNamedPipe(HANDLE(file.as_raw_handle())) } {
-            log(&format!("DisconnectNamedPipe failed: {error}"));
+        // Each answer on its own thread: a client that stops reading blocks
+        // its own thread and nothing else, and the loop is back to waiting for
+        // the next client at once.
+        let spawned = std::thread::Builder::new()
+            .name("prime-index-answer".into())
+            .spawn(move || {
+                if let Err(error) = answer(&file) {
+                    log(&format!("request failed: {error}"));
+                }
+                if let Err(error) = unsafe { DisconnectNamedPipe(HANDLE(file.as_raw_handle())) } {
+                    log(&format!("DisconnectNamedPipe failed: {error}"));
+                }
+            });
+        if let Err(error) = spawned {
+            log(&format!("could not answer a request: {error}"));
         }
     }
     unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
@@ -512,6 +543,11 @@ fn log_file() -> PathBuf {
 /// A line in the service's own log, in ProgramData (it has no console and
 /// no user to show anything to). Kept under a megabyte.
 pub fn log(line: &str) {
+    // Answers run on their own threads: one line at a time, so a line is
+    // never cut in half by another one.
+    let _one_at_a_time = LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = log_file();
     if let Some(parent) = path.parent()
         && std::fs::create_dir_all(parent).is_err()

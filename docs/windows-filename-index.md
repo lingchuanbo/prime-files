@@ -14,9 +14,29 @@
 
 本版不保存跨服务重启的 USN 游标或 MFT 基线。服务重启时重新读取全量基线，校准停机期间的变化；首次快照准备期间请求需要等待。
 
+## 内存
+
+常驻内存 = 每条名字的结构开销 × 卷内名称数 + 两份名字文本（原文与小写）。2026-11-25 的调整后，每条名字的开销是：
+
+| 结构 | 每条 |
+|---|---|
+| `protocol::Volume` 的 `Entry` | 32 B |
+| `mft::Table` 的 `Name`（仅 USN 跟踪中的卷） | 16 B |
+| `mft::Table` 的 `Info`（仅 USN 跟踪中的卷，按记录数） | 16 B |
+| 名字原文 | 1 份：快照与表**共享同一个缓冲**（`Volume::sharing`），不再各存一份 |
+| 名字小写 | 1 份（带锚点的子串搜索靠它） |
+| 拼音 | 仅含汉字的名字，另有 12 B 跨度 |
+
+- **有 USN 跟踪的卷**：约 64 B 结构 + 2 份名字文本。
+- **没有 USN 跟踪的卷**（启动追赶失败后进入 30 分钟全量重建）：约 32 B 结构 + 2 份名字文本。`Table` 建完快照后立即丢弃——那种模式下一次是重新读盘，不会再做增量合并，快照独占那份原文缓冲。
+- 共享是只读的：增量更新时 `compact` 换上一个新缓冲（旧快照继续用它自己的那份），所以给表追加名字不会去改正在被搜索的那份。`Volume::reserve` 只在缓冲还没被共享时才预留，避免把要共享的缓冲拷一遍。
+- `mft::tree` 先用一遍计数得到条目数与名字字节数，再 `Volume::reserve` 预留，结尾 `shrink` 收回小写/拼音缓冲多出来的容量。因此不再是 `Vec`/`String` 按倍扩容留下的 1–2 倍余量（本机 E: 844 万条时，仅 `Entry` 的扩容余量就有约 330 MB）。
+- 有测试锁住这些：`Entry` 32 B、`Name` 16 B、`Info` 16 B、`tree` 的预留不超过实际使用 64 B，以及快照与表共享名字缓冲（`protocol::tests::a_name_costs_32_bytes_of_entry_and_12_of_pinyin`、`mft::tests::a_record_costs_16_bytes_of_info_and_16_of_name`、`mft::tests::a_tree_reserves_the_room_it_needs_instead_of_doubling_it`、`mft::tests::a_tree_shares_the_tables_names_instead_of_copying_them`）。
+
 ## 兜底
 
 - 日志 ID 改变、游标过期或倒退、未知日志格式、单轮超过 256 批或 32,768 条不同记录时，保留旧快照并安排后台全量重建，失败后间隔约 30 秒重试。
+- 增量更新拒绝某批变化时，错误信息带 MFT 记录号和具体校验原因（如"its attributes are listed elsewhere""an attribute overruns the record"），日志里能直接看出是哪条记录让整批重建。
 - 常驻属性列表按文件主记录与全部扩展记录一起读取，校验引用和序列号后整批更新，包含扩展记录中的大小与硬链接名称。缺失、损坏、序列号不匹配、非常驻属性列表或嵌套扩展列表使用同一重建路径，整批保留旧数据。
 - 启动时日志追赶失败，会再取一次全量基线，暂时禁用增量并安排重试。
 - 无法打开现有 USN 日志的卷使用每 30 分钟全量更新，也可手动重建。服务不会创建或修改卷的 USN 日志。
@@ -48,4 +68,4 @@ cargo test --release -p nohrs-indexer real_ -- --ignored --nocapture --test-thre
 
 ## 应用到已安装服务
 
-编译只生成仓库下的程序，不会替换已运行的服务。需在获准重启后，用新版 `prime-files-indexer.exe --install --allow <原安装用户 SID>` 更新已安装服务；其安装路径通常为 `C:\Program Files\Prime Files Indexer`。协议兼容既有界面，服务重启后先建立新基线。
+编译只生成仓库下的程序，不会替换已运行的服务。需在获准重启后，用新版 `luma-files-indexer.exe --install --allow <原安装用户 SID>` 更新已安装服务；其安装路径通常为 `C:\Program Files\Prime Files Indexer`（服务名与安装目录沿用旧名，改名只涉及程序文件名）。协议兼容既有界面，服务重启后先建立新基线。

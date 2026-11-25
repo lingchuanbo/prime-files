@@ -1523,6 +1523,42 @@ pub(crate) mod mft {
         false
     }
 
+    /// Whether the service is installed on this machine, answering or not:
+    /// its program lives in Program Files, where only an administrator put it.
+    pub(crate) fn installed() -> bool {
+        #[cfg(windows)]
+        {
+            static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *INSTALLED.get_or_init(|| {
+                nohrs_indexer::install::install_dir()
+                    .join(nohrs_indexer::EXE_NAME)
+                    .exists()
+            })
+        }
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// Whether the app should wait for the service rather than walk the drives
+    /// itself. A service that is starting, or busy reading its first baseline,
+    /// does not answer for a moment; walking instead opens every folder on
+    /// every volume, which takes the machine away for half an hour where the
+    /// service takes minutes. A service that stays silent is broken, and the
+    /// drives are walked after all.
+    pub(crate) fn waiting_for_service() -> bool {
+        #[cfg(windows)]
+        {
+            const GRACE: Duration = Duration::from_secs(90);
+            static FIRST_SILENT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+            if !installed() || searchable() {
+                return false;
+            }
+            FIRST_SILENT.get_or_init(Instant::now).elapsed() < GRACE
+        }
+        #[cfg(not(windows))]
+        false
+    }
+
     /// Asks the service for the paths holding every one of `terms`. The
     /// service scans the names it keeps, so nothing of the table is loaded
     /// here: what comes back is the few thousand paths that matched.
@@ -1754,7 +1790,7 @@ pub(crate) mod mft {
     fn change(enable: bool) -> Result<(), String> {
         use nohrs_indexer::client;
         let report =
-            std::env::temp_dir().join(format!("prime-files-indexer-{}.txt", std::process::id()));
+            std::env::temp_dir().join(format!("luma-files-indexer-{}.txt", std::process::id()));
         if let Err(error) = std::fs::remove_file(&report)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -4365,6 +4401,13 @@ pub(crate) fn ensure(cx: &mut App) {
     if mft::searchable() {
         return;
     }
+    // A service that is installed but not answering this second is starting,
+    // or reading its first baseline. Walking instead would open every folder
+    // on every drive for half an hour; ask again in a moment.
+    if mft::waiting_for_service() {
+        ask_again(cx);
+        return;
+    }
     if state.index.is_some() {
         let stale = state.index.as_ref().is_some_and(|index| index.stale());
         if stale && state.building.is_none() {
@@ -4392,6 +4435,17 @@ pub(crate) fn ensure(cx: &mut App) {
             }
         })
         .log_err();
+    });
+    cx.global_mut::<Everything>()._task = Some(task);
+}
+
+/// Asks for the index again in a moment. Nothing else wakes the page while
+/// the service is starting, and its answer settles it either way: searchable,
+/// or silent long enough that the drives are walked after all.
+fn ask_again(cx: &mut App) {
+    let task = cx.spawn(async move |cx| {
+        cx.background_executor().timer(Duration::from_secs(2)).await;
+        cx.update(ensure).log_err();
     });
     cx.global_mut::<Everything>()._task = Some(task);
 }
@@ -4460,6 +4514,13 @@ pub(crate) fn rebuild(cx: &mut App) {
             }
         });
         cx.global_mut::<Everything>()._task = Some(ui_task);
+        return;
+    }
+    // The service is installed but silent for a moment (starting, or reading
+    // its first baseline): walking the drives instead is what took the
+    // machine away for half an hour.
+    if mft::waiting_for_service() {
+        ask_again(cx);
         return;
     }
     let state = cx.default_global::<Everything>();

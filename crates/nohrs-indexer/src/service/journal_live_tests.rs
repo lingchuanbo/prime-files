@@ -41,8 +41,11 @@ fn names(journal: &Journal, id: u64) -> Vec<String> {
     let Some(mut bytes) = journal.record(id).unwrap() else {
         return vec![];
     };
+    let Some(number) = crate::mft::record_of(id) else {
+        return vec![];
+    };
     let mut table = crate::mft::Table::default();
-    crate::mft::parse_record(&mut table, id, &mut bytes);
+    crate::mft::parse_record(&mut table, number, &mut bytes);
     table
         .names
         .iter()

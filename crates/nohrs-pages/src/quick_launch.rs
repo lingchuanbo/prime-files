@@ -8506,9 +8506,7 @@ mod tests {
     /// The edit dialog's working folder and icon are written, and emptying a
     /// field clears it; the four-field form leaves both as they were.
     #[gpui::test]
-    fn an_edited_item_takes_and_clears_the_working_folder_and_icon(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn an_edited_item_takes_and_clears_the_working_folder_and_icon(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let cwd_text = directory.path().to_string_lossy().to_string();
         let program = "C:\\Windows\\System32\\cmd.exe".to_string();
@@ -8537,7 +8535,17 @@ mod tests {
             assert_eq!(item.icon.as_deref(), Some("C:\\icone.png"));
 
             // Emptying them clears them.
-            assert!(edit_item_fields(cx, 0, 0, "B", &program, "", Some(""), Some(""), false));
+            assert!(edit_item_fields(
+                cx,
+                0,
+                0,
+                "B",
+                &program,
+                "",
+                Some(""),
+                Some(""),
+                false
+            ));
             let item = item_at(cx, 0, 0).expect("the item");
             assert_eq!(item.cwd, None);
             assert_eq!(item.icon, None);

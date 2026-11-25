@@ -116,6 +116,11 @@ impl Index {
 const POLL: Duration = Duration::from_secs(2);
 const RETRY: Duration = Duration::from_secs(30);
 const FALLBACK_REFRESH: Duration = Duration::from_secs(30 * 60);
+/// How long a batch that the journal alone cannot answer waits before the
+/// volume is read whole again. Rebuilding at once would only rebuild again on
+/// the next change to the same record, which is what made a busy volume spend
+/// most of its time reading its own table.
+const UNMERGEABLE_REBUILD: Duration = Duration::from_secs(5 * 60);
 
 pub(super) fn run(index: &Index) {
     use windows::Win32::System::Threading::{
@@ -154,7 +159,13 @@ pub(super) fn run(index: &Index) {
 }
 
 fn update(volume: &mut Tracked, forced: bool, index: &Index) -> bool {
-    if !forced && volume.retry.is_some_and(|last| last.elapsed() < RETRY) {
+    // Each volume says how long to wait after a failure: half a minute for a
+    // journal that went stale, minutes for a batch only a full read answers.
+    if !forced
+        && volume
+            .retry
+            .is_some_and(|last| last.elapsed() < volume.retry_after)
+    {
         return false;
     }
     let result = if forced || volume.retry.is_some() {
@@ -170,6 +181,7 @@ fn update(volume: &mut Tracked, forced: bool, index: &Index) -> bool {
                 volume.root
             ));
             volume.retry = Some(Instant::now());
+            volume.retry_after = RETRY;
             false
         }
     }

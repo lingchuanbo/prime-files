@@ -18,7 +18,7 @@ name = "nohrs_indexer"
 path = "src/nohrs_indexer.rs"
 
 [[bin]]
-name = "prime-files-indexer"
+name = "luma-files-indexer"
 path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]

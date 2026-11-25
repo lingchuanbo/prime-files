@@ -30,8 +30,8 @@ pub mod service;
 pub const SERVICE_NAME: &str = "PrimeFilesIndexer";
 /// The pipe the service answers on.
 pub const PIPE_NAME: &str = r"\\.\pipe\PrimeFilesIndexer";
-/// The program file, beside PrimeFiles.exe and in Program Files.
-pub const EXE_NAME: &str = "prime-files-indexer.exe";
+/// The program file, beside LumaFiles.exe and in Program Files.
+pub const EXE_NAME: &str = "luma-files-indexer.exe";
 
 /// Whether `text` is a string SID (`S-1-5-21-…`): it goes into a security
 /// descriptor and a service's command line, so nothing else may pass.

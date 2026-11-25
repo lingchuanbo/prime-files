@@ -13,8 +13,9 @@ use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileE
 use windows::Win32::System::Services::{
     ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
     CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_HANDLE,
-    SC_MANAGER_ALL_ACCESS, SERVICE_ALL_ACCESS, SERVICE_AUTO_START, SERVICE_CONFIG_DESCRIPTION,
-    SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL, SERVICE_STATUS,
+    SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
+    SERVICE_CHANGE_CONFIG, SERVICE_CONFIG_DESCRIPTION, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW,
+    SERVICE_ERROR_NORMAL, SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STATUS, SERVICE_STOP,
     SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
 };
 use windows::core::{HSTRING, PWSTR};
@@ -44,15 +45,19 @@ impl Drop for Handle {
     }
 }
 
-fn manager() -> io::Result<Handle> {
-    unsafe { OpenSCManagerW(None, None, SC_MANAGER_ALL_ACCESS) }
+/// Opens the service manager for exactly `access`. Some machines hand out
+/// read access to it without the right to create services — or without
+/// `WRITE_DAC`, which `SC_MANAGER_ALL_ACCESS` includes — and asking for
+/// everything at once is refused whole, so each step asks for what it uses.
+fn open_manager(access: u32) -> io::Result<Handle> {
+    unsafe { OpenSCManagerW(None, None, access) }
         .map(Handle)
         .map_err(io::Error::from)
 }
 
-fn open(manager: &Handle) -> io::Result<Option<Handle>> {
+fn open(manager: &Handle, access: u32) -> io::Result<Option<Handle>> {
     let name = HSTRING::from(SERVICE_NAME);
-    match unsafe { OpenServiceW(manager.0, &name, SERVICE_ALL_ACCESS) } {
+    match unsafe { OpenServiceW(manager.0, &name, access) } {
         Ok(handle) => Ok(Some(Handle(handle))),
         Err(error) if WIN32_ERROR::from_error(&error) == Some(ERROR_SERVICE_DOES_NOT_EXIST) => {
             Ok(None)
@@ -60,6 +65,16 @@ fn open(manager: &Handle) -> io::Result<Option<Handle>> {
         Err(error) => Err(io::Error::from(error)),
     }
 }
+
+/// What updating the service needs of the service itself, and what removing
+/// it needs. Asking for everything would be refused whole on a machine that
+/// trimmed the service's permissions too, the way it may have trimmed the
+/// service manager's.
+const TO_UPDATE: u32 = SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS;
+// The standard right that lets a caller delete an object. windows-rs names
+// it only among the file rights; `DeleteService` wants it on the service.
+const DELETE_ACCESS: u32 = 0x0001_0000;
+const TO_REMOVE: u32 = SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE_ACCESS;
 
 fn stop(service: &Handle) {
     let mut status = SERVICE_STATUS::default();
@@ -78,23 +93,30 @@ fn stop(service: &Handle) {
     }
 }
 
+/// Puts the step in front of the system's own words. An elevated run's only
+/// reader is a log line or a report file, where "Access denied" on its own
+/// does not say whether the service manager, the folder or the copy refused.
+fn at(step: &'static str) -> impl FnOnce(io::Error) -> io::Error {
+    move |error| io::Error::new(error.kind(), format!("{step}: {error}"))
+}
+
 /// Installs (or updates) the service for `allowed_sid` and starts it.
 pub fn install(allowed_sid: &str) -> io::Result<()> {
     if !is_sid(allowed_sid) {
         return Err(io::Error::other("not a user SID"));
     }
-    let manager = manager()?;
-    let existing = open(&manager)?;
+    let manager = open_manager(SC_MANAGER_CONNECT).map_err(at("opening the service manager"))?;
+    let existing = open(&manager, TO_UPDATE).map_err(at("opening the existing service"))?;
     // Its program is in use while it runs.
     if let Some(service) = &existing {
         stop(service);
     }
     let dir = install_dir();
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir).map_err(at("creating the install folder"))?;
     let target = dir.join(EXE_NAME);
-    let current = std::env::current_exe()?;
+    let current = std::env::current_exe().map_err(at("finding this program"))?;
     if !same_file(&current, &target) {
-        std::fs::copy(&current, &target)?;
+        std::fs::copy(&current, &target).map_err(at("copying the program into place"))?;
     }
     let command = HSTRING::from(format!(
         "\"{}\" --service --allow {allowed_sid}",
@@ -118,15 +140,20 @@ pub fn install(allowed_sid: &str) -> io::Result<()> {
                     &display,
                 )
             }
-            .map_err(io::Error::from)?;
+            .map_err(io::Error::from)
+            .map_err(at("updating the service"))?;
             service
         }
         None => {
+            // Creating needs the right to create services, which is granted
+            // less often than plain connect; ask for it only on this path.
+            let creator = open_manager(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)
+                .map_err(at("opening the service manager to create the service"))?;
             let name = HSTRING::from(SERVICE_NAME);
             // No account given: LocalSystem, the one that may open a volume.
             unsafe {
                 CreateServiceW(
-                    manager.0,
+                    creator.0,
                     &name,
                     &display,
                     SERVICE_ALL_ACCESS,
@@ -142,7 +169,8 @@ pub fn install(allowed_sid: &str) -> io::Result<()> {
                 )
             }
             .map(Handle)
-            .map_err(io::Error::from)?
+            .map_err(io::Error::from)
+            .map_err(at("creating the service"))?
         }
     };
     let mut text: Vec<u16> = DESCRIPTION.encode_utf16().chain([0]).collect();
@@ -163,16 +191,18 @@ pub fn install(allowed_sid: &str) -> io::Result<()> {
         Err(error) if WIN32_ERROR::from_error(&error) == Some(ERROR_SERVICE_ALREADY_RUNNING) => {
             Ok(())
         }
-        Err(error) => Err(io::Error::from(error)),
+        Err(error) => Err(at("starting the service")(io::Error::from(error))),
     }
 }
 
 /// Stops and removes the service and its program.
 pub fn uninstall() -> io::Result<()> {
-    let manager = manager()?;
-    if let Some(service) = open(&manager)? {
+    let manager = open_manager(SC_MANAGER_CONNECT).map_err(at("opening the service manager"))?;
+    if let Some(service) = open(&manager, TO_REMOVE).map_err(at("opening the existing service"))? {
         stop(&service);
-        unsafe { DeleteService(service.0) }.map_err(io::Error::from)?;
+        unsafe { DeleteService(service.0) }
+            .map_err(io::Error::from)
+            .map_err(at("removing the service"))?;
     }
     let dir = install_dir();
     if dir.exists() && std::fs::remove_dir_all(&dir).is_err() {

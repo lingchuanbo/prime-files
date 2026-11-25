@@ -4026,7 +4026,9 @@ async fn expanded_directories_last_only_for_the_folder_they_were_turned_on_for(
             assert_eq!(page.cwd, root_path);
             assert!(!page.directory_expanded);
             assert!(
-                page.filtered_entries.iter().any(|entry| entry.kind == "dir"),
+                page.filtered_entries
+                    .iter()
+                    .any(|entry| entry.kind == "dir"),
                 "the parent lists its folders again"
             );
         })
