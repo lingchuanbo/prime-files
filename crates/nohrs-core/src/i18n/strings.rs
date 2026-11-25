@@ -2849,4 +2849,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Click the magnifier on the bottom bar or press Ctrl+Shift+F in any program and type any part of the name. Several terms filter together, * and ? work, a term with \\ searches the path, and regex:expression uses a regular expression.",
         "Haga clic en la lupa de la barra inferior o pulse Ctrl+Shift+F en cualquier programa y escriba cualquier parte del nombre. Varios términos filtran juntos, * y ? funcionan, un término con \\ busca en la ruta y regex:expresión usa una expresión regular.",
     ),
+    (
+        "{failed} de {total} falharam: {reason}",
+        "{failed} of {total} failed: {reason}",
+        "{failed} de {total} fallaron: {reason}",
+    ),
 ];

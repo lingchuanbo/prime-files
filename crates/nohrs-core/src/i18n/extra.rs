@@ -8822,4 +8822,15 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "点底部栏的放大镜，或在任何程序里按 Ctrl+Shift+F，输入名字的任意部分。多个词一起筛选，支持 * 和 ?，含 \\ 的词搜索路径，regex:表达式 使用正则表达式。",
         ],
     ),
+    (
+        "{failed} de {total} falharam: {reason}",
+        [
+            "{failed} sur {total} ont échoué : {reason}",
+            "{failed} von {total} fehlgeschlagen: {reason}",
+            "{failed} su {total} non riusciti: {reason}",
+            "{failed} из {total} не удалось: {reason}",
+            "{total} 件中 {failed} 件失敗: {reason}",
+            "{total} 个中有 {failed} 个失败：{reason}",
+        ],
+    ),
 ];

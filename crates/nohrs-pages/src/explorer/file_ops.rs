@@ -344,12 +344,22 @@ impl OpReport {
             for failure in &self.failures {
                 tracing::error!("explorer file operation failed: {failure}");
             }
+            // The count alone left the person with nothing to act on: the
+            // reason (permission denied, a name in use, a full disk) is what
+            // tells them which knob to turn. Only the first one fits the bar;
+            // the rest stay in the log.
+            let reason = self
+                .failures
+                .first()
+                .map(|failure| short_reason(failure))
+                .unwrap_or_default();
             return (
                 StatusLevel::Error,
                 tf!(
-                    "{failed} de {total} falharam",
+                    "{failed} de {total} falharam: {reason}",
                     failed = self.failures.len(),
-                    total = total
+                    total = total,
+                    reason = reason
                 ),
             );
         }
@@ -386,6 +396,19 @@ impl OpReport {
             ),
         }
     }
+}
+
+/// The one reason a batch's failures can show in the status bar: the first
+/// message, its whitespace flattened and cut to what fits on the line.
+fn short_reason(failure: &str) -> String {
+    const MOST: usize = 140;
+    let flat = failure.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MOST {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(MOST.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
 }
 
 // [`apply_one`] to a name nothing else is waiting on, clearing away its own
@@ -1864,7 +1887,30 @@ mod op_report_tests {
         report.failed("/src/other: permission denied".into());
         let (level, text) = report.footer(2, "2 item(s) moved");
         assert_eq!(level, StatusLevel::Error);
-        assert_eq!(text, "1 de 2 falharam");
+        assert_eq!(
+            text, "1 de 2 falharam: /src/other: permission denied",
+            "the reason is what the person can act on"
+        );
+    }
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::short_reason;
+
+    #[test]
+    fn a_reason_fits_the_status_bar_on_one_line() {
+        assert_eq!(
+            short_reason("io error: 拒绝访问。 (os error 5)"),
+            "io error: 拒绝访问。 (os error 5)"
+        );
+        // Line breaks and runs of blanks come out as one space.
+        assert_eq!(short_reason("first\nsecond\t\tthird"), "first second third");
+        // A long one is cut, and says so.
+        let long = "x".repeat(400);
+        let cut = short_reason(&long);
+        assert!(cut.chars().count() < long.chars().count());
+        assert!(cut.ends_with('…'));
     }
 }
 
