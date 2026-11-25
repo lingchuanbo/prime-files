@@ -70,7 +70,7 @@ file_type_colors = [
 
 ```toml
 [indexing]
-# コンピューター全体の名前検索 (Ctrl+E) が名前をどこから取るか:
+# コンピューター全体の名前検索 (Ctrl+Shift+F) が名前をどこから取るか:
 #   "auto"        Everything が起動中ならそのインデックス、なければ自前 (最初の検索時に決定)
 #   "prime-files" 自前のインデックス (ドライブ走査、または NTFS MFT を読むサービス)
 #   "everything"  Everything のインデックスだけを使う (SDK DLL 経由、ここでは索引を作らない)

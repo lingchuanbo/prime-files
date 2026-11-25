@@ -1064,7 +1064,7 @@ pub struct Indexing {
 
 /// Where the whole-computer name search gets its file names.
 ///
-/// The whole-computer search (`Ctrl+E`) needs every name on the drives from
+/// The whole-computer search (`Ctrl+Shift+F`) needs every name on the drives from
 /// somewhere. This app can keep that list itself, or borrow the one an
 /// installed Everything (voidtools) already keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -1649,7 +1649,7 @@ impl Config {
              [updates]\n\
              automatic = true       # look for, download and install new versions (installed copies only)\n\
              \n\
-             # The whole-computer search (Ctrl+E) gets its names from:\n\
+             # The whole-computer search (Ctrl+Shift+F) gets its names from:\n\
              #   \"auto\"        Everything's index when Everything is open, this\n\
              #                 app's own otherwise, decided on the first search\n\
              #   \"prime-files\" this app's own index (walked, or read from the\n\

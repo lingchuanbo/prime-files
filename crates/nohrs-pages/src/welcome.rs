@@ -505,7 +505,7 @@ impl WelcomePage {
                     .child(div().flex_1().text_sm().text_color(rgb(theme::fg())).child(label))
                     .child(div().text_xs().text_color(rgb(theme::fg_secondary())).child(text))
             })))
-            .child(note(t!("Dicas: Espaço mostra o arquivo grande, os botões laterais do mouse voltam e avançam, Ctrl+E busca no computador inteiro, e Configurações › Atalhos muda qualquer tecla.")))
+            .child(note(t!("Dicas: Espaço mostra o arquivo grande, os botões laterais do mouse voltam e avançam, Ctrl+Shift+F busca no computador inteiro em qualquer programa, e Configurações › Atalhos muda qualquer tecla.")))
     }
 }
 

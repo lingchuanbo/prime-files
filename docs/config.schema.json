@@ -314,7 +314,7 @@
       ]
     },
     "IndexSource": {
-      "description": "Where the whole-computer name search gets its file names.\n\nThe whole-computer search (`Ctrl+E`) needs every name on the drives from\nsomewhere. This app can keep that list itself, or borrow the one an\ninstalled Everything (voidtools) already keeps.",
+      "description": "Where the whole-computer name search gets its file names.\n\nThe whole-computer search (`Ctrl+Shift+F`) needs every name on the drives from\nsomewhere. This app can keep that list itself, or borrow the one an\ninstalled Everything (voidtools) already keeps.",
       "oneOf": [
         {
           "const": "auto",

@@ -281,9 +281,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Haz clic de nuevo para confirmar",
     ),
     (
-        "Clique na lupa da barra de baixo ou aperte Ctrl+E e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho.",
-        "Click the magnifier in the bottom bar or press Ctrl+E and type any part of the name. Several terms narrow together, * and ? work, and a term with \\ searches the path.",
-        "Haz clic en la lupa de la barra inferior o pulsa Ctrl+E y escribe cualquier parte del nombre. Varios términos filtran juntos, * y ? funcionan, y un término con \\ busca en la ruta.",
+        "Clique na lupa da barra de baixo ou aperte Ctrl+Shift+F em qualquer programa e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho.",
+        "Click the magnifier in the bottom bar or press Ctrl+Shift+F in any program and type any part of the name. Several terms narrow together, * and ? work, and a term with \\ searches the path.",
+        "Haz clic en la lupa de la barra inferior o pulsa Ctrl+Shift+F en cualquier programa y escribe cualquier parte del nombre. Varios términos filtran juntos, * y ? funcionan, y un término con \\ busca en la ruta.",
     ),
     (
         "Clique na tecla de um comando e aperte a combinação nova; Esc desiste. Um atalho que já era de outro comando sai dele. Vale na hora.",
@@ -382,9 +382,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
     ("Desligado", "Off", "Desactivado"),
     ("Detalhes", "Details", "Detalles"),
     (
-        "Dicas: Ctrl+E busca no computador inteiro, parar o mouse sobre um som toca ele, e Configurações › Atalhos muda qualquer tecla.",
-        "Tips: Ctrl+E searches the whole computer, resting the mouse on a sound plays it, and Settings › Shortcuts changes any key.",
-        "Consejos: Ctrl+E busca en todo el equipo, dejar el ratón sobre un sonido lo reproduce, y Configuración › Atajos cambia cualquier tecla.",
+        "Dicas: Ctrl+Shift+F busca no computador inteiro em qualquer programa, parar o mouse sobre um som toca ele, e Configurações › Atalhos muda qualquer tecla.",
+        "Tips: Ctrl+Shift+F searches the whole computer from any program, resting the mouse on a sound plays it, and Settings › Shortcuts changes any key.",
+        "Consejos: Ctrl+Shift+F busca en todo el equipo desde cualquier programa, dejar el ratón sobre un sonido lo reproduce, y Configuración › Atajos cambia cualquier tecla.",
     ),
     ("Diminuir o zoom", "Zoom out", "Reducir el zoom"),
     (
@@ -1427,9 +1427,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Ajustes del día a día. Todo queda en Configuración para cambiarlo después.",
     ),
     (
-        "Dicas: Espaço mostra o arquivo grande, os botões laterais do mouse voltam e avançam, Ctrl+E busca no computador inteiro, e Configurações › Atalhos muda qualquer tecla.",
-        "Tips: Space shows the file large, the mouse's side buttons go back and forward, Ctrl+E searches the whole computer, and Settings › Shortcuts changes any key.",
-        "Consejos: Espacio muestra el archivo en grande, los botones laterales del ratón van atrás y adelante, Ctrl+E busca en todo el equipo, y Configuración › Atajos cambia cualquier tecla.",
+        "Dicas: Espaço mostra o arquivo grande, os botões laterais do mouse voltam e avançam, Ctrl+Shift+F busca no computador inteiro em qualquer programa, e Configurações › Atalhos muda qualquer tecla.",
+        "Tips: Space shows the file large, the mouse's side buttons go back and forward, Ctrl+Shift+F searches the whole computer from any program, and Settings › Shortcuts changes any key.",
+        "Consejos: Espacio muestra el archivo en grande, los botones laterales del ratón van atrás y adelante, Ctrl+Shift+F busca en todo el equipo desde cualquier programa, y Configuración › Atajos cambia cualquier tecla.",
     ),
     ("Espaço", "Space", "Espacio"),
     ("Visualização rápida", "Quick look", "Vista rápida"),
