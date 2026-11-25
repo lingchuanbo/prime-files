@@ -84,7 +84,7 @@ enabled = true     # 下のリスト・マスク・パターンを有効にす�
 hidden = false     # 隠しファイルとフォルダー (隠しフォルダーの中身ごと)
 system = false     # システム ファイルとフォルダー
 paths = []         # 中身ごと外すフォルダー (例 "C:\\Temp")
-globs = []         # 名前またはパスのパターン (例 "*.tmp", "*/node_modules/*")
+globs = []         # 名前またはパスのパターン (例 "*.tmp", "*/node_modules/*")。フォルダー名なら中身ごと外れる
 include_only = []  # 残すファイル マスク (例 "*.pdf")。空 = すべてのファイル
 masks = []         # 外すファイル マスク (例 "*.tmp")
 

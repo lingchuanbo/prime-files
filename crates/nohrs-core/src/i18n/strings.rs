@@ -2839,4 +2839,9 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "The names on the drives are kept on this computer. While the program is open, whatever is created or renamed goes in at once; with the service it keeps the names and reads them again every 30 minutes, and without it the index in this process is built again once it is over 6 hours old. Nothing leaves the computer.",
         "Los nombres de las unidades se guardan en este equipo. Con el programa abierto, lo que se crea o renombra entra al instante; con el servicio, este guarda los nombres y los relee cada 30 minutos, y sin él el índice de este proceso se rehace cuando pasa de 6 horas. Nada sale del equipo.",
     ),
+    (
+        "Um nome de arquivo ou de pasta; a pasta sai com tudo o que há dentro. Vários separados por ponto e vírgula, como .git; .svn; temp; *.tmp.",
+        "A file or folder name; a folder leaves with everything inside it. Separate several with semicolons, like .git; .svn; temp; *.tmp.",
+        "Un nombre de archivo o carpeta; la carpeta sale con todo lo que contiene. Separe varios con punto y coma, como .git; .svn; temp; *.tmp.",
+    ),
 ];

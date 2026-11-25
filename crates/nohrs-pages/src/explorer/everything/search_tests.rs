@@ -334,6 +334,33 @@ fn globs_match_names_and_paths() {
 }
 
 #[test]
+fn a_bare_pattern_takes_a_folder_and_everything_inside_it() {
+    let filters = filters_with(&[], &[".git", ".svn", "temp"], &[], &[]);
+    let mut pass = filters.pass();
+    // The folder itself and every hit below it.
+    assert!(!pass.accepts("C:\\repo\\.git", true));
+    assert!(!pass.accepts("C:\\repo\\.git\\config", false));
+    assert!(!pass.accepts("D:\\work\\app\\.svn\\entries\\base", false));
+    assert!(!pass.accepts("C:\\Users\\bob\\AppData\\Local\\Temp\\x.tmp", false));
+    assert!(!pass.accepts("C:\\proj\\Temp", true));
+    // A longer name that merely contains one is kept.
+    assert!(pass.accepts("C:\\repo\\.gitlab-ci.yml", false));
+    assert!(pass.accepts("C:\\repo\\legit-config", false));
+    assert!(pass.accepts("C:\\repo\\temporary\\a.txt", false));
+}
+
+#[test]
+fn temporary_files_are_left_out_by_their_masks() {
+    let filters = filters_with(&[], &[], &[], &["*.tmp", "*.temp", "~$*"]);
+    let mut pass = filters.pass();
+    assert!(!pass.accepts("C:\\a\\draft.tmp", false));
+    assert!(!pass.accepts("C:\\a\\draft.temp", false));
+    assert!(!pass.accepts("C:\\a\\~$report.docx", false));
+    assert!(pass.accepts("C:\\a\\draft.txt", false));
+    assert!(pass.accepts("C:\\a\\template.docx", false));
+}
+
+#[test]
 fn include_only_keeps_matching_files_and_every_folder() {
     let filters = filters_with(&[], &[], &["*.pdf", "*.docx"], &[]);
     let mut pass = filters.pass();

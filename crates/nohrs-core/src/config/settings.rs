@@ -1700,7 +1700,7 @@ impl Config {
              hidden = false     # hidden files and folders, and what they hold\n\
              system = false     # system files and folders\n\
              paths = []         # folders left out with everything inside them\n\
-             globs = []         # name or path patterns, like \"*.tmp\" or \"*/node_modules/*\"\n\
+             globs = []         # name or path patterns, like \"*.tmp\" or \"*/node_modules/*\"; a folder name takes what is inside it\n\
              include_only = []  # file masks kept, like \"*.pdf\"; empty = every file\n\
              masks = []         # file masks left out\n\
              \n\

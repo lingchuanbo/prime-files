@@ -102,7 +102,7 @@ pub(crate) fn ensure_inputs(
         window,
         |page, input, event: &InputEvent, _window, cx| {
             if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                let masks = masks_of(input.read(cx).value().as_ref());
+                let masks = patterns_of(input.read(cx).value().as_ref());
                 if masks != page.config.indexing.exclude.include_only {
                     page.write("indexing.exclude", "include_only", toml_array(&masks), cx);
                 }
@@ -114,7 +114,7 @@ pub(crate) fn ensure_inputs(
         window,
         |page, input, event: &InputEvent, _window, cx| {
             if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                let patterns = masks_of(input.read(cx).value().as_ref());
+                let patterns = patterns_of(input.read(cx).value().as_ref());
                 if patterns != page.config.indexing.exclude.masks {
                     page.write("indexing.exclude", "masks", toml_array(&patterns), cx);
                 }
@@ -399,7 +399,12 @@ impl Section {
                         ),
                     );
             }
-            Row::new(t!("Adicionar filtro…"), None, control).wide()
+            Row::hint(
+                t!("Adicionar filtro…"),
+                t!("Um nome de arquivo ou de pasta; a pasta sai com tudo o que há dentro. Vários separados por ponto e vírgula, como .git; .svn; temp; *.tmp."),
+                control,
+            )
+            .wide()
         });
 
         let masks = Group::titled(
@@ -621,7 +626,7 @@ fn normal_volume(root: &str) -> String {
 }
 
 /// The masks of a `;`-separated field, in the order typed, without blanks.
-fn masks_of(text: &str) -> Vec<String> {
+fn patterns_of(text: &str) -> Vec<String> {
     text.split([';', ','])
         .map(str::trim)
         .filter(|mask| !mask.is_empty())
@@ -693,16 +698,22 @@ fn add_filter(
     window: &mut Window,
     cx: &mut Context<SettingsPage>,
 ) {
-    let pattern = input.read(cx).value().trim().to_string();
-    if pattern.is_empty() {
+    let typed = patterns_of(input.read(cx).value().as_ref());
+    if typed.is_empty() {
         return;
     }
     let mut globs = page.config.indexing.exclude.globs.clone();
-    if !globs
-        .iter()
-        .any(|existing| existing.eq_ignore_ascii_case(&pattern))
-    {
-        globs.push(pattern);
+    let mut added = false;
+    for pattern in typed {
+        if !globs
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&pattern))
+        {
+            globs.push(pattern);
+            added = true;
+        }
+    }
+    if added {
         page.write("indexing.exclude", "globs", toml_array(&globs), cx);
     }
     input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -722,10 +733,10 @@ mod tests {
     #[test]
     fn masks_split_on_semicolons_and_commas_without_blanks() {
         assert_eq!(
-            masks_of(" *.pdf ; *.docx ,, "),
+            patterns_of(" *.pdf ; *.docx ,, "),
             vec!["*.pdf".to_string(), "*.docx".to_string()]
         );
-        assert!(masks_of("   ").is_empty());
+        assert!(patterns_of("   ").is_empty());
     }
 
     #[test]

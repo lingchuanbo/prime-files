@@ -3813,9 +3813,15 @@ impl IndexFilters {
         })
     }
 
-    fn glob_excluded(&self, lowered: &str, name: &str) -> bool {
+    /// A bare pattern names a file or a folder, and a folder takes everything
+    /// under it with it: `.git` leaves out every hit inside a `.git` folder, not
+    /// only an entry called that. A pattern with a separator covers the whole
+    /// path instead.
+    fn glob_excluded(&self, lowered: &str) -> bool {
         self.exclude_globs.iter().any(|pattern| match pattern {
-            GlobPattern::Name(chars) => wildcard(chars, name),
+            GlobPattern::Name(chars) => lowered
+                .split('\\')
+                .any(|component| !component.is_empty() && wildcard(chars, component)),
             GlobPattern::Path(chars) => wildcard(chars, lowered),
         })
     }
@@ -3870,7 +3876,7 @@ impl<'a> FilterPass<'a> {
                 return false;
             }
             let name = lowered.rsplit('\\').next().unwrap_or(lowered.as_str());
-            if self.filters.glob_excluded(&lowered, name) {
+            if self.filters.glob_excluded(&lowered) {
                 return false;
             }
             // A mask says what a file is; a folder is never judged by one.

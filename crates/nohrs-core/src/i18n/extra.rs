@@ -8800,4 +8800,15 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
             "驱动器上的名称保存在这台电脑上。程序打开时，新建或重命名的内容会立即加入；有索引服务时由它保存名称并每 30 分钟重读一次，没有服务时本进程的索引每 6 小时重建一次。任何内容都不会离开电脑。",
         ],
     ),
+    (
+        "Um nome de arquivo ou de pasta; a pasta sai com tudo o que há dentro. Vários separados por ponto e vírgula, como .git; .svn; temp; *.tmp.",
+        [
+            "Un nom de fichier ou de dossier ; le dossier part avec tout son contenu. Séparez-en plusieurs par des points-virgules, comme .git; .svn; temp; *.tmp.",
+            "Ein Datei- oder Ordnername; ein Ordner verschwindet mitsamt seinem Inhalt. Mehrere mit Semikolons trennen, etwa .git; .svn; temp; *.tmp.",
+            "Un nome di file o cartella; la cartella sparisce con tutto ciò che contiene. Separa più voci con punti e virgola, come .git; .svn; temp; *.tmp.",
+            "Имя файла или папки; папка исключается вместе со всем содержимым. Несколько имён разделяйте точками с запятой, например .git; .svn; temp; *.tmp.",
+            "ファイル名またはフォルダー名。フォルダーは中身ごと除外されます。複数はセミコロンで区切ります (例: .git; .svn; temp; *.tmp)。",
+            "文件名或文件夹名；文件夹会连同里面的一切一起排除。多个用分号分隔，例如 .git; .svn; temp; *.tmp。",
+        ],
+    ),
 ];
