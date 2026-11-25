@@ -22,7 +22,6 @@ use gpui::{
     uniform_list,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, IconName, Root};
 use nohrs_services::fs::ops;
 use nohrs_services::fs::trash::Ledger;
@@ -204,6 +203,68 @@ pub struct SearchWindow {
     sort: Option<(SortKey, bool)>,
     widths: ColumnWidths,
     resizing: Option<ColumnResize>,
+    /// The menu a right click opened, if any.
+    menu: Option<crate::drawn_menu::Menu>,
+    /// The result the open menu acts on.
+    menu_index: Option<usize>,
+}
+
+impl crate::drawn_menu::MenuHost for SearchWindow {
+    fn menu(&self) -> Option<&crate::drawn_menu::Menu> {
+        self.menu.as_ref()
+    }
+
+    fn set_menu(&mut self, menu: Option<crate::drawn_menu::Menu>) {
+        if menu.is_none() {
+            self.menu_index = None;
+        }
+        self.menu = menu;
+    }
+
+    fn choose(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.menu_index.take() else {
+            return;
+        };
+        match id {
+            MENU_OPEN => self.open_result(index, cx),
+            MENU_REVEAL => self.reveal_result(index, cx),
+            MENU_COPY => self.copy_result(index, false, cx),
+            MENU_CUT => self.copy_result(index, true, cx),
+            MENU_TRASH => self.trash_result(index, cx),
+            MENU_RENAME => self.begin_rename(index, window, cx),
+            MENU_COPY_PATH => self.copy_path(index, cx),
+            MENU_COPY_NAME => self.copy_name(index, cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+}
+
+/// The ids of the rows of the result menu.
+const MENU_OPEN: u32 = 1;
+const MENU_REVEAL: u32 = 2;
+const MENU_COPY: u32 = 3;
+const MENU_CUT: u32 = 4;
+const MENU_TRASH: u32 = 5;
+const MENU_RENAME: u32 = 6;
+const MENU_COPY_PATH: u32 = 7;
+const MENU_COPY_NAME: u32 = 8;
+
+/// The rows of the menu a right click opens on a result.
+fn result_menu_rows() -> Vec<crate::drawn_menu::MenuRow> {
+    use crate::drawn_menu::MenuRow;
+    vec![
+        MenuRow::entry("打开", true, MENU_OPEN),
+        MenuRow::entry("在资源管理器中显示", true, MENU_REVEAL),
+        MenuRow::rule(),
+        MenuRow::entry("复制", true, MENU_COPY),
+        MenuRow::entry("剪切", true, MENU_CUT),
+        MenuRow::entry("删除", true, MENU_TRASH),
+        MenuRow::entry("重命名", true, MENU_RENAME),
+        MenuRow::rule(),
+        MenuRow::entry("复制路径", true, MENU_COPY_PATH),
+        MenuRow::entry("复制名字", true, MENU_COPY_NAME),
+    ]
 }
 
 impl SearchWindow {
@@ -242,6 +303,8 @@ impl SearchWindow {
                 modified: DEFAULT_MODIFIED_WIDTH,
             },
             resizing: None,
+            menu: None,
+            menu_index: None,
         }
     }
 
@@ -842,6 +905,15 @@ impl SearchWindow {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.to_lowercase();
         let modifiers = event.keystroke.modifiers;
+        // The drawn menu takes the keyboard while it is open: Esc closes it and
+        // nothing behind it runs.
+        if crate::drawn_menu::is_open(self) {
+            if key == "escape" {
+                crate::drawn_menu::close(self, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         // While renaming, the field owns typing, Enter and Escape; only Escape
         // is taken here so it can close the dialog.
         if self.renaming.is_some() {
@@ -934,7 +1006,7 @@ impl From<IndexedSearchHit> for SearchResult {
 }
 
 impl Render for SearchWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let results = self.results.clone();
         let selected = self.selected;
         let view = cx.entity().downgrade();
@@ -1106,6 +1178,10 @@ impl Render for SearchWindow {
                 )
                 .child(body);
 
+        // The menu goes over the list but under any dialog.
+        if let Some(menu) = crate::drawn_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
         if let Some(rename_input) = rename {
             root = root.child(
                 div()
@@ -1258,7 +1334,6 @@ fn render_row(
         format_bytes(result.hit.size)
     };
     let modified = format_modified(result.hit.modified);
-    let menu_view = view.clone();
     div()
         .id(("indexed-search-row", index))
         .h(px(42.0))
@@ -1343,58 +1418,21 @@ fn render_row(
                 .text_color(rgb(theme::fg_secondary()))
                 .child(modified),
         )
-        .context_menu(move |menu: PopupMenu, _window, cx| {
+        .on_mouse_down(MouseButton::Right, {
             // Right-clicking a row is also selecting it, so the menu items and
             // the preview always describe the row the menu was opened on.
-            let _ = menu_view.update(cx, |this, cx| {
-                if this.selected != Some(index) {
-                    this.selected = Some(index);
-                    this.refresh_preview(cx);
-                    cx.notify();
-                }
-            });
-            // The builder is an `Fn`, so each item's closure gets its own
-            // handle cloned here rather than one moved out of this closure.
-            let open_view = menu_view.clone();
-            let reveal_view = menu_view.clone();
-            let copy_view = menu_view.clone();
-            let cut_view = menu_view.clone();
-            let trash_view = menu_view.clone();
-            let rename_view = menu_view.clone();
-            let path_view = menu_view.clone();
-            let name_view = menu_view.clone();
-            menu.item(PopupMenuItem::new("打开").on_click(move |_, _window, cx| {
-                let _ = open_view.update(cx, |this, cx| this.open_result(index, cx));
-            }))
-            .item(
-                PopupMenuItem::new("在资源管理器中显示").on_click(move |_, _window, cx| {
-                    let _ = reveal_view.update(cx, |this, cx| this.reveal_result(index, cx));
-                }),
-            )
-            .separator()
-            .item(PopupMenuItem::new("复制").on_click(move |_, _window, cx| {
-                let _ = copy_view.update(cx, |this, cx| this.copy_result(index, false, cx));
-            }))
-            .item(PopupMenuItem::new("剪切").on_click(move |_, _window, cx| {
-                let _ = cut_view.update(cx, |this, cx| this.copy_result(index, true, cx));
-            }))
-            .item(PopupMenuItem::new("删除").on_click(move |_, _window, cx| {
-                let _ = trash_view.update(cx, |this, cx| this.trash_result(index, cx));
-            }))
-            .item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
-                let _ = rename_view.update(cx, |this, cx| this.begin_rename(index, window, cx));
-            }))
-            .separator()
-            .item(
-                PopupMenuItem::new("复制路径").on_click(move |_, _window, cx| {
-                    let _ = path_view.update(cx, |this, cx| this.copy_path(index, cx));
-                }),
-            )
-            .item(
-                PopupMenuItem::new("复制名字").on_click(move |_, _window, cx| {
-                    let _ = name_view.update(cx, |this, cx| this.copy_name(index, cx));
-                }),
-            )
+            let view = view.clone();
+            move |event: &MouseDownEvent, _window, cx| {
+                view.update(cx, |this, cx| {
+                    this.menu_index = Some(index);
+                    if this.selected != Some(index) {
+                        this.selected = Some(index);
+                        this.refresh_preview(cx);
+                    }
+                    crate::drawn_menu::open_at(this, event.position, result_menu_rows(), cx);
+                })
+                .ok();
+            }
         })
 }
 

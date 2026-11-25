@@ -15,6 +15,7 @@ actions!(
 );
 
 /// A reusable 2-way split/tab container shared across pages.
+mod drawn_menu;
 pub mod compact;
 /// Making Nohrs the folder handler of the Windows user.
 pub mod default_explorer;
