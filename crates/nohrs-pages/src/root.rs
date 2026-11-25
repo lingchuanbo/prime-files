@@ -472,6 +472,15 @@ impl RootView {
         // Where the whole-computer search gets its names may have changed;
         // the explorer's index state follows the file like any other setting.
         crate::explorer::everything::set_engine(config.indexing.source, cx);
+        // `[indexing] volumes` and `[indexing.exclude]` narrow the hits of
+        // every search, so a change takes effect without reindexing.
+        crate::explorer::everything::set_filters(
+            crate::explorer::everything::IndexFilters::from_config(&config.indexing),
+            cx,
+        );
+        // The jump bar's prepared view of the index holds the filters of the
+        // search that made it: prepare it again with the new ones.
+        self.dialog_search = None;
         let ui = config.ui.clone();
         let explorer_cfg = config.explorer.clone();
         let compact = config.compact.clone();

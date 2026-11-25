@@ -2149,13 +2149,13 @@ mod tests {
                 "the chord has its row"
             );
             assert_eq!(groups[3].title, Some(t!("Arquivo")));
-            let labels: Vec<&str> = groups
+            let labels: Vec<SharedString> = groups
                 .iter()
                 .flat_map(|group| &group.rows)
-                .map(|row| row.label)
+                .map(|row| row.label.clone())
                 .collect();
-            assert!(labels.contains(&t!("Grupos")));
-            assert!(labels.contains(&t!("Itens")));
+            assert!(labels.iter().any(|label| label == t!("Grupos")));
+            assert!(labels.iter().any(|label| label == t!("Itens")));
         });
     }
 

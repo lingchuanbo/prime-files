@@ -1058,8 +1058,11 @@ pub struct Indexing {
     pub mode: IndexingMode,
     /// Where the whole-computer name search gets its file names.
     pub source: IndexSource,
-    /// Paths and globs excluded from indexing.
+    /// Paths, globs and file masks kept out of the index.
     pub exclude: IndexingExclude,
+    /// Drives whose names the whole-computer search answers from, spelled
+    /// `"C:"`. Empty (the default) means every fixed drive.
+    pub volumes: Vec<String>,
 }
 
 /// Where the whole-computer name search gets its file names.
@@ -1119,14 +1122,44 @@ impl IndexingMode {
     }
 }
 
-/// Paths and globs excluded from indexing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// What the whole-computer search leaves out: the list of folders, name
+/// patterns and file masks, plus the Windows attributes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct IndexingExclude {
-    /// Literal paths (absolute or relative to the indexed root) to skip.
+    /// Whether `paths`, `globs`, `include_only` and `masks` apply at all
+    /// (Everything's "Enable exclude list").
+    pub enabled: bool,
+    /// Leave out hidden files and folders, and everything a hidden folder
+    /// holds.
+    pub hidden: bool,
+    /// Leave out system files and folders.
+    pub system: bool,
+    /// Folder paths (absolute, or relative to a drive root) left out with
+    /// everything inside them.
     pub paths: Vec<String>,
-    /// Glob patterns (e.g. `**/target/**`) to skip.
+    /// Name or path patterns (e.g. `*.tmp`, `*~`, `*\node_modules\*`) left
+    /// out.
     pub globs: Vec<String>,
+    /// File masks the search keeps (`*.pdf`, `*.docx`); empty keeps every
+    /// file. Folders are never filtered by a mask.
+    pub include_only: Vec<String>,
+    /// File masks left out (`*.tmp`, `*.log`).
+    pub masks: Vec<String>,
+}
+
+impl Default for IndexingExclude {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hidden: false,
+            system: false,
+            paths: Vec::new(),
+            globs: Vec::new(),
+            include_only: Vec::new(),
+            masks: Vec::new(),
+        }
+    }
 }
 
 /// Search backend selection.
@@ -1658,10 +1691,18 @@ impl Config {
              [indexing]\n\
              source = \"auto\"   # \"auto\" | \"prime-files\" | \"everything\"\n\
              mode = \"auto\"     # reserved: \"auto\" | \"always-on\" | \"manual\"\n\
+             volumes = []       # fixed drives the search answers from, like [\"C:\"]; empty = all\n\
              \n\
+             # What the whole-computer search leaves out. The four lists below\n\
+             # are read only while enabled is true.\n\
              [indexing.exclude]\n\
-             paths = []   # reserved\n\
-             globs = []   # reserved\n\
+             enabled = true     # the list, the masks and the patterns below\n\
+             hidden = false     # hidden files and folders, and what they hold\n\
+             system = false     # system files and folders\n\
+             paths = []         # folders left out with everything inside them\n\
+             globs = []         # name or path patterns, like \"*.tmp\" or \"*/node_modules/*\"\n\
+             include_only = []  # file masks kept, like \"*.pdf\"; empty = every file\n\
+             masks = []         # file masks left out\n\
              \n\
              # Parsed and validated, but not yet applied at runtime 鈥?it takes\n\
              # effect when its subsystem is wired in a later phase\n\
@@ -2495,9 +2536,14 @@ fn read_indexing(table: &toml::Table, indexing: &mut Indexing, diagnostics: &mut
             )),
         }
     }
+    if let Some(value) = table.get("volumes")
+        && let Some(volumes) = read_string_array(value, "indexing.volumes", diagnostics)
+    {
+        indexing.volumes = volumes;
+    }
     warn_unknown_keys(
         table,
-        &["mode", "source", "exclude"],
+        &["mode", "source", "exclude", "volumes"],
         "indexing.",
         diagnostics,
     );
@@ -2508,17 +2554,51 @@ fn read_indexing_exclude(
     exclude: &mut IndexingExclude,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if let Some(value) = table.get("paths")
-        && let Some(paths) = read_string_array(value, "indexing.exclude.paths", diagnostics)
-    {
-        exclude.paths = paths;
+    for (key, field) in [
+        ("enabled", &mut exclude.enabled),
+        ("hidden", &mut exclude.hidden),
+        ("system", &mut exclude.system),
+    ] {
+        let Some(value) = table.get(key) else {
+            continue;
+        };
+        match value.as_bool() {
+            Some(flag) => *field = flag,
+            None => {
+                let current = *field;
+                diagnostics.push(Diagnostic::warn(format!(
+                    "invalid indexing.exclude.{key} {value}; using {current}"
+                )));
+            }
+        }
     }
-    if let Some(value) = table.get("globs")
-        && let Some(globs) = read_string_array(value, "indexing.exclude.globs", diagnostics)
-    {
-        exclude.globs = globs;
+    for (key, field) in [
+        ("paths", &mut exclude.paths),
+        ("globs", &mut exclude.globs),
+        ("include_only", &mut exclude.include_only),
+        ("masks", &mut exclude.masks),
+    ] {
+        if let Some(value) = table.get(key)
+            && let Some(entries) =
+                read_string_array(value, &format!("indexing.exclude.{key}"), diagnostics)
+        {
+            *field = entries;
+        }
     }
-    warn_unknown_keys(table, &["paths", "globs"], "indexing.exclude.", diagnostics);
+    warn_unknown_keys(
+        table,
+        &[
+            "enabled",
+            "hidden",
+            "system",
+            "paths",
+            "globs",
+            "include_only",
+            "masks",
+        ],
+        "indexing.exclude.",
+        diagnostics,
+    );
 }
 
 fn read_search(table: &toml::Table, search: &mut Search, diagnostics: &mut Vec<Diagnostic>) {
@@ -3026,6 +3106,12 @@ mod tests {
             DirectoryMenuPosition::Cursor
         );
         assert_eq!(config.indexing.source, IndexSource::Auto);
+        assert!(config.indexing.volumes.is_empty());
+        assert!(config.indexing.exclude.enabled);
+        assert!(!config.indexing.exclude.hidden);
+        assert!(!config.indexing.exclude.system);
+        assert!(config.indexing.exclude.include_only.is_empty());
+        assert!(config.indexing.exclude.masks.is_empty());
     }
 
     #[test]
@@ -3225,9 +3311,15 @@ mod tests {
             [indexing]
             mode = "always-on"
             source = "everything"
+            volumes = ["C:", "D:\\"]
             [indexing.exclude]
+            enabled = false
+            hidden = true
+            system = true
             paths = ["/tmp", "node_modules"]
             globs = ["**/target/**"]
+            include_only = ["*.pdf", "*.docx"]
+            masks = ["*.tmp"]
             [search]
             backend = "tantivy"
             [launcher]
@@ -3244,8 +3336,14 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(config.indexing.mode, IndexingMode::AlwaysOn);
         assert_eq!(config.indexing.source, IndexSource::Everything);
+        assert_eq!(config.indexing.volumes, ["C:", "D:\\"]);
+        assert!(!config.indexing.exclude.enabled);
+        assert!(config.indexing.exclude.hidden);
+        assert!(config.indexing.exclude.system);
         assert_eq!(config.indexing.exclude.paths, ["/tmp", "node_modules"]);
         assert_eq!(config.indexing.exclude.globs, ["**/target/**"]);
+        assert_eq!(config.indexing.exclude.include_only, ["*.pdf", "*.docx"]);
+        assert_eq!(config.indexing.exclude.masks, ["*.tmp"]);
         assert_eq!(config.search.backend, SearchBackend::Tantivy);
         assert_eq!(config.launcher.hotkey, "Ctrl+Space");
         assert!(!config.launcher.position_remember);

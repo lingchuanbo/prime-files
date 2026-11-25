@@ -24,8 +24,8 @@ use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::{Icon, Sizable as _};
 use nohrs_core::config::{
     self, BarSize, Config, DirectoryMenuPosition, DockSide, DoubleClickEmpty, FileTypeColorRule,
-    IconMode, IndexSource, ListRowHeight, SortMethod, SortOrder, SplitDirection, TabWidthMode,
-    ThemeMode, TrayIcon,
+    IconMode, ListRowHeight, SortMethod, SortOrder, SplitDirection, TabWidthMode, ThemeMode,
+    TrayIcon,
 };
 use nohrs_core::i18n::{self, Lang, tr};
 use nohrs_core::shortcuts::{self, Action, Chord};
@@ -53,6 +53,8 @@ pub enum SettingsSection {
     Media,
     /// The whole-computer search.
     Search,
+    /// The search index: which drives and names it answers with.
+    Index,
     /// Opening folders from Windows and other programs here.
     Integrations,
     /// The quick-launch window: its chord, layout and groups.
@@ -64,7 +66,7 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::General,
         Self::Tabs,
         Self::Appearance,
@@ -72,6 +74,7 @@ impl SettingsSection {
         Self::Files,
         Self::Media,
         Self::Search,
+        Self::Index,
         Self::Integrations,
         Self::QuickLaunch,
         Self::Shortcuts,
@@ -87,6 +90,7 @@ impl SettingsSection {
             Self::Files => t!("Arquivos e pastas"),
             Self::Media => t!("Mídia"),
             Self::Search => t!("Busca"),
+            Self::Index => t!("Índice de busca"),
             Self::Integrations => t!("Integração com o Windows"),
             Self::QuickLaunch => t!("Inicialização rápida"),
             Self::Shortcuts => t!("Atalhos"),
@@ -105,6 +109,9 @@ impl SettingsSection {
                 "Áudio e vídeo: ouvir passando o mouse, tocar no visualizador e ver a forma de onda."
             ),
             Self::Search => t!("Encontrar qualquer arquivo do computador pelo nome."),
+            Self::Index => {
+                t!("Quais unidades, pastas e nomes a busca em todo o computador encontra.")
+            }
             Self::Integrations => {
                 t!("Abrir no LumaFiles as pastas do Windows e de outros programas.")
             }
@@ -127,6 +134,7 @@ impl SettingsSection {
             Self::Files => "icons/folder-open.svg",
             Self::Media => "icons/music.svg",
             Self::Search => "icons/search.svg",
+            Self::Index => "icons/database.svg",
             Self::Integrations => "icons/app-window.svg",
             Self::QuickLaunch => "icons/pin.svg",
             Self::Shortcuts => "icons/case-sensitive.svg",
@@ -184,7 +192,8 @@ enum Pick {
 
 // One setting: its name, what it does, and the control that changes it.
 struct Row {
-    label: &'static str,
+    // A static name, or one made from what the row lists (a drive, a folder).
+    label: SharedString,
     hint: Option<SharedString>,
     control: AnyElement,
     // Writes the default back; `Some` only while the value differs from it.
@@ -195,9 +204,13 @@ struct Row {
 }
 
 impl Row {
-    fn new(label: &'static str, hint: Option<SharedString>, control: impl IntoElement) -> Self {
+    fn new(
+        label: impl Into<SharedString>,
+        hint: Option<SharedString>,
+        control: impl IntoElement,
+    ) -> Self {
         Self {
-            label,
+            label: label.into(),
             hint,
             control: control.into_any_element(),
             reset: None,
@@ -205,7 +218,11 @@ impl Row {
         }
     }
 
-    fn hint(label: &'static str, hint: impl Into<SharedString>, control: impl IntoElement) -> Self {
+    fn hint(
+        label: impl Into<SharedString>,
+        hint: impl Into<SharedString>,
+        control: impl IntoElement,
+    ) -> Self {
         Self::new(label, Some(hint.into()), control)
     }
 
@@ -290,6 +307,8 @@ pub struct SettingsPage {
     recording: Option<Action>,
     // The quick-launch section: its form, the recorded chord and the group list.
     quick_launch: quick_launch::Section,
+    /// The search index section: its tabs and the fields being edited.
+    index: index::Section,
 }
 
 /// The colour wheel while it is open: the colour the handles point at, and
@@ -358,6 +377,7 @@ impl SettingsPage {
             focus_handle: cx.focus_handle(),
             recording: None,
             quick_launch: quick_launch::Section::default(),
+            index: index::Section::default(),
         };
         page.refresh_default_explorer(cx);
         page.refresh_listary(cx);
@@ -699,8 +719,9 @@ impl SettingsPage {
         self.section = section;
         self.confirm_reset = false;
         // The search page says what Everything answers, and `auto` must hear
-        // from it before it can show which index is in use.
-        if section == SettingsSection::Search {
+        // from it before it can show which index is in use. The index page
+        // shows the same facts.
+        if matches!(section, SettingsSection::Search | SettingsSection::Index) {
             let status = everything::status(cx);
             if status.external.is_none() && status.source != Source::Own {
                 everything::probe(cx);
@@ -725,6 +746,12 @@ impl SettingsPage {
             // (a hand edit, the defaults button) is shown again.
             self.space_map_bands.clear();
             self.space_map_colors.clear();
+        }
+        if self.config.indexing.exclude != config.indexing.exclude {
+            // The mask fields show the lists; a change made elsewhere (by hand,
+            // or by the defaults button) is shown again.
+            self.index.include_only = None;
+            self.index.masks = None;
         }
         self.config = config;
         cx.notify();
@@ -1296,6 +1323,7 @@ impl SettingsPage {
             SettingsSection::Files => self.files(cx),
             SettingsSection::Media => self.media(cx),
             SettingsSection::Search => self.search_section(cx),
+            SettingsSection::Index => self.index.groups(self, cx),
             SettingsSection::Integrations => self.integrations(cx),
             SettingsSection::QuickLaunch => self.quick_launch(cx),
             SettingsSection::Shortcuts => self.shortcuts(cx),
@@ -2685,195 +2713,24 @@ impl SettingsPage {
         ]
     }
 
-    fn search_section(&self, cx: &mut Context<Self>) -> Vec<Group> {
-        let status = everything::status(cx);
-        let source = status.source;
-        let refresh_feedback = if status.service_refreshing {
-            Some(t!("Pedindo para reconstruir o índice…").to_string())
-        } else {
-            status
-                .service_refresh_result
-                .as_ref()
-                .map(|result| match result {
-                    Ok(()) => t!("O serviço de indexação aceitou o pedido.").to_string(),
-                    Err(error) => format!(
-                        "{} {error}",
-                        t!("Não foi possível pedir a reconstrução do índice:")
-                    ),
-                })
-        };
-        // The own index's count while it is walked or read; with Everything
-        // answering, what its index holds instead.
-        let state = if source == Source::Everything {
-            everything::external_text(status.external.as_ref())
-        } else if status.service {
-            match status.service_index_status.as_ref() {
-                Some(Ok(index)) if index.ready => {
-                    if index.refreshing {
-                        tf!("{n} 个索引条目，正在重建", n = index.entries)
-                    } else {
-                        tf!("{n} 个索引条目，已就绪", n = index.entries)
-                    }
-                }
-                Some(Ok(_)) | None => t!("索引服务正在建立索引…").to_string(),
-                Some(Err(error)) => format!("{} {error}", t!("无法读取索引服务状态：")),
-            }
-        } else {
-            match (status.building, status.entries) {
-                (Some(found), _) => tf!("Indexando… {n} itens até agora", n = found),
-                (None, Some(entries)) => {
-                    match status.built.and_then(|built| built.elapsed().ok()) {
-                        Some(age) => {
-                            tf!("{n} itens, atualizado {ago}", n = entries, ago = ago(age))
-                        }
-                        None => tf!("{n} itens", n = entries),
-                    }
-                }
-                (None, None) => t!("O índice é criado na primeira busca.").to_string(),
-            }
-        };
-        let building = status.building.is_some();
-        let own_index = source != Source::Everything;
-        let picked = self.config.indexing.source;
-        let mut rows = vec![
-            Row::hint(
-                t!("Buscar em todo o computador"),
-                t!(
-                    "Clique na lupa da barra de baixo ou aperte Ctrl+Shift+F em qualquer programa e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho."
-                ),
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme::fg_secondary()))
-                            .child(state),
-                    )
-                    .when_some(refresh_feedback, |this, feedback| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme::fg_secondary()))
-                                .child(feedback),
-                        )
-                    })
-                    .when(own_index && !building, |this| {
-                        this.child(
-                            button(
-                                "everything-rebuild",
-                                if status.service_refreshing {
-                                    t!("Pedindo para reconstruir o índice…")
-                                } else {
-                                    t!("Reindexar agora")
-                                },
-                                status.service_refreshing,
-                            )
-                            .on_click(cx.listener(
-                                |_page, _event, _window, cx| {
-                                    crate::explorer::everything::rebuild(cx)
-                                },
-                            )),
-                        )
-                    }),
-            ),
-            Row::hint(
-                t!("Índice do computador"),
-                t!(
-                    "De onde vêm os nomes da busca em todo o computador. Com o Everything aberto, o índice dele serve e nada é criado aqui; o automático decide isso na primeira busca."
-                ),
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap_2()
-                    .child(self.config_choice(
-                        "index-source",
-                        &[
-                            (t!("Automático"), picked == IndexSource::Auto, "\"auto\""),
-                            (
-                                t!("Neste programa"),
-                                picked == IndexSource::PrimeFiles,
-                                "\"prime-files\"",
-                            ),
-                            (
-                                "Everything",
-                                picked == IndexSource::Everything,
-                                "\"everything\"",
-                            ),
-                        ],
-                        ("indexing", "source"),
-                        cx,
-                    ))
-                    .when(
-                        picked == IndexSource::Auto && source == Source::Own,
-                        |this| {
-                            this.child(
-                                div()
-                                    .max_w(px(280.0))
-                                    .text_xs()
-                                    .text_right()
-                                    .text_color(rgb(theme::fg_secondary()))
-                                    .child(everything::auto_note(status.external.as_ref())),
-                            )
-                        },
-                    ),
-            ),
-        ];
-        if own_index {
-            use crate::explorer::everything::mft;
-            let mft_state = mft::state();
-            let (mft_busy, mft_error) = cx
-                .try_global::<crate::explorer::everything::Everything>()
-                .map_or((false, None), |state| {
-                    (state.mft_busy, state.mft_error.clone())
-                });
-            let mft_text = match (mft_busy, mft_error, mft_state) {
-                (true, _, _) => t!("Aguardando a permissão do Windows…").to_string(),
-                (false, Some(error), _) => tf!("Não deu certo: {error}", error = error),
-                (false, None, mft::State::On) => t!("Ligada").to_string(),
-                (false, None, mft::State::Stopped) => {
-                    t!("O serviço está instalado mas parado.").to_string()
-                }
-                (false, None, mft::State::Off) => t!("Desligada").to_string(),
-            };
-            let mft_on = mft_state == mft::State::On;
-            rows.push(Row::hint(
-                t!("Indexação instantânea"),
-                t!("Lê a tabela dos discos NTFS como o Everything: o índice do computador fica pronto em segundos, também depois de reiniciar. Instala um serviço do Windows, com permissão de administrador uma vez."),
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap_2()
-                    // A failure's text can be a whole path: it wraps in a
-                    // narrow column instead of pushing the description into
-                    // one word a line.
-                    .child(
-                        div()
-                            .max_w(px(280.0))
-                            .text_xs()
-                            .text_right()
-                            .text_color(rgb(theme::fg_secondary()))
-                            .child(mft_text),
-                    )
-                    .when(!mft_busy, |this| {
-                        this.child(
-                            button("everything-mft", if mft_on { t!("Desativar") } else { t!("Ativar") }, false)
-                                .on_click(cx.listener(move |_page, _event, _window, cx| mft::set(!mft_on, cx))),
-                        )
-                    }),
-            ));
-            rows.push(Row::hint(
-                t!("Como o índice é feito"),
-                t!("Os nomes de todas as unidades fixas ficam guardados neste computador. Com o programa aberto, o que é criado ou renomeado entra na hora; com o serviço, ele guarda os nomes e os relê a cada 30 minutos, e sem o serviço o índice deste processo é refeito quando passa de 6 horas. Nada sai do computador."),
-                div(),
-            ));
-        }
+    fn search_section(&self, _cx: &mut Context<Self>) -> Vec<Group> {
         vec![
-            Group::new(rows),
+            Group::new(vec![
+                Row::hint(
+                    t!("Buscar em todo o computador"),
+                    t!(
+                        "Clique na lupa da barra de baixo ou aperte Ctrl+Shift+F em qualquer programa e digite qualquer parte do nome. Vários termos filtram juntos, * e ? funcionam, e um termo com \\ procura no caminho."
+                    ),
+                    div(),
+                ),
+                Row::hint(
+                    t!("O índice"),
+                    t!(
+                        "As unidades, as pastas e os nomes que a busca deixa de fora ficam em Índice de busca."
+                    ),
+                    div(),
+                ),
+            ]),
             Group::titled(
                 t!("Outras buscas"),
                 vec![
@@ -3329,7 +3186,7 @@ impl SettingsPage {
     // An on/off switch for a boolean `[section] key`.
     fn switch(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         on: bool,
         (section, key): (&'static str, &'static str),
         cx: &mut Context<Self>,
@@ -3346,7 +3203,7 @@ impl SettingsPage {
     // An on/off switch whose click does `pick` (what turns it the other way).
     fn switch_pick(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         on: bool,
         pick: Pick,
         cx: &mut Context<Self>,
@@ -3358,7 +3215,7 @@ impl SettingsPage {
     // read-only (§17.1 B).
     fn switch_pick_when(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         on: bool,
         pick: Pick,
         enabled: bool,
@@ -3824,6 +3681,9 @@ impl SettingsPage {
                             ),
                     ),
             )
+            .when(section == SettingsSection::Index, |this| {
+                this.child(self.index.tabs(cx))
+            })
             .children(
                 groups
                     .into_iter()
@@ -3851,7 +3711,7 @@ impl SettingsPage {
                     group.rows.into_iter().filter(move |row| {
                         section_matches
                             || group_matches
-                            || fold(row.label).contains(needle)
+                            || fold(&row.label).contains(needle)
                             || row
                                 .hint
                                 .as_ref()
@@ -4035,7 +3895,7 @@ fn ago(age: std::time::Duration) -> String {
     }
 }
 
-fn button(id: &'static str, label: &'static str, danger: bool) -> Stateful<Div> {
+fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, danger: bool) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(28.0))
@@ -4058,7 +3918,7 @@ fn button(id: &'static str, label: &'static str, danger: bool) -> Stateful<Div> 
             }
         })
         .hover(|style| style.bg(rgb(theme::bg_hover())))
-        .child(label)
+        .child(label.into())
 }
 
 fn file_rule_button(
@@ -4115,6 +3975,10 @@ impl Render for SettingsPage {
         // only the section and a search draw them.
         if searching || self.section == SettingsSection::QuickLaunch {
             quick_launch::ensure_inputs(self, window, cx);
+        }
+        // The index section's fields also need the window.
+        if searching || self.section == SettingsSection::Index {
+            index::ensure_inputs(self, window, cx);
         }
         let width = f32::from(window.viewport_size().width);
         let narrow = width < NARROW;
@@ -4283,6 +4147,7 @@ fn pointer_events(page: Entity<SettingsPage>, part: WheelPart) -> AnyElement {
     .into_any_element()
 }
 
+mod index;
 mod quick_launch;
 
 #[cfg(test)]

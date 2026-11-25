@@ -339,10 +339,15 @@
         "exclude": {
           "$ref": "#/$defs/IndexingExclude",
           "default": {
+            "enabled": true,
             "globs": [],
-            "paths": []
+            "hidden": false,
+            "include_only": [],
+            "masks": [],
+            "paths": [],
+            "system": false
           },
-          "description": "Paths and globs excluded from indexing."
+          "description": "Paths, globs and file masks kept out of the index."
         },
         "mode": {
           "$ref": "#/$defs/IndexingMode",
@@ -353,16 +358,50 @@
           "$ref": "#/$defs/IndexSource",
           "default": "auto",
           "description": "Where the whole-computer name search gets its file names."
+        },
+        "volumes": {
+          "default": [],
+          "description": "Drives whose names the whole-computer search answers from, spelled\n`\"C:\"`. Empty (the default) means every fixed drive.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
     },
     "IndexingExclude": {
-      "description": "Paths and globs excluded from indexing.",
+      "description": "What the whole-computer search leaves out: the list of folders, name\npatterns and file masks, plus the Windows attributes.",
       "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Whether `paths`, `globs`, `include_only` and `masks` apply at all\n(Everything's \"Enable exclude list\").",
+          "type": "boolean"
+        },
         "globs": {
           "default": [],
-          "description": "Glob patterns (e.g. `**/target/**`) to skip.",
+          "description": "Name or path patterns (e.g. `*.tmp`, `*~`, `*\\node_modules\\*`) left\nout.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "hidden": {
+          "default": false,
+          "description": "Leave out hidden files and folders, and everything a hidden folder\nholds.",
+          "type": "boolean"
+        },
+        "include_only": {
+          "default": [],
+          "description": "File masks the search keeps (`*.pdf`, `*.docx`); empty keeps every\nfile. Folders are never filtered by a mask.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "masks": {
+          "default": [],
+          "description": "File masks left out (`*.tmp`, `*.log`).",
           "items": {
             "type": "string"
           },
@@ -370,11 +409,16 @@
         },
         "paths": {
           "default": [],
-          "description": "Literal paths (absolute or relative to the indexed root) to skip.",
+          "description": "Folder paths (absolute, or relative to a drive root) left out with\neverything inside them.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "system": {
+          "default": false,
+          "description": "Leave out system files and folders.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1066,11 +1110,17 @@
       "$ref": "#/$defs/Indexing",
       "default": {
         "exclude": {
+          "enabled": true,
           "globs": [],
-          "paths": []
+          "hidden": false,
+          "include_only": [],
+          "masks": [],
+          "paths": [],
+          "system": false
         },
         "mode": "auto",
-        "source": "auto"
+        "source": "auto",
+        "volumes": []
       },
       "description": "Filesystem indexing strategy and exclusions."
     },

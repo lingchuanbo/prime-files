@@ -113,9 +113,15 @@ expression: parsed
             mode: Auto,
             source: Auto,
             exclude: IndexingExclude {
+                enabled: true,
+                hidden: false,
+                system: false,
                 paths: [],
                 globs: [],
+                include_only: [],
+                masks: [],
             },
+            volumes: [],
         },
         search: Search {
             backend: Auto,

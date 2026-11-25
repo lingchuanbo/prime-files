@@ -30,6 +30,7 @@
 //! walked under its lock, which holds the walkers for the few milliseconds
 //! a scan takes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -3702,6 +3703,330 @@ fn load_segment(
 }
 
 // ---------------------------------------------------------------------------
+// `[indexing]` filters
+
+/// Windows' own bit for a hidden entry.
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+/// Windows' own bit for a system entry.
+const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+
+/// What `[indexing]` narrows a whole-computer search to: the drives it answers
+/// from, and the `[indexing.exclude]` lists and attributes. Applied to the hits
+/// of each query rather than to the table, so editing the config changes what
+/// the next search answers with, without walking the drives again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct IndexFilters {
+    volumes: Vec<String>,
+    exclude_hidden: bool,
+    exclude_system: bool,
+    exclude_enabled: bool,
+    exclude_paths: Vec<String>,
+    exclude_globs: Vec<GlobPattern>,
+    include_only: Vec<Vec<char>>,
+    exclude_masks: Vec<Vec<char>>,
+}
+
+/// One `[indexing.exclude] globs` entry, split by what it is matched against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GlobPattern {
+    /// A bare name pattern (`*.tmp`): matched against the file or folder name.
+    Name(Vec<char>),
+    /// Holds a separator (`*/node_modules/*`): matched against the whole path.
+    Path(Vec<char>),
+}
+
+impl IndexFilters {
+    /// The filters `indexing` asks for, already lowered and stripped of what
+    /// cannot match (`/` written as `\`, trailing separators, empty entries).
+    pub(crate) fn from_config(indexing: &nohrs_core::config::Indexing) -> Self {
+        let exclude = &indexing.exclude;
+        Self {
+            volumes: indexing
+                .volumes
+                .iter()
+                .map(|volume| normalized_path(volume))
+                .filter(|volume| !volume.is_empty())
+                .collect(),
+            exclude_hidden: exclude.hidden,
+            exclude_system: exclude.system,
+            exclude_enabled: exclude.enabled,
+            exclude_paths: exclude
+                .paths
+                .iter()
+                .map(|path| normalized_path(path))
+                .filter(|path| !path.is_empty())
+                .collect(),
+            exclude_globs: exclude
+                .globs
+                .iter()
+                .filter_map(|glob| glob_pattern(glob))
+                .collect(),
+            include_only: exclude
+                .include_only
+                .iter()
+                .map(|mask| mask_chars(mask))
+                .filter(|mask| !mask.is_empty())
+                .collect(),
+            exclude_masks: exclude
+                .masks
+                .iter()
+                .map(|mask| mask_chars(mask))
+                .filter(|mask| !mask.is_empty())
+                .collect(),
+        }
+    }
+
+    /// Whether there is nothing to filter with: the query can skip the pass.
+    pub(crate) fn is_default(&self) -> bool {
+        self.volumes.is_empty()
+            && !self.exclude_hidden
+            && !self.exclude_system
+            && (!self.exclude_enabled
+                || (self.exclude_paths.is_empty()
+                    && self.exclude_globs.is_empty()
+                    && self.include_only.is_empty()
+                    && self.exclude_masks.is_empty()))
+    }
+
+    /// Whether the search answers from the drive `root` is on, spelled `"C:"`
+    /// or `"C:\"`. An empty volume list allows every drive.
+    pub(crate) fn volume_allowed(&self, root: &str) -> bool {
+        if self.volumes.is_empty() {
+            return true;
+        }
+        let root = normalized_path(root);
+        self.volumes.iter().any(|volume| volume == &root)
+    }
+
+    /// The pass one search filters its hits with.
+    pub(crate) fn pass(&self) -> FilterPass<'_> {
+        FilterPass::new(self)
+    }
+
+    fn path_excluded(&self, lowered: &str) -> bool {
+        self.exclude_paths.iter().any(|folder| {
+            lowered == folder.as_str()
+                || lowered
+                    .strip_prefix(folder.as_str())
+                    .is_some_and(|rest| rest.starts_with('\\'))
+                || (!is_absolute_entry(folder) && tail_matches(lowered, folder))
+        })
+    }
+
+    fn glob_excluded(&self, lowered: &str, name: &str) -> bool {
+        self.exclude_globs.iter().any(|pattern| match pattern {
+            GlobPattern::Name(chars) => wildcard(chars, name),
+            GlobPattern::Path(chars) => wildcard(chars, lowered),
+        })
+    }
+}
+
+/// The per-search side of [`IndexFilters`]: the attribute lookups of one
+/// search, and the cache that keeps each folder from being asked twice.
+pub(crate) struct FilterPass<'a> {
+    filters: &'a IndexFilters,
+    /// The attributes of every entry and folder already asked about; `None` for
+    /// one that could not be read, so a failed lookup is not retried for every
+    /// hit below it.
+    attributes: HashMap<String, Option<u32>>,
+}
+
+impl<'a> FilterPass<'a> {
+    fn new(filters: &'a IndexFilters) -> Self {
+        Self {
+            filters,
+            attributes: HashMap::new(),
+        }
+    }
+
+    /// Whether the hit at `path` is kept: the drive it is on, the exclude
+    /// lists, and the hidden and system attributes of the entry itself and of
+    /// every folder above it. `is_dir` only matters to the file masks.
+    pub(crate) fn accepts(&mut self, path: &str, is_dir: bool) -> bool {
+        self.accepts_with(path, is_dir, platform_attributes)
+    }
+
+    /// `accepts` with the attribute lookup handed in, so a test can drive it
+    /// from its own table instead of the file system.
+    fn accepts_with(
+        &mut self,
+        path: &str,
+        is_dir: bool,
+        mut attributes_of: impl FnMut(&str) -> Option<u32>,
+    ) -> bool {
+        if self.filters.is_default() {
+            return true;
+        }
+        // Windows compares names without case, and the paths handed to the
+        // file system here work lowered too, so one copy serves both.
+        let lowered = path.to_lowercase();
+        if let Some(drive) = drive_component(&lowered)
+            && !self.filters.volume_allowed(drive)
+        {
+            return false;
+        }
+        if self.filters.exclude_enabled {
+            if self.filters.path_excluded(&lowered) {
+                return false;
+            }
+            let name = lowered.rsplit('\\').next().unwrap_or(lowered.as_str());
+            if self.filters.glob_excluded(&lowered, name) {
+                return false;
+            }
+            // A mask says what a file is; a folder is never judged by one.
+            if !is_dir {
+                if !self.filters.include_only.is_empty()
+                    && !self
+                        .filters
+                        .include_only
+                        .iter()
+                        .any(|mask| wildcard(mask, name))
+                {
+                    return false;
+                }
+                if self
+                    .filters
+                    .exclude_masks
+                    .iter()
+                    .any(|mask| wildcard(mask, name))
+                {
+                    return false;
+                }
+            }
+        }
+        !self.blocked_by_attributes(&lowered, &mut attributes_of)
+    }
+
+    /// Whether the entry at `lowered` or one of the folders above it carries an
+    /// attribute the filters leave out. The drive root itself ("C:") is not
+    /// looked up: `symlink_metadata` would answer for that drive's current
+    /// directory instead of its root.
+    fn blocked_by_attributes(
+        &mut self,
+        lowered: &str,
+        attributes_of: &mut impl FnMut(&str) -> Option<u32>,
+    ) -> bool {
+        if !self.filters.exclude_hidden && !self.filters.exclude_system {
+            return false;
+        }
+        let mut current = lowered;
+        loop {
+            if let Some(attributes) = self.attributes_of_cached(current, attributes_of) {
+                if self.filters.exclude_hidden && attributes & FILE_ATTRIBUTE_HIDDEN != 0 {
+                    return true;
+                }
+                if self.filters.exclude_system && attributes & FILE_ATTRIBUTE_SYSTEM != 0 {
+                    return true;
+                }
+            }
+            let Some(at) = current.rfind('\\') else {
+                return false;
+            };
+            current = &current[..at];
+            if current.is_empty() || current.ends_with(':') {
+                return false;
+            }
+        }
+    }
+
+    fn attributes_of_cached(
+        &mut self,
+        folder: &str,
+        attributes_of: &mut impl FnMut(&str) -> Option<u32>,
+    ) -> Option<u32> {
+        if let Some(known) = self.attributes.get(folder) {
+            return *known;
+        }
+        let attributes = attributes_of(folder);
+        self.attributes.insert(folder.to_string(), attributes);
+        attributes
+    }
+}
+
+// One path as the filters compare it: Windows ignores case and takes either
+// separator, and a trailing separator would hide the folder's boundary.
+fn normalized_path(path: &str) -> String {
+    path.trim()
+        .replace('/', "\\")
+        .to_lowercase()
+        .trim_end_matches('\\')
+        .to_string()
+}
+
+// A mask or glob, lowered the same way, with either separator written as `\`.
+fn normalized_pattern(pattern: &str) -> String {
+    pattern.trim().replace('/', "\\").to_lowercase()
+}
+
+fn mask_chars(mask: &str) -> Vec<char> {
+    normalized_pattern(mask).chars().collect()
+}
+
+fn glob_pattern(glob: &str) -> Option<GlobPattern> {
+    let normalized = normalized_pattern(glob);
+    if normalized.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = normalized.chars().collect();
+    Some(if normalized.contains('\\') {
+        GlobPattern::Path(chars)
+    } else {
+        GlobPattern::Name(chars)
+    })
+}
+
+/// The drive a lowered path is on ("c:" for `c:\...`); `None` for a path with
+/// no drive letter, which no volume list narrows.
+fn drive_component(lowered: &str) -> Option<&str> {
+    if lowered.as_bytes().get(1) == Some(&b':') {
+        lowered.get(..2)
+    } else {
+        None
+    }
+}
+
+// A folder entry with a drive, or starting at a drive's root; the others name
+// a folder that may sit anywhere on a path.
+fn is_absolute_entry(folder: &str) -> bool {
+    folder.as_bytes().get(1) == Some(&b':') || folder.starts_with('\\')
+}
+
+/// `folder` appears in `lowered` at a folder boundary and either ends the path
+/// or is followed by another one: a relative exclude entry matches a folder of
+/// that name wherever it sits, and never a name that merely starts with it.
+fn tail_matches(lowered: &str, folder: &str) -> bool {
+    lowered.match_indices(folder).any(|(at, _)| {
+        at > 0
+            && lowered.as_bytes().get(at - 1) == Some(&b'\\')
+            && (at + folder.len() == lowered.len()
+                || lowered.as_bytes().get(at + folder.len()) == Some(&b'\\'))
+    })
+}
+
+/// The Windows attributes of `path` itself, not of where a link points; the
+/// rest are unread. `None` when it could not be read, which is a hit deleted
+/// since the walk or a folder denied to this user.
+#[cfg(windows)]
+fn platform_attributes(path: &str) -> Option<u32> {
+    use std::os::windows::fs::MetadataExt as _;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| metadata.file_attributes())
+}
+
+/// No attributes to read here: a dot before the name is the only mark of a
+/// hidden entry, and nothing is system.
+#[cfg(not(windows))]
+fn platform_attributes(path: &str) -> Option<u32> {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    Some(if name.starts_with('.') {
+        FILE_ATTRIBUTE_HIDDEN
+    } else {
+        0
+    })
+}
+
+// ---------------------------------------------------------------------------
 // The app-wide state
 
 /// The index every pane searches, and the walk refreshing it.
@@ -3731,6 +4056,9 @@ pub(crate) struct Everything {
     pub mft_index_status: Option<Result<ServiceIndexStatus, String>>,
     /// Where `[indexing] source` sends the whole-computer names.
     engine: IndexSource,
+    /// `[indexing] volumes` and `[indexing.exclude]`: applied to the hits of
+    /// every search, so a change needs no reindexing.
+    pub(crate) filters: IndexFilters,
     /// Everything's answer to the last probe; `None` until it is asked.
     external: Option<Result<remote::Info, remote::Error>>,
     /// A probe is on its way to Everything.
@@ -3971,6 +4299,21 @@ pub(crate) fn set_engine(engine: IndexSource, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Takes the `[indexing]` filters the config now asks for. They are applied to
+/// the hits of each search, so a change needs neither a reindex nor a reload:
+/// the generation bump makes every pane run its search again, and the new
+/// answer is filtered.
+pub(crate) fn set_filters(filters: IndexFilters, cx: &mut App) {
+    let state = cx.default_global::<Everything>();
+    if state.filters == filters {
+        return;
+    }
+    state.filters = filters;
+    state.generation += 1;
+    tracing::info!("the whole-computer index filters changed");
+    cx.refresh_windows();
+}
+
 /// Asks Everything whether it answers — its SDK first, then its IPC window —
 /// off the UI thread, and keeps the answer for the bar and the settings page.
 /// On `auto` it decides the source, so the panes' next search reads it.
@@ -4182,6 +4525,36 @@ pub(crate) fn status(cx: &App) -> Status {
     }
 }
 
+/// One of the machine's fixed drives, as the settings page lists them.
+pub(crate) struct Volume {
+    pub root: String,
+    /// How many names this process holds for it, when its own index has that
+    /// drive; `None` while the indexer service or Everything holds them.
+    pub entries: Option<usize>,
+}
+
+/// The fixed drives of this machine; entry count per drive when the local
+/// index holds that drive.
+pub(crate) fn volumes(cx: &App) -> Vec<Volume> {
+    let index = cx
+        .try_global::<Everything>()
+        .and_then(|state| state.index.as_ref());
+    platform::fixed_drives()
+        .into_iter()
+        .map(|root| {
+            let drive = root.trim_end_matches('\\');
+            let entries = index.and_then(|index| {
+                index
+                    .segments
+                    .iter()
+                    .find(|segment| segment.root().eq_ignore_ascii_case(drive))
+                    .map(|segment| segment.entries.len())
+            });
+            Volume { root, entries }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Whole-computer search for other windows
 
@@ -4215,6 +4588,8 @@ pub(crate) struct WholeComputerSearch {
     walking: Option<Arc<Mutex<Segment>>>,
     /// What the watcher saw created since the walks.
     fresh: Arc<Mutex<Fresh>>,
+    /// The `[indexing]` filters the hits are narrowed by.
+    filters: IndexFilters,
 }
 
 impl WholeComputerSearch {
@@ -4243,9 +4618,11 @@ impl WholeComputerSearch {
             #[cfg(windows)]
             {
                 let cancel = Arc::new(AtomicBool::new(false));
+                let mut pass = self.filters.pass();
                 return match remote::search(&terms, limit as u32, &cancel, None, None) {
                     Ok(hits) => Ok(hits
                         .into_iter()
+                        .filter(|hit| pass.accepts(&hit.path, hit.dir))
                         .map(|hit| WholeComputerHit {
                             path: hit.path,
                             is_dir: hit.dir,
@@ -4269,8 +4646,10 @@ impl WholeComputerSearch {
         if self.service {
             match mft::search(&terms, limit as u32) {
                 Ok(hits) => {
+                    let mut pass = self.filters.pass();
                     return Ok(hits
                         .into_iter()
+                        .filter(|hit| pass.accepts(&hit.path, hit.dir))
                         .map(|hit| WholeComputerHit {
                             path: hit.path,
                             is_dir: hit.dir,
@@ -4331,6 +4710,7 @@ impl WholeComputerSearch {
         // the letters together (or whose pinyin initials do), not to every name
         // whose letters appear in order — and this window is compared with it.
         let mut hits = scan();
+        let mut pass = self.filters.pass();
         let mut shown = std::collections::HashSet::new();
         let mut targets = Vec::new();
         let mut remaining = hits.as_mut_slice();
@@ -4346,10 +4726,16 @@ impl WholeComputerSearch {
                     continue;
                 };
                 let path = segment.path(position);
+                let is_dir = entry.flags & DIR != 0;
+                // The same filters the Explorer's list and the other sources
+                // answer through: this table is no exception to them.
+                if !pass.accepts(&path, is_dir) {
+                    continue;
+                }
                 if shown.insert(path.to_lowercase()) {
                     targets.push(WholeComputerHit {
                         path,
-                        is_dir: entry.flags & DIR != 0,
+                        is_dir,
                         size: entry.size,
                         modified: entry.modified,
                     });
@@ -4377,6 +4763,7 @@ pub(crate) fn prepare(cx: &mut App) -> WholeComputerSearch {
             || Arc::new(Mutex::new(Fresh::default())),
             |state| state.fresh.clone(),
         ),
+        filters: state.map_or_else(IndexFilters::default, |state| state.filters.clone()),
     }
 }
 
@@ -4732,6 +5119,9 @@ impl ExplorerPane {
             .filter(|state| state.walking_is_new())
             .and_then(|state| state.walking.clone());
         let fresh = state.map(|state| state.fresh.clone());
+        // Cloned here, on the UI thread: the search thread builds the pass and
+        // narrows every hit by what the config asks for.
+        let index_filters = state.map_or_else(IndexFilters::default, |state| state.filters.clone());
         let built = index.as_ref().map(|index| index.built);
         let partial = index
             .as_ref()
@@ -4835,6 +5225,9 @@ impl ExplorerPane {
                     let mut batch = Vec::new();
                     let mut limit = FIRST_BATCH;
                     let mut last_sent = Instant::now();
+                    // One pass for the whole search: the folder attributes it
+                    // reads are then asked of the file system once each.
+                    let mut pass = index_filters.pass();
                     for (name, path, dir, folder_size) in targets {
                         if cancel.load(Ordering::Relaxed) {
                             return;
@@ -4845,6 +5238,10 @@ impl ExplorerPane {
                             }
                             limit = BATCH;
                             last_sent = Instant::now();
+                        }
+                        // Kept out by `[indexing]`: not shown at all.
+                        if !pass.accepts(&path, dir) {
+                            continue;
                         }
                         // Gone since the walk: not shown.
                         let Ok(metadata) = std::fs::symlink_metadata(&path) else {

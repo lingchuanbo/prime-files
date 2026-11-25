@@ -205,7 +205,7 @@ pub fn config_file_for(section: &str, key: &str) -> PathBuf {
         ("theme", _) | ("space_map", _) | ("ui", "file_type_colors") => {
             directory.join("appearance.toml")
         }
-        ("indexing", _) | ("search", _) => directory.join("search.toml"),
+        ("indexing", _) | ("search", _) | ("indexing.exclude", _) => directory.join("search.toml"),
         _ => directory.join("config.toml"),
     }
 }

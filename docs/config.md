@@ -62,7 +62,7 @@ file_type_colors = [
 
 `[keybindings]` と `[plugins]` は型として定義済みだが、値はまだ挙動に反映されない (hot reload は再起動扱い、§5)。スキーマには予約済みで、P3/P4 で形を拡張しても古いファイルは壊れない。
 
-> **ランタイム反映状況**: `theme` / `ui` / `diagnostics` / `indexing.source` はランタイムに反映される。`ui.file_type_colors` の `pattern` はセミコロンで区切った複数の、大文字と小文字を区別しないファイル名 glob に対応する (例: `*.webp;*.svg`)。上から最初に一致した色を一覧・グリッド・コンパクト表示のファイル名に適用する。`indexing.mode` / `indexing.exclude` / `search` / `launcher` / `keybindings` / `plugins` は **parse + validate されるが、まだ挙動には反映されない** (各サブシステムが配線される後続フェーズで有効化)。schema / template に先行して載せているのは、ファイルとエディタ補完が形を先取りできるようにするため。編集しても今は効果がない点に注意。
+> **ランタイム反映状況**: `theme` / `ui` / `diagnostics` / `indexing.source` / `indexing.volumes` / `indexing.exclude` (`enabled` / `hidden` / `system` / `paths` / `globs` / `include_only` / `masks`) はランタイムに反映される。`[indexing]` の `source` と `volumes`、`[indexing.exclude]` は**検索時にヒットを絞り込む**形で適用され、インデックス自体は作り直さない (設定を変えると次の検索からすぐ効く)。`ui.file_type_colors` の `pattern` はセミコロンで区切った複数の、大文字と小文字を区別しないファイル名 glob に対応する (例: `*.webp;*.svg`)。上から最初に一致した色を一覧・グリッド・コンパクト表示のファイル名に適用する。`indexing.mode` / `search` / `launcher` / `keybindings` / `plugins` は **parse + validate されるが、まだ挙動には反映されない** (各サブシステムが配線される後続フェーズで有効化)。schema / template に先行して載せているのは、ファイルとエディタ補完が形を先取りできるようにするため。編集しても今は効果がない点に注意。
 >
 > **`required` なし**: 全フィールドが `#[serde(default)]`。ローダは `Config::default()` から開始して存在するキーだけ上書きするため、どのセクションを省略しても (空の `config.toml` でも) 受理される。生成スキーマも `required` を持たず、エディタ検証とローダ挙動が一致する。
 
@@ -76,10 +76,17 @@ file_type_colors = [
 #   "everything"  Everything のインデックスだけを使う (SDK DLL 経由、ここでは索引を作らない)
 source = "auto"
 mode = "auto"  # "auto" | "always-on" | "manual" (予約)
+volumes = []   # 検索が答える固定ドライブ (例 ["C:", "D:"])。空 = すべて
 
+# 検索から外すもの。次の 4 つのリストは enabled が true のときだけ効く。
 [indexing.exclude]
-paths = []
-globs = []
+enabled = true     # 下のリスト・マスク・パターンを有効にする
+hidden = false     # 隠しファイルとフォルダー (隠しフォルダーの中身ごと)
+system = false     # システム ファイルとフォルダー
+paths = []         # 中身ごと外すフォルダー (例 "C:\\Temp")
+globs = []         # 名前またはパスのパターン (例 "*.tmp", "*/node_modules/*")
+include_only = []  # 残すファイル マスク (例 "*.pdf")。空 = すべてのファイル
+masks = []         # 外すファイル マスク (例 "*.tmp")
 
 [search]
 backend = "auto"  # "tantivy" | "ripgrep" | "auto"

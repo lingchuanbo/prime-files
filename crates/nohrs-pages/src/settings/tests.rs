@@ -232,3 +232,44 @@ fn search_ignores_case_and_accents() {
     assert_eq!(super::fold("Áudio nos ÍCONES"), "audio nos icones");
     assert!(super::fold("Configuração").contains(&super::fold("configuracao")));
 }
+
+#[gpui::test]
+fn the_index_section_shows_its_three_tabs(cx: &mut TestAppContext) {
+    use super::index::Tab;
+    let page = cx.new(SettingsPage::new);
+    page.update(cx, |page, cx| {
+        assert!(SettingsSection::ALL.contains(&SettingsSection::Index));
+        let labels = |page: &SettingsPage, cx: &mut Context<SettingsPage>| {
+            let groups = page.groups(SettingsSection::Index, cx);
+            groups
+                .iter()
+                .flat_map(|group| &group.rows)
+                .map(|row| row.label.clone())
+                .collect::<Vec<_>>()
+        };
+
+        page.index.tab = Tab::Volumes;
+        assert!(
+            labels(page, cx)
+                .iter()
+                .any(|label| label == t!("Unidades fixas")),
+            "the volumes tab lists the drives"
+        );
+
+        page.index.tab = Tab::Exclude;
+        assert!(
+            labels(page, cx)
+                .iter()
+                .any(|label| label == t!("Ativar lista de exclusão")),
+            "the exclude tab has the list switch"
+        );
+
+        page.index.tab = Tab::Advanced;
+        assert!(
+            labels(page, cx)
+                .iter()
+                .any(|label| label == t!("Indexação instantânea")),
+            "the advanced tab has the instant indexing"
+        );
+    });
+}
