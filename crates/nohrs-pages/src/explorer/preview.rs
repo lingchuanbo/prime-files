@@ -300,7 +300,9 @@ impl ExplorerPane {
     /// run of key presses reads one file, the last.
     pub(crate) fn follow_active_in_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A hidden preview reads nothing; the next click shows the row then.
-        if !self.preview_visible && !self.quick_look {
+        // Alt+Q's preview in the other pane counts as shown: this pane's own
+        // panel is hidden in a split, but the other pane shows this selection.
+        if !self.preview_visible && !self.quick_look && !self.preview_in_sibling {
             self.preview_follow = None;
             return;
         }
@@ -314,19 +316,26 @@ impl ExplorerPane {
             self.preview_follow = None;
             return;
         };
-        if self.preview_path.as_deref() == Some(path.as_str()) {
+        // The path the other pane shows is in the other pane's state, not this
+        // one's `preview_path`, so a split asks for every row the keys land on.
+        if !self.preview_in_sibling && self.preview_path.as_deref() == Some(path.as_str()) {
             self.preview_follow = None;
             return;
         }
         let delay = self.preview_follow_delay;
+        let in_sibling = self.preview_in_sibling;
         self.preview_follow = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(delay).await;
             this.update_in(cx, |pane, window, cx| {
+                // Alt+Q was pressed again while the keys waited: the preview
+                // is closed (or moved back here), so nothing is read.
+                if pane.preview_in_sibling != in_sibling {
+                    return;
+                }
                 // A click in the meantime moved on to another row, and
                 // previewed it itself.
-                if pane.active_path.as_deref() == Some(path.as_str())
-                    && pane.preview_path.as_deref() != Some(path.as_str())
-                {
+                let already = pane.preview_path.as_deref() == Some(path.as_str());
+                if pane.active_path.as_deref() == Some(path.as_str()) && (in_sibling || !already) {
                     pane.open_preview(path, window, cx);
                 }
             })

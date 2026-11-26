@@ -711,6 +711,54 @@ async fn the_preview_follows_the_arrow_keys_once_they_stop(cx: &mut TestAppConte
         .unwrap();
 }
 
+// In a split, Alt+Q shows the selection in the other pane. That preview has to
+// follow the arrow keys too: the panel is the other pane's, so this pane's own
+// `preview_path` never names the row the other side shows.
+#[gpui::test]
+async fn the_preview_in_the_other_pane_follows_the_arrow_keys(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "A").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "B").unwrap();
+    let folder = dir.path().to_string_lossy().into_owned();
+    let a = dir.path().join("a.txt").to_string_lossy().into_owned();
+    let b = dir.path().join("b.txt").to_string_lossy().into_owned();
+
+    let window = new_explorer_page(cx);
+    let page = window.root(cx).expect("the window has its page");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    page.update_in(&mut cx, |page, window, cx| {
+        page.split(SplitDirection::Vertical, window, cx);
+        page.open_path(folder.clone(), None, window, cx);
+    });
+    let (active, sibling) = page.update(&mut cx, |page, _cx| (page.pane(1), page.pane(0)));
+    active.update_in(&mut cx, |pane, window, cx| {
+        pane.select_single(0);
+        pane.toggle_preview_in_other_pane(window, cx);
+        assert!(pane.preview_in_sibling, "Alt+Q previews over there");
+        assert_eq!(
+            sibling.read(cx).preview_request.as_deref(),
+            Some(a.as_str()),
+            "the row under the cursor is the one shown over there"
+        );
+        pane.move_active_following(1, false, window, cx);
+    });
+    cx.executor()
+        .advance_clock(super::preview::PREVIEW_FOLLOW_DELAY * 2);
+    cx.run_until_parked();
+    let shown = active.update(&mut cx, |_pane, cx| {
+        let other = sibling.read(cx);
+        other
+            .preview_request
+            .clone()
+            .or_else(|| other.preview_path.clone())
+    });
+    assert_eq!(
+        shown.as_deref(),
+        Some(b.as_str()),
+        "the arrow key moved the preview in the other pane"
+    );
+}
+
 // A press on an item the preview lists becomes a drag out only once the
 // pointer has moved past the threshold with the button held, as in the
 // listing; a release before that stays the click that opens the item.
