@@ -313,6 +313,24 @@ impl SearchWindow {
         }
     }
 
+    /// The text in the search field, for the tests that drive the window.
+    #[cfg(test)]
+    pub(crate) fn field_text(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
+    /// Puts `text` in the search field, as if typed, and searches for it.
+    ///
+    /// `Ctrl+Alt+F` uses it to start from the folder in use: the field then
+    /// holds the folder's path and the caret sits at its end, ready for the
+    /// name to add.
+    pub(crate) fn seed_query(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |state, cx| {
+            state.set_value(text, window, cx);
+            state.focus(window, cx);
+        });
+    }
+
     fn start_search(&mut self, query: String, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
@@ -1574,26 +1592,65 @@ fn format_modified(seconds: u32) -> String {
     nohrs_ui::components::file_list::format_date(&u64::from(seconds))
 }
 
+/// The search window while it is open: the handle to close or bring forward,
+/// and the view to put a folder in when the shortcut names one.
+#[derive(Clone)]
+pub(crate) struct OpenWindow {
+    pub(crate) handle: WindowHandle<Root>,
+    pub(crate) view: WeakEntity<SearchWindow>,
+}
+
 #[derive(Default)]
-struct OpenSearchWindow(Option<WindowHandle<Root>>);
+struct OpenSearchWindow(Option<OpenWindow>);
 impl gpui::Global for OpenSearchWindow {}
+
+/// The open search window, if it is still alive.
+pub(crate) fn live_window(cx: &App) -> Option<OpenWindow> {
+    let state = cx.try_global::<OpenSearchWindow>()?;
+    let open = state.0.as_ref()?;
+    cx.windows()
+        .iter()
+        .any(|window| window.window_id() == open.handle.window_id())
+        .then(|| open.clone())
+}
 
 /// Opens the search window, or closes it when it is already open.
 pub fn toggle(cx: &mut App) -> anyhow::Result<()> {
-    let existing = cx
-        .try_global::<OpenSearchWindow>()
-        .and_then(|state| state.0);
-    if let Some(handle) = existing.filter(|handle| {
-        cx.windows()
-            .iter()
-            .any(|window| window.window_id() == handle.window_id())
-    }) {
+    if let Some(open) = live_window(cx) {
         cx.set_global(OpenSearchWindow(None));
         cx.defer(move |cx| {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            let _ = open
+                .handle
+                .update(cx, |_, window, _| window.remove_window());
         });
         return Ok(());
     }
+    show(None, cx)
+}
+
+/// Opens the search window with `seed` already in its field — `Ctrl+Alt+F`
+/// passes the folder in use — or puts `seed` in the field of the open window
+/// and brings it forward.
+pub fn open_for_folder(seed: String, cx: &mut App) -> anyhow::Result<()> {
+    if let Some(open) = live_window(cx) {
+        let seeded = seed.clone();
+        let shown = open.handle.update(cx, |_, window, cx| {
+            if let Err(error) = open
+                .view
+                .update(cx, |view, cx| view.seed_query(seeded, window, cx))
+            {
+                tracing::debug!("the search window closed while the folder was put in: {error:#}");
+            }
+            window.activate_window();
+        });
+        if shown.is_ok() {
+            return Ok(());
+        }
+    }
+    show(Some(seed), cx)
+}
+
+fn show(seed: Option<String>, cx: &mut App) -> anyhow::Result<()> {
     let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -1619,11 +1676,25 @@ pub fn toggle(cx: &mut App) -> anyhow::Result<()> {
         tabbing_identifier: None,
     };
     let ledger = Ledger::open();
+    let mut built = None;
     let handle = cx.open_window(options, |window, cx| {
         let search = cx.new(|cx| SearchWindow::new(window, cx, ledger));
+        built = Some(search.downgrade());
         cx.new(|cx| Root::new(search, window, cx))
     })?;
-    cx.set_global(OpenSearchWindow(Some(handle)));
+    let Some(view) = built else {
+        return Err(anyhow::anyhow!(
+            "the search window was built without its view"
+        ));
+    };
+    if let Some(seed) = seed {
+        handle.update(cx, |_, window, cx| {
+            if let Err(error) = view.update(cx, |view, cx| view.seed_query(seed, window, cx)) {
+                tracing::debug!("the search window closed while the folder was put in: {error:#}");
+            }
+        })?;
+    }
+    cx.set_global(OpenSearchWindow(Some(OpenWindow { handle, view })));
     Ok(())
 }
 
@@ -1707,10 +1778,70 @@ mod tests {
         })
     }
 
+    // `Ctrl+Alt+F` opens the window with the folder in it; pressing it again
+    // puts the new folder in the same window rather than opening a second one.
+    #[gpui::test]
+    async fn the_folder_shortcut_opens_a_window_and_reuses_an_open_one(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let first = format!("C:{0}SoftDir{0}", std::path::MAIN_SEPARATOR);
+        cx.update(|cx| super::open_for_folder(first.clone(), cx))
+            .expect("the window opens");
+        cx.run_until_parked();
+        let open = cx
+            .update(|cx| super::live_window(cx))
+            .expect("the window is open and remembered");
+        open.handle
+            .update(cx, |_, _window, cx| {
+                let value = open
+                    .view
+                    .read_with(cx, |view, cx| view.field_text(cx))
+                    .expect("the view is alive");
+                assert_eq!(value, first, "the field holds the folder it opened with");
+            })
+            .expect("the window is alive");
+
+        let second = format!("D:{0}Projects{0}", std::path::MAIN_SEPARATOR);
+        cx.update(|cx| super::open_for_folder(second.clone(), cx))
+            .expect("the open window takes the folder");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            1,
+            "no second search window"
+        );
+        open.handle
+            .update(cx, |_, _window, cx| {
+                let value = open
+                    .view
+                    .read_with(cx, |view, cx| view.field_text(cx))
+                    .expect("the view is alive");
+                assert_eq!(value, second, "the open window switched to the new folder");
+            })
+            .expect("the window is alive");
+    }
+
     #[test]
     fn formats_sizes_for_result_rows() {
         assert_eq!(format_bytes(12), "12 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
+    }
+
+    // `Ctrl+Alt+F` puts the folder in use in the field; the name typed next is
+    // then a path below it.
+    #[gpui::test]
+    async fn a_folder_put_in_the_field_is_what_the_search_starts_from(cx: &mut TestAppContext) {
+        let Harness { window, search } = harness(cx, &[]);
+        let seed = format!("C:\\SoftDir{}", std::path::MAIN_SEPARATOR);
+        window
+            .update(cx, |_root, window, cx| {
+                search.update(cx, |view, cx| view.seed_query(seed.clone(), window, cx));
+            })
+            .expect("the search window should be open");
+        cx.run_until_parked();
+        search.update(cx, |view, cx| {
+            assert_eq!(view.field_text(cx), seed, "the field holds the folder");
+            assert_eq!(view.query, seed, "and the search starts from it");
+        });
     }
 
     #[test]

@@ -1132,6 +1132,17 @@ pub(super) static EXTRA: &[(&str, [&str; 6])] = &[
         ],
     ),
     (
+        "Buscar na pasta atual",
+        [
+            "Rechercher dans ce dossier",
+            "In diesem Ordner suchen",
+            "Cerca in questa cartella",
+            "Искать в этой папке",
+            "このフォルダー内を検索",
+            "在此文件夹中搜索",
+        ],
+    ),
+    (
         "Buscar uma configuração…",
         [
             "Rechercher un paramètre…",

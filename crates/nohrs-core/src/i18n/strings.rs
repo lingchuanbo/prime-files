@@ -266,6 +266,11 @@ pub(super) static STRINGS: &[(&str, &str, &str)] = &[
         "Buscar en el índice",
     ),
     (
+        "Buscar na pasta atual",
+        "Search in this folder",
+        "Buscar en esta carpeta",
+    ),
+    (
         "Buscar uma configuração…",
         "Search settings…",
         "Buscar un ajuste…",

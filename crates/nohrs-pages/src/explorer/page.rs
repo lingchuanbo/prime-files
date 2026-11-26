@@ -117,6 +117,9 @@ actions!(
         TabMenu,
         /// Show every shortcut in one sheet.
         ShowShortcuts,
+        /// Open the standalone search window with the folder in use already in
+        /// its field, so the name typed next searches this folder.
+        SearchHere,
         /// Open a new tab in the active pane, rooted at home.
         NewTab,
         /// Close the active tab (closing the pane if it was its last tab).
@@ -135,6 +138,17 @@ fn tab_shortcut_index(key: &str) -> Option<usize> {
         [digit @ b'1'..=b'9'] => Some(usize::from(*digit - b'1')),
         [b'0'] => Some(9),
         _ => None,
+    }
+}
+
+/// What the standalone search's field starts with when it is opened on the
+/// folder in use: the folder's path, ending in a separator, so the name typed
+/// next reads as a path below it.
+fn search_seed(cwd: &str) -> String {
+    if cwd.ends_with(std::path::MAIN_SEPARATOR) {
+        cwd.to_string()
+    } else {
+        format!("{cwd}{}", std::path::MAIN_SEPARATOR)
     }
 }
 
@@ -191,6 +205,7 @@ pub fn rebind_shortcuts(cx: &mut App) {
         Action::PreviousTab,
         Action::TabMenu,
         Action::ShowShortcuts,
+        Action::SearchHere,
     ];
     let wanted: Vec<(String, Action)> = page_actions
         .into_iter()
@@ -232,6 +247,7 @@ pub fn rebind_shortcuts(cx: &mut App) {
             Action::PreviousTab => KeyBinding::new(keys, PreviousTab, context),
             Action::TabMenu => KeyBinding::new(keys, TabMenu, context),
             Action::ShowShortcuts => KeyBinding::new(keys, ShowShortcuts, context),
+            Action::SearchHere => KeyBinding::new(keys, SearchHere, context),
             _ => KeyBinding::new(keys, ToggleTerminal, context),
         });
     }
@@ -3031,6 +3047,12 @@ impl Render for ExplorerPage {
                 let _ = window;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &SearchHere, _window, cx| {
+                let cwd = this.group.active_pane().read(cx).cwd.clone();
+                if !cwd.is_empty() {
+                    crate::search_window::open_for_folder(search_seed(&cwd), cx).log_err();
+                }
+            }))
             .when(
                 self.terminal_drag.is_some() || self.group.dragging(),
                 |this| {
@@ -3212,7 +3234,9 @@ impl ExplorerPage {
 
 #[cfg(test)]
 mod tab_feature_tests {
-    use super::{ExplorerPage, PaneSnapshot, ResizableState, TrashLedger, tab_shortcut_index};
+    use super::{
+        ExplorerPage, PaneSnapshot, ResizableState, TrashLedger, search_seed, tab_shortcut_index,
+    };
     use gpui::{AppContext, TestAppContext};
 
     #[::core::prelude::v1::test]
@@ -3222,6 +3246,67 @@ mod tab_feature_tests {
         }
         assert_eq!(None, tab_shortcut_index("10"));
         assert_eq!(None, tab_shortcut_index("a"));
+    }
+
+    // `Ctrl+Alt+F` leaves the caret after the folder, ready for the name.
+    #[::core::prelude::v1::test]
+    fn a_folder_is_seeded_with_a_separator_for_the_name_to_follow() {
+        let separator = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            search_seed(&format!("C:{separator}SoftDir")),
+            format!("C:{separator}SoftDir{separator}")
+        );
+        // A drive root already ends in one, and does not get a second.
+        let root = format!("C:{separator}");
+        assert_eq!(search_seed(&root), root);
+    }
+
+    // Ctrl+Alt+F opens the standalone search on the folder the pane in use
+    // shows, with the caret after it.
+    #[gpui::test]
+    async fn the_folder_shortcut_opens_the_search_on_the_pane_in_use(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+
+        cx.update(gpui_component::init);
+        let directory = tempfile::tempdir().expect("a temp folder");
+        let folder = directory.path().to_string_lossy().into_owned();
+        let window = cx.add_window(|window, cx| {
+            let resizable = cx.new(|_| ResizableState::default());
+            ExplorerPage::new(
+                resizable,
+                None,
+                None,
+                TrashLedger::KeptByOs,
+                false,
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |page, window, cx| {
+                page.pane(0)
+                    .update(cx, |pane, _cx| pane.cwd = folder.clone());
+                window.dispatch_action(super::SearchHere.boxed_clone(), cx);
+            })
+            .expect("the page window is open");
+        cx.run_until_parked();
+        let open = cx
+            .update(|cx| crate::search_window::live_window(cx))
+            .expect("the shortcut opened the search window");
+        open.handle
+            .update(cx, |_, _window, cx| {
+                let value = open
+                    .view
+                    .read_with(cx, |view, cx| view.field_text(cx))
+                    .expect("the view is alive");
+                assert_eq!(
+                    value,
+                    format!("{folder}{}", std::path::MAIN_SEPARATOR),
+                    "the field starts from the folder in use"
+                );
+            })
+            .expect("the search window is alive");
     }
 
     #[::core::prelude::v1::test]

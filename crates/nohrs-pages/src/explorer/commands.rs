@@ -146,6 +146,7 @@ impl ExplorerPane {
             | Action::PreviousTab
             | Action::TabMenu
             | Action::ShowShortcuts
+            | Action::SearchHere
             | Action::ToggleTerminal => return false,
         }
         true

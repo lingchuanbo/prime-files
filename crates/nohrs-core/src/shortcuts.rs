@@ -45,6 +45,7 @@ pub enum Action {
     SearchSubfolders,
     SearchEverything,
     SearchIndex,
+    SearchHere,
     FilterBar,
     TypeFilter,
     ToggleHiddenFiles,
@@ -295,7 +296,9 @@ pub const ACTIONS: &[ActionInfo] = &[
         "search_everything",
         SEARCH,
         crate::k!("Buscar em todo o computador"),
-        &["ctrl-alt-f"],
+        // Ctrl+Alt+F now opens the standalone search on the folder in use; the
+        // in-pane whole-computer search keeps a neighbour of it.
+        &["ctrl-alt-e"],
     ),
     info(
         Action::SearchIndex,
@@ -303,6 +306,13 @@ pub const ACTIONS: &[ActionInfo] = &[
         SEARCH,
         crate::k!("Buscar no índice"),
         &["ctrl-shift-f"],
+    ),
+    info(
+        Action::SearchHere,
+        "search_here",
+        SEARCH,
+        crate::k!("Buscar na pasta atual"),
+        &["ctrl-alt-f"],
     ),
     info(
         Action::FilterBar,
