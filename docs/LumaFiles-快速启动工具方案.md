@@ -105,7 +105,7 @@ icon  = "fluent:briefcase"
   path = '%USERPROFILE%\Projects'  # 支持环境变量和 {portable} 等变量
 ```
 
-- 路径支持 `%ENV%`、`{portable}`（便携根目录）和 `{luma}`（程序目录），方便 U 盘或换机后直接用。
+- 路径支持 `%ENV%`、`%LumaFiles%`（程序所在目录，例如 `%LumaFiles%\tools\run.exe`）、`{portable}`（便携根目录）和 `{luma}`（程序目录），方便 U 盘或换机后直接用。
 - 用 `serde` 加上现有 `config/watcher.rs`，改文件后**热重载**；解析失败时保留旧配置，并在界面上提示出错的行号。
 - 补进 `docs/config.schema.json`，在编辑器里写 `dock.toml` 有补全和校验。
 - 支持导入和导出：导入 PowerToys Run、Listary、RunAny、Rolan 的配置，导出单个 `dock.toml`。

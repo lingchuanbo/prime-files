@@ -210,8 +210,8 @@ pub struct Item {
     /// Identifier a `group` item references. `^[a-z0-9_]{1,32}$`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// Target path, possibly with `%ENV%` / `{portable}` / `{luma}` /
-    /// `{config}` variables (§7).
+    /// Target path, possibly with `%ENV%` / `%LumaFiles%` / `{portable}` /
+    /// `{luma}` / `{config}` variables (§7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Command-line arguments handed to `ShellExecuteExW`.

@@ -86,7 +86,7 @@
           "type": "string"
         },
         "path": {
-          "description": "Target path, possibly with `%ENV%` / `{portable}` / `{luma}` /\n`{config}` variables (§7).",
+          "description": "Target path, possibly with `%ENV%` / `%LumaFiles%` / `{portable}` /\n`{luma}` / `{config}` variables (§7).",
           "type": [
             "string",
             "null"

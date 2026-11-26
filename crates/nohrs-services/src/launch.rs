@@ -3,8 +3,8 @@
 //!
 //! Three things live here, all of them usable off the UI thread:
 //!
-//! * [`expand`] — the `%ENV%` / `{portable}` / `{luma}` / `{config}` variables
-//!   of a stored path (§7).
+//! * [`expand`] — the `%ENV%` / `%LumaFiles%` / `{portable}` / `{luma}` /
+//!   `{config}` variables of a stored path (§7).
 //! * [`LaunchAction`] and [`LaunchRegistry`] — one implementation per `type`,
 //!   looked up by name (§8.1).
 //! * [`validate_url`] — the scheme whitelist, a pure function (§8.2).
@@ -91,8 +91,8 @@ pub struct ExpandContext {
     /// The `userdata` folder beside the executable, when the installation is
     /// portable; `None` otherwise.
     pub portable_root: Option<PathBuf>,
-    /// The directory the program's executable sits in (`{luma}`), which is also
-    /// what a relative path is resolved against.
+    /// The directory the program's executable sits in (`{luma}` and
+    /// `%LumaFiles%`), which is also what a relative path is resolved against.
     pub program_dir: PathBuf,
     /// The active configuration directory (`{config}`).
     pub config_dir: PathBuf,
@@ -122,9 +122,12 @@ impl ExpandContext {
 
 /// Turns a stored path into one the Shell can be handed.
 ///
-/// One level only: a variable whose value itself holds `%OTHER%` is not
-/// expanded again, so a file cannot make the program resolve a path the author
-/// never wrote. A relative path is resolved against [`ExpandContext::program_dir`].
+/// `%LumaFiles%` is answered from the context before the environment is
+/// consulted; every other `%NAME%` is an environment variable, matched without
+/// regard to case. One level only: a variable whose value itself holds
+/// `%OTHER%` is not expanded again, so a file cannot make the program resolve a
+/// path the author never wrote. A relative path is resolved against
+/// [`ExpandContext::program_dir`].
 pub fn expand(raw: &str, context: &ExpandContext) -> Result<PathBuf, ExpandError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -146,9 +149,14 @@ pub fn expand(raw: &str, context: &ExpandContext) -> Result<PathBuf, ExpandError
                     Some(length) => {
                         let name: String =
                             characters[index + 1..index + 1 + length].iter().collect();
-                        let value = environment_variable(&name)
-                            .ok_or_else(|| ExpandError::Undefined { name: name.clone() })?;
-                        expanded.push_str(&value);
+                        match installation_variable(&name, context) {
+                            Some(folder) => expanded.push_str(&folder.to_string_lossy()),
+                            None => {
+                                let value = environment_variable(&name)
+                                    .ok_or_else(|| ExpandError::Undefined { name: name.clone() })?;
+                                expanded.push_str(&value);
+                            }
+                        }
                         index += 1 + length + 1;
                     }
                 }
@@ -192,6 +200,24 @@ pub fn expand(raw: &str, context: &ExpandContext) -> Result<PathBuf, ExpandError
         return Ok(path);
     }
     Ok(context.program_dir.join(path))
+}
+
+/// The `%NAME%` variables that name a folder of the installation itself rather
+/// than something the environment knows.
+///
+/// `%LumaFiles%` is the folder of the running executable, the same one `{luma}`
+/// expands to, written in the form Windows users already know from `cmd.exe`.
+/// It is what lets a tool shipped beside the program be configured as
+/// `%LumaFiles%\tools\run.exe`: the path then survives moving or copying the
+/// installation, which an absolute path would not.
+///
+/// The built-in name wins over an environment variable of the same name, so a
+/// stray variable cannot point it somewhere else.
+fn installation_variable(name: &str, context: &ExpandContext) -> Option<PathBuf> {
+    if name.eq_ignore_ascii_case("LumaFiles") {
+        return Some(context.program_dir.clone());
+    }
+    None
 }
 
 /// A `%NAME%` variable, matched without regard to case.
@@ -657,6 +683,33 @@ mod tests {
         assert_eq!(
             expanded("{portable}\\notes.txt"),
             PathBuf::from("P:\\userdata\\notes.txt")
+        );
+    }
+
+    #[test]
+    fn the_installation_name_is_the_program_folder() {
+        assert_eq!(
+            expanded("%LumaFiles%\\tools\\run.exe"),
+            PathBuf::from("C:\\Apps\\Luma\\tools\\run.exe")
+        );
+        // Like an environment variable on Windows, the name ignores case.
+        assert_eq!(
+            expanded("%lumafiles%\\run.exe"),
+            PathBuf::from("C:\\Apps\\Luma\\run.exe")
+        );
+        assert_eq!(expanded("%LUMAFILES%"), PathBuf::from("C:\\Apps\\Luma"));
+    }
+
+    #[test]
+    fn the_installation_name_is_not_read_from_the_environment() {
+        // A variable named like the program must not redirect the folder the
+        // program was started from. Rust 2024 made `set_var` unsafe.
+        unsafe { std::env::set_var("LumaFiles", "D:\\elsewhere") };
+        let result = expand("%LumaFiles%\\x", &context());
+        unsafe { std::env::remove_var("LumaFiles") };
+        assert_eq!(
+            result.expect("the built-in name is answered"),
+            PathBuf::from("C:\\Apps\\Luma\\x")
         );
     }
 

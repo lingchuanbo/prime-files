@@ -251,9 +251,10 @@ pub fn migrate(config: QuickLaunchConfig) -> QuickLaunchConfig;  // 目前只有
 pub fn expand(raw: &str, context: &ExpandContext) -> Result<PathBuf, ExpandError>;
 pub struct ExpandContext { pub portable_root: Option<PathBuf>, pub program_dir: PathBuf, pub config_dir: PathBuf }
 ```
-- 支持的变量：`%NAME%`（环境变量，大小写不敏感）、`{portable}`、`{luma}`（程序所在目录）、`{config}`。
+- 支持的变量：`%NAME%`（环境变量，大小写不敏感）、`%LumaFiles%`（程序所在目录，等价于 `{luma}`，优先于同名环境变量）、`{portable}`、`{luma}`（程序所在目录）、`{config}`。
 - 变量未定义时返回 `Err(Undefined(name))`；非便携模式下用到 `{portable}` 时返回 `Err(NotPortable)`。**禁止**保留未展开的字符串继续去启动。
 - 只展开一层，不递归。
+- `args` 不是路径，按原文交给 Shell，不展开（`%03d` 这类字面量不能被当成变量）。
 - 相对路径按 `{luma}` 解析。
 - `ExpandContext` 由调用方从 `nohrs_core::config::paths` 构造，services 自己不读全局状态，方便测试。
 - 配置里存用户写的原始字符串。界面拖入时，如果路径在便携根目录下，自动改写成 `{portable}\…`。

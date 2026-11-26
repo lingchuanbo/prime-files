@@ -2330,7 +2330,7 @@ fn editor_overlay(
                     .text_xs()
                     .text_color(rgb(theme::muted()))
                     .child(
-                        "路径、参数、工作文件夹和图标支持 %环境变量%（如 %ProgramFiles%）以及 {luma}、{config}、{portable}",
+                        "路径、工作文件夹和图标支持 %环境变量%（如 %ProgramFiles%）、%LumaFiles%（程序所在目录）以及 {luma}、{config}、{portable}；参数按原样传给程序",
                     ),
             )
     };
