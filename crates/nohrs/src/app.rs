@@ -7,8 +7,10 @@
 //! `nohrs_launcher::LauncherView`. Neither pillar references the other; the
 //! binary owns the keybinding that summons the launcher from anywhere.
 
-use crate::cli::{Cli, Command};
-use gpui::{App, AppContext, Application, Bounds, KeyBinding, WindowAppearance, actions, px, size};
+use crate::cli::{Cli, Command, StartupWindow};
+use gpui::{
+    App, AppContext, Application, AsyncApp, Bounds, KeyBinding, WindowAppearance, actions, px, size,
+};
 use gpui_component::Root;
 use gpui_component::resizable::ResizableState;
 use nohrs_core::config::{self, ConfigOverride, ThemeMode};
@@ -22,13 +24,37 @@ use nohrs_ui::assets::Assets;
 use nohrs_ui::components::layout::unified_toolbar::UNIFIED_TOOLBAR_HEIGHT;
 use nohrs_ui::window::{self, traffic_lights::TrafficLightsHook};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub struct NohrsApp;
+
+/// How long a `-quick_launcher` / `-search` startup waits for the explorer
+/// window to take the focus before opening the window it was asked for, and how
+/// often it looks.
+///
+/// The explorer takes the focus when its first frame is shown, and the quick
+/// launch panel hides itself when the focus leaves it (§11): opening the panel
+/// before that frame would show it and take it away again.
+const STARTUP_WINDOW_ACTIVE_POLL: Duration = Duration::from_millis(50);
+const STARTUP_WINDOW_ACTIVE_WAIT: Duration = Duration::from_secs(5);
+
+/// Waits until `is_active` answers true, or for the wait to run out.
+async fn wait_until_active(mut is_active: impl FnMut(&mut AsyncApp) -> bool, cx: &mut AsyncApp) {
+    let polls = STARTUP_WINDOW_ACTIVE_WAIT.as_millis() / STARTUP_WINDOW_ACTIVE_POLL.as_millis();
+    for _ in 0..polls {
+        if is_active(cx) {
+            return;
+        }
+        cx.background_executor()
+            .timer(STARTUP_WINDOW_ACTIVE_POLL)
+            .await;
+    }
+}
 
 actions!(nohrs, [OpenStandaloneSearch]);
 
 impl NohrsApp {
-    pub fn run(cli: &Cli) {
+    pub fn run(cli: &Cli, startup_window: Option<StartupWindow>) {
         // Before anything can panic. A released window has no console, so a
         // crash with `diagnostics.runtime_log` off (the default) would leave
         // nothing behind; this writes the one line that says where it died.
@@ -215,8 +241,43 @@ impl NohrsApp {
                     cx.new(|cx| Root::new(view, window, cx))
                 }
             });
-            if let Err(error) = opened {
-                tracing::error!("failed to open main window: {error}");
+            match opened {
+                Ok(main_window) => {
+                    // The window the command line asked for, opened over the
+                    // explorer: no instance was running to take the request.
+                    if let Some(startup_window) = startup_window {
+                        app.spawn(async move |cx| {
+                            wait_until_active(
+                                |cx| {
+                                    main_window
+                                        .update(cx, |_, window, _| window.is_window_active())
+                                        .unwrap_or(false)
+                                },
+                                cx,
+                            )
+                            .await;
+                            let opened = cx.update(|app| match startup_window {
+                                StartupWindow::QuickLaunch => {
+                                    nohrs_pages::quick_launch::toggle(app);
+                                }
+                                StartupWindow::Search => {
+                                    if let Err(error) = nohrs_pages::search_window::toggle(app) {
+                                        tracing::error!(
+                                            "could not open the standalone search window: {error:#}"
+                                        );
+                                    }
+                                }
+                            });
+                            if let Err(error) = opened {
+                                tracing::debug!(
+                                    "the app closed before its startup window opened: {error}"
+                                );
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                Err(error) => tracing::error!("failed to open main window: {error}"),
             }
         });
     }

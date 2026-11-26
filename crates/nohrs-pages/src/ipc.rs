@@ -45,6 +45,10 @@ enum Request {
     Ping,
     /// Bring the window to the front, showing nothing new.
     Show,
+    /// Show the quick launch panel, or hide it when it is up.
+    ToggleQuickLaunch,
+    /// Show the standalone search window, or close it when it is up.
+    ToggleSearch,
     /// Show a folder, or a file selected inside its folder, in a new tab.
     Open { path: String },
     /// Point an existing tab at a folder, or at a file inside one.
@@ -126,6 +130,18 @@ pub fn request_open(path: &Path) -> bool {
 /// none.
 pub fn request_show() -> bool {
     send(json!({ "cmd": "show" })).is_some_and(|reply| reply["ok"] == true)
+}
+
+/// Shows or hides the quick launch panel in the running instance. Returns
+/// `false` when none answers, so the caller starts the program itself.
+pub fn request_toggle_quick_launch() -> bool {
+    send(json!({ "cmd": "toggle_quick_launch" })).is_some_and(|reply| reply["ok"] == true)
+}
+
+/// Shows or closes the standalone search window in the running instance.
+/// Returns `false` when none answers.
+pub fn request_toggle_search() -> bool {
+    send(json!({ "cmd": "toggle_search" })).is_some_and(|reply| reply["ok"] == true)
 }
 
 /// Returns the active explorer tab's folder from the running instance.
@@ -324,6 +340,14 @@ impl RootView {
                 crate::foreground::bring_to_front(window);
                 json!({ "ok": true })
             }
+            Request::ToggleQuickLaunch => {
+                crate::quick_launch::toggle(cx);
+                json!({ "ok": true })
+            }
+            Request::ToggleSearch => match crate::search_window::toggle(cx) {
+                Ok(()) => json!({ "ok": true }),
+                Err(error) => json!({ "ok": false, "error": error.to_string() }),
+            },
             Request::Open { path } => match folder_and_selection(Path::new(&path)) {
                 Some((folder, select)) => {
                     self.show_explorer(cx);
@@ -412,6 +436,12 @@ mod tests {
         assert!(matches!(envelope.request, Request::Navigate { tab: 7, .. }));
         let envelope: Envelope = serde_json::from_str(r#"{"token":"t","cmd":"current"}"#).unwrap();
         assert!(matches!(envelope.request, Request::Current));
+        let envelope: Envelope =
+            serde_json::from_str(r#"{"token":"t","cmd":"toggle_quick_launch"}"#).unwrap();
+        assert!(matches!(envelope.request, Request::ToggleQuickLaunch));
+        let envelope: Envelope =
+            serde_json::from_str(r#"{"token":"t","cmd":"toggle_search"}"#).unwrap();
+        assert!(matches!(envelope.request, Request::ToggleSearch));
         assert!(serde_json::from_str::<Envelope>(r#"{"token":"t","cmd":"format_c"}"#).is_err());
     }
 

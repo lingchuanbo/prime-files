@@ -5,6 +5,7 @@
 
 use clap::{Parser, Subcommand};
 use nohrs_core::config::{self, ConfigOverride, ThemeMode};
+use std::ffi::OsString;
 use std::process::Command as ProcessCommand;
 
 #[derive(Parser, Debug)]
@@ -56,10 +57,57 @@ pub enum Command {
     },
     /// Open the launcher window on its own, without the explorer.
     Launcher,
+    /// Open the quick launch panel, or hide it when it is already open.
+    #[command(name = "quick_launcher")]
+    QuickLauncher,
+    /// Open the standalone search window, or hide it when it is already open.
+    Search,
     /// Gives Listary's folders back to Explorer if they open here. Run by the
     /// uninstaller, which cannot edit Listary's JSON itself.
     #[command(hide = true)]
     ForgetListary,
+}
+
+/// The window `-quick_launcher` / `-search` asks for when it starts the program
+/// instead of handing the request to an instance that is already running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupWindow {
+    /// The quick launch panel.
+    QuickLaunch,
+    /// The standalone search window.
+    Search,
+}
+
+impl Command {
+    /// The window this command asks a *starting* program to open, if any.
+    pub fn startup_window(&self) -> Option<StartupWindow> {
+        match self {
+            Self::QuickLauncher => Some(StartupWindow::QuickLaunch),
+            Self::Search => Some(StartupWindow::Search),
+            _ => None,
+        }
+    }
+}
+
+/// Rewrites the forms a script types — `-search`, `-quick_launcher`, and their
+/// `--` and hyphen spellings — into the command names the parser knows.
+///
+/// `clap` reads `-search` as a cluster of short flags, so the spelling the
+/// manual shows would otherwise be an argument error. A leading dash is how a
+/// Windows program's switches are often written; a caller should not have to
+/// know which layer reads it.
+pub fn normalize_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    arguments
+        .into_iter()
+        .map(|argument| match argument.to_str() {
+            Some(
+                "-quick_launcher" | "--quick_launcher" | "-quick-launcher" | "--quick-launcher"
+                | "quick_launcher",
+            ) => OsString::from("quick_launcher"),
+            Some("-search") | Some("--search") => OsString::from("search"),
+            _ => argument,
+        })
+        .collect()
 }
 
 #[derive(Subcommand, Debug)]
@@ -231,5 +279,38 @@ mod tests {
         let cli = Cli::parse_from(["nohrs", "current-path"]);
         assert!(matches!(cli.command, Some(Command::CurrentPath)));
         assert!(Cli::try_parse_from(["nohrs", "open"]).is_err());
+    }
+
+    #[test]
+    fn the_dash_forms_of_the_window_commands_parse() {
+        for argument in [
+            "-quick_launcher",
+            "--quick_launcher",
+            "-quick-launcher",
+            "--quick-launcher",
+        ] {
+            let args = normalize_arguments(["LumaFiles".into(), argument.into()]);
+            let cli = Cli::parse_from(args);
+            assert!(
+                matches!(cli.command, Some(Command::QuickLauncher)),
+                "{argument} should open the quick launch panel"
+            );
+            assert_eq!(
+                cli.command.as_ref().and_then(Command::startup_window),
+                Some(StartupWindow::QuickLaunch)
+            );
+        }
+        for argument in ["-search", "--search"] {
+            let args = normalize_arguments(["LumaFiles".into(), argument.into()]);
+            let cli = Cli::parse_from(args);
+            assert!(
+                matches!(cli.command, Some(Command::Search)),
+                "{argument} should open the standalone search"
+            );
+            assert_eq!(
+                cli.command.as_ref().and_then(Command::startup_window),
+                Some(StartupWindow::Search)
+            );
+        }
     }
 }

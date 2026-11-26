@@ -24,7 +24,23 @@ fn main() {
     }) {
         attach_parent_console();
     }
-    let mut cli = cli::Cli::parse();
+    let mut cli = cli::Cli::parse_from(cli::normalize_arguments(std::env::args_os()));
+
+    // `-quick_launcher` / `-search`: when a program is already running, the
+    // request goes to it and this process is done. When none answers, this
+    // process starts the program and opens the window itself, so the first
+    // invocation of a script works exactly like the later ones.
+    let startup_window = cli.command.as_ref().and_then(cli::Command::startup_window);
+    if let Some(startup_window) = startup_window {
+        let handed_over = match startup_window {
+            cli::StartupWindow::QuickLaunch => nohrs_pages::ipc::request_toggle_quick_launch(),
+            cli::StartupWindow::Search => nohrs_pages::ipc::request_toggle_search(),
+        };
+        if handed_over {
+            return;
+        }
+        cli.command = None;
+    }
 
     if matches!(cli.command, Some(cli::Command::CurrentPath)) {
         match nohrs_pages::ipc::current_path() {
@@ -83,7 +99,7 @@ fn main() {
         eprintln!("could not prepare application storage: {error}");
     }
 
-    app::NohrsApp::run(&cli);
+    app::NohrsApp::run(&cli, startup_window);
 
     // Explorer still holds the shell windows registered for the open tabs;
     // take them back while this process can still answer.

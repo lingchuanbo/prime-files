@@ -8,7 +8,11 @@
 & 'C:\LumaFiles\LumaFiles.exe' open 'D:\工作资料'
 & 'C:\LumaFiles\LumaFiles.exe' open 'D:\工作资料\说明.txt'
 & 'C:\LumaFiles\LumaFiles.exe' current-path
+& 'C:\LumaFiles\LumaFiles.exe' -quick_launcher   # 打开或关闭快速启动面板
+& 'C:\LumaFiles\LumaFiles.exe' -search           # 打开或关闭独立搜索窗口
 ```
+
+`-quick_launcher` 和 `-search`（也接受 `--quick_launcher`、`--search`，以及不带前面的 `quick_launcher`、`search`）每次执行都切换对应窗口：程序已经在运行时由运行中的实例打开或关闭，本次调用随即退出，**不会多开进程**；程序没有运行时则先启动程序，再在主窗口之后打开该窗口。所以脚本里重复调用同一条命令即可，例如 AutoHotkey 的 `Run "C:\LumaFiles\LumaFiles.exe -quick_launcher"`。
 
 `open` 接受文件夹或文件：文件会打开所在文件夹并选中该文件。已有窗口时在新标签页打开；否则启动程序。路径不存在时返回非零退出码。原有的直接传入路径仍可使用。
 
@@ -33,6 +37,8 @@
 - `current`：返回活动标签页的 `tab` 和 `folder`。
 - `tabs`：返回 `tabs` 数组，每项包含 `tab`、`folder` 和 `active`。
 - `navigate`：传入 `tab` 和绝对路径 `path`，在指定标签页导航。
+- `toggle_quick_launch`：打开或关闭快速启动面板（与 `-quick_launcher` 相同）。
+- `toggle_search`：打开或关闭独立搜索窗口（与 `-search` 相同）。
 
 响应的 `ok` 为 `false` 表示失败，部分失败响应含 `error`。标签页 ID 仅在当前进程内有效；每次调用应重新读取端点，设置连接和读取超时，并处理窗口关闭或启动中的情况。IPC 路径由运行实例的配置模式决定，而不是外部调用者的当前工作目录。
 
