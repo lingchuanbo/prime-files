@@ -1,6 +1,6 @@
 # gpui 0.2.2, patched for Nohrs
 
-A copy of gpui 0.2.2 from crates.io with two changes. The first, in
+A copy of gpui 0.2.2 from crates.io with four changes. The first, in
 `src/platform/windows/window.rs`, `DragEnter`: the CF_HDROP `HGLOBAL` is passed
 to `DragQueryFileW` as the `HDROP` it is, instead of being dereferenced as a
 pointer to one.
@@ -38,3 +38,16 @@ an error (rust-lang/rust#154024). Upstream may already have fixed it.
 When gpui is upgraded: check whether a caption or caption-button press, or a
 caption-button release, still returns `Some(0)` when the dispatch was
 "handled" (the lines are marked `NOHRS`).
+
+The fourth, in `src/platform/windows/window.rs` and
+`src/platform/windows/platform.rs`: the window classes are registered as
+`LumaFiles_WinClass` and `LumaFiles_PlatformWindow` instead of `Zed::Window` and
+`Zed::PlatformWindow` (26/11/2026). The class is the name Win32 callers and
+AutoHotkey's `ahk_class` match, and the program is not the editor whose toolkit
+this is: a script written for Zed's windows must not act on these, and one
+written for these must not act on Zed's. Nothing in gpui reads either name, so
+only the registration and creation constants changed (marked `Nohrs`).
+
+When gpui is upgraded: check whether `WINDOW_CLASS_NAME` and
+`PLATFORM_WINDOW_CLASS_NAME` still exist and still say `Zed::`, and rename them
+again.

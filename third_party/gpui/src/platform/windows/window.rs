@@ -1149,7 +1149,10 @@ enum WindowOpenState {
     Windowed,
 }
 
-const WINDOW_CLASS_NAME: PCWSTR = w!("Zed::Window");
+// Nohrs: the class name is what AutoHotkey and Win32 callers see; it says
+// LumaFiles rather than Zed so a script can tell the windows of this program
+// from those of the editor it took the toolkit from.
+const WINDOW_CLASS_NAME: PCWSTR = w!("LumaFiles_WinClass");
 
 fn register_window_class(icon_handle: HICON) {
     static ONCE: Once = Once::new();

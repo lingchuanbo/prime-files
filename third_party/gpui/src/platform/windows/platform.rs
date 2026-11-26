@@ -1093,7 +1093,9 @@ fn handle_gpu_device_lost(
     }
 }
 
-const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");
+// Nohrs: the hidden helper window is named after the program too, so no
+// "Zed::" class is registered by this process.
+const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("LumaFiles_PlatformWindow");
 
 fn register_platform_window_class() {
     let wc = WNDCLASSW {
