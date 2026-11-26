@@ -11,3 +11,5 @@ pub mod i18n;
 pub mod shortcuts;
 /// Logging and other telemetry setup.
 pub mod telemetry;
+/// The window classes Windows registers this program's windows under.
+pub mod window_class;

@@ -44,9 +44,9 @@ The fourth, in `src/platform/windows/window.rs`,
 window classes are named by the program instead of by the toolkit (26/11/2026).
 `Zed::Window` became `LumaFiles_WinClass`, `Zed::PlatformWindow` became
 `LumaFiles_PlatformWindow`, and `WindowOptions::window_class` was added so a
-window can name its own class: the explorer, the quick launch panel
-(`LumaFiles_QuickLauncher_WinClass`) and the standalone search
-(`LumaFiles_Search_WinClass`) do, so a script can tell them apart. The class is
+window can name its own class: the program names its windows (see the
+`window_class` module in `nohrs-core`), so a script can tell the explorer, the
+quick launch panel and the rest apart. The class is
 the name Win32 callers and AutoHotkey's `ahk_class` match, and the program is
 not the editor whose toolkit this is: a script written for Zed's windows must
 not act on these, and one written for these must not act on Zed's. Each class is

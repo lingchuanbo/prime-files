@@ -1606,8 +1606,8 @@ pub fn toggle(cx: &mut App) -> anyhow::Result<()> {
         show: true,
         kind: WindowKind::Normal,
         // Its own class, so a script can drive the search window without
-        // matching the explorer's (`nohrs_ui::window` names the three windows).
-        window_class: Some(nohrs_ui::window::SEARCH_WINDOW_CLASS),
+        // matching the explorer's (`nohrs_core::window_class` names them all).
+        window_class: Some(nohrs_core::window_class::SEARCH),
         is_movable: true,
         is_resizable: true,
         is_minimizable: true,

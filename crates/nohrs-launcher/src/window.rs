@@ -73,9 +73,9 @@ pub fn launcher_window_options(bounds: Bounds<Pixels>) -> WindowOptions {
         show: true,
         // Above ordinary windows — it is summoned over whatever is in front.
         kind: WindowKind::PopUp,
-        // The program's default class: this window is not one of the three
-        // windows that name their own (explorer, quick launch, search).
-        window_class: None,
+        // Its own class, so a script can drive the palette without matching
+        // the explorer's window (`nohrs_core::window_class` names them all).
+        window_class: Some(nohrs_core::window_class::LAUNCHER),
         is_movable: true,
         is_resizable: false,
         is_minimizable: false,
@@ -180,8 +180,9 @@ pub fn open_keep_alive_window(cx: &mut App) -> Result<()> {
         focus: false,
         show: false,
         kind: WindowKind::PopUp,
-        // A window nobody sees, so it shares the program's default class.
-        window_class: None,
+        // A window nobody sees, but it is named so that a script looking for
+        // the explorer's class finds nothing it cannot activate.
+        window_class: Some(nohrs_core::window_class::KEEP_ALIVE),
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,

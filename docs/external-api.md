@@ -38,13 +38,16 @@
 
 ## 窗口类名
 
-AutoHotkey 等外部脚本可以用窗口类名（`ahk_class`）定位本程序的窗口。三个主要窗口各有自己的类名，不必再靠标题或进程号区分：
+AutoHotkey 等外部脚本可以用窗口类名（`ahk_class`）定位本程序的窗口，不必再靠标题或进程号区分。程序里的 GPUI 窗口各用各的类名：
 
 | 窗口 | 窗口类名 |
 |---|---|
 | 主窗口（资源管理器） | `LumaFiles_WinClass` |
 | 快速启动面板 | `LumaFiles_QuickLauncher_WinClass` |
 | 独立搜索窗口（`Ctrl+Shift+F`） | `LumaFiles_Search_WinClass` |
+| 启动器面板（`Ctrl+Shift+Space`，程序内 `Ctrl+K`） | `LumaFiles_Launcher_WinClass` |
+| 批量重命名窗口 | `LumaFiles_BatchRename_WinClass` |
+| 常驻模式的隐藏窗口 | `LumaFiles_KeepAlive_WinClass` |
 
 ```ahk
 ; AutoHotkey v2
@@ -53,4 +56,4 @@ if WinExist("ahk_class LumaFiles_WinClass")
 WinActivate "ahk_class LumaFiles_Search_WinClass"
 ```
 
-其余窗口不单独命名：`Ctrl+K` 启动器、批量重命名窗口等仍是 `LumaFiles_WinClass`；托盘、跳转栏和隐藏的辅助窗口分别是 `LumaFiles.Tray`、`LumaFiles.DialogJump.Bar`、`LumaFiles_PlatformWindow`。`ahk_exe LumaFiles.exe` 一直可用；从旧版本升级的脚本需要把 `ahk_class Zed::Window` 改成上表中的名字。
+托盘、跳转栏和 gpui 的隐藏辅助窗口不在上表中，它们的类名分别是 `LumaFiles.Tray`、`LumaFiles.DialogJump.Bar`、`LumaFiles_PlatformWindow`。`ahk_exe LumaFiles.exe` 一直可用；从旧版本升级的脚本需要把 `ahk_class Zed::Window` 改成上表中的名字。类名在 [nohrs-core 的 `window_class`](../crates/nohrs-core/src/window_class.rs) 里集中定义，改名等于改接口，脚本也会跟着失效。

@@ -258,6 +258,9 @@ pub(super) fn open(
             ..Default::default()
         }),
         window_min_size: Some(size(px(1020.0), px(660.0))),
+        // Its own class, so a script can drive the rename window without
+        // matching the explorer's (`nohrs_core::window_class` names them all).
+        window_class: Some(nohrs_core::window_class::BATCH_RENAME),
         ..Default::default()
     };
     let mut current_view = None;
