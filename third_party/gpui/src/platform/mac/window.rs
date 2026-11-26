@@ -574,6 +574,7 @@ impl MacWindow {
             bounds,
             titlebar,
             kind,
+            window_class: _,
             is_movable,
             is_resizable,
             is_minimizable,

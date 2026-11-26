@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     rc::{Rc, Weak},
     str::FromStr,
-    sync::{Arc, Once},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -376,7 +376,7 @@ impl WindowsWindow {
             disable_direct_composition,
             directx_devices,
         } = creation_info;
-        register_window_class(icon);
+        register_window_class(params.window_class.unwrap_or(DEFAULT_WINDOW_CLASS_NAME), icon);
         let hide_title_bar = params
             .titlebar
             .as_ref()
@@ -436,10 +436,18 @@ impl WindowsWindow {
             disable_direct_composition,
             directx_devices,
         };
+        // The name lives until the call returns; Windows registers the window
+        // under a copy of it.
+        let window_class_name: Vec<u16> = params
+            .window_class
+            .unwrap_or(DEFAULT_WINDOW_CLASS_NAME)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let creation_result = unsafe {
             CreateWindowExW(
                 dwexstyle,
-                WINDOW_CLASS_NAME,
+                PCWSTR(window_class_name.as_ptr()),
                 &window_name,
                 dwstyle,
                 CW_USEDEFAULT,
@@ -1151,23 +1159,40 @@ enum WindowOpenState {
 
 // Nohrs: the class name is what AutoHotkey and Win32 callers see; it says
 // LumaFiles rather than Zed so a script can tell the windows of this program
-// from those of the editor it took the toolkit from.
-const WINDOW_CLASS_NAME: PCWSTR = w!("LumaFiles_WinClass");
+// from those of the editor it took the toolkit from. A window may name its own
+// (`WindowOptions::window_class`) — the explorer, the quick launch panel and the
+// standalone search do — and the windows that name none share this one.
+const DEFAULT_WINDOW_CLASS_NAME: &str = "LumaFiles_WinClass";
 
-fn register_window_class(icon_handle: HICON) {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(window_procedure),
-            hIcon: icon_handle,
-            lpszClassName: PCWSTR(WINDOW_CLASS_NAME.as_ptr()),
-            style: CS_HREDRAW | CS_VREDRAW,
-            hInstance: get_module_handle().into(),
-            hbrBackground: unsafe { CreateSolidBrush(COLORREF(0x00000000)) },
-            ..Default::default()
-        };
-        unsafe { RegisterClassW(&wc) };
-    });
+fn register_window_class(window_class: &'static str, icon_handle: HICON) {
+    // `RegisterClassW` takes a UTF-16 name that only has to live for the call:
+    // Windows copies it into the class, so it is rebuilt here instead of being
+    // kept around. A class is registered the first time a window of it is
+    // created, and registering the same name twice would only fail with
+    // "class already exists", which is why the names already taken are
+    // remembered.
+    static REGISTERED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut registered = REGISTERED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if registered.contains(&window_class) {
+        return;
+    }
+    let name: Vec<u16> = window_class
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(window_procedure),
+        hIcon: icon_handle,
+        lpszClassName: PCWSTR(name.as_ptr()),
+        style: CS_HREDRAW | CS_VREDRAW,
+        hInstance: get_module_handle().into(),
+        hbrBackground: unsafe { CreateSolidBrush(COLORREF(0x00000000)) },
+        ..Default::default()
+    };
+    unsafe { RegisterClassW(&wc) };
+    registered.push(window_class);
 }
 
 unsafe extern "system" fn window_procedure(

@@ -39,15 +39,20 @@ When gpui is upgraded: check whether a caption or caption-button press, or a
 caption-button release, still returns `Some(0)` when the dispatch was
 "handled" (the lines are marked `NOHRS`).
 
-The fourth, in `src/platform/windows/window.rs` and
-`src/platform/windows/platform.rs`: the window classes are registered as
-`LumaFiles_WinClass` and `LumaFiles_PlatformWindow` instead of `Zed::Window` and
-`Zed::PlatformWindow` (26/11/2026). The class is the name Win32 callers and
-AutoHotkey's `ahk_class` match, and the program is not the editor whose toolkit
-this is: a script written for Zed's windows must not act on these, and one
-written for these must not act on Zed's. Nothing in gpui reads either name, so
-only the registration and creation constants changed (marked `Nohrs`).
+The fourth, in `src/platform/windows/window.rs`,
+`src/platform/windows/platform.rs`, `src/platform.rs` and `src/window.rs`: the
+window classes are named by the program instead of by the toolkit (26/11/2026).
+`Zed::Window` became `LumaFiles_WinClass`, `Zed::PlatformWindow` became
+`LumaFiles_PlatformWindow`, and `WindowOptions::window_class` was added so a
+window can name its own class: the explorer, the quick launch panel
+(`LumaFiles_QuickLauncher_WinClass`) and the standalone search
+(`LumaFiles_Search_WinClass`) do, so a script can tell them apart. The class is
+the name Win32 callers and AutoHotkey's `ahk_class` match, and the program is
+not the editor whose toolkit this is: a script written for Zed's windows must
+not act on these, and one written for these must not act on Zed's. Each class is
+registered the first time a window of that class is created; other platforms
+ignore the option (marked `Nohrs`).
 
-When gpui is upgraded: check whether `WINDOW_CLASS_NAME` and
-`PLATFORM_WINDOW_CLASS_NAME` still exist and still say `Zed::`, and rename them
-again.
+When gpui is upgraded: check whether `DEFAULT_WINDOW_CLASS_NAME` and
+`PLATFORM_WINDOW_CLASS_NAME` still exist and still say `Zed::`, whether
+`WindowOptions` still has `window_class`, and rename or port them again.

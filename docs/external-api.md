@@ -35,3 +35,22 @@
 - `navigate`：传入 `tab` 和绝对路径 `path`，在指定标签页导航。
 
 响应的 `ok` 为 `false` 表示失败，部分失败响应含 `error`。标签页 ID 仅在当前进程内有效；每次调用应重新读取端点，设置连接和读取超时，并处理窗口关闭或启动中的情况。IPC 路径由运行实例的配置模式决定，而不是外部调用者的当前工作目录。
+
+## 窗口类名
+
+AutoHotkey 等外部脚本可以用窗口类名（`ahk_class`）定位本程序的窗口。三个主要窗口各有自己的类名，不必再靠标题或进程号区分：
+
+| 窗口 | 窗口类名 |
+|---|---|
+| 主窗口（资源管理器） | `LumaFiles_WinClass` |
+| 快速启动面板 | `LumaFiles_QuickLauncher_WinClass` |
+| 独立搜索窗口（`Ctrl+Shift+F`） | `LumaFiles_Search_WinClass` |
+
+```ahk
+; AutoHotkey v2
+if WinExist("ahk_class LumaFiles_WinClass")
+    WinActivate
+WinActivate "ahk_class LumaFiles_Search_WinClass"
+```
+
+其余窗口不单独命名：`Ctrl+K` 启动器、批量重命名窗口等仍是 `LumaFiles_WinClass`；托盘、跳转栏和隐藏的辅助窗口分别是 `LumaFiles.Tray`、`LumaFiles.DialogJump.Bar`、`LumaFiles_PlatformWindow`。`ahk_exe LumaFiles.exe` 一直可用；从旧版本升级的脚本需要把 `ahk_class Zed::Window` 改成上表中的名字。

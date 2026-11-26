@@ -1104,6 +1104,12 @@ pub struct WindowOptions {
     /// The kind of window to create
     pub kind: WindowKind,
 
+    /// The name the window's class is registered under, where the platform has
+    /// classes to name (Windows). It is what Win32 callers and AutoHotkey's
+    /// `ahk_class` match, so it is how a program's windows are told apart.
+    /// Other platforms ignore it. `None` uses the program's default class.
+    pub window_class: Option<&'static str>,
+
     /// Whether the window should be movable by the user
     pub is_movable: bool,
 
@@ -1153,6 +1159,10 @@ pub(crate) struct WindowParams {
     /// The kind of window to create
     #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
     pub kind: WindowKind,
+
+    /// The window class to register under (Nohrs; Windows only)
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub window_class: Option<&'static str>,
 
     /// Whether the window should be movable by the user
     #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
@@ -1230,6 +1240,7 @@ impl Default for WindowOptions {
             focus: true,
             show: true,
             kind: WindowKind::Normal,
+            window_class: None,
             is_movable: true,
             is_resizable: true,
             is_minimizable: true,

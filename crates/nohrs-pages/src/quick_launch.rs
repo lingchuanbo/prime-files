@@ -3876,6 +3876,9 @@ fn window_options(bounds: Bounds<Pixels>, _view: View) -> WindowOptions {
         focus: true,
         show: true,
         kind: WindowKind::PopUp,
+        // Its own class, so a script can drive the panel without matching the
+        // explorer's window (`nohrs_ui::window` names the three windows).
+        window_class: Some(nohrs_ui::window::QUICK_LAUNCH_WINDOW_CLASS),
         is_movable: true,
         is_resizable: true,
         is_minimizable: false,
