@@ -405,30 +405,33 @@ fn render_grid_item(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(match (page.icon_mode, waveform, thumbnail) {
-                    // No icons: the tile keeps its shape, with nothing in the
-                    // place the picture was.
-                    (nohrs_core::config::IconMode::None, _, _) => {
-                        div().size(px(tile.icon)).flex_shrink_0().into_any_element()
-                    }
-                    (_, Some(bars), _) => crate::explorer::waveforms::canvas(
-                        bars,
-                        tile.icon,
-                        selected,
-                        crate::explorer::hover_audio::progress_of(&item.path),
-                    ),
-                    (_, None, Some(image)) => img(ImageSource::Render(image))
-                        .size_full()
-                        .object_fit(ObjectFit::Contain)
-                        .into_any_element(),
-                    (_, None, None) => Icon::new(icon_name)
-                        .size(px((tile.icon * 0.6).max(24.0)))
-                        .text_color(rgb(if is_dir {
-                            theme::accent()
-                        } else {
-                            theme::gray_500()
-                        }))
-                        .into_any_element(),
+                .child({
+                    let picture = match (page.icon_mode, waveform, thumbnail) {
+                        // No icons: the tile keeps its shape, with nothing in
+                        // the place the picture was.
+                        (nohrs_core::config::IconMode::None, _, _) => {
+                            div().size(px(tile.icon)).flex_shrink_0().into_any_element()
+                        }
+                        (_, Some(bars), _) => crate::explorer::waveforms::canvas(
+                            bars,
+                            tile.icon,
+                            selected,
+                            crate::explorer::hover_audio::progress_of(&item.path),
+                        ),
+                        (_, None, Some(image)) => img(ImageSource::Render(image))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element(),
+                        (_, None, None) => Icon::new(icon_name)
+                            .size(px((tile.icon * 0.6).max(24.0)))
+                            .text_color(rgb(if is_dir {
+                                theme::accent()
+                            } else {
+                                theme::gray_500()
+                            }))
+                            .into_any_element(),
+                    };
+                    super::row::mark_picture(page, &item, picture, tile.icon)
                 }),
         )
         .child(match rename_input {

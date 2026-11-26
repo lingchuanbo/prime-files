@@ -1,7 +1,7 @@
-//! The states a listing shows beside a file's name: what the Git or SVN
-//! checkout around the folder says about it, and whether a cloud provider
-//! (OneDrive and services built on the same file attributes) has its bytes on
-//! this device or only online.
+//! The states a listing marks on a file's icon: what the Git or SVN checkout
+//! around the folder says about it, and whether a cloud provider (OneDrive and
+//! services built on the same file attributes) has its bytes on this device or
+//! only online.
 //!
 //! Neither answer belongs to the folder read: the version-control state comes
 //! from outside the folder (the checkout root may be many levels up) and the
@@ -9,7 +9,7 @@
 //! listing. Both are gathered here so the pane can ask once per folder, off
 //! the foreground thread, and keep the maps for rendering.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -41,6 +41,9 @@ impl VcsKind {
 /// What the badge beside a file's name says about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum VcsState {
+    /// Tracked and unchanged: the checkout has nothing to say about it, which
+    /// is the state most files of a working copy are in.
+    Normal,
     /// Changed in the working tree.
     Modified,
     /// Added to the next commit.
@@ -60,34 +63,19 @@ pub(crate) enum VcsState {
 }
 
 impl VcsState {
-    /// The letter the badge shows. The first six are Git's own letters, which
-    /// somebody who works with it already reads; replaced and renamed borrow
-    /// the letters `svn status` uses.
-    pub(crate) fn letter(self) -> &'static str {
-        match self {
-            Self::Modified => "M",
-            Self::Added => "A",
-            Self::Untracked => "?",
-            Self::Deleted => "D",
-            Self::Conflicted => "C",
-            Self::Renamed => "R",
-            Self::Copied => "C",
-            Self::Replaced => "R",
-        }
-    }
-
     /// How loudly the state asks to be looked at, for a folder, which shows
-    /// the loudest state of anything under it.
+    /// the loudest state of anything under it. Clean is the quietest.
     fn rank(self) -> u8 {
         match self {
-            Self::Conflicted => 7,
-            Self::Modified => 6,
-            Self::Added => 5,
-            Self::Deleted => 4,
-            Self::Renamed => 3,
-            Self::Copied => 2,
-            Self::Replaced => 1,
-            Self::Untracked => 0,
+            Self::Conflicted => 8,
+            Self::Modified => 7,
+            Self::Added => 6,
+            Self::Deleted => 5,
+            Self::Renamed => 4,
+            Self::Copied => 3,
+            Self::Replaced => 2,
+            Self::Untracked => 1,
+            Self::Normal => 0,
         }
     }
 }
@@ -153,6 +141,10 @@ fn find_checkout(folder: &Path) -> Option<(VcsKind, PathBuf)> {
 
 /// Runs `git status` for the files at or under `folder` and maps what it
 /// reports onto full paths.
+///
+/// `git status` only mentions what changed, so the tracked files of the folder
+/// are read as well: the ones it did not mention are clean, which is the mark
+/// a working copy wants on most of its files.
 fn git_states(root: &Path, folder: &Path) -> Option<HashMap<String, VcsState>> {
     // Run from the folder and limit the status to it (`-- .` is relative to
     // the working directory), so a checkout of a whole disk is not walked for
@@ -169,7 +161,27 @@ fn git_states(root: &Path, folder: &Path) -> Option<HashMap<String, VcsState>> {
         ],
         folder,
     )?;
-    Some(parse_git_porcelain(&output, root))
+    let mut states = parse_git_porcelain(&output, root);
+    // `--full-name` keeps the paths relative to the checkout root whatever
+    // folder the command runs in; `-z` keeps names with spaces intact.
+    if let Some(tracked) = run("git", &["ls-files", "-z", "--full-name", "--", "."], folder) {
+        mark_tracked_clean(&mut states, root, &tracked);
+    }
+    Some(states)
+}
+
+/// Marks every tracked path that `git status` did not mention as clean.
+///
+/// A path that already carries a louder state keeps it: a folder full of
+/// changes must not read as clean because it is also tracked.
+fn mark_tracked_clean(states: &mut HashMap<String, VcsState>, root: &Path, tracked: &[u8]) {
+    for path in tracked.split(|byte| *byte == 0) {
+        if path.is_empty() {
+            continue;
+        }
+        let path = String::from_utf8_lossy(path);
+        insert_with_folders(states, root, &root.join(path.as_ref()), VcsState::Normal);
+    }
 }
 
 /// Turns `git status --porcelain=v1 -z` output into states by full path.
@@ -235,23 +247,57 @@ fn classify_git(status: &[u8]) -> Option<VcsState> {
 }
 
 /// Runs `svn status` in `folder` and maps what it reports onto full paths.
+///
+/// `--no-ignore` makes the ignored files show up too: a file `svn status` does
+/// not mention at all is a versioned one with no changes, and without the
+/// ignored ones on the list that could not be told apart from an ignored file.
 fn svn_states(root: &Path, folder: &Path) -> Option<HashMap<String, VcsState>> {
     let output = run(
         "svn",
-        &["status", "--non-interactive", "--ignore-externals", "."],
+        &[
+            "status",
+            "--non-interactive",
+            "--ignore-externals",
+            "--no-ignore",
+            ".",
+        ],
         folder,
     )?;
-    Some(parse_svn_status(
-        &String::from_utf8_lossy(&output),
-        root,
-        folder,
-    ))
+    let (mut states, mentioned) = parse_svn_status(&String::from_utf8_lossy(&output), root, folder);
+    mark_svn_clean(&mut states, root, folder, &mentioned);
+    Some(states)
 }
 
-/// Turns `svn status` output into states by full path. Each line is seven
+/// Marks the entries of `folder` that `svn status` did not mention as clean.
+fn mark_svn_clean(
+    states: &mut HashMap<String, VcsState>,
+    root: &Path,
+    folder: &Path,
+    mentioned: &HashSet<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if mentioned.contains(&path_key(&path)) {
+            continue;
+        }
+        insert_with_folders(states, root, &path, VcsState::Normal);
+    }
+}
+
+/// Turns `svn status` output into states by full path, and every path the
+/// output mentioned at all — ignored and unversioned ones included, so the
+/// clean files of the folder can be told apart from them. Each line is seven
 /// status columns, a space, then the path (relative to `folder`).
-fn parse_svn_status(text: &str, root: &Path, folder: &Path) -> HashMap<String, VcsState> {
+fn parse_svn_status(
+    text: &str,
+    root: &Path,
+    folder: &Path,
+) -> (HashMap<String, VcsState>, HashSet<String>) {
     let mut states = HashMap::new();
+    let mut mentioned = HashSet::new();
     for line in text.lines() {
         let Some(flags) = line.get(..7) else {
             continue;
@@ -262,18 +308,19 @@ fn parse_svn_status(text: &str, root: &Path, folder: &Path) -> HashMap<String, V
         if path.is_empty() {
             continue;
         }
-        let Some(state) = classify_svn(flags) else {
-            continue;
-        };
         let path = Path::new(path);
         let full = if path.is_absolute() {
             path.to_path_buf()
         } else {
             folder.join(path)
         };
+        mentioned.insert(path_key(&full));
+        let Some(state) = classify_svn(flags) else {
+            continue;
+        };
         insert_with_folders(&mut states, root, &full, state);
     }
-    states
+    (states, mentioned)
 }
 
 /// The state a seven-column `svn status` line stands for. Column 7 is a tree
@@ -336,15 +383,29 @@ fn path_key(path: &Path) -> String {
     normalize(&path.to_string_lossy())
 }
 
-/// Normalizes a path for the state maps: one separator, one case (Windows).
+/// Normalizes a path for the state maps: one separator, one case (Windows),
+/// and no trailing separator.
+///
+/// `git status` and `svn status` name a folder with a trailing separator
+/// (`cankao2/`), the listing without one; the maps are addressed by the
+/// listing's spelling, so that separator goes.
 pub(crate) fn normalize(text: &str) -> String {
     #[cfg(windows)]
     {
-        text.replace('/', "\\").to_lowercase()
+        let mut normalized = text.replace('/', "\\").to_lowercase();
+        // A drive root is `C:\` and keeps its separator.
+        while normalized.len() > 3 && normalized.ends_with('\\') {
+            normalized.pop();
+        }
+        normalized
     }
     #[cfg(not(windows))]
     {
-        text.to_string()
+        let mut normalized = text.to_string();
+        while normalized.len() > 1 && normalized.ends_with('/') {
+            normalized.pop();
+        }
+        normalized
     }
 }
 
@@ -438,6 +499,8 @@ fn run(program: &str, args: &[&str], cwd: &Path) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
+// Fixtures build checkouts on disk; there is no frame to stall here.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -518,7 +581,7 @@ mod tests {
     #[test]
     fn svn_status_lines_map_to_states() {
         let text = "M       src/main.rs\n?       new.txt\nA       added.txt\nD       gone.txt\nC       conflict.txt\nI       ignored.log\n      C  tree.txt\n";
-        let states = parse_svn_status(text, &repo(), &repo());
+        let (states, mentioned) = parse_svn_status(text, &repo(), &repo());
         let state = |name: &str| states.get(&key(name)).copied();
         assert_eq!(state("src/main.rs"), Some(VcsState::Modified));
         assert_eq!(state("new.txt"), Some(VcsState::Untracked));
@@ -527,6 +590,45 @@ mod tests {
         assert_eq!(state("conflict.txt"), Some(VcsState::Conflicted));
         assert_eq!(state("ignored.log"), None, "ignored files carry no badge");
         assert_eq!(state("tree.txt"), Some(VcsState::Conflicted));
+        // Every path the output named is remembered, badged or not, so the
+        // ignored file is not read as clean afterwards.
+        assert!(mentioned.contains(&key("ignored.log")));
+        assert!(!mentioned.contains(&key("untouched.txt")));
+    }
+
+    #[test]
+    fn files_a_checkout_does_not_mention_are_clean() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("clean.txt"), "x").unwrap();
+        std::fs::write(directory.path().join("changed.txt"), "y").unwrap();
+        std::fs::write(directory.path().join("ignored.log"), "z").unwrap();
+        let text = "M       changed.txt\nI       ignored.log\n";
+        let (mut states, mentioned) = parse_svn_status(text, directory.path(), directory.path());
+        mark_svn_clean(&mut states, directory.path(), directory.path(), &mentioned);
+        let state = |name: &str| states.get(&path_key(&directory.path().join(name))).copied();
+        assert_eq!(state("clean.txt"), Some(VcsState::Normal));
+        assert_eq!(state("changed.txt"), Some(VcsState::Modified));
+        assert_eq!(state("ignored.log"), None, "an ignored file is not clean");
+    }
+
+    #[test]
+    fn tracked_files_git_does_not_mention_are_clean() {
+        let mut states = states_of_git(" M src/lib.rs\0");
+        mark_tracked_clean(&mut states, &repo(), b"src/lib.rs\0README.md\0");
+        assert_eq!(
+            states.get(&key("README.md")).copied(),
+            Some(VcsState::Normal)
+        );
+        assert_eq!(
+            states.get(&key("src/lib.rs")).copied(),
+            Some(VcsState::Modified)
+        );
+        // The checkout root carries the loudest state under it, so the clean
+        // file does not turn it green.
+        assert_eq!(
+            states.get(&path_key(&repo())).copied(),
+            Some(VcsState::Modified)
+        );
     }
 
     #[test]
@@ -595,6 +697,16 @@ mod tests {
         assert_eq!(
             status.state_of(&repo().join("other.md").display().to_string()),
             None
+        );
+    }
+
+    #[test]
+    fn a_folder_named_with_a_trailing_separator_matches_the_listing() {
+        // `git status` prints an untracked folder as `cankao2/`; the row for
+        // that folder is addressed as `cankao2`, so both must key the same.
+        assert_eq!(
+            path_key(&repo().join("cankao2/")),
+            path_key(&repo().join("cankao2"))
         );
     }
 }

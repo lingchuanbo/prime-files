@@ -330,18 +330,22 @@ pub fn render(
                                 // or when the Shell has none, the generic one.
                                 // With icons turned off the gutter stays, so
                                 // the names still line up.
-                                .child(match (page.icon_mode, shell_icon) {
-                                    (IconMode::None, _) => {
-                                        div().w(px(ICON_SIZE)).flex_shrink_0().into_any_element()
-                                    }
-                                    (_, Some(image)) => img(ImageSource::Render(image))
-                                        .size(px(ICON_SIZE))
-                                        .flex_shrink_0()
-                                        .into_any_element(),
-                                    (_, None) => Icon::new(icon_name)
-                                        .size_4()
-                                        .text_color(icon_color)
-                                        .into_any_element(),
+                                .child({
+                                    let picture = match (page.icon_mode, shell_icon) {
+                                        (IconMode::None, _) => div()
+                                            .w(px(ICON_SIZE))
+                                            .flex_shrink_0()
+                                            .into_any_element(),
+                                        (_, Some(image)) => img(ImageSource::Render(image))
+                                            .size(px(ICON_SIZE))
+                                            .flex_shrink_0()
+                                            .into_any_element(),
+                                        (_, None) => Icon::new(icon_name)
+                                            .size_4()
+                                            .text_color(icon_color)
+                                            .into_any_element(),
+                                    };
+                                    mark_picture(page, item, picture, ICON_SIZE)
                                 })
                                 .child(match rename_input {
                                     // Borderless and flush with the label it
@@ -537,9 +541,12 @@ fn row_background(is_selected: bool, ix: usize, page: &ExplorerPane) -> u32 {
     }
 }
 
-/// The marks between a file's name and its tags: the cloud state and the
-/// Git/SVN state, each only while the settings ask for it and the state is
-/// one worth showing.
+/// The marks between a file's name and its tags: the cloud state, and the
+/// Git/SVN state when there is no icon to mark instead.
+///
+/// The version-control state is drawn on the icon (`mark_picture`); with icons
+/// turned off there is nothing to put it on, so the letter stands in after the
+/// name, where the state used to be shown.
 pub(crate) fn status_badges(page: &ExplorerPane, item: &FileEntryDto) -> Vec<AnyElement> {
     let mut badges = Vec::with_capacity(2);
     if let Some(state) = page.sync_state(&item.path) {
@@ -575,31 +582,118 @@ pub(crate) fn status_badges(page: &ExplorerPane, item: &FileEntryDto) -> Vec<Any
                 .into_any_element(),
         );
     }
-    if let Some(state) = page.vcs_state(&item.path) {
-        // The checkout and its root tell which repository the badge is about:
-        // a folder can sit in one of several nested checkouts.
-        let context = page
-            .vcs_status
-            .as_ref()
-            .map(|status| format!("{} · {}", status.kind.name(), status.root))
-            .unwrap_or_default();
-        let label = SharedString::from(format!("{} ({context})", vcs_label(state)));
+    if page.icon_mode == IconMode::None
+        && let Some(state) = page.vcs_state(&item.path)
+    {
         badges.push(
             div()
-                .id(SharedString::from(format!("vcs-badge-{}", item.path)))
                 .flex_shrink_0()
                 .ml(px(4.0))
-                .text_xs()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(rgb(vcs_color(state)))
-                .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
-                })
-                .child(state.letter())
+                .child(vcs_disc(page, item, state, 12.0))
                 .into_any_element(),
         );
     }
     badges
+}
+
+/// The disc of a version-control state: a filled circle with the state's
+/// glyph, `edge` pixels across.
+fn vcs_disc(
+    page: &ExplorerPane,
+    item: &FileEntryDto,
+    state: VcsState,
+    edge: f32,
+) -> impl IntoElement + use<> {
+    // The checkout and its root tell which repository the mark is about: a
+    // folder can sit in one of several nested checkouts.
+    let context = page
+        .vcs_status
+        .as_ref()
+        .map(|status| format!("{} · {}", status.kind.name(), status.root))
+        .unwrap_or_default();
+    let label = SharedString::from(format!("{} ({context})", vcs_label(state)));
+    let background = vcs_color(state);
+    div()
+        .id(SharedString::from(format!("vcs-mark-{}", item.path)))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(edge))
+        .rounded_full()
+        .bg(rgb(background))
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+        })
+        .child(
+            Icon::new(Icon::empty())
+                .path(vcs_glyph(state))
+                .size(px((edge * 0.68).max(6.0)))
+                .text_color(rgb(vcs_glyph_color(background))),
+        )
+}
+
+/// The picture with its version-control mark in the corner, or the picture
+/// alone when there is no checkout or no icon to mark.
+pub(crate) fn mark_picture(
+    page: &ExplorerPane,
+    item: &FileEntryDto,
+    picture: AnyElement,
+    edge: f32,
+) -> AnyElement {
+    if page.icon_mode == IconMode::None {
+        return picture;
+    }
+    let Some(state) = page.vcs_state(&item.path) else {
+        return picture;
+    };
+    // A mark that covers the icon would hide the picture it is about: the
+    // corner disc is about half the icon, and it sits where the Shell draws
+    // its own overlays (bottom left), so a checkout reads as it does in
+    // Explorer and Total Commander.
+    let disc = (edge * 0.5).clamp(8.0, 24.0);
+    div()
+        .relative()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(edge))
+        .child(picture)
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .bottom_0()
+                .child(vcs_disc(page, item, state, disc)),
+        )
+        .into_any_element()
+}
+
+/// The glyph of a state: a check for the clean one, as Total Commander and
+/// TortoiseSVN draw it, and the shape that says what the others are.
+fn vcs_glyph(state: VcsState) -> &'static str {
+    match state {
+        VcsState::Normal => "icons/check.svg",
+        VcsState::Modified | VcsState::Replaced => "icons/alert.svg",
+        VcsState::Added => "icons/plus.svg",
+        VcsState::Untracked => "icons/question.svg",
+        VcsState::Deleted => "icons/minus.svg",
+        VcsState::Conflicted => "icons/close.svg",
+        VcsState::Renamed => "icons/arrow-up-down.svg",
+        VcsState::Copied => "icons/copy.svg",
+    }
+}
+
+/// The glyph colour that reads on a state's disc: near-black on the bright
+/// tints of the dark palette, white on the deep ones.
+fn vcs_glyph_color(background: u32) -> u32 {
+    let red = (background >> 16) & 0xFF;
+    let green = (background >> 8) & 0xFF;
+    let blue = background & 0xFF;
+    // Rec. 601 luma, how the eye weights the three channels.
+    let luma = 0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32;
+    if luma > 150.0 { 0x101820 } else { 0xFFFFFF }
 }
 
 /// The extension badge of a type: the extension in the type's colour on a
@@ -624,13 +718,14 @@ fn type_badge(style: &TypeStyle) -> Option<AnyElement> {
     )
 }
 
-/// The colour that reads a state at a glance: amber for what was edited,
-/// green for what is new, red for what is gone or fights, the accent for what
-/// moved.
+/// The colour that reads a state at a glance: green for clean and for what is
+/// new, amber for what was edited, grey for what the checkout does not know,
+/// red for what is gone or fights, the accent for what moved.
 fn vcs_color(state: VcsState) -> u32 {
     match state {
+        VcsState::Normal | VcsState::Added => theme::success(),
         VcsState::Modified | VcsState::Replaced => theme::warning(),
-        VcsState::Added | VcsState::Untracked => theme::success(),
+        VcsState::Untracked => theme::gray_500(),
         VcsState::Deleted | VcsState::Conflicted => theme::danger(),
         VcsState::Renamed | VcsState::Copied => theme::accent(),
     }
@@ -639,6 +734,7 @@ fn vcs_color(state: VcsState) -> u32 {
 /// The tooltip's wording for a state.
 fn vcs_label(state: VcsState) -> &'static str {
     match state {
+        VcsState::Normal => t!("Normal"),
         VcsState::Modified => t!("Modificado"),
         VcsState::Added | VcsState::Replaced => t!("Novo"),
         VcsState::Untracked => t!("Não versionado"),
