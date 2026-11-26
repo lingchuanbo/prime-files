@@ -54,13 +54,18 @@ fn main() {
     }
 
     if let Some(cli::Command::Open { path }) = &cli.command {
+        let path = cli::expand_argument_path(path);
         if !path.exists() {
             eprintln!("LumaFiles: path does not exist: {}", path.display());
             std::process::exit(1);
         }
-        cli.path = Some(path.clone());
+        cli.path = Some(path);
         cli.command = None;
     }
+
+    // A folder given as a bare argument may name a variable as well; the
+    // window that takes it over resolves it from the expanded path.
+    cli.path = cli.path.as_deref().map(cli::expand_argument_path);
 
     // `config` subcommands run headless and exit without opening a window.
     if let Some(cli::Command::Config { action }) = &cli.command {

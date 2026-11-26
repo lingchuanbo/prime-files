@@ -202,6 +202,25 @@ pub fn expand(raw: &str, context: &ExpandContext) -> Result<PathBuf, ExpandError
     Ok(context.program_dir.join(path))
 }
 
+/// Expands the variables of a path the user typed or stored, and returns the
+/// text unchanged when it holds none or when one has no answer.
+///
+/// [`expand`] resolves a relative path against the program folder and refuses
+/// an unknown variable; both are right for a launch item, but a string somebody
+/// typed should reach the caller's own "not found" message as it was written.
+/// Only text that carries a variable goes through the expansion, so a path that
+/// merely contains a `%` is left alone.
+pub fn expand_user_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if !trimmed.contains('%') && !trimmed.contains('{') {
+        return raw.to_string();
+    }
+    match expand(trimmed, &ExpandContext::current()) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(_) => raw.to_string(),
+    }
+}
+
 /// The `%NAME%` variables that name a folder of the installation itself rather
 /// than something the environment knows.
 ///
@@ -710,6 +729,35 @@ mod tests {
         assert_eq!(
             result.expect("the built-in name is answered"),
             PathBuf::from("C:\\Apps\\Luma\\x")
+        );
+    }
+
+    #[test]
+    fn a_typed_path_expands_its_variables_and_keeps_what_it_cannot_answer() {
+        let name = "NOHRS_TYPED_PATH_TEST_VARIABLE";
+        // Rust 2024 made `set_var` unsafe; this test needs the variable set.
+        unsafe { std::env::set_var(name, "C:\\temp") };
+        let expanded = expand_user_path(&format!("%{name}%\\notes"));
+        let undefined = expand_user_path("%NOHRS_TYPED_PATH_SURELY_UNDEFINED%\\notes");
+        let braces = expand_user_path("{luma}\\tools");
+        unsafe { std::env::remove_var(name) };
+        assert_eq!(expanded, "C:\\temp\\notes");
+        assert_eq!(
+            undefined, "%NOHRS_TYPED_PATH_SURELY_UNDEFINED%\\notes",
+            "an undefined variable stays written for the caller's own message"
+        );
+        // The braces resolve against this process, like a launch path's do.
+        assert!(std::path::Path::new(&braces).is_absolute(), "{braces}");
+        assert_ne!(braces, "{luma}\\tools");
+        // A path with a lone `%` is not a variable and is left alone.
+        assert_eq!(
+            expand_user_path("C:\\100%\\notes.txt"),
+            "C:\\100%\\notes.txt"
+        );
+        // A path with no variable at all is not resolved or trimmed.
+        assert_eq!(
+            expand_user_path("C:\\Windows\\notepad.exe"),
+            "C:\\Windows\\notepad.exe"
         );
     }
 

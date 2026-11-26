@@ -538,7 +538,9 @@ impl ExplorerPage {
             pane.sidebar_visible = sidebar_visible;
             pane.preview_visible = self.preview_visible;
             if let Some(cwd) = cwd {
-                pane.cwd = cwd;
+                // A restored tab or a path handed over by another program may
+                // hold a `%NAME%` / `{luma}` variable.
+                pane.cwd = nohrs_services::launch::expand_user_path(&cwd);
                 // Force a reload of the new root on the next render.
                 pane.loaded = false;
             }

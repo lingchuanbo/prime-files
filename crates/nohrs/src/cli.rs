@@ -244,6 +244,15 @@ fn edit_config(path: &std::path::Path) -> i32 {
     }
 }
 
+/// Expands the variables of a path given on the command line
+/// (`%SoftDir%\project`, `{luma}\tools`) before anything asks the disk about
+/// it, so a script can pass a variable instead of this machine's absolute path.
+pub fn expand_argument_path(path: &std::path::Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(nohrs_services::launch::expand_user_path(
+        &path.to_string_lossy(),
+    ))
+}
+
 /// Reads the `PATH` argument, repairing a quoted drive root.
 ///
 /// Windows hands a folder over as `LumaFiles.exe "%1"`, and for a drive that is

@@ -70,7 +70,12 @@ impl ExplorerPane {
         let Some(state) = &self.path_edit else {
             return;
         };
-        let typed = super::network::normalize_address(&state.input.read(cx).value());
+        // The text may name a variable (`%SoftDir%\project`, `{luma}\tools`):
+        // the expansion answers it before anything asks the disk, and text
+        // without one is left exactly as typed.
+        let typed = super::network::normalize_address(&nohrs_services::launch::expand_user_path(
+            &state.input.read(cx).value(),
+        ));
         let path = Path::new(&typed);
         // A network address is gone to without asking the disk here: a
         // server that does not answer would freeze the window for as long,

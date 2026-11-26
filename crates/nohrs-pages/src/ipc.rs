@@ -168,7 +168,9 @@ pub fn is_running() -> bool {
 
 /// Splits a path into the folder to show and the entry to select in it.
 pub fn folder_and_selection(path: &Path) -> Option<(String, Option<String>)> {
-    let path = std::fs::canonicalize(path).ok()?;
+    // A caller may name a variable (`%SoftDir%\project`) instead of the folder.
+    let expanded = nohrs_services::launch::expand_user_path(&path.to_string_lossy());
+    let path = std::fs::canonicalize(Path::new(&expanded)).ok()?;
     let path = strip_verbatim(&path);
     if path.is_dir() {
         Some((path.to_string_lossy().into_owned(), None))
@@ -467,5 +469,17 @@ mod tests {
     fn tokens_differ_between_draws() {
         assert_ne!(new_token(), new_token());
         assert_eq!(new_token().len(), 32);
+    }
+
+    #[test]
+    fn a_path_with_a_variable_is_expanded_before_it_is_looked_up() {
+        // The variable every desktop has, so the test never writes outside the
+        // temp tree: USERPROFILE on Windows, HOME elsewhere.
+        let name = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let home = std::env::var(name).expect("the platform has a home folder");
+        let (folder, select) = folder_and_selection(Path::new(&format!("%{name}%")))
+            .expect("the expanded folder exists");
+        assert!(select.is_none());
+        assert!(crate::explorer::same_path(&folder, &home));
     }
 }

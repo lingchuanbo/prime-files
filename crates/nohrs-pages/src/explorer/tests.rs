@@ -3385,6 +3385,36 @@ async fn path_field_shows_the_path_and_goes_where_it_is_told(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+async fn the_path_field_expands_a_variable_into_its_folder(cx: &mut TestAppContext) {
+    // The variable every desktop has, so the test never writes outside the
+    // temp tree: USERPROFILE on Windows, HOME elsewhere.
+    let name = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = std::env::var(name).expect("the platform has a home folder");
+    let dir = tempfile::tempdir().unwrap();
+    let window = open_pane_at(cx, dir.path());
+    window
+        .update(cx, |pane, window, cx| {
+            pane.begin_path_edit(window, cx);
+            let input = pane.path_edit.as_ref().unwrap().input.clone();
+            input.update(cx, |state, cx| {
+                state.set_value(format!("%{name}%"), window, cx)
+            });
+            pane.commit_path_edit(window, cx);
+            assert!(
+                pane.path_edit.is_none(),
+                "the variable names a real folder, so the field closes"
+            );
+            assert!(
+                crate::explorer::same_path(&pane.cwd, &home),
+                "the field went to {} (from %{}%), not {home}",
+                pane.cwd,
+                name
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 async fn dropping_files_on_a_folder_moves_them_on_the_same_drive(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

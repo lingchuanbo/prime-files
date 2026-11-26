@@ -498,6 +498,10 @@ impl ExplorerPane {
     }
 
     pub(crate) fn change_dir(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        // A folder reached from a favorite, the directory menu or a restored
+        // tab may be stored with `%SoftDir%`-style variables: resolve them here,
+        // where every one of those paths arrives.
+        let path = nohrs_services::launch::expand_user_path(&path);
         if path == self.cwd {
             return;
         }
